@@ -142,12 +142,8 @@ impl Home {
             .expect("an open in flight")
     }
 
-    fn snack_timer(&self) -> Timer {
-        self.screen
-            .timers()
-            .into_iter()
-            .find(|t| matches!(t, Timer::Snack(_)))
-            .expect("a toast up")
+    fn snack_timer(&self) -> crate::ui::snack::SnackTimer {
+        self.screen.snack_timer().expect("a toast up")
     }
 }
 
@@ -276,6 +272,43 @@ fn a_created_practice_opens_after_the_loading_dialog() {
 }
 
 #[test]
+fn the_loading_dialog_comes_in_and_goes_over_150_ms_with_frames_only_meanwhile() {
+    use crate::ui::core::motion;
+    use crate::ui::core::widgets::confirm_dialog::testing::{assert_comes_in, assert_goes};
+    use crate::ui::core::widgets::confirm_dialog::{DialogMotion, TRANSITION};
+    use iced::advanced::subscription::into_recipes;
+    use std::time::Instant;
+
+    let t = TRANSITION;
+    let frames =
+        |home: &Home, at: Instant| into_recipes(motion::frames(home.screen.is_animating(at))).len();
+    let mut home = Home::over(FakePractices::with(vec![summary("a", "Song")]));
+    assert_eq!(frames(&home, Instant::now()), 0, "idle");
+
+    let before = Instant::now();
+    home.send(Message::Open("a".into()));
+    let after = Instant::now();
+    assert_comes_in(home.screen.loading.as_ref().expect("drawn"), before, after);
+    assert_eq!(frames(&home, after), 1, "frames while it comes in");
+    assert_eq!(frames(&home, after + t), 0, "none once it is in");
+
+    // Say it got all the way in. The hold over, it goes as the practice is
+    // pushed, out of reach.
+    home.screen.loading = Some(DialogMotion::shown());
+    let timer = home.opening_timer();
+    let before = Instant::now();
+    home.fire(timer);
+    let after = Instant::now();
+    assert_eq!(home.navigations, [song("a")]);
+    assert_goes(home.screen.loading.as_ref().expect("drawn"), before, after);
+    assert!(!home.shows("Loading practice"), "out of reach");
+    assert_eq!(frames(&home, after), 1, "frames while it goes");
+    home.send(Message::DialogFrame(after + t));
+    assert!(home.screen.loading_fade(after + t).is_none(), "gone");
+    assert_eq!(frames(&home, after + t), 0, "and the frames stop");
+}
+
+#[test]
 fn a_cancelled_prompt_creates_nothing() {
     let repo = FakePractices::with(Vec::new());
     let mut home = Home::over(repo.clone());
@@ -298,11 +331,18 @@ fn a_failed_create_says_so_and_opens_nothing() {
     assert_eq!(home.titles(), ["Kept"]);
     // The result is cleared once shown.
     assert!(home.screen.vm().create_project().result().is_none());
+    // Up 2.8 s from the end of its entrance.
     let timer = home.snack_timer();
-    assert_eq!(timer.delay(), Duration::from_millis(2800));
-    home.fire(timer);
+    let latest = std::time::Instant::now() + crate::ui::snack::TRANSITION;
+    assert!(timer.deadline <= latest + Duration::from_millis(2800));
+    assert!(timer.deadline > latest + Duration::from_millis(2500));
+    home.send(Message::SnackExpired(timer.seq));
     assert!(home.screen.snack().is_none());
-    assert!(!home.shows(CREATE_FAILED));
+    assert!(home.shows(CREATE_FAILED), "leaving");
+    home.send(Message::SnackFrame(
+        std::time::Instant::now() + crate::ui::snack::TRANSITION,
+    ));
+    assert!(!home.shows(CREATE_FAILED), "gone");
 }
 
 // -------------------------------------------------------------- open

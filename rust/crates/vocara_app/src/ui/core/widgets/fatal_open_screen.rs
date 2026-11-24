@@ -12,6 +12,7 @@ use iced::widget::{button, center, column, container, row, scrollable, text, Spa
 use iced::{Background, Border, Element, Length, Shadow, Theme};
 
 use crate::ui::core::theme::{self, alpha, font, Studio};
+use crate::ui::core::widgets::fading_scrollbar::Fading;
 
 /// What the user can do on the fatal window.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -143,7 +144,7 @@ impl FatalOpenScreen {
                         .padding(12)
                         .width(Length::Fill),
                     )
-                    .style(theme::scrollbar),
+                    .fading(),
                 )
                 .max_height(140)
                 .width(Length::Fill)

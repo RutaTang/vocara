@@ -40,13 +40,20 @@
 //! 960 wide: an app bar, the about header and the package list on the left,
 //! and the selected package's licenses on a card to the right. Colours are
 //! the theme Settings gave it (`Studio.background` scaffold,
-//! `Studio.surface` cards and app bar) over forui's zinc text styles. Flutter
-//! faded a newly selected package in over 500 ms and loaded its paragraphs
-//! a few per frame; iced shows them at once. "Powered by Flutter" reads
-//! "Powered by iced".
+//! `Studio.surface` cards and app bar) over forui's zinc text styles. A newly
+//! selected package's licenses come in as the detail's `AnimatedSwitcher`
+//! brought them, over 500 ms: up from a quarter of the card's height
+//! (`Curves.fastOutSlowIn`) as they fade in (`Curves.easeIn`), the last
+//! package's going the same way back over them (`FadeUpwardsPageTransition`);
+//! the one going takes no input. A package's licenses fill in as
+//! `_PackageLicensePage` filled them, a license at a time (Flutter parsed
+//! each in a task between frames, so a few could land per frame; here one
+//! lands per frame), under Material's spinner until the last has. "Powered
+//! by Flutter" reads "Powered by iced".
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 use iced::alignment::{Horizontal, Vertical};
 use iced::border::Radius;
@@ -59,7 +66,11 @@ use serde::Deserialize;
 use vocara_services::update_check_service::UpdateCheckService;
 
 use crate::ui::core::icons::{self, Icon};
+use crate::ui::core::motion::{Controller, Curve};
 use crate::ui::core::theme::{self, alpha, font, Studio, Zinc};
+use crate::ui::core::widgets::fading_scrollbar::Fading;
+use crate::ui::core::widgets::slide::slide;
+use crate::ui::core::widgets::studio_hint::spinner;
 
 #[cfg(test)]
 mod generate;
@@ -376,6 +387,11 @@ impl LicenseData {
         &self.packages
     }
 
+    /// How many licenses are bound to `package`.
+    pub fn license_count(&self, package: &str) -> usize {
+        self.bindings.get(package).map_or(0, Vec::len)
+    }
+
     /// The licenses bound to `package`.
     pub fn licenses_of(&self, package: &str) -> Vec<&LicenseEntry> {
         self.bindings
@@ -435,6 +451,10 @@ const CARD_ELEVATION: f32 = 4.0;
 /// `_textVerticalSeparation`.
 const TEXT_SEPARATION: f32 = 18.0;
 
+/// How long a package's licenses take to come in, and the last one's to
+/// go (the detail's `AnimatedSwitcher`).
+pub const DETAIL_TRANSITION: Duration = Duration::from_millis(500);
+
 /// What the page reports.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Message {
@@ -442,18 +462,66 @@ pub enum Message {
     Back,
     /// A package in the list (its index in [`LicenseData::packages`]).
     Select(usize),
+    /// A frame while a package's licenses come in or go.
+    Frame(Instant),
 }
 
 /// The license page: which package is shown (the first until one is
-/// picked, as `selectedId` was).
-#[derive(Debug, Default, Clone)]
+/// picked, as `selectedId` was), and the details coming and going.
+#[derive(Debug, Clone)]
 pub struct LicensesPage {
+    /// What it lists.
+    data: &'static LicenseData,
     selected: usize,
+    /// How many of the shown package's licenses have filled in.
+    loaded: usize,
+    /// The shown package's detail coming in; none for the first, which
+    /// shows at once (an `AnimatedSwitcher`'s first child does).
+    entering: Option<Controller>,
+    /// The details going, each on its own controller running back.
+    leaving: Vec<Going>,
+    /// The last frame's time, what the drawing reads.
+    now: Instant,
+}
+
+/// A package's detail going, as far as its licenses had filled in.
+#[derive(Debug, Clone)]
+struct Going {
+    index: usize,
+    controller: Controller,
+    loaded: usize,
+}
+
+impl Default for LicensesPage {
+    fn default() -> Self {
+        Self::over(license_data())
+    }
 }
 
 impl LicensesPage {
+    /// The page listing every license the app ships.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The page listing `data`.
+    pub fn over(data: &'static LicenseData) -> Self {
+        Self {
+            data,
+            selected: 0,
+            loaded: 0,
+            entering: None,
+            leaving: Vec::new(),
+            now: Instant::now(),
+        }
+    }
+
+    /// How many licenses the shown package has.
+    fn total(&self) -> usize {
+        self.data
+            .packages
+            .get(self.selected)
+            .map_or(0, |p| self.data.license_count(p))
     }
 
     /// The package shown (an index into [`LicenseData::packages`]).
@@ -466,19 +534,72 @@ impl LicensesPage {
         match message {
             Message::Back => true,
             Message::Select(index) => {
-                self.selected = index;
+                self.select(index, Instant::now());
+                false
+            }
+            Message::Frame(at) => {
+                self.frame(at);
                 false
             }
         }
     }
 
-    /// The page, listing every license the app ships.
-    pub fn view(&self) -> Element<'_, Message> {
-        self.view_of(license_data())
+    /// Shows package `index` from `now`: its licenses come in as the shown
+    /// one's go (from wherever they had got).
+    pub fn select(&mut self, index: usize, now: Instant) {
+        if index == self.selected {
+            return;
+        }
+        let mut going = self
+            .entering
+            .take()
+            .unwrap_or_else(|| Controller::completed(DETAIL_TRANSITION, DETAIL_TRANSITION));
+        going.reverse(now);
+        self.leaving.retain(|g| g.index != index);
+        self.leaving.push(Going {
+            index: self.selected,
+            controller: going,
+            loaded: self.loaded,
+        });
+        let mut coming = Controller::new(DETAIL_TRANSITION, DETAIL_TRANSITION);
+        coming.forward(now);
+        self.entering = Some(coming);
+        self.selected = index;
+        // A new `_PackageLicensePage`: its licenses fill in anew.
+        self.loaded = 0;
     }
 
-    /// The page over `data`.
-    pub fn view_of<'a>(&self, data: &'a LicenseData) -> Element<'a, Message> {
+    /// A frame at `at`: the details move on, those gone are let go, and one
+    /// more of the shown package's licenses fills in.
+    pub fn frame(&mut self, at: Instant) {
+        self.now = self.now.max(at);
+        let now = self.now;
+        self.leaving.retain(|g| g.controller.is_animating(now));
+        if self.loaded < self.total() {
+            self.loaded += 1;
+        }
+    }
+
+    /// Whether a package's licenses come in, go or fill in at `now`.
+    pub fn is_animating(&self, now: Instant) -> bool {
+        self.entering.as_ref().is_some_and(|c| c.is_animating(now))
+            || self.leaving.iter().any(|g| g.controller.is_animating(now))
+            || self.loaded < self.total()
+    }
+
+    /// A detail on `controller` at the last frame: its opacity and how far
+    /// down it is, in its heights (`_FadeUpwardsPageTransition`).
+    fn upwards(&self, controller: Option<&Controller>) -> (f32, f32) {
+        let t = controller.map_or(1.0, |c| c.value(self.now));
+        (
+            Curve::EaseIn.transform(t),
+            0.25 * (1.0 - Curve::FastOutSlowIn.transform(t)),
+        )
+    }
+
+    /// The page.
+    pub fn view(&self) -> Element<'static, Message> {
+        let data = self.data;
         let selected = self.selected.min(data.packages.len().saturating_sub(1));
         let scaffold = column![
             app_bar(),
@@ -494,21 +615,30 @@ impl LicensesPage {
             .height(Length::Fill)
             .style(theme::page)];
         if let Some(package) = data.packages.get(selected) {
+            // The details going, under the one coming in.
+            let mut details = stack![].width(Length::Fill).height(Length::Fill);
+            for going in &self.leaving {
+                if let Some(package) = data.packages.get(going.index) {
+                    let (opacity, down) = self.upwards(Some(&going.controller));
+                    let card = detail(package, &data.licenses_of(package), going.loaded, opacity);
+                    details = details.push(slide(card, 0.0).down(down).inert());
+                }
+            }
+            let (opacity, down) = self.upwards(self.entering.as_ref());
+            let card = detail(package, &data.licenses_of(package), self.loaded, opacity);
+            details = details.push(slide(keyed_column([(selected, card)]), 0.0).down(down));
             // The detail card sits over the app bar's lower half, from the
             // master's edge (less the card's elevation) to the gutter.
             layers = layers.push(
-                container(
-                    keyed_column([(selected, detail(package, &data.licenses_of(package)))])
-                        .height(Length::Fill),
-                )
-                .padding(Padding {
-                    top: TOOLBAR_HEIGHT,
-                    right: GUTTER + CARD_ELEVATION,
-                    bottom: 0.0,
-                    left: MASTER_WIDTH,
-                })
-                .width(Length::Fill)
-                .height(Length::Fill),
+                container(details)
+                    .padding(Padding {
+                        top: TOOLBAR_HEIGHT,
+                        right: GUTTER + CARD_ELEVATION,
+                        bottom: 0.0,
+                        left: MASTER_WIDTH,
+                    })
+                    .width(Length::Fill)
+                    .height(Length::Fill),
             );
         }
         layers.into()
@@ -518,15 +648,20 @@ impl LicensesPage {
 /// A Material surface: `Studio.surface` (the card colour Settings set) at
 /// elevation 4, with `radius` (`None` = square).
 fn material(radius: Option<Radius>) -> impl Fn(&Theme) -> container::Style {
+    faded_material(radius, 1.0)
+}
+
+/// [`material`] at `opacity`.
+fn faded_material(radius: Option<Radius>, opacity: f32) -> impl Fn(&Theme) -> container::Style {
     move |_| container::Style {
         text_color: Some(Zinc::FOREGROUND),
-        background: Some(Background::Color(Studio::SURFACE)),
+        background: Some(Background::Color(alpha(Studio::SURFACE, opacity))),
         border: Border {
             radius: radius.unwrap_or_default(),
             ..Border::default()
         },
         shadow: Shadow {
-            color: Color::from_rgba8(0, 0, 0, 0.45),
+            color: Color::from_rgba8(0, 0, 0, 0.45 * opacity),
             offset: Vector::new(0.0, 2.0),
             blur_radius: 6.0,
         },
@@ -602,7 +737,7 @@ fn master(data: &LicenseData, selected: usize) -> Element<'_, Message> {
     }
     scrollable(list.width(Length::Fill))
         .height(Length::Fill)
-        .style(theme::scrollbar)
+        .fading()
         .into()
 }
 
@@ -665,24 +800,32 @@ fn package_tile<'a>(
 }
 
 /// `_PackageLicensePage` on the detail card: the package and its license
-/// count, then each license after a divider, paragraph by paragraph.
-fn detail<'a>(package: &str, licenses: &[&LicenseEntry]) -> Element<'a, Message> {
+/// count, then each of the first `loaded` licenses after a divider,
+/// paragraph by paragraph, and Material's spinner while more are to come;
+/// all of it at `opacity` (iced has no subtree opacity: each color fades).
+fn detail<'a>(
+    package: &str,
+    licenses: &[&LicenseEntry],
+    loaded: usize,
+    opacity: f32,
+) -> Element<'a, Message> {
+    let fg = alpha(Zinc::FOREGROUND, Zinc::FOREGROUND.a * opacity);
     let header = container(column![
         text(package.to_string())
             .size(18)
             .line_height(1.0)
-            .color(Zinc::FOREGROUND),
+            .color(fg),
         Space::new().height(4),
         text(licenses_detail_text(licenses.len()))
             .size(14)
             .line_height(1.0)
-            .color(Zinc::FOREGROUND),
+            .color(fg),
     ])
     .height(TOOLBAR_HEIGHT)
     .padding([0.0, 16.0])
     .align_y(Vertical::Center);
     let mut body = Column::new();
-    for license in licenses {
+    for license in licenses.iter().take(loaded) {
         // `Padding(all: 18, child: Divider())`: a 16 px divider, its 1 px
         // line centred (in the scheme's outline colour, the foreground).
         body = body.push(
@@ -690,13 +833,24 @@ fn detail<'a>(package: &str, licenses: &[&LicenseEntry]) -> Element<'a, Message>
                 container(Space::new())
                     .width(Length::Fill)
                     .height(1)
-                    .style(theme::fill(Zinc::FOREGROUND)),
+                    .style(theme::fill(fg)),
             )
             .padding([18.0 + 7.5, 18.0]),
         );
         for p in license.paragraphs() {
-            body = body.push(paragraph(p));
+            body = body.push(paragraph(p, fg));
         }
+    }
+    if loaded < licenses.len() {
+        // `CircularProgressIndicator()` in 24 / 0 padding, in the scheme's
+        // primary.
+        let primary = alpha(Zinc::PRIMARY, Zinc::PRIMARY.a * opacity);
+        body = body.push(
+            container(spinner(36.0, 4.0, primary))
+                .width(Length::Fill)
+                .align_x(Horizontal::Center)
+                .padding([24, 0]),
+        );
     }
     let content = column![
         header,
@@ -707,27 +861,30 @@ fn detail<'a>(package: &str, licenses: &[&LicenseEntry]) -> Element<'a, Message>
             left: GUTTER,
         }))
         .height(Length::Fill)
-        .style(theme::scrollbar),
+        .fading(),
     ];
     container(content)
         .width(Length::Fill)
         .height(Length::Fill)
-        .style(material(Some(Radius {
-            top_left: 3.0,
-            top_right: 3.0,
-            bottom_right: 0.0,
-            bottom_left: 0.0,
-        })))
+        .style(faded_material(
+            Some(Radius {
+                top_left: 3.0,
+                top_right: 3.0,
+                bottom_right: 0.0,
+                bottom_left: 0.0,
+            }),
+            opacity,
+        ))
         .into()
 }
 
-/// One paragraph in the licenses' `bodySmall` style: a centred bold heading
-/// 16 below the last, or text 8 below it, indented 16 a level.
-fn paragraph<'a>(p: LicenseParagraph) -> Element<'a, Message> {
+/// One paragraph in the licenses' `bodySmall` style, in `color`: a centred
+/// bold heading 16 below the last, or text 8 below it, indented 16 a level.
+fn paragraph<'a>(p: LicenseParagraph, color: Color) -> Element<'a, Message> {
     let body = text(p.text)
         .size(12)
         .line_height(LineHeight::Relative(1.0))
-        .color(Zinc::FOREGROUND)
+        .color(color)
         .width(Length::Fill);
     if p.indent == LicenseParagraph::CENTERED_INDENT {
         container(body.font(font::BOLD).align_x(Horizontal::Center))
@@ -898,9 +1055,13 @@ mod tests {
                 text: "Another".into(),
             },
         ]);
-        let mut page = LicensesPage::new();
+        let data: &'static LicenseData = Box::leak(Box::new(data));
+        let mut page = LicensesPage::over(data);
+        // Its licenses fill in, one a frame.
+        let t0 = Instant::now();
+        page.frame(t0);
         let messages: Vec<Message> = {
-            let mut ui = iced_test::simulator(page.view_of(&data));
+            let mut ui = iced_test::simulator(page.view());
             assert!(ui.find("Licenses").is_ok());
             assert!(ui.find("Vocara").is_ok());
             assert!(ui.find(application_version().as_str()).is_ok());
@@ -918,19 +1079,93 @@ mod tests {
             assert!(!page.update(m));
         }
         assert_eq!(page.selected(), 1);
-        let mut ui = iced_test::simulator(page.view_of(&data));
+        page.frame(t0 + DETAIL_TRANSITION);
+        page.frame(t0 + DETAIL_TRANSITION);
+        let mut ui = iced_test::simulator(page.view());
         assert!(ui.find("Second license").is_ok());
         assert!(ui.find("Another").is_ok());
         assert!(ui.find("First license").is_err());
 
         let back = char::from(Icon::ChevronLeft).to_string();
         let messages: Vec<Message> = {
-            let mut ui = iced_test::simulator(page.view_of(&data));
+            let mut ui = iced_test::simulator(page.view());
             ui.click(back.as_str()).expect("the back button");
             ui.into_messages().collect()
         };
         assert_eq!(messages, vec![Message::Back]);
         assert!(page.update(Message::Back));
+    }
+
+    #[test]
+    fn a_picked_packages_licenses_come_up_and_in_as_the_last_ones_go() {
+        let mut page = LicensesPage::new();
+        // Say its licenses have filled in (see the next test).
+        page.loaded = page.total();
+        let t0 = Instant::now();
+        assert_eq!(
+            page.upwards(page.entering.as_ref()),
+            (1.0, 0.0),
+            "the first, at once"
+        );
+        assert!(!page.is_animating(t0));
+        page.select(1, t0);
+        assert_eq!(page.selected(), 1, "at once");
+        assert!(page.is_animating(t0 + DETAIL_TRANSITION / 2));
+        let at = |page: &mut LicensesPage, t: Duration| {
+            page.now = t0 + t;
+            let coming = page.upwards(page.entering.as_ref());
+            let going = page.upwards(page.leaving.first().map(|g| &g.controller));
+            (coming, going)
+        };
+        let ((opacity, down), (gone, sunk)) = at(&mut page, Duration::ZERO);
+        assert_eq!((opacity, down), (0.0, 0.25), "start: down a quarter, clear");
+        assert_eq!((gone, sunk), (1.0, 0.0), "the last one in full");
+        let ((opacity, down), (gone, sunk)) = at(&mut page, DETAIL_TRANSITION / 2);
+        assert!(
+            (opacity - Curve::EaseIn.transform(0.5)).abs() < 1e-3,
+            "{opacity}"
+        );
+        let rise = 0.25 * (1.0 - Curve::FastOutSlowIn.transform(0.5));
+        assert!((down - rise).abs() < 1e-3, "{down}");
+        assert!(
+            (gone - opacity).abs() < 1e-3 && (sunk - down).abs() < 1e-3,
+            "mirrored"
+        );
+        let ((opacity, down), _) = at(&mut page, DETAIL_TRANSITION);
+        assert_eq!((opacity, down), (1.0, 0.0), "end");
+        page.frame(t0 + DETAIL_TRANSITION);
+        assert!(page.leaving.is_empty(), "the last one let go");
+        page.loaded = page.total();
+        assert!(!page.is_animating(t0 + DETAIL_TRANSITION));
+    }
+
+    #[test]
+    fn a_packages_licenses_fill_in_one_a_frame_under_a_spinner() {
+        let entry = |text: &str| LicenseEntry {
+            packages: vec!["three".into()],
+            text: text.into(),
+        };
+        let data = LicenseData::collect(vec![entry("One"), entry("Two"), entry("Three")]);
+        let data: &'static LicenseData = Box::leak(Box::new(data));
+        let mut page = LicensesPage::over(data);
+        let shown = |page: &LicensesPage| {
+            let mut ui = iced_test::simulator(page.view());
+            ["One", "Two", "Three"].map(|t| ui.find(t).is_ok())
+        };
+        let t0 = Instant::now();
+        assert!(page.is_animating(t0), "frames while they fill in");
+        assert_eq!(shown(&page), [false; 3], "none yet");
+        assert!(iced_test::simulator(page.view())
+            .find("3 licenses.")
+            .is_ok());
+        page.frame(t0);
+        assert_eq!(shown(&page), [true, false, false]);
+        page.frame(t0);
+        page.frame(t0);
+        assert_eq!(shown(&page), [true; 3], "all in");
+        assert!(!page.is_animating(t0), "and the frames stop");
+        page.frame(t0);
+        assert_eq!(page.loaded, 3);
     }
 
     #[test]

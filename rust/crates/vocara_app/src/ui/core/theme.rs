@@ -181,6 +181,99 @@ pub fn boxed(background: Option<Color>, radius: f32, border: Option<Color>) -> c
     }
 }
 
+// ------------------------------------------------------------------ fading
+
+/// `color` at `opacity` of its alpha: a color of a faded subtree (an
+/// `Opacity` or `FadeTransition` around it), iced having no subtree
+/// opacity.
+pub const fn faded(color: Color, opacity: f32) -> Color {
+    Color {
+        a: color.a * opacity,
+        ..color
+    }
+}
+
+fn faded_background(background: Background, opacity: f32) -> Background {
+    match background {
+        Background::Color(c) => Background::Color(faded(c, opacity)),
+        Background::Gradient(g) => Background::Gradient(g.scale_alpha(opacity)),
+    }
+}
+
+/// A container's look at `opacity`: its fill, border, shadow and text.
+pub fn faded_container(style: container::Style, opacity: f32) -> container::Style {
+    container::Style {
+        text_color: style.text_color.map(|c| faded(c, opacity)),
+        background: style.background.map(|b| faded_background(b, opacity)),
+        border: Border {
+            color: faded(style.border.color, opacity),
+            ..style.border
+        },
+        shadow: Shadow {
+            color: faded(style.shadow.color, opacity),
+            ..style.shadow
+        },
+        snap: style.snap,
+    }
+}
+
+/// A button's look at `opacity`.
+pub fn faded_button(style: button::Style, opacity: f32) -> button::Style {
+    button::Style {
+        background: style.background.map(|b| faded_background(b, opacity)),
+        text_color: faded(style.text_color, opacity),
+        border: Border {
+            color: faded(style.border.color, opacity),
+            ..style.border
+        },
+        shadow: Shadow {
+            color: faded(style.shadow.color, opacity),
+            ..style.shadow
+        },
+        snap: style.snap,
+    }
+}
+
+/// A text field's look at `opacity`.
+pub fn faded_input(style: text_input::Style, opacity: f32) -> text_input::Style {
+    text_input::Style {
+        background: faded_background(style.background, opacity),
+        border: Border {
+            color: faded(style.border.color, opacity),
+            ..style.border
+        },
+        icon: faded(style.icon, opacity),
+        placeholder: faded(style.placeholder, opacity),
+        value: faded(style.value, opacity),
+        selection: faded(style.selection, opacity),
+    }
+}
+
+/// A scrollable's look at `opacity`: its container and both rails.
+pub fn faded_scrollable(style: scrollable::Style, opacity: f32) -> scrollable::Style {
+    let rail = |rail: scrollable::Rail| scrollable::Rail {
+        background: rail.background.map(|b| faded_background(b, opacity)),
+        border: Border {
+            color: faded(rail.border.color, opacity),
+            ..rail.border
+        },
+        scroller: scrollable::Scroller {
+            background: faded_background(rail.scroller.background, opacity),
+            border: Border {
+                color: faded(rail.scroller.border.color, opacity),
+                ..rail.scroller.border
+            },
+        },
+    };
+    scrollable::Style {
+        container: faded_container(style.container, opacity),
+        vertical_rail: rail(style.vertical_rail),
+        horizontal_rail: rail(style.horizontal_rail),
+        gap: style.gap.map(|b| faded_background(b, opacity)),
+        auto_scroll: style.auto_scroll,
+    }
+}
+
 /// A plain fill (`ColoredBox(color: ...)`).
 pub fn fill(color: Color) -> impl Fn(&Theme) -> container::Style {
     move |_| boxed(Some(color), 0.0, None)
@@ -236,8 +329,9 @@ pub fn menu(_: &Theme) -> container::Style {
     }
 }
 
-/// A menu row: transparent, `Studio.hover` under the pointer (the
-/// `InkWell(hoverColor: Studio.hover)` rows; splashes are off app-wide).
+/// A menu row: transparent, `Studio.hover` under the pointer, at once (a
+/// `MouseRegion`'s hover; the `InkWell` rows fade theirs in, see
+/// `widgets::animated::ink_hover`).
 pub fn menu_item(_: &Theme, status: button::Status) -> button::Style {
     let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
     button::Style {
@@ -340,7 +434,9 @@ pub const SCROLLBAR_WIDTH: f32 = 8.0;
 
 /// Material 3's desktop scrollbar under the zinc scheme: no track, a
 /// radius-8 thumb in `onSurface` at 30 %, 50 % hovered, 60 % dragged.
-/// (Flutter fades the thumb in on scroll; iced keeps it shown.)
+/// Scrollables take it through `widgets::fading_scrollbar`, which fades the
+/// thumb in on a scroll and out after it, and eases its hover color, as
+/// Flutter did.
 pub fn scrollbar(_: &Theme, status: scrollable::Status) -> scrollable::Style {
     let (h, v) = match status {
         scrollable::Status::Active { .. } => (0.30, 0.30),

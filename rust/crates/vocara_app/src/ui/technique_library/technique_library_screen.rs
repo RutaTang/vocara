@@ -18,14 +18,16 @@
 //! next confirmed one run, and the return from a technique's page reloads
 //! the list and opens card taps again.
 //!
-//! Flutter animated the card border (120 ms) and the snack bar's entrance;
-//! iced switches at once.
+//! A card's border turns coral while the pointer is over it, over 120 ms,
+//! linear (the Dart `AnimatedContainer`).
 //!
 //! The page draws its snack bars itself, over its bottom edge, while
 //! it is on top; once it leaves (or is covered) the app keeps them up over
 //! the page on top (`app::messenger`), as Dart's `ScaffoldMessenger`, above
 //! every page, did. A new one waits behind the ones up, as `showSnackBar`
-//! queued it; the timer is a subscription.
+//! queued it; each slides up and back down as Material's fixed snack bar
+//! did, its time counted from the end of its entrance (`ui::snack`); the
+//! timer is a subscription.
 
 mod anchored;
 #[cfg(test)]
@@ -57,10 +59,13 @@ use crate::router::{Navigation, Route};
 use crate::services::Services;
 use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::theme::{self, alpha, bare_button, font, Studio};
+use crate::ui::core::widgets::animated::{animated_container, ink_hover, Decoration};
 use crate::ui::core::widgets::confirm_dialog::ConfirmDialog;
+use crate::ui::core::widgets::fading_scrollbar::Fading;
 use crate::ui::core::widgets::studio_button::{studio_button, StudioButtonVariant};
 use crate::ui::core::widgets::studio_hint::spinner;
 use crate::ui::core::widgets::studio_text::studio_text;
+use crate::ui::snack::{SnackEvent, SnackQueue, SnackStyle};
 use crate::ui::{Screen, SnackBar, Update};
 
 /// The snack bar after a create that did not happen.
@@ -73,6 +78,9 @@ pub const SNACK_DURATION: Duration = Duration::from_millis(4000);
 
 /// The grid's padding (all round).
 pub const GRID_PADDING: f32 = 24.0;
+/// How long a card's border takes to change (`AnimatedContainer`).
+pub const CARD_ANIMATION: Duration = Duration::from_millis(120);
+
 /// The widest a card gets (`maxCrossAxisExtent`).
 pub const CARD_MAX_WIDTH: f32 = 300.0;
 /// Every card's height (`mainAxisExtent`).
@@ -106,11 +114,7 @@ pub struct TechniqueLibraryScreen {
     queued_deletes: VecDeque<String>,
     /// The snack bars: the first shows, the rest wait their turn (the
     /// `ScaffoldMessenger` queue).
-    snacks: VecDeque<String>,
-    /// Tags the showing snack bar's timer, so a stale timer hides nothing.
-    snack_seq: u64,
-    /// Since when the first has shown.
-    snack_since: Instant,
+    snacks: SnackQueue,
 }
 
 /// What the library reacts to.
@@ -156,6 +160,8 @@ pub enum Message {
     RemoteApplied(RemoteApplied),
     /// The showing snack bar's time is up.
     SnackExpired(u64),
+    /// A frame while a snack bar enters or leaves.
+    SnackFrame(Instant),
 }
 
 /// What handling one message asked for: the view model's work, to run off
@@ -240,9 +246,7 @@ impl TechniqueLibraryScreen {
             remote_applied: services.library.remote_applied.clone(),
             tag_menu: false,
             queued_deletes: VecDeque::new(),
-            snacks: VecDeque::new(),
-            snack_seq: 0,
-            snack_since: Instant::now(),
+            snacks: SnackQueue::new(),
         };
         (screen, load)
     }
@@ -254,7 +258,7 @@ impl TechniqueLibraryScreen {
 
     /// The snack bar showing, if any.
     pub fn snack(&self) -> Option<&str> {
-        self.snacks.front().map(String::as_str)
+        self.snacks.current().map(|s| s.text.as_str())
     }
 
     /// Whether the tag filter's menu is open.
@@ -320,12 +324,11 @@ impl TechniqueLibraryScreen {
             Message::Landed(done) => self.landed(done),
             Message::RemoteApplied(event) => Step::effect(self.vm.on_remote_applied(&event)),
             Message::SnackExpired(seq) => {
-                if seq == self.snack_seq
-                    && self.snacks.pop_front().is_some()
-                    && !self.snacks.is_empty()
-                {
-                    self.snack_shows();
-                }
+                self.snacks.expired(seq, Instant::now());
+                Step::none()
+            }
+            Message::SnackFrame(at) => {
+                self.snacks.frame(at);
                 Step::none()
             }
         }
@@ -404,17 +407,8 @@ impl TechniqueLibraryScreen {
     /// `showSnackBar(SnackBar(content: Text(text)))`: shown now, or after
     /// the ones before it.
     fn show_snack(&mut self, text: &str) {
-        self.snacks.push_back(text.to_string());
-        if self.snacks.len() == 1 {
-            self.snack_shows();
-        }
-    }
-
-    /// The first snack bar shows from now, for [`SNACK_DURATION`] (timed by
-    /// the subscription).
-    fn snack_shows(&mut self) {
-        self.snack_seq += 1;
-        self.snack_since = Instant::now();
+        let bar = SnackBar::new(text, SNACK_DURATION, false, SnackStyle::Fixed, snack_bar);
+        self.snacks.show(bar, Instant::now());
     }
 
     // ---------------------------------------------------------------- view
@@ -623,11 +617,11 @@ impl Screen for TechniqueLibraryScreen {
             .remote_applied
             .subscription()
             .map(Message::RemoteApplied);
-        if self.snacks.is_empty() {
-            return applied;
-        }
-        let timer = iced::Subscription::run_with(self.snack_seq, snack_timer);
-        iced::Subscription::batch([applied, timer])
+        let snacks = self.snacks.subscription().map(|event| match event {
+            SnackEvent::Expired(seq) => Message::SnackExpired(seq),
+            SnackEvent::Frame(at) => Message::SnackFrame(at),
+        });
+        iced::Subscription::batch([applied, snacks])
     }
 
     fn update(&mut self, message: Message, _services: &Services) -> Update<Message> {
@@ -645,8 +639,8 @@ impl Screen for TechniqueLibraryScreen {
             .width(Length::Fill)
             .height(Length::Fill)
             .style(theme::page)];
-        if let Some(snack) = self.snack() {
-            layers = layers.push(snack_bar(snack));
+        if let Some(snacks) = self.snacks.view() {
+            layers = layers.push(snacks.map(|never| match never {}));
         }
         layers.into()
     }
@@ -666,21 +660,8 @@ impl Screen for TechniqueLibraryScreen {
     /// The snack bar showing, for the time it has left, then the ones
     /// waiting, for all of theirs; each queued behind the ones before it.
     fn take_snack_bars(&mut self) -> Vec<SnackBar> {
-        let look = snack_bar::<Infallible>;
-        let mut snacks = std::mem::take(&mut self.snacks).into_iter();
-        let showing = snacks.next().and_then(|text| {
-            SnackBar::showing(text, SNACK_DURATION, self.snack_since, false, look)
-        });
-        showing
-            .into_iter()
-            .chain(snacks.map(|text| SnackBar::waiting(text, SNACK_DURATION, false, look)))
-            .collect()
+        self.snacks.take(Instant::now())
     }
-}
-
-/// Snack bar timer `seq`.
-fn snack_timer(seq: &u64) -> impl iced::futures::Stream<Item = Message> {
-    crate::ui::one_shot(SNACK_DURATION, Message::SnackExpired(*seq))
 }
 
 /// A full-width 1 px line in `Studio.border`.
@@ -731,7 +712,7 @@ fn menu_item<'a>(
     } else {
         Studio::TEXT_PRIMARY
     };
-    button(
+    let row = button(
         row![
             studio_text(label)
                 .size(13)
@@ -754,9 +735,10 @@ fn menu_item<'a>(
     )
     .width(Length::Fill)
     .padding([9, 14])
-    .style(theme::menu_item)
-    .on_press(on_tap)
-    .into()
+    .style(bare_button)
+    .on_press(on_tap);
+    // An `InkWell(hoverColor: Studio.hover)`.
+    ink_hover(row, Studio::HOVER, 0.0)
 }
 
 /// How the grid lays out at a content `width`: the column count and the
@@ -789,16 +771,29 @@ fn grid(vm: &TechniqueLibraryViewModel) -> Element<'_, Message> {
         scrollable(rows)
             .width(Length::Fill)
             .height(Length::Fill)
-            .style(theme::scrollbar)
+            .fading()
             .into()
     })
     .into()
 }
 
 /// A technique's card: at rest, and — while the pointer is over it — with
-/// its coral border and its trash.
+/// its trash and its coral border, which comes in over 120 ms.
 fn card<'a>(t: &'a Technique, vm: &TechniqueLibraryViewModel) -> Element<'a, Message> {
-    hover(card_face(t, vm, false), card_face(t, vm, true))
+    animated_container(
+        hover(card_face(t, vm, false), card_face(t, vm, true)),
+        CARD_ANIMATION,
+    )
+    .border_above()
+    .style(|hovered| {
+        let border = if hovered {
+            alpha(Studio::ACCENT, 0.6)
+        } else {
+            Studio::BORDER
+        };
+        Decoration::boxed(Studio::PANEL, 10.0, border, 1.0)
+    })
+    .into()
 }
 
 fn card_face<'a>(
@@ -871,12 +866,8 @@ fn card_face<'a>(
             .push(Space::new().height(8))
             .push(tag_chips(&t.tags, vm));
     }
-    let border = if hovered {
-        alpha(Studio::ACCENT, 0.6)
-    } else {
-        Studio::BORDER
-    };
-    // 16 of padding inside the 1 px border.
+    // 16 of padding inside the 1 px border (the card's, drawn over the
+    // face).
     button(
         container(content)
             .width(Length::Fill)
@@ -891,9 +882,8 @@ fn card_face<'a>(
         background: Some(Background::Color(Studio::PANEL)),
         text_color: Studio::TEXT_PRIMARY,
         border: Border {
-            color: border,
-            width: 1.0,
             radius: 10.0.into(),
+            ..Border::default()
         },
         shadow: Shadow::default(),
         snap: false,
@@ -1017,9 +1007,9 @@ fn empty_state<'a>() -> Element<'a, Message> {
 
 /// Material 3's fixed snack bar along the page's bottom: the inverse
 /// surface, 14 px text, 24 / 14 of padding, elevation 6. It takes its own
-/// taps. (Of any message type: the app draws it too, once the page has
-/// handed it over.)
-fn snack_bar<M: 'static>(message: &str) -> Element<'_, M> {
+/// taps. (The app draws it too, once the page has handed it over; it slides
+/// rather than fades, so it is always opaque.)
+fn snack_bar(message: &str, _opacity: f32) -> Element<'_, Infallible> {
     let bar = container(
         text(message)
             .size(14)
@@ -1036,9 +1026,5 @@ fn snack_bar<M: 'static>(message: &str) -> Element<'_, M> {
         },
         ..theme::boxed(Some(theme::SNACK_BAR_DEFAULT_BACKGROUND), 0.0, None)
     });
-    container(opaque(bar))
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .align_y(Vertical::Bottom)
-        .into()
+    opaque(bar)
 }

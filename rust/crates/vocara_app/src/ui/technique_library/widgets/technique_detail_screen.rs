@@ -44,7 +44,9 @@
 //! on top; once it leaves (or is covered) the app keeps them up over the page
 //! on top (`app::messenger`), as Dart's `ScaffoldMessenger`, above every
 //! page, did. A new one waits behind the ones up, as `showSnackBar` queued
-//! it; the timer is a subscription. The
+//! it; each slides up and back down as Material's fixed snack bar did, its
+//! time counted from the end of its entrance (`ui::snack`); the timer is a
+//! subscription. The
 //! header ignores its buttons for a double-tap's span after it switches
 //! modes, as Dart's `IgnorePointer` did, by dropping their messages. No
 //! italic Inter face is bundled, so "Empty content" asks for italic and
@@ -57,7 +59,6 @@ mod tests;
 #[cfg(test)]
 mod through_the_app;
 
-use std::collections::VecDeque;
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -89,10 +90,12 @@ use crate::services::Services;
 use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::theme::{self, alpha, bare_button, boxed, font, Studio};
 use crate::ui::core::widgets::confirm_dialog::ConfirmDialog;
+use crate::ui::core::widgets::fading_scrollbar::Fading;
 use crate::ui::core::widgets::spectrogram_painter::{release_spectrogram_images, RenderRequest};
 use crate::ui::core::widgets::studio_button::{studio_button, StudioButtonVariant};
 use crate::ui::core::widgets::studio_hint::spinner;
 use crate::ui::core::widgets::studio_text::studio_text;
+use crate::ui::snack::{SnackEvent, SnackQueue, SnackStyle};
 use crate::ui::song_practice_detail::widgets::voiceprint_view::{
     self as voiceprint, VoiceprintState,
 };
@@ -209,6 +212,8 @@ pub enum Message {
     RemoteApplied(RemoteApplied),
     /// The showing snack bar's time is up.
     SnackExpired(u64),
+    /// A frame while a snack bar enters or leaves.
+    SnackFrame(Instant),
 }
 
 /// The edit form: the text as typed, and the technique it was seeded from
@@ -452,11 +457,7 @@ pub struct TechniqueDetailScreen {
     /// The examples as last shown.
     shown: Shown,
     /// The snack bars: the first shows, the rest wait their turn.
-    snacks: VecDeque<String>,
-    /// Tags the showing snack bar's timer.
-    snack_seq: u64,
-    /// Since when the first has shown.
-    snack_since: Instant,
+    snacks: SnackQueue,
 }
 
 impl std::fmt::Debug for TechniqueDetailScreen {
@@ -510,9 +511,7 @@ impl TechniqueDetailScreen {
             settle_seq: 0,
             form: None,
             shown: Shown::default(),
-            snacks: VecDeque::new(),
-            snack_seq: 0,
-            snack_since: Instant::now(),
+            snacks: SnackQueue::new(),
         };
         let mut step = Step::new();
         screen.absorb(next, &mut step);
@@ -537,7 +536,7 @@ impl TechniqueDetailScreen {
 
     /// The snack bar showing, if any.
     pub fn snack(&self) -> Option<&str> {
-        self.snacks.front().map(String::as_str)
+        self.snacks.current().map(|s| s.text.as_str())
     }
 
     /// The examples' players.
@@ -595,6 +594,11 @@ impl TechniqueDetailScreen {
 
     fn handle(&mut self, message: Message) -> Step {
         let mut step = Step::new();
+        if let Message::SnackFrame(at) = message {
+            // Only the snack bar's drawing moves.
+            self.snacks.frame(at);
+            return step;
+        }
         // The header ignores taps for a double-tap's span after it switches.
         let header = matches!(
             message,
@@ -673,14 +677,8 @@ impl TechniqueDetailScreen {
                 let next = self.vm.on_remote_applied(&event);
                 self.absorb(next, &mut step);
             }
-            Message::SnackExpired(seq) => {
-                if seq == self.snack_seq
-                    && self.snacks.pop_front().is_some()
-                    && !self.snacks.is_empty()
-                {
-                    self.snack_shows();
-                }
-            }
+            Message::SnackExpired(seq) => self.snacks.expired(seq, Instant::now()),
+            Message::SnackFrame(at) => self.snacks.frame(at),
         }
         self.refresh(&mut step);
         step
@@ -973,17 +971,8 @@ impl TechniqueDetailScreen {
 
     /// Shows `text` in a snack bar (now, or after the ones before it).
     fn snack_into(&mut self, text: &str) {
-        self.snacks.push_back(text.to_string());
-        if self.snacks.len() == 1 {
-            self.snack_shows();
-        }
-    }
-
-    /// The first snack bar shows from now, for [`SNACK_DURATION`] (timed by
-    /// the subscription).
-    fn snack_shows(&mut self) {
-        self.snack_seq += 1;
-        self.snack_since = Instant::now();
+        let bar = SnackBar::new(text, SNACK_DURATION, false, SnackStyle::Fixed, snack_bar);
+        self.snacks.show(bar, Instant::now());
     }
 
     // -------------------------------------------------------------- view
@@ -1134,7 +1123,7 @@ impl TechniqueDetailScreen {
         scrollable(page)
             .width(Length::Fill)
             .height(Length::Fill)
-            .style(theme::scrollbar)
+            .fading()
             .into()
     }
 
@@ -1240,7 +1229,7 @@ impl TechniqueDetailScreen {
         }))
         .width(Length::Fill)
         .height(Length::Fill)
-        .style(theme::scrollbar)
+        .fading()
         .into()
     }
 }
@@ -1263,8 +1252,8 @@ impl Screen for TechniqueDetailScreen {
             .width(Length::Fill)
             .height(Length::Fill)
             .style(theme::page)];
-        if let Some(snack) = self.snack() {
-            layers = layers.push(snack_bar(snack));
+        if let Some(snacks) = self.snacks.view() {
+            layers = layers.push(snacks.map(|never| match never {}));
         }
         layers.into()
     }
@@ -1283,9 +1272,10 @@ impl Screen for TechniqueDetailScreen {
                 iced::time::every(MicRecordingController::TICK_PERIOD).map(|_| Message::Tick),
             );
         }
-        if !self.snacks.is_empty() {
-            subscriptions.push(Subscription::run_with(self.snack_seq, snack_timer));
-        }
+        subscriptions.push(self.snacks.subscription().map(|event| match event {
+            SnackEvent::Expired(seq) => Message::SnackExpired(seq),
+            SnackEvent::Frame(at) => Message::SnackFrame(at),
+        }));
         Subscription::batch(subscriptions)
     }
 
@@ -1307,21 +1297,8 @@ impl Screen for TechniqueDetailScreen {
     /// The snack bar showing, for the time it has left, then the ones
     /// waiting, for all of theirs; each queued behind the ones before it.
     fn take_snack_bars(&mut self) -> Vec<SnackBar> {
-        let look = snack_bar::<Infallible>;
-        let mut snacks = std::mem::take(&mut self.snacks).into_iter();
-        let showing = snacks.next().and_then(|text| {
-            SnackBar::showing(text, SNACK_DURATION, self.snack_since, false, look)
-        });
-        showing
-            .into_iter()
-            .chain(snacks.map(|text| SnackBar::waiting(text, SNACK_DURATION, false, look)))
-            .collect()
+        self.snacks.take(Instant::now())
     }
-}
-
-/// Snack bar timer `seq`.
-fn snack_timer(seq: &u64) -> impl iced::futures::Stream<Item = Message> {
-    crate::ui::one_shot(SNACK_DURATION, Message::SnackExpired(*seq))
 }
 
 /// The unsaved-changes dialog (`_confirmDiscard`); `then` takes whether the
@@ -1424,9 +1401,9 @@ fn chip_row<'a>(labels: &'a [String], tint: bool) -> Element<'a, Message> {
 
 /// Material 3's fixed snack bar along the page's bottom: the inverse
 /// surface, 14 px text, 24 / 14 of padding, elevation 6. It takes its own
-/// taps. (Of any message type: the app draws it too, once the page has
-/// handed it over.)
-fn snack_bar<M: 'static>(message: &str) -> Element<'_, M> {
+/// taps. (The app draws it too, once the page has handed it over; it slides
+/// rather than fades, so it is always opaque.)
+fn snack_bar(message: &str, _opacity: f32) -> Element<'_, Infallible> {
     let bar = container(
         text(message)
             .size(14)
@@ -1443,9 +1420,5 @@ fn snack_bar<M: 'static>(message: &str) -> Element<'_, M> {
         },
         ..boxed(Some(theme::SNACK_BAR_DEFAULT_BACKGROUND), 0.0, None)
     });
-    container(opaque(bar))
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .align_y(Vertical::Bottom)
-        .into()
+    opaque(bar)
 }

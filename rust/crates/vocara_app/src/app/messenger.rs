@@ -14,7 +14,9 @@
 //!
 //! So a page holds snack bars of its own only while it is on top and the
 //! app shows none: the order in which they were shown is the order in which
-//! they come and go, as in Dart's single queue.
+//! they come and go, as in Dart's single queue. They enter and leave as
+//! Material's did, a handed-over one carrying on from where its entrance
+//! got ([`crate::ui::snack`]).
 //!
 //! # Differences from Flutter
 //!
@@ -22,66 +24,41 @@
 //! draws over itself in place of a Dart dialog route (Home's "Loading
 //! practice" dialog, the song page's note editor and technique picker),
 //! which covered a snack bar in Dart; the studio dialogs still cover it. No
-//! Dart snack bar had an action, so none is carried over. A snack bar comes
-//! and goes at once (Flutter slid it in and out).
+//! Dart snack bar had an action, so none is carried over. One leaving as its
+//! page stops being on top goes at once.
 
-use std::collections::VecDeque;
-use std::time::Duration;
+use std::convert::Infallible;
+use std::time::Instant;
 
 use iced::{Element, Subscription};
 
 use super::{Message, Page};
 use crate::router::Router;
-use crate::ui::{self, SnackBar};
-
-/// The timer of the snack bar the app shows: its number and the time it
-/// has left. The subscription's identity, so the next one starts its own.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct SnackTimer {
-    seq: u64,
-    /// How long the snack bar has left to show.
-    pub left: Duration,
-}
-
-impl SnackTimer {
-    /// What the timer sends when the time is up.
-    pub fn message(self) -> Message {
-        Message::SnackBarExpired(self.seq)
-    }
-}
+use crate::ui::snack::{SnackEvent, SnackQueue, SnackTimer};
+use crate::ui::SnackBar;
 
 /// The app's snack bars: the first shows, the rest wait their turn.
 #[derive(Debug, Default)]
 pub(super) struct Messenger {
-    queue: VecDeque<(u64, SnackBar)>,
-    /// Numbers the snack bars, so a stale timer takes down nothing.
-    made: u64,
+    queue: SnackQueue,
 }
 
 impl Messenger {
     /// The snack bar showing, if any.
     pub fn showing(&self) -> Option<&SnackBar> {
-        self.queue.front().map(|(_, bar)| bar)
+        self.queue.current()
     }
 
     /// The showing snack bar's timer.
     pub fn timer(&self) -> Option<SnackTimer> {
-        self.queue.front().map(|(seq, bar)| SnackTimer {
-            seq: *seq,
-            left: bar.left,
-        })
+        self.queue.timer()
     }
 
-    /// Takes in snack bars a page handed over, in order: one its page
-    /// cleared the others for takes their place, the others wait behind.
-    pub fn adopt(&mut self, bars: Vec<SnackBar>) {
-        for bar in bars {
-            if bar.clears {
-                self.queue.clear();
-            }
-            self.made += 1;
-            self.queue.push_back((self.made, bar));
-        }
+    /// Takes in snack bars a page handed over at `now`, in order: one its
+    /// page cleared the others for takes their place, the others wait
+    /// behind.
+    pub fn adopt(&mut self, bars: Vec<SnackBar>, now: Instant) {
+        self.queue.adopt(bars, now);
     }
 
     /// Takes over the snack bars of every page that is not on top, and of
@@ -89,112 +66,115 @@ impl Messenger {
     /// docs).
     pub fn gather(&mut self, router: &mut Router<Page>) {
         let top = router.top().0;
+        let now = Instant::now();
         for (id, page) in router.pages_mut() {
             if id != top || !self.queue.is_empty() {
-                self.adopt(page.take_snack_bars());
+                let bars = page.take_snack_bars();
+                self.adopt(bars, now);
             }
         }
     }
 
-    /// Snack bar `seq`'s time is up: the next one shows.
-    pub fn expired(&mut self, seq: u64) {
-        if self.queue.front().is_some_and(|(s, _)| *s == seq) {
-            self.queue.pop_front();
+    /// What the snack bars' subscription reported.
+    pub fn event(&mut self, event: SnackEvent) {
+        match event {
+            SnackEvent::Expired(seq) => self.queue.expired(seq, Instant::now()),
+            SnackEvent::Frame(at) => self.queue.frame(at),
         }
     }
 
-    /// The snack bar showing, as its page drew it.
+    /// The snack bars as their pages drew them, entering or leaving.
     pub fn view(&self) -> Option<Element<'_, Message>> {
-        self.showing()
-            .map(|bar| (bar.look)(&bar.text).map(|never| match never {}))
+        self.queue
+            .view()
+            .map(|e: Element<'_, Infallible>| e.map(|never| match never {}))
     }
 
-    /// Its timer, while one shows.
+    /// Their timer, and the frames while one enters or leaves.
     pub fn subscription(&self) -> Subscription<Message> {
-        self.timer().map_or_else(Subscription::none, |timer| {
-            Subscription::run_with(timer, snack_timer)
+        self.queue.subscription().map(|event| match event {
+            SnackEvent::Expired(seq) => Message::SnackBarExpired(seq),
+            SnackEvent::Frame(at) => Message::SnackBarFrame(at),
         })
     }
 }
 
-/// The showing snack bar's one-shot timer.
-fn snack_timer(timer: &SnackTimer) -> impl iced::futures::Stream<Item = Message> {
-    ui::one_shot(timer.left, timer.message())
-}
-
 #[cfg(test)]
 mod tests {
-    use iced::futures::StreamExt;
+    use std::time::Duration;
 
     use super::*;
+    use crate::ui::snack::{SnackStyle, TRANSITION};
 
-    fn look(text: &str) -> Element<'_, std::convert::Infallible> {
+    fn look(text: &str, _: f32) -> Element<'_, Infallible> {
         iced::widget::text(text).into()
     }
 
     fn bar(text: &str, left_ms: u64, clears: bool) -> SnackBar {
-        SnackBar::waiting(
-            text.to_string(),
+        SnackBar::new(
+            text,
             Duration::from_millis(left_ms),
             clears,
+            SnackStyle::Floating,
             look,
         )
     }
 
     fn texts(m: &Messenger) -> Vec<&str> {
-        m.queue.iter().map(|(_, b)| b.text.as_str()).collect()
+        m.queue.texts().collect()
     }
 
     #[test]
     fn a_clearing_snack_bar_takes_the_place_of_those_up_and_a_queued_one_waits() {
         let mut m = Messenger::default();
-        m.adopt(vec![bar("a", 100, false), bar("b", 4000, false)]);
+        let t0 = Instant::now();
+        m.adopt(vec![bar("a", 100, false), bar("b", 4000, false)], t0);
         assert_eq!(texts(&m), ["a", "b"]);
-        m.adopt(vec![bar("c", 4000, false)]);
+        m.adopt(vec![bar("c", 4000, false)], t0);
         assert_eq!(texts(&m), ["a", "b", "c"], "queued behind");
-        m.adopt(vec![bar("d", 2800, true)]);
+        let t1 = t0 + Duration::from_secs(1);
+        m.adopt(vec![bar("d", 2800, true)], t1);
         assert_eq!(texts(&m), ["d"], "cleared the others");
-        assert_eq!(m.timer().map(|t| t.left), Some(Duration::from_millis(2800)));
+        // It enters once "a" has left: its time is up 2.8 s after that.
+        let timer = m.timer().expect("a timer");
+        assert_eq!(
+            timer.deadline,
+            t1 + TRANSITION + TRANSITION + Duration::from_millis(2800)
+        );
     }
 
     #[test]
     fn only_the_showing_snack_bars_timer_takes_it_down() {
         let mut m = Messenger::default();
-        m.adopt(vec![bar("a", 100, false), bar("b", 4000, false)]);
+        let t0 = Instant::now();
+        m.adopt(vec![bar("a", 100, false), bar("b", 4000, false)], t0);
         let first = m.timer().expect("a timer");
-        m.adopt(vec![bar("c", 4000, false)]);
+        m.adopt(vec![bar("c", 4000, false)], t0);
         assert_eq!(m.timer(), Some(first), "the one showing runs on");
-        m.expired(first.seq + 1);
+        m.event(SnackEvent::Expired(first.seq + 1));
         assert_eq!(texts(&m), ["a", "b", "c"], "not its timer");
-        m.expired(first.seq);
+        m.event(SnackEvent::Expired(first.seq));
         assert_eq!(texts(&m), ["b", "c"]);
         let second = m.timer().expect("the next one's");
         assert_ne!(second, first);
-        assert_eq!(second.left, Duration::from_millis(4000), "all its time");
-        m.expired(first.seq);
+        m.event(SnackEvent::Expired(first.seq));
         assert_eq!(texts(&m), ["b", "c"], "a stale timer takes down nothing");
     }
 
     #[test]
-    fn the_timer_sends_once_its_time_is_up_then_nothing() {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_time()
-            .build()
-            .expect("a runtime");
-        let timer = SnackTimer {
-            seq: 7,
-            left: Duration::from_millis(60),
-        };
-        rt.block_on(async {
-            let started = std::time::Instant::now();
-            let mut stream = std::pin::pin!(snack_timer(&timer));
-            assert!(matches!(
-                stream.next().await,
-                Some(Message::SnackBarExpired(7))
-            ));
-            assert!(started.elapsed() >= timer.left);
-            let more = tokio::time::timeout(Duration::from_millis(100), stream.next()).await;
-            assert!(more.is_err(), "then nothing more");
-        });
+    fn the_subscription_carries_the_timer_and_frames_only_while_one_moves() {
+        use iced::advanced::subscription::into_recipes;
+        let mut m = Messenger::default();
+        assert!(into_recipes(m.subscription()).is_empty(), "nothing up");
+        // Up long enough to have entered: its timer alone.
+        let long_ago = Instant::now() - Duration::from_secs(1);
+        m.adopt(vec![bar("a", 60_000, false)], long_ago);
+        assert_eq!(into_recipes(m.subscription()).len(), 1);
+        // Leaving: the frames too.
+        let seq = m.timer().expect("a timer").seq;
+        m.event(SnackEvent::Expired(seq));
+        assert_eq!(into_recipes(m.subscription()).len(), 1, "frames, no timer");
+        m.event(SnackEvent::Frame(Instant::now() + TRANSITION));
+        assert!(into_recipes(m.subscription()).is_empty(), "idle again");
     }
 }

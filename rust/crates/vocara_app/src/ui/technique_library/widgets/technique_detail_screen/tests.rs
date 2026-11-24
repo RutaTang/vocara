@@ -1063,7 +1063,7 @@ fn a_recording_notice_is_toasted_once() {
         Some("Recording stopped: the input device was disconnected.")
     );
     assert!(h.vm().recording_notice().is_none(), "cleared once shown");
-    let seq = h.screen.snack_seq;
+    let seq = h.screen.snacks.current_seq().expect("one showing");
     h.send(Message::SnackExpired(seq));
     assert_eq!(h.screen.snack(), None);
 }

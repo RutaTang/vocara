@@ -19,7 +19,9 @@
 //! Two Flutter overlays draw inside the page here, under the window drag
 //! bar: the "Loading practice" dialog (a non-dismissible `showDialog` with
 //! no result to give, which the app's dialog stack cannot close on a timer)
-//! and the SnackBar. The studio dialogs (new practice, delete confirmation,
+//! and the SnackBar. The dialog comes in and goes as its `DialogRoute` did
+//! (`confirm_dialog::DialogMotion`): it fades out over the library as the
+//! practice slides in, taking no input. The studio dialogs (new practice, delete confirmation,
 //! update download) go through the app's dialog stack and cover the whole
 //! window, as Flutter's dialog routes did.
 //!
@@ -27,7 +29,8 @@
 //! a page Home pushes takes it over (the app keeps it up over that page,
 //! `app::messenger`), and a toast Home shows while the app shows one
 //! replaces that one (`clearSnackBars`), as under Dart's app-wide
-//! `ScaffoldMessenger`.
+//! `ScaffoldMessenger`. It fades in and out as Material's floating snack bar
+//! did, its 2.8 s counted from the end of its entrance (`ui::snack`).
 
 use std::collections::VecDeque;
 use std::convert::Infallible;
@@ -38,8 +41,7 @@ use std::time::{Duration, Instant};
 use iced::alignment::{Horizontal, Vertical};
 use iced::futures::{stream, Stream, StreamExt};
 use iced::widget::{
-    button, center, column, container, opaque, responsive, row, scrollable, stack, text, tooltip,
-    Space,
+    button, center, column, container, opaque, responsive, row, scrollable, stack, text, Space,
 };
 use iced::{Color, Element, Length, Padding, Shadow, Subscription, Task, Theme, Vector};
 use vocara_model::models::practice_summary::PracticeSummary;
@@ -55,11 +57,16 @@ use crate::app::library::RemoteAppliedBroadcast;
 use crate::router::Route;
 use crate::services::Services;
 use crate::ui::core::icons::{self, Icon};
+use crate::ui::core::motion;
 use crate::ui::core::theme::{self, alpha, bare_button, boxed, font, Studio};
-use crate::ui::core::widgets::confirm_dialog::ConfirmDialog;
+use crate::ui::core::widgets::confirm_dialog::{barrier, ConfirmDialog, DialogMotion, Fade};
+use crate::ui::core::widgets::fading_scrollbar::Fading;
+use crate::ui::core::widgets::material_tooltip::material_tooltip;
+use crate::ui::core::widgets::slide::inert;
 use crate::ui::core::widgets::studio_button::{studio_button, StudioButtonVariant};
 use crate::ui::core::widgets::studio_hint::spinner;
 use crate::ui::core::widgets::studio_text::studio_text;
+use crate::ui::snack::{SnackEvent, SnackQueue, SnackStyle, SnackTimer};
 use crate::ui::{Screen, SnackBar, Update};
 
 /// How long after home mounts the once-per-run update auto-check fires: a
@@ -91,8 +98,6 @@ pub enum Timer {
     UpdateCheck,
     /// The opening dialog's hold before open `n` pushes its practice.
     Opening(u64),
-    /// Toast `n`'s display time.
-    Snack(u64),
 }
 
 impl Timer {
@@ -101,7 +106,6 @@ impl Timer {
         match self {
             Timer::UpdateCheck => UPDATE_CHECK_DELAY,
             Timer::Opening(_) => OPENING_HOLD,
-            Timer::Snack(_) => SNACK_DURATION,
         }
     }
 
@@ -110,7 +114,6 @@ impl Timer {
         match self {
             Timer::UpdateCheck => Message::UpdateCheckDue,
             Timer::Opening(n) => Message::OpeningElapsed(n),
-            Timer::Snack(n) => Message::SnackExpired(n),
         }
     }
 }
@@ -153,6 +156,10 @@ pub enum Message {
     DownloadDialogClosed,
     /// Toast `n` has been up long enough.
     SnackExpired(u64),
+    /// A frame while a toast enters or leaves.
+    SnackFrame(Instant),
+    /// A frame while the opening dialog comes in or goes.
+    DialogFrame(Instant),
 }
 
 /// An open in flight: the opening dialog, then the pushed practice until it
@@ -165,15 +172,6 @@ struct Opening {
     id: String,
     /// Whether the opening dialog still shows (the push has not happened).
     dialog: bool,
-}
-
-/// A failure toast.
-#[derive(Debug, Clone)]
-struct Snack {
-    seq: u64,
-    text: String,
-    /// Since when it has shown.
-    since: Instant,
 }
 
 /// The home page (see the module docs).
@@ -196,8 +194,14 @@ pub struct HomeScreen {
     /// one.
     update_check_pending: bool,
 
-    snack: Option<Snack>,
-    snacks: u64,
+    /// The failure toasts (one at a time: each replaces the one up).
+    snacks: SnackQueue,
+
+    /// The opening dialog's route animation, from its open until it has
+    /// gone.
+    loading: Option<DialogMotion>,
+    /// The last frame's time, what the dialog's drawing reads.
+    now: Instant,
 
     /// Deletes confirmed while another one still ran, in the order they were
     /// confirmed: each runs once the one before it is done.
@@ -209,7 +213,7 @@ impl std::fmt::Debug for HomeScreen {
         f.debug_struct("HomeScreen")
             .field("vm", &self.vm)
             .field("opening", &self.opening)
-            .field("snack", &self.snack)
+            .field("snacks", &self.snacks)
             .finish_non_exhaustive()
     }
 }
@@ -243,8 +247,9 @@ impl HomeScreen {
             opening: None,
             opens: 0,
             update_check_pending: true,
-            snack: None,
-            snacks: 0,
+            snacks: SnackQueue::new(),
+            loading: None,
+            now: Instant::now(),
             queued_deletes: VecDeque::new(),
         };
         (screen, run(first))
@@ -264,9 +269,6 @@ impl HomeScreen {
         if let Some(o) = self.opening.as_ref().filter(|o| o.dialog) {
             timers.push(Timer::Opening(o.seq));
         }
-        if let Some(s) = &self.snack {
-            timers.push(Timer::Snack(s.seq));
-        }
         timers
     }
 
@@ -277,7 +279,12 @@ impl HomeScreen {
 
     /// The toast on screen, if any.
     pub fn snack(&self) -> Option<&str> {
-        self.snack.as_ref().map(|s| s.text.as_str())
+        self.snacks.current().map(|s| s.text.as_str())
+    }
+
+    /// The toast's timer, while one is up.
+    pub fn snack_timer(&self) -> Option<SnackTimer> {
+        self.snacks.timer()
     }
 
     /// Opens practice `id`: the "Loading practice" dialog over the library
@@ -293,6 +300,17 @@ impl HomeScreen {
             id,
             dialog: true,
         });
+        self.loading = Some(DialogMotion::opening(Instant::now()));
+    }
+
+    /// The opening dialog's fade, while it is drawn.
+    pub fn loading_fade(&self, now: Instant) -> Option<Fade> {
+        self.loading.as_ref().map(|m| m.fade(now))
+    }
+
+    /// Whether the opening dialog comes in or goes at `now`.
+    pub fn is_animating(&self, now: Instant) -> bool {
+        self.loading.as_ref().is_some_and(|m| m.is_animating(now))
     }
 
     /// Surfaces create/delete failures as a transient toast the moment the
@@ -312,14 +330,17 @@ impl HomeScreen {
         effects
     }
 
-    /// Replaces any toast on screen with `message`.
+    /// Replaces any toast on screen with `message` (`clearSnackBars`, then
+    /// `showSnackBar`).
     fn show_error(&mut self, message: &str) {
-        self.snacks += 1;
-        self.snack = Some(Snack {
-            seq: self.snacks,
-            text: message.to_string(),
-            since: Instant::now(),
-        });
+        let bar = SnackBar::new(
+            message,
+            SNACK_DURATION,
+            true,
+            SnackStyle::Floating,
+            snack_bar,
+        );
+        self.snacks.show(bar, Instant::now());
     }
 
     fn landed(&mut self, landing: Landing) -> Update<Message> {
@@ -422,6 +443,9 @@ impl Screen for HomeScreen {
                 Some(o) if o.seq == seq && o.dialog => {
                     // Close the dialog, then enter.
                     o.dialog = false;
+                    if let Some(loading) = &mut self.loading {
+                        loading.close(Instant::now());
+                    }
                     Update::push(Route::Song { id: o.id.clone() })
                 }
                 _ => Update::none(),
@@ -477,8 +501,17 @@ impl Screen for HomeScreen {
                 None => Update::none(),
             },
             Message::SnackExpired(seq) => {
-                if self.snack.as_ref().is_some_and(|s| s.seq == seq) {
-                    self.snack = None;
+                self.snacks.expired(seq, Instant::now());
+                Update::none()
+            }
+            Message::SnackFrame(at) => {
+                self.snacks.frame(at);
+                Update::none()
+            }
+            Message::DialogFrame(at) => {
+                self.now = self.now.max(at);
+                if self.loading.as_ref().is_some_and(|m| m.is_gone(self.now)) {
+                    self.loading = None;
                 }
                 Update::none()
             }
@@ -497,11 +530,14 @@ impl Screen for HomeScreen {
             .width(Length::Fill)
             .height(Length::Fill)
             .style(theme::page)];
-        if let Some(snack) = &self.snack {
-            layers = layers.push(snack_bar(&snack.text));
+        if let Some(snacks) = self.snacks.view() {
+            layers = layers.push(snacks.map(|never| match never {}));
         }
-        if self.opening.as_ref().is_some_and(|o| o.dialog) {
-            layers = layers.push(opening_dialog());
+        if let Some(fade) = self.loading_fade(self.now) {
+            let dialog = opening_dialog(fade);
+            // Going, it takes no input.
+            let open = self.opening.as_ref().is_some_and(|o| o.dialog);
+            layers = layers.push(if open { dialog } else { inert(dialog) });
         }
         layers.into()
     }
@@ -512,6 +548,12 @@ impl Screen for HomeScreen {
             .into_iter()
             .map(|timer| Subscription::run_with(timer, timer_stream))
             .collect();
+        subscriptions.push(self.snacks.subscription().map(|event| match event {
+            SnackEvent::Expired(seq) => Message::SnackExpired(seq),
+            SnackEvent::Frame(at) => Message::SnackFrame(at),
+        }));
+        subscriptions
+            .push(motion::frames(self.is_animating(Instant::now())).map(Message::DialogFrame));
         // Freshness reloads when sync applies remote rows; with no sync
         // configured the stream simply never fires.
         subscriptions.push(
@@ -559,13 +601,7 @@ impl Screen for HomeScreen {
 
     /// The toast, for the time it has left; it replaced the ones before it.
     fn take_snack_bars(&mut self) -> Vec<SnackBar> {
-        let Some(snack) = self.snack.take() else {
-            return Vec::new();
-        };
-        let look = snack_bar::<Infallible>;
-        SnackBar::showing(snack.text, SNACK_DURATION, snack.since, true, look)
-            .into_iter()
-            .collect()
+        self.snacks.take(Instant::now())
     }
 }
 
@@ -607,16 +643,8 @@ fn header_icon_button<'a>(icon: Icon, tip: &'a str, on_tap: Message) -> Element<
     .padding(0)
     .style(bare_button)
     .on_press(on_tap);
-    tooltip(
-        target,
-        container(text(tip).size(theme::TOOLTIP_TEXT_SIZE))
-            .padding(theme::TOOLTIP_PADDING)
-            .style(theme::tooltip),
-        tooltip::Position::Bottom,
-    )
     // Material's tooltip sits 24 px below the target's centre.
-    .gap(24.0 - 34.0 / 2.0)
-    .into()
+    material_tooltip(target, tip, 24.0 - 34.0 / 2.0).into()
 }
 
 /// How many cards fit across `width` (`SliverGridDelegateWithMax
@@ -661,7 +689,7 @@ fn practice_grid(projects: &[PracticeSummary]) -> Element<'_, Message> {
         scrollable(container(rows).padding(GRID_PADDING).width(Length::Fill))
             .width(Length::Fill)
             .height(Length::Fill)
-            .style(theme::scrollbar)
+            .fading()
             .into()
     })
     .into()
@@ -723,16 +751,16 @@ fn error_state<'a>() -> Element<'a, Message> {
 
 /// A small "loading practice" dialog shown over the library while a project
 /// opens (it stays on the library, dimmed, so opening feels like a quick
-/// load rather than a jump to a blank screen). Its barrier is not
+/// load rather than a jump to a blank screen), at `fade`. Its barrier is not
 /// dismissible: it takes every tap.
-fn opening_dialog<'a>() -> Element<'a, Message> {
+fn opening_dialog<'a>(fade: Fade) -> Element<'a, Message> {
     // Accent disc behind the spinner — reads as a deliberate, branded
     // loader.
-    let disc = container(spinner(24.0, 2.6, Studio::ACCENT))
+    let disc = container(spinner(24.0, 2.6, fade.color(Studio::ACCENT)))
         .padding(14)
         .width(52)
         .height(52)
-        .style(|_: &Theme| boxed(Some(alpha(Studio::ACCENT, 0.1)), 26.0, None));
+        .style(fade.style(|_: &Theme| boxed(Some(alpha(Studio::ACCENT, 0.1)), 26.0, None)));
     let card = container(
         column![
             disc,
@@ -741,51 +769,45 @@ fn opening_dialog<'a>() -> Element<'a, Message> {
                 .size(13.5)
                 .font(font::SEMIBOLD)
                 .letter_spacing(0.2)
-                .color(Studio::TEXT_PRIMARY),
+                .color(fade.color(Studio::TEXT_PRIMARY)),
         ]
         .align_x(Horizontal::Center),
     )
     .width(168)
     .padding(Padding::from([26, 24]))
-    .style(|_: &Theme| container::Style {
+    .style(fade.style(|_: &Theme| container::Style {
         shadow: Shadow {
             color: alpha(Color::BLACK, 0.4),
             offset: Vector::new(0.0, 10.0),
             blur_radius: 28.0,
         },
         ..boxed(Some(Studio::SURFACE_RAISED), 16.0, Some(Studio::BORDER))
-    });
-    let barrier = opaque(
-        container(Space::new())
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .style(theme::fill(alpha(Color::BLACK, 0.28))),
-    );
+    }));
+    let barrier = barrier::<Message>(alpha(Color::BLACK, 0.28), fade.barrier, None);
     stack![barrier, center(opaque(card))].into()
 }
 
 /// The failure toast: a floating SnackBar 16 in from the page's edges at its
-/// bottom, `Studio.surfaceRaised`, radius 8, `Studio.border`, 13 px text.
-/// (Of any message type: the app draws it too, once the page has handed it
-/// over.)
-fn snack_bar<M: 'static>(message: &str) -> Element<'_, M> {
-    let bar = container(text(message).size(13).color(Studio::TEXT_PRIMARY))
+/// bottom, `Studio.surfaceRaised`, radius 8, `Studio.border`, 13 px text, at
+/// `opacity`. (The app draws it too, once the page has handed it over.)
+fn snack_bar(message: &str, opacity: f32) -> Element<'_, Infallible> {
+    let fade = move |c: Color| alpha(c, c.a * opacity);
+    let bar = container(text(message).size(13).color(fade(Studio::TEXT_PRIMARY)))
         .width(Length::Fill)
         .padding(Padding::from([14, 16]))
-        .style(|_: &Theme| container::Style {
+        .style(move |_: &Theme| container::Style {
             shadow: Shadow {
-                color: alpha(Color::BLACK, 0.4),
+                color: alpha(Color::BLACK, 0.4 * opacity),
                 offset: Vector::new(0.0, 3.0),
                 blur_radius: 8.0,
             },
-            ..boxed(Some(Studio::SURFACE_RAISED), 8.0, Some(Studio::BORDER))
+            ..boxed(
+                Some(fade(Studio::SURFACE_RAISED)),
+                8.0,
+                Some(fade(Studio::BORDER)),
+            )
         });
-    container(bar)
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .padding(16)
-        .align_y(Vertical::Bottom)
-        .into()
+    container(bar).width(Length::Fill).padding(16).into()
 }
 
 #[cfg(test)]

@@ -434,10 +434,13 @@ fn refused_delete() -> App {
     app
 }
 
-/// Takes down the snack bar the app shows, its time up.
+/// Takes down the snack bar the app shows, its time up, and lets it leave.
 fn time_up(app: &mut App) {
     let timer = app.snack_timer().expect("a snack bar's timer runs");
-    let task = app.update(timer.message());
+    let task = app.update(app::Message::SnackBarExpired(timer.seq));
+    settle(app, task);
+    let left = std::time::Instant::now() + crate::ui::snack::TRANSITION;
+    let task = app.update(app::Message::SnackBarFrame(left));
     settle(app, task);
 }
 
@@ -487,11 +490,11 @@ fn a_library_snack_bar_waits_behind_it() {
     );
     assert!(!shows(&app, DELETE_FAILED));
     let timer = app.snack_timer().expect("its timer runs");
-    // It was handed over the moment it was shown, its time all but whole.
+    // It was handed over the moment it was shown: all of its time is
+    // ahead, from the end of its entrance.
     assert!(
-        SNACK_DURATION - timer.left < Duration::from_millis(500),
-        "for all of its time, not {:?}",
-        timer.left
+        timer.deadline >= std::time::Instant::now() + SNACK_DURATION,
+        "for all of its time"
     );
 
     time_up(&mut app);

@@ -47,6 +47,8 @@ pub struct StudioField<'a, M> {
     input: Input<'a, M>,
     id: Option<widget::Id>,
     enabled: bool,
+    /// Every color at this opacity (inside a fading dialog).
+    opacity: f32,
 }
 
 /// A single-line field showing `value` (Flutter's default `minLines: 1,
@@ -62,6 +64,7 @@ pub fn studio_field<'a, M>(label: impl Into<String>, value: &'a str) -> StudioFi
         },
         id: None,
         enabled: true,
+        opacity: 1.0,
     }
 }
 
@@ -84,6 +87,7 @@ pub fn studio_prose_field<'a, M>(
         },
         id: None,
         enabled: true,
+        opacity: 1.0,
     }
 }
 
@@ -139,6 +143,13 @@ impl<'a, M> StudioField<'a, M> {
         self.enabled = enabled;
         self
     }
+
+    /// Draws every color at `opacity` (inside a fading dialog: iced has no
+    /// subtree opacity).
+    pub fn opacity(mut self, opacity: f32) -> Self {
+        self.opacity = opacity;
+        self
+    }
 }
 
 /// The borderless multi-line field: [`theme::studio_input`]'s look for a
@@ -157,9 +168,27 @@ fn studio_editor(_: &Theme, status: text_editor::Status) -> text_editor::Style {
     }
 }
 
+/// An editor's look at `opacity`.
+fn faded_editor(style: text_editor::Style, opacity: f32) -> text_editor::Style {
+    text_editor::Style {
+        background: match style.background {
+            Background::Color(c) => Background::Color(theme::faded(c, opacity)),
+            other => other,
+        },
+        border: Border {
+            color: theme::faded(style.border.color, opacity),
+            ..style.border
+        },
+        placeholder: theme::faded(style.placeholder, opacity),
+        value: theme::faded(style.value, opacity),
+        selection: theme::faded(style.selection, opacity),
+    }
+}
+
 impl<'a, M: Clone + 'a> From<StudioField<'a, M>> for Element<'a, M> {
     fn from(f: StudioField<'a, M>) -> Self {
         let enabled = f.enabled;
+        let opacity = f.opacity;
         let field: Element<'a, M> = match f.input {
             Input::Line {
                 value,
@@ -170,7 +199,7 @@ impl<'a, M: Clone + 'a> From<StudioField<'a, M>> for Element<'a, M> {
                     .size(TEXT_SIZE)
                     .line_height(LINE_HEIGHT)
                     .padding(0)
-                    .style(theme::studio_input);
+                    .style(move |t, s| theme::faded_input(theme::studio_input(t, s), opacity));
                 if let Some(id) = f.id {
                     input = input.id(id);
                 }
@@ -198,7 +227,7 @@ impl<'a, M: Clone + 'a> From<StudioField<'a, M>> for Element<'a, M> {
                     .padding(0)
                     .min_height(line * f32::from(min_lines.max(1)))
                     .max_height(line * f32::from(max_lines.max(min_lines).max(1)))
-                    .style(studio_editor);
+                    .style(move |t, s| faded_editor(studio_editor(t, s), opacity));
                 if let Some(id) = f.id {
                     editor = editor.id(id);
                 }
@@ -215,12 +244,12 @@ impl<'a, M: Clone + 'a> From<StudioField<'a, M>> for Element<'a, M> {
                 .size(10.5)
                 .font(font::BOLD)
                 .letter_spacing(0.6)
-                .color(Studio::TEXT_FAINT),
+                .color(theme::faded(Studio::TEXT_FAINT, opacity)),
             Space::new().height(6),
             container(field)
                 .width(Length::Fill)
                 .padding(Padding::from([10, 12]))
-                .style(theme::inset(8.0)),
+                .style(move |t| theme::faded_container(theme::inset(8.0)(t), opacity)),
         ]
         .into()
     }

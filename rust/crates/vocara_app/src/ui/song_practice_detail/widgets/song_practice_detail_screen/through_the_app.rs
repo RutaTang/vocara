@@ -348,10 +348,13 @@ fn refusing_creates(library: Arc<Library>, environment: AppEnvironment) -> Servi
     services
 }
 
-/// Takes down the snack bar the app shows, its time up.
+/// Takes down the snack bar the app shows, its time up, and lets it leave.
 fn time_up(app: &mut App) {
     let timer = app.snack_timer().expect("a snack bar's timer runs");
-    let task = app.update(timer.message());
+    let task = app.update(app::Message::SnackBarExpired(timer.seq));
+    settle(app, task);
+    let left = std::time::Instant::now() + crate::ui::snack::TRANSITION;
+    let task = app.update(app::Message::SnackBarFrame(left));
     settle(app, task);
 }
 
@@ -372,8 +375,7 @@ fn a_takes_finalize_toast_at_back_stays_up_on_home_until_its_time_is_up() {
     let bar = app.snack_bar().expect("the app shows it");
     assert_eq!(bar.text, DROPPED);
     assert!(bar.left <= SNACK_DURATION, "for the time it had left");
-    let timer = app.snack_timer().expect("its timer runs");
-    assert_eq!(timer.left, bar.left);
+    assert!(app.snack_timer().is_some(), "its timer runs");
 
     time_up(&mut app);
     assert!(!shows(&app, DROPPED), "gone once its time is up");
@@ -394,6 +396,10 @@ fn a_home_toast_replaces_the_takes_toast() {
     )));
     settle(&mut app, task);
     click(&mut app, "Create");
+    // The take's leaves first.
+    let left = std::time::Instant::now() + crate::ui::snack::TRANSITION;
+    let task = app.update(app::Message::SnackBarFrame(left));
+    settle(&mut app, task);
     assert!(shows(&app, CREATE_FAILED), "Home's toast shows");
     assert!(!shows(&app, DROPPED), "in place of the take's");
 

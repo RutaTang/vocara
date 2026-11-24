@@ -53,7 +53,7 @@ use iced::widget::canvas::{self, Frame, Geometry, LineCap, Path, Stroke};
 use iced::widget::scrollable::{Direction, Scrollbar};
 use iced::widget::{
     button, canvas as canvas_widget, center, column, container, responsive, row, scrollable, text,
-    tooltip, Column, Space,
+    Column, Space,
 };
 use iced::{mouse, Color, Element, Length, Padding, Point, Rectangle, Renderer, Size, Theme};
 use vocara_model::models::audio_track::AudioTrack;
@@ -63,6 +63,8 @@ use vocara_services::app_settings_service::AppSettingsService;
 use super::mixer_shared::{argb, keyed_row, tap, MenuItem, Opens, PopupMenu};
 use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::theme::{self, alpha, bare_button, boxed, font, Studio};
+use crate::ui::core::widgets::fading_scrollbar::Fading;
+use crate::ui::core::widgets::material_tooltip::material_tooltip;
 use crate::ui::core::widgets::painter::{color_key, KeyedCache};
 use crate::ui::core::widgets::studio_controls::{fader_db, studio_pan_knob};
 use crate::ui::core::widgets::studio_text::studio_text;
@@ -278,7 +280,7 @@ impl<'a> MixerStrip<'a> {
             .direction(Direction::Horizontal(Scrollbar::default()))
             .width(Length::Fill)
             .height(Length::Fill)
-            .style(theme::scrollbar)
+            .fading()
             .into()
     }
 }
@@ -377,7 +379,7 @@ fn strip_body<'a>(build: impl Fn(bool) -> Vec<Element<'a, Message>> + 'a) -> Ele
             )
             .width(Length::Fill)
             .height(Length::Fill)
-            .style(theme::scrollbar)
+            .fading()
             .into()
         }
     })
@@ -860,16 +862,8 @@ fn mic_input_channel<'a>(mic: MicInput) -> Element<'a, Message> {
         );
         // A locked MON says why, and where to unlock it when it can be.
         let mon = match monitor_lock_message(&mic) {
-            Some(why) => tooltip(
-                mon,
-                container(text(why).size(theme::TOOLTIP_TEXT_SIZE))
-                    .max_width(280)
-                    .padding(theme::TOOLTIP_PADDING)
-                    .style(theme::tooltip),
-                // Material's tooltip prefers below.
-                tooltip::Position::Bottom,
-            )
-            .into(),
+            // Material's tooltip prefers below.
+            Some(why) => material_tooltip(mon, why, 0.0).max_width(280.0).into(),
             None => mon,
         };
         vec![

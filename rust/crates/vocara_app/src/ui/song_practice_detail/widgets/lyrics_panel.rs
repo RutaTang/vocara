@@ -34,7 +34,14 @@
 //!   (0.4 for the reader, 0.5 for the sync list), clamped to the list. iced
 //!   lists are not lazy, so every line has a place to scroll to: Dart's
 //!   extrapolation for lines `ListView.builder` had not built is not needed.
-//!   The scroll is immediate (Dart animated it over 320 / 200 ms).
+//!   The scroll animates as Dart's did, from where the list is: over
+//!   320 ms easing out for the readers, 200 ms on `Curves.ease` (the
+//!   default curve) for the sync list. The operation reports where the list
+//!   is and where it goes ([`Message::Scroll`]); the screen then feeds the
+//!   panel frames ([`Message::ScrollFrame`], subscribed to while
+//!   [`LyricsPanelState::is_scrolling`]) and each one scrolls the list
+//!   along. A user's own scroll meanwhile does not stop it, as it stopped
+//!   Flutter's (its ballistic activity took over).
 //! - The sync view's `Focus(autofocus)` taking Space → the view handles a
 //!   Space press nothing else took, and takes it (the screen's shortcuts skip
 //!   captured keys). iced hands every widget the key, not the focused one
@@ -48,20 +55,22 @@
 //!   height (the toolbar, the pinned hint) keeps a slot, so the editor and
 //!   the sync list keep their widget state (Dart keyed the tab body).
 //!
-//! Where iced differs: tooltips show below their button on hover.
+//! Where iced differs: a tooltip (`material_tooltip`, which fades as
+//! Material's did) stays below its button, kept inside the window, where
+//! Flutter's flipped above when there was no room below.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use iced::advanced::widget::operation::scrollable::{scroll_to, AbsoluteOffset};
+use iced::advanced::widget::operation::scrollable::AbsoluteOffset;
 use iced::advanced::widget::operation::{Operation, Outcome, Scrollable};
 use iced::alignment::{Horizontal, Vertical};
 use iced::widget::canvas::{self, Frame, Geometry};
 use iced::widget::text::{Alignment, Wrapping};
 use iced::widget::{
     button, canvas as canvas_widget, center, column, container, responsive, row, scrollable, stack,
-    text, text_editor, tooltip, Column, Space,
+    text, text_editor, Column, Space,
 };
 use iced::{
     keyboard, mouse, widget, Border, Color, Element, Event, Length, Padding, Pixels, Point,
@@ -74,8 +83,11 @@ use vocara_model::models::technique_marker::TechniqueMarker;
 use vocara_model::util::format::format_clock_ms;
 
 use crate::ui::core::icons::{self, Icon};
+use crate::ui::core::motion::{Curve, Implicit};
 use crate::ui::core::theme::{self, alpha, boxed, fill, font, Studio};
+use crate::ui::core::widgets::fading_scrollbar::Fading;
 use crate::ui::core::widgets::holds_keyboard::holds_keyboard;
+use crate::ui::core::widgets::material_tooltip::material_tooltip;
 use crate::ui::core::widgets::studio_button::{studio_button, StudioButtonVariant};
 use crate::ui::core::widgets::studio_text::{fill_spaced_text, studio_text};
 use crate::ui::core::widgets::visible_drop_target::visible_drop_target;
@@ -245,6 +257,47 @@ pub enum Message {
     EditTechnique { track_id: String, marker_id: String },
     /// The Focus view says why it took no drop: `onToast(message)`.
     Toast(String),
+    /// A reveal found its line: scroll its list there
+    /// ([`LyricsPanelState::start_scroll`]).
+    Scroll(ScrollStart),
+    /// A frame while a list scrolls to a revealed line
+    /// ([`LyricsPanelState::scroll_frame`]).
+    ScrollFrame(Instant),
+}
+
+/// How a reveal scrolls (`ensureVisible`'s `duration` and `curve`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScrollMotion {
+    pub duration: Duration,
+    pub curve: Curve,
+}
+
+impl ScrollMotion {
+    /// A reader's `_reveal`: 320 ms, easing out.
+    pub const READER: Self = Self {
+        duration: Duration::from_millis(320),
+        curve: Curve::EaseOut,
+    };
+    /// The sync list's `_scrollToTarget`: 200 ms on the default curve.
+    pub const SYNC: Self = Self {
+        duration: Duration::from_millis(200),
+        curve: Curve::Ease,
+    };
+}
+
+/// Where a revealed line's list is, and where it scrolls to.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RevealScroll {
+    pub list: widget::Id,
+    pub from: f32,
+    pub to: f32,
+}
+
+/// A reveal that found its line, and how it scrolls there.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScrollStart {
+    pub scroll: RevealScroll,
+    pub motion: ScrollMotion,
 }
 
 /// The platform's open panel for a lyrics file, filtered to the extensions
@@ -298,6 +351,8 @@ pub struct LyricsPanelState {
     focus_reader: Option<Reader>,
     /// The sync list is on screen, built at this revision.
     sync_list: Option<u64>,
+    /// The lists scrolling to a revealed line, each from where it was.
+    scrolls: Vec<(widget::Id, Implicit<f32>)>,
 }
 
 impl Default for LyricsPanelState {
@@ -311,25 +366,28 @@ impl Default for LyricsPanelState {
 pub enum PanelRequest {
     /// Give the keyboard to the widget (the editor).
     Focus(widget::Id),
-    /// Scroll `list` so `line` sits at `alignment` of its height
-    /// (`Scrollable.ensureVisible`).
+    /// Scroll `list` so `line` sits at `alignment` of its height, moving
+    /// as `motion` says (`Scrollable.ensureVisible`).
     Reveal {
         list: widget::Id,
         line: widget::Id,
         alignment: f32,
+        motion: ScrollMotion,
     },
 }
 
 impl PanelRequest {
     /// The request as a task.
-    pub fn into_task<M: Send + 'static>(self) -> Task<M> {
+    pub fn into_task(self) -> Task<Message> {
         match self {
             PanelRequest::Focus(id) => iced::widget::operation::focus(id),
             PanelRequest::Reveal {
                 list,
                 line,
                 alignment,
-            } => iced::advanced::widget::operate(Reveal::new(list, line, alignment)).discard(),
+                motion,
+            } => iced::advanced::widget::operate(Reveal::new(list, line, alignment))
+                .map(move |scroll| Message::Scroll(ScrollStart { scroll, motion })),
         }
     }
 }
@@ -374,7 +432,46 @@ impl LyricsPanelState {
             reader: None,
             focus_reader: None,
             sync_list: None,
+            scrolls: Vec::new(),
         }
+    }
+
+    /// A reveal found its line at `now`: its list scrolls there from where
+    /// it is, as `motion` says (a later reveal of the same list takes over
+    /// from where this one got).
+    pub fn start_scroll<T: Send + 'static>(&mut self, start: ScrollStart, now: Instant) -> Task<T> {
+        let ScrollStart { scroll, motion } = start;
+        let from = self
+            .scrolls
+            .iter()
+            .find(|(id, _)| *id == scroll.list)
+            .map_or(scroll.from, |(_, a)| a.value(now));
+        self.scrolls.retain(|(id, _)| *id != scroll.list);
+        let mut along = Implicit::new(from, motion.duration, motion.curve);
+        along.retarget(scroll.to, now);
+        if !along.is_animating(now) {
+            return scroll_list(scroll.list, scroll.to);
+        }
+        self.scrolls.push((scroll.list, along));
+        Task::none()
+    }
+
+    /// A frame at `now`: each scrolling list moves along; those there stop.
+    pub fn scroll_frame<T: Send + 'static>(&mut self, now: Instant) -> Task<T> {
+        let moves: Vec<Task<T>> = self
+            .scrolls
+            .iter()
+            .map(|(id, along)| scroll_list(id.clone(), along.value(now)))
+            .collect();
+        self.scrolls.retain(|(_, along)| along.is_animating(now));
+        Task::batch(moves)
+    }
+
+    /// Whether a list scrolls to a revealed line at `now`.
+    pub fn is_scrolling(&self, now: Instant) -> bool {
+        self.scrolls
+            .iter()
+            .any(|(_, along)| along.is_animating(now))
     }
 
     /// The editor's widget id.
@@ -475,10 +572,15 @@ impl LyricsPanelState {
     /// line.
     fn reveal(&self, list: List, idx: i64, lines: usize, alignment: f32) -> Option<PanelRequest> {
         let i = usize::try_from(idx).ok().filter(|&i| i < lines)?;
+        let motion = match list {
+            List::Sync => ScrollMotion::SYNC,
+            List::Reader | List::Focus => ScrollMotion::READER,
+        };
         Some(PanelRequest::Reveal {
             list: self.list_id(list),
             line: self.line_id(list, i),
             alignment,
+            motion,
         })
     }
 
@@ -617,14 +719,26 @@ fn sync_reader(slot: &mut Option<Reader>, shown: bool, data: &RightPanelData<'_>
 
 // ---------------------------------------------------------- ensureVisible
 
-/// `Scrollable.ensureVisible(line, alignment)`: finds `line` inside `list`
-/// and scrolls the list so the line's top sits at `alignment` of the room
-/// the viewport has around it, clamped to the list's extent.
+/// `list` scrolled to `y`.
+fn scroll_list<T: Send + 'static>(list: widget::Id, y: f32) -> Task<T> {
+    iced::widget::operation::scroll_to(
+        list,
+        AbsoluteOffset {
+            x: None,
+            y: Some(y),
+        },
+    )
+}
+
+/// `Scrollable.ensureVisible(line, alignment)`: finds `line` inside `list`,
+/// and where the list is and where it must scroll so the line's top sits at
+/// `alignment` of the room the viewport has around it, clamped to the
+/// list's extent ([`RevealScroll`]).
 pub(crate) struct Reveal {
     list: widget::Id,
     line: widget::Id,
     alignment: f32,
-    viewport: Option<(Rectangle, Rectangle)>,
+    viewport: Option<(Rectangle, Rectangle, f32)>,
     target: Option<Rectangle>,
 }
 
@@ -654,8 +768,8 @@ pub fn reveal_offset(
     offset.clamp(0.0, (content.height - viewport.height).max(0.0))
 }
 
-impl Operation for Reveal {
-    fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+impl Operation<RevealScroll> for Reveal {
+    fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation<RevealScroll>)) {
         operate(self);
     }
 
@@ -670,26 +784,23 @@ impl Operation for Reveal {
         id: Option<&widget::Id>,
         bounds: Rectangle,
         content_bounds: Rectangle,
-        _translation: Vector,
+        translation: Vector,
         _state: &mut dyn Scrollable,
     ) {
         if id == Some(&self.list) {
-            self.viewport = Some((bounds, content_bounds));
+            self.viewport = Some((bounds, content_bounds, translation.y));
         }
     }
 
-    fn finish(&self) -> Outcome<()> {
-        let (Some((viewport, content)), Some(line)) = (self.viewport, self.target) else {
+    fn finish(&self) -> Outcome<RevealScroll> {
+        let (Some((viewport, content, from)), Some(line)) = (self.viewport, self.target) else {
             return Outcome::None;
         };
-        let y = reveal_offset(viewport, content, line, self.alignment);
-        Outcome::Chain(Box::new(scroll_to(
-            self.list.clone(),
-            AbsoluteOffset {
-                x: None,
-                y: Some(y),
-            },
-        )))
+        Outcome::Some(RevealScroll {
+            list: self.list.clone(),
+            from,
+            to: reveal_offset(viewport, content, line, self.alignment),
+        })
     }
 }
 
@@ -757,15 +868,7 @@ fn with_tip<'a>(
     tip: &str,
     target_height: f32,
 ) -> Element<'a, Message> {
-    tooltip(
-        target,
-        container(text(tip.to_string()).size(theme::TOOLTIP_TEXT_SIZE))
-            .padding(theme::TOOLTIP_PADDING)
-            .style(theme::tooltip),
-        tooltip::Position::Bottom,
-    )
-    .gap(24.0 - target_height / 2.0)
-    .into()
+    material_tooltip(target, tip, 24.0 - target_height / 2.0).into()
 }
 
 /// `_IconBtn`: a 15 px icon in a 6 px pad (coral-washed when `active`),
@@ -1037,7 +1140,7 @@ fn empty_state<'a>() -> Element<'a, Message> {
             .color(Studio::TEXT_FAINT),
     ]
     .align_x(Horizontal::Center);
-    center(scrollable(container(content).padding(24)).style(theme::scrollbar)).into()
+    center(scrollable(container(content).padding(24)).fading()).into()
 }
 
 // -------------------------------------------------------------- the reader
@@ -1109,7 +1212,7 @@ fn lyrics_reader<'a>(
         .id(state.list_id(list))
         .width(Length::Fill)
         .height(Length::Fill)
-        .style(theme::scrollbar)
+        .fading()
         .into()
 }
 
@@ -1231,7 +1334,7 @@ fn lyrics_sync<'a>(state: &'a LyricsPanelState, data: RightPanelData<'a>) -> Ele
         .id(state.list_id(List::Sync))
         .width(Length::Fill)
         .height(Length::Fill)
-        .style(theme::scrollbar);
+        .fading();
         // The hint's pinned slot stays when it goes, so the list keeps its
         // place in the tree.
         let top: Element<'a, Message> = if pin_hint {
@@ -1360,7 +1463,7 @@ fn tab_list<'a>(items: Column<'a, Message>) -> Element<'a, Message> {
     )
     .width(Length::Fill)
     .height(Length::Fill)
-    .style(theme::scrollbar)
+    .fading()
     .into()
 }
 

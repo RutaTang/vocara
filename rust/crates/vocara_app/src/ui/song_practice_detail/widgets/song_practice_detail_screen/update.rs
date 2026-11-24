@@ -16,7 +16,8 @@ use super::{
     SongPracticeDetailScreen, Source, Step, NO_AUDIO_IN_DROP,
 };
 use crate::router::{Navigation, Route};
-use crate::ui::core::widgets::confirm_dialog::{ConfirmDialog, Dialog, DialogResult};
+use crate::ui::core::widgets::confirm_dialog::{ConfirmDialog, Dialog, DialogMotion, DialogResult};
+use crate::ui::snack::{SnackBar, SnackStyle};
 use crate::ui::song_practice_detail::view_model::song_practice_detail_view_model::{
     normalize_marker_range, DockTab, Effect, LyricsMode, Reply, RightTab, Started,
 };
@@ -41,6 +42,21 @@ impl SongPracticeDetailScreen {
     /// Handles one message; what it asked of the runtime.
     pub(super) fn handle(&mut self, message: Message) -> Step {
         let mut step = Step::new();
+        if let Message::SnackFrame(at) = message {
+            // Only the snack bar's drawing moves.
+            self.snacks.frame(at);
+            return step;
+        }
+        if let Message::DialogFrame(at) = message {
+            // Only the note editor's or the picker's drawing moves.
+            self.dialog_frame(at);
+            return step;
+        }
+        if let Message::Lyrics(lyrics_panel::Message::ScrollFrame(at)) = message {
+            // Only a lyrics list's scroll moves.
+            step.task(self.lyrics.scroll_frame(at));
+            return step;
+        }
         if self.disposed {
             // Gone from the stack: only the answers to work the view model
             // still has in flight, so it lands.
@@ -172,11 +188,7 @@ impl SongPracticeDetailScreen {
                 let fx = self.vm.on_remote_applied(&event);
                 self.absorb(fx, &mut step);
             }
-            Message::SnackExpired(seq) => {
-                if self.snack.as_ref().is_some_and(|(s, ..)| *s == seq) {
-                    self.snack = None;
-                }
-            }
+            Message::SnackExpired(seq) => self.snacks.expired(seq, Instant::now()),
             Message::Done => {}
             answer => self.answer(answer, &mut step),
         }
@@ -305,8 +317,14 @@ impl SongPracticeDetailScreen {
         if self.disposed {
             return;
         }
-        self.snack_seq += 1;
-        self.snack = Some((self.snack_seq, text, Instant::now()));
+        let bar = SnackBar::new(
+            text,
+            super::SNACK_DURATION,
+            true,
+            SnackStyle::Floating,
+            super::view::snack_bar,
+        );
+        self.snacks.show(bar, Instant::now());
     }
 
     /// `vm.refuseStructuralEdit()`: whether an import or a structural edit
@@ -826,6 +844,15 @@ impl SongPracticeDetailScreen {
                 self.toast(text);
                 return;
             }
+            P::Scroll(start) => {
+                let scroll = self.lyrics.start_scroll(start, Instant::now());
+                step.task(scroll);
+                return;
+            }
+            P::ScrollFrame(at) => {
+                step.task(self.lyrics.scroll_frame(at));
+                return;
+            }
         };
         self.absorb(fx, step);
     }
@@ -1005,6 +1032,7 @@ impl SongPracticeDetailScreen {
             normalize_marker_range,
         );
         step.task(editor.focus());
+        self.open_editor();
         self.note_editor = Some((
             editor,
             NoteTarget::Add {
@@ -1031,6 +1059,7 @@ impl SongPracticeDetailScreen {
             normalize_marker_range,
         );
         step.task(editor.focus());
+        self.open_editor();
         self.note_editor = Some((
             editor,
             NoteTarget::Edit {
@@ -1047,9 +1076,12 @@ impl SongPracticeDetailScreen {
         let note_editor::Step::Closed(result) = editor.update(m) else {
             return;
         };
-        let Some((_, target)) = self.note_editor.take() else {
+        let Some((editor, target)) = self.note_editor.take() else {
             return;
         };
+        let mut motion = self.editor_motion.clone();
+        motion.close(Instant::now());
+        self.closing_editor = Some(Box::new((editor, motion)));
         let Some(result) = result else {
             return;
         };
@@ -1098,6 +1130,8 @@ impl SongPracticeDetailScreen {
         let seq = self.picker_seq;
         let picker = TechniquePicker::new(title);
         step.task(picker.focus());
+        self.picker_motion = DialogMotion::opening(Instant::now());
+        self.closing_picker = None;
         self.picker = Some(OpenPicker {
             picker,
             seq,
@@ -1119,11 +1153,62 @@ impl SongPracticeDetailScreen {
         let Some(open) = self.picker.take() else {
             return;
         };
+        let OpenPicker {
+            picker,
+            track_id,
+            start_ms,
+            end_ms,
+            ..
+        } = open;
+        let mut motion = self.picker_motion.clone();
+        motion.close(Instant::now());
+        self.closing_picker = Some(Box::new((picker, motion)));
         if let Some(t) = picked {
-            let fx =
-                self.vm
-                    .add_technique(&open.track_id, &t.id, &t.name, open.start_ms, open.end_ms);
+            let fx = self
+                .vm
+                .add_technique(&track_id, &t.id, &t.name, start_ms, end_ms);
             self.absorb(fx, step);
+        }
+    }
+
+    /// The note editor opens: it comes in, over any going.
+    fn open_editor(&mut self) {
+        self.editor_motion = DialogMotion::opening(Instant::now());
+        self.closing_editor = None;
+    }
+
+    /// Whether the note editor or the picker comes in or goes at `now`.
+    pub(super) fn dialogs_animating(&self, now: Instant) -> bool {
+        (self.note_editor.is_some() && self.editor_motion.is_animating(now))
+            || (self.picker.is_some() && self.picker_motion.is_animating(now))
+            || self
+                .closing_editor
+                .as_ref()
+                .is_some_and(|c| c.1.is_animating(now))
+            || self
+                .closing_picker
+                .as_ref()
+                .is_some_and(|c| c.1.is_animating(now))
+    }
+
+    /// A frame of the note editor's or the picker's motion: a closed one
+    /// that has gone is dropped.
+    fn dialog_frame(&mut self, at: Instant) {
+        self.dialog_now = self.dialog_now.max(at);
+        let now = self.dialog_now;
+        if self
+            .closing_editor
+            .as_ref()
+            .is_some_and(|c| c.1.is_gone(now))
+        {
+            self.closing_editor = None;
+        }
+        if self
+            .closing_picker
+            .as_ref()
+            .is_some_and(|c| c.1.is_gone(now))
+        {
+            self.closing_picker = None;
         }
     }
 

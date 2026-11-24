@@ -26,16 +26,21 @@
 //! The device lists refresh once on open, then every 1.5 s so plugging or
 //! unplugging a device updates them live (the refresh only notifies when a
 //! set actually changed). Toasts (Dart's floating SnackBars) and the license
-//! page (a `MaterialPageRoute` pushed over Settings) draw inside the page,
+//! page (a `MaterialPageRoute` pushed over Settings, sliding in and back out
+//! over it as the app's pages do, `slide::cupertino`) draw inside the page,
 //! under the window drag bar; the studio dialogs (the repair confirmation,
 //! the update download dialog) go through the app's dialog stack. A toast
 //! still up when Settings leaves stays up over Home for the time it has left
 //! (the app's, `app::messenger`), as under Dart's app-wide
-//! `ScaffoldMessenger`.
+//! `ScaffoldMessenger`. A toast fades in and out as Material's floating
+//! snack bar did, its 3.5 s counted from the end of its entrance
+//! (`ui::snack`).
 //!
-//! Flutter's Material slider and switch are drawn here with iced's slider and
-//! a switch built to Material 3's geometry, without their hover/press
-//! overlays; the switch's semantics label has no counterpart.
+//! Flutter's Material slider and switch are drawn here with iced's slider,
+//! under Material's overlay (`slider_overlay`: it grows over 100 ms under
+//! the pointer on the thumb or a drag), and a switch built to Material 3's
+//! geometry and toggle motion (200 ms), without its hover/press overlay; the
+//! switch's semantics label has no counterpart.
 
 use std::collections::VecDeque;
 use std::convert::Infallible;
@@ -48,7 +53,7 @@ use std::time::{Duration, Instant};
 use iced::alignment::{Horizontal, Vertical};
 use iced::border::Radius;
 use iced::futures::channel::mpsc;
-use iced::futures::{stream, Stream, StreamExt};
+use iced::futures::{Stream, StreamExt};
 use iced::widget::{
     button, column, container, row, scrollable, slider, stack, text, Column, Space,
 };
@@ -69,11 +74,17 @@ use crate::app::library::Library;
 use crate::router::Route;
 use crate::services::Services;
 use crate::ui::core::icons::{self, Icon};
+use crate::ui::core::motion::{self, Controller, Curve, Lerp};
 use crate::ui::core::theme::{self, alpha, bare_button, boxed, font, Studio, Zinc};
+use crate::ui::core::widgets::animated::{animated, ink_hover};
 use crate::ui::core::widgets::confirm_dialog::ConfirmDialog;
+use crate::ui::core::widgets::fading_scrollbar::Fading;
+use crate::ui::core::widgets::slide::{cupertino, slide, PAGE_TRANSITION};
+use crate::ui::core::widgets::slider_overlay::slider_overlay;
 use crate::ui::core::widgets::studio_hint::spinner;
 use crate::ui::core::widgets::studio_text::studio_text;
 use crate::ui::home::widgets::update_notice::UpdateDownloadDialog;
+use crate::ui::snack::{SnackEvent, SnackQueue, SnackStyle, SnackTimer};
 use crate::ui::{Screen, SnackBar, Update};
 use crate::util::to_string_as_fixed;
 
@@ -366,15 +377,10 @@ pub enum Message {
     Licenses(licenses::Message),
     /// Toast `n` has been up long enough.
     ToastExpired(u64),
-}
-
-/// A result toast.
-#[derive(Debug, Clone)]
-struct Toast {
-    seq: u64,
-    text: String,
-    /// Since when it has shown.
-    since: Instant,
+    /// A frame while the license page slides, or its licenses come in.
+    Frame(Instant),
+    /// A frame while a toast enters or leaves.
+    ToastFrame(Instant),
 }
 
 // ------------------------------------------------------------------ screen
@@ -411,10 +417,16 @@ pub struct SettingsScreen {
     exporting: bool,
 
     /// The license page, while it is open over Settings.
-    licenses: Option<LicensesPage>,
+    licenses: Option<Box<LicensesPage>>,
+    /// The license page's route animation, while it slides in or out.
+    licenses_route: Option<Box<Controller>>,
+    /// The license page sliding out after its Back, drawn until it has.
+    closed_licenses: Option<Box<LicensesPage>>,
+    /// The last frame's time, what the drawing reads.
+    now: Instant,
 
-    toast: Option<Toast>,
-    toasts: u64,
+    /// The result toasts (one at a time: each replaces the one up).
+    toasts: SnackQueue,
 }
 
 impl std::fmt::Debug for SettingsScreen {
@@ -425,7 +437,7 @@ impl std::fmt::Debug for SettingsScreen {
             .field("repairing", &self.repairing)
             .field("exporting", &self.exporting)
             .field("licenses", &self.licenses.is_some())
-            .field("toast", &self.toast)
+            .field("toasts", &self.toasts)
             .finish_non_exhaustive()
     }
 }
@@ -458,23 +470,39 @@ impl SettingsScreen {
             picking: false,
             exporting: false,
             licenses: None,
-            toast: None,
-            toasts: 0,
+            licenses_route: None,
+            closed_licenses: None,
+            now: Instant::now(),
+            toasts: SnackQueue::new(),
         };
         // Refresh once on open (the poll then keeps the lists live).
         let first = screen.refresh();
         (screen, first)
     }
 
+    /// Whether the license page slides, or its licenses come in or go, at
+    /// `now`.
+    pub fn is_animating(&self, now: Instant) -> bool {
+        self.licenses_route
+            .as_ref()
+            .is_some_and(|r| r.is_animating(now))
+            || self.licenses.as_ref().is_some_and(|l| l.is_animating(now))
+    }
+
     /// The toast on screen, if any.
     pub fn toast(&self) -> Option<&str> {
-        self.toast.as_ref().map(|t| t.text.as_str())
+        self.toasts.current().map(|t| t.text.as_str())
     }
 
     /// The number of the toast on screen ([`Message::ToastExpired`] takes
     /// it down).
     pub fn toast_seq(&self) -> Option<u64> {
-        self.toast.as_ref().map(|t| t.seq)
+        self.toasts.current_seq()
+    }
+
+    /// The toast's timer, while one is up.
+    pub fn toast_timer(&self) -> Option<SnackTimer> {
+        self.toasts.timer()
     }
 
     /// Whether the repair is running.
@@ -575,12 +603,8 @@ impl SettingsScreen {
     /// Replaces any toast on screen with `text` (`clearSnackBars`, then
     /// `showSnackBar`).
     fn show_toast(&mut self, text: impl Into<String>) {
-        self.toasts += 1;
-        self.toast = Some(Toast {
-            seq: self.toasts,
-            text: text.into(),
-            since: Instant::now(),
-        });
+        let bar = SnackBar::new(text, TOAST_DURATION, true, SnackStyle::Floating, toast_bar);
+        self.toasts.show(bar, Instant::now());
     }
 
     fn check_for_updates(&mut self) -> Update<Message> {
@@ -795,21 +819,55 @@ impl Screen for SettingsScreen {
                 Update::none()
             }
             Message::OpenLicenses => {
-                self.licenses = Some(LicensesPage::new());
+                self.licenses = Some(Box::new(LicensesPage::new()));
+                let mut route = Controller::new(PAGE_TRANSITION, PAGE_TRANSITION);
+                route.forward(Instant::now());
+                self.licenses_route = Some(Box::new(route));
+                self.closed_licenses = None;
                 Update::none()
             }
             Message::Licenses(message) => {
                 if let Some(page) = &mut self.licenses {
                     if page.update(message) {
-                        self.licenses = None;
+                        // Back: the page slides back out from where it got.
+                        let now = Instant::now();
+                        let mut route = self
+                            .licenses_route
+                            .take()
+                            .filter(|r| r.is_animating(now))
+                            .map_or_else(
+                                || Controller::completed(PAGE_TRANSITION, PAGE_TRANSITION),
+                                |r| *r,
+                            );
+                        route.reverse(now);
+                        self.licenses_route = Some(Box::new(route));
+                        self.closed_licenses = self.licenses.take();
                     }
                 }
                 Update::none()
             }
-            Message::ToastExpired(seq) => {
-                if self.toast.as_ref().is_some_and(|t| t.seq == seq) {
-                    self.toast = None;
+            Message::Frame(at) => {
+                self.now = self.now.max(at);
+                let now = self.now;
+                if let Some(page) = &mut self.licenses {
+                    page.frame(at);
                 }
+                if self
+                    .licenses_route
+                    .as_ref()
+                    .is_some_and(|r| !r.is_animating(now))
+                {
+                    self.licenses_route = None;
+                    self.closed_licenses = None;
+                }
+                Update::none()
+            }
+            Message::ToastExpired(seq) => {
+                self.toasts.expired(seq, Instant::now());
+                Update::none()
+            }
+            Message::ToastFrame(at) => {
+                self.toasts.frame(at);
                 Update::none()
             }
         }
@@ -842,33 +900,45 @@ impl Screen for SettingsScreen {
 
     /// The toast, for the time it has left; it replaced the ones before it.
     fn take_snack_bars(&mut self) -> Vec<SnackBar> {
-        let Some(toast) = self.toast.take() else {
-            return Vec::new();
-        };
-        let look = toast_bar::<Infallible>;
-        SnackBar::showing(toast.text, TOAST_DURATION, toast.since, true, look)
-            .into_iter()
-            .collect()
+        self.toasts.take(Instant::now())
     }
 
     fn view(&self) -> Element<'_, Message> {
-        let page: Element<'_, Message> = match &self.licenses {
-            Some(licenses) => licenses.view().map(Message::Licenses),
-            None => column![
+        let settings = || -> Element<'_, Message> {
+            column![
                 header(),
                 scrollable(self.body())
                     .width(Length::Fill)
                     .height(Length::Fill)
-                    .style(theme::scrollbar),
+                    .fading(),
+            ]
+            .into()
+        };
+        let route = self.licenses_route.as_ref().map(|r| cupertino(r, self.now));
+        let page: Element<'_, Message> = match (&self.licenses, &self.closed_licenses, route) {
+            // Sliding in over Settings, which slides a third of the way out.
+            (Some(licenses), _, Some((moving, covered, shadow))) => stack![
+                slide(settings(), covered).inert(),
+                slide(licenses.view().map(Message::Licenses), moving).shadow(shadow),
             ]
             .into(),
+            (Some(licenses), ..) => licenses.view().map(Message::Licenses),
+            // Sliding back out after its Back, Settings sliding back in.
+            (None, Some(closed), Some((moving, covered, shadow))) => stack![
+                slide(settings(), covered),
+                slide(closed.view().map(Message::Licenses), moving)
+                    .shadow(shadow)
+                    .inert(),
+            ]
+            .into(),
+            (None, ..) => settings(),
         };
         let mut layers = stack![container(page)
             .width(Length::Fill)
             .height(Length::Fill)
             .style(theme::page)];
-        if let Some(toast) = &self.toast {
-            layers = layers.push(toast_bar(&toast.text));
+        if let Some(toasts) = self.toasts.view() {
+            layers = layers.push(toasts.map(|never| match never {}));
         }
         layers.into()
     }
@@ -882,24 +952,16 @@ impl Screen for SettingsScreen {
             Subscription::run_with(SettingsFeed(Arc::clone(&self.settings)), settings_changes)
                 .map(|()| Message::SettingsChanged),
         ];
-        if let Some(seq) = self.toast_seq() {
-            subscriptions.push(Subscription::run_with(seq, toast_timer));
-        }
+        subscriptions.push(self.toasts.subscription().map(|event| match event {
+            SnackEvent::Expired(seq) => Message::ToastExpired(seq),
+            SnackEvent::Frame(at) => Message::ToastFrame(at),
+        }));
+        subscriptions.push(motion::frames(self.is_animating(Instant::now())).map(Message::Frame));
         if self.watches_update_check() {
             subscriptions.push(iced::time::every(UPDATE_WATCH).map(|_| Message::UpdateWatch));
         }
         Subscription::batch(subscriptions)
     }
-}
-
-/// Toast `seq`'s one-shot timer.
-fn toast_timer(seq: &u64) -> impl Stream<Item = Message> {
-    let seq = *seq;
-    stream::once(async move {
-        tokio::time::sleep(TOAST_DURATION).await;
-        Message::ToastExpired(seq)
-    })
-    .chain(stream::pending())
 }
 
 /// The settings service as a subscription's identity (the service itself, by
@@ -1189,37 +1251,25 @@ impl Corners {
     }
 }
 
-/// A row that takes taps: `Studio.hover` under the pointer (the
-/// `InkWell(hoverColor: Studio.hover)` rows; splashes are off app-wide),
-/// nothing when disabled.
-fn row_style(corners: Corners) -> impl Fn(&Theme, button::Status) -> button::Style {
-    move |_, status| {
-        let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
-        button::Style {
-            background: hovered.then_some(Background::Color(Studio::HOVER)),
-            text_color: Studio::TEXT_PRIMARY,
-            border: Border {
-                radius: corners.radius(),
-                ..Border::default()
-            },
-            shadow: Shadow::default(),
-            snap: false,
-        }
-    }
-}
-
-/// A tappable row of a card: `on_tap` `None` disables it.
+/// A tappable row of a card: `on_tap` `None` disables it. Its hover
+/// highlight fades in and out (the `InkWell`'s, `ink_hover`); none on a
+/// disabled row.
 fn tappable<'a>(
     content: impl Into<Element<'a, Message>>,
     on_tap: Option<Message>,
     corners: Corners,
 ) -> Element<'a, Message> {
-    button(content)
+    let enabled = on_tap.is_some();
+    let row = button(content)
         .padding(0)
         .width(Length::Fill)
-        .style(row_style(corners))
-        .on_press_maybe(on_tap)
-        .into()
+        .style(bare_button)
+        .on_press_maybe(on_tap);
+    if enabled {
+        ink_hover(row, Studio::HOVER, corners.radius())
+    } else {
+        row.into()
+    }
 }
 
 /// `_Card`: the raised card the rows sit in — `Studio.surfaceRaised`, radius
@@ -1402,14 +1452,18 @@ fn reverb_card<'a>(wet: f64) -> Element<'a, Message> {
     let value = wet.clamp(0.0, 1.0);
     // Flutter's track sits the overlay radius (12) in from each end; iced's
     // runs edge to edge with the thumb's centre a radius (6) in.
-    let reverb = container(
+    let reverb = container(slider_overlay(
         slider(0.0..=1.0, value, |wet| {
             Message::Choose(Choice::MonitorReverb(wet))
         })
         .step(0.01)
         .height(24)
         .style(reverb_slider_style),
-    )
+        value as f32,
+        6.0,
+        // `RoundSliderOverlayShape(overlayRadius: 12)`.
+        12.0,
+    ))
     .id(REVERB_SLIDER)
     .padding(Padding::from([0, 6]))
     .width(Length::Fill);
@@ -1518,38 +1572,48 @@ fn headphones_card<'a>(device: AudioDevice, marked: bool) -> Element<'a, Message
     .into()
 }
 
+/// How long Material's switch takes to toggle (`_kToggleDuration`).
+pub const SWITCH_TOGGLE: Duration = Duration::from_millis(200);
+
 /// Material 3's switch: a 52 × 32 track — coral when on, the inset colour
 /// with an outline when off — and its thumb, 24 px on the right when on,
-/// 16 px on the left when off. Tapping it toggles.
+/// 16 px on the left when off. Tapping it toggles. A toggle moves it over
+/// 200 ms (`ToggleableStateMixin`'s position: `Curves.easeIn` turning on,
+/// `Curves.easeOut` turning off), the thumb sliding and growing or
+/// shrinking and the colors following, as `_SwitchPainter` drew it.
 fn material_switch<'a>(on: bool, toggle: Message) -> Element<'a, Message> {
+    let target = if on { 1.0 } else { 0.0 };
+    let curve = if on { Curve::EaseIn } else { Curve::EaseOut };
+    animated(target, SWITCH_TOGGLE, curve, move |position| {
+        material_switch_at(position, toggle.clone())
+    })
+    .into()
+}
+
+/// [`material_switch`] at `position` (0 off, 1 on).
+fn material_switch_at<'a>(position: f32, toggle: Message) -> Element<'a, Message> {
     const WIDTH: f32 = 52.0;
     const HEIGHT: f32 = 32.0;
-    let thumb_size = if on { 24.0 } else { 16.0 };
+    let thumb_size = 16.0.lerp(24.0, position);
+    // The thumb's centre runs between the track's rounded ends.
+    let centre = (HEIGHT / 2.0).lerp(WIDTH - HEIGHT / 2.0, position);
     // The scheme's `onPrimary` thumb when on; the `outline` (its
     // `onSurface`) thumb and track outline when off.
-    let (track, outline, thumb) = if on {
-        (Studio::ACCENT, None, Zinc::PRIMARY_FOREGROUND)
-    } else {
-        (Studio::INSET, Some(Zinc::FOREGROUND), Zinc::FOREGROUND)
-    };
+    let track = Studio::INSET.lerp(Studio::ACCENT, position);
+    let outline = Zinc::FOREGROUND.lerp(Color::TRANSPARENT, position);
+    let thumb = Zinc::FOREGROUND.lerp(Zinc::PRIMARY_FOREGROUND, position);
     let knob = container(Space::new())
         .width(thumb_size)
         .height(thumb_size)
         .style(move |_: &Theme| boxed(Some(thumb), thumb_size / 2.0, None));
-    let face = container(knob)
+    let face = container(row![Space::new().width(centre - thumb_size / 2.0), knob])
         .width(WIDTH)
         .height(HEIGHT)
-        .padding((HEIGHT - thumb_size) / 2.0)
-        .align_x(if on {
-            Horizontal::Right
-        } else {
-            Horizontal::Left
-        })
         .align_y(Vertical::Center)
         .style(move |_: &Theme| container::Style {
             border: Border {
-                color: outline.unwrap_or(Color::TRANSPARENT),
-                width: if outline.is_some() { 2.0 } else { 0.0 },
+                color: outline,
+                width: if outline.a > 0.0 { 2.0 } else { 0.0 },
                 radius: (HEIGHT / 2.0).into(),
             },
             ..boxed(Some(track), HEIGHT / 2.0, None)
@@ -1712,26 +1776,26 @@ fn info_row<'a>(icon: Icon, title: &'a str, subtitle: String) -> Element<'a, Mes
 
 /// The result toast (home's SnackBar pattern): floating 16 in from the
 /// page's edges at its bottom, `Studio.surfaceRaised`, radius 8,
-/// `Studio.border`, 13 px text. (Of any message type: the app draws it too,
-/// once the page has handed it over.)
-fn toast_bar<M: 'static>(message: &str) -> Element<'_, M> {
-    let bar = container(text(message).size(13).color(Studio::TEXT_PRIMARY))
+/// `Studio.border`, 13 px text, at `opacity`. (The app draws it too, once
+/// the page has handed it over.)
+fn toast_bar(message: &str, opacity: f32) -> Element<'_, Infallible> {
+    let fade = move |c: Color| alpha(c, c.a * opacity);
+    let bar = container(text(message).size(13).color(fade(Studio::TEXT_PRIMARY)))
         .width(Length::Fill)
         .padding(Padding::from([14, 16]))
-        .style(|_: &Theme| container::Style {
+        .style(move |_: &Theme| container::Style {
             shadow: Shadow {
-                color: alpha(Color::BLACK, 0.4),
+                color: alpha(Color::BLACK, 0.4 * opacity),
                 offset: Vector::new(0.0, 3.0),
                 blur_radius: 8.0,
             },
-            ..boxed(Some(Studio::SURFACE_RAISED), 8.0, Some(Studio::BORDER))
+            ..boxed(
+                Some(fade(Studio::SURFACE_RAISED)),
+                8.0,
+                Some(fade(Studio::BORDER)),
+            )
         });
-    container(bar)
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .padding(16)
-        .align_y(Vertical::Bottom)
-        .into()
+    container(bar).width(Length::Fill).padding(16).into()
 }
 
 #[cfg(test)]

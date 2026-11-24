@@ -17,14 +17,14 @@
 //! stops showing mid-drag owes its commit to the screen.
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use iced::advanced::graphics::text::cosmic_text::Buffer;
 use iced::advanced::layout::{self, Layout};
 use iced::advanced::text::LineHeight;
 use iced::advanced::widget::{tree, Operation, Tree};
 use iced::advanced::{renderer, Widget};
-use iced::alignment::{Horizontal, Vertical};
+use iced::alignment::Horizontal;
 use iced::widget::canvas::{self, Frame, Geometry, LineCap, Path, Stroke};
 use iced::widget::{button, canvas as canvas_widget, column, container};
 use iced::{
@@ -32,6 +32,7 @@ use iced::{
     Shadow, Size, Theme, Vector,
 };
 
+use super::animated::{animated_container, Decoration};
 use super::gesture::{Gesture, PanDoubleTap};
 use super::studio_text::{self, studio_text};
 use super::wrap::Wrap;
@@ -550,9 +551,13 @@ pub fn fader_db_readout<'a, M: 'a>(volume: f64) -> Element<'a, M> {
 
 // -------------------------------------------------------------------- toggle
 
+/// How long [`studio_toggle`]'s thumb and color take to change.
+pub const TOGGLE_ANIMATION: Duration = Duration::from_millis(120);
+
 /// `StudioToggle`: an iOS-style on/off toggle used for mute/enable in the
-/// mixer — 34 × 19, a 15 px white thumb, `activeColor` when on. (Flutter
-/// slid the thumb over 120 ms; iced moves it at once.)
+/// mixer — 34 × 19, a 15 px white thumb, `activeColor` when on. The thumb
+/// slides and the color changes over 120 ms, linear (its
+/// `AnimatedContainer`).
 pub fn studio_toggle<'a, M: Clone + 'a>(
     value: bool,
     on_changed: impl Fn(bool) -> M + 'a,
@@ -567,28 +572,19 @@ pub fn studio_toggle<'a, M: Clone + 'a>(
             },
             ..container::Style::default()
         });
-    let track = container(thumb)
+    let track = animated_container(thumb, TOGGLE_ANIMATION)
         .width(34)
         .height(19)
         .padding(2)
-        .align_x(if value {
-            Horizontal::Right
-        } else {
-            Horizontal::Left
-        })
-        .align_y(Vertical::Center)
-        .style(move |_| container::Style {
-            background: Some(Background::Color(if value {
+        .align((if value { 1.0 } else { -1.0 }, 0.0))
+        .decoration(Decoration::fill(
+            if value {
                 active_color
             } else {
                 Studio::TOGGLE_OFF
-            })),
-            border: Border {
-                radius: 10.0.into(),
-                ..Border::default()
             },
-            ..container::Style::default()
-        });
+            10.0,
+        ));
     button(track)
         .padding(0)
         .style(bare_button)
@@ -947,6 +943,38 @@ mod tests {
         assert_eq!(
             ui.into_messages().collect::<Vec<_>>(),
             vec![Msg::Toggle(true)]
+        );
+    }
+
+    #[test]
+    fn the_toggle_slides_its_thumb_and_changes_color_over_120_ms() {
+        use crate::ui::core::motion::Lerp;
+        use crate::ui::core::widgets::animated::testing::{near, Frames, MS};
+        use iced::time::Instant;
+
+        let view = |value| studio_toggle(value, Msg::Toggle, Studio::ACCENT);
+        let mut window = Frames::new(Size::new(40.0, 20.0));
+        // The thumb's middle off (9.5), halfway (17) and on (24.5); the
+        // track beside it.
+        let (left, middle, right) = (
+            Point::new(6.0, 9.0),
+            Point::new(17.0, 9.0),
+            Point::new(28.0, 9.0),
+        );
+        let at = |w: &Frames, p: Point, c: Color| near(w.pixel(p), c);
+        let t0 = Instant::now();
+        window.frame(view(false), &[], t0);
+        assert!(at(&window, left, Color::WHITE) && at(&window, right, Studio::TOGGLE_OFF));
+        assert!(window.frame(view(true), &[], t0));
+        assert!(at(&window, left, Color::WHITE), "start");
+        window.frame(view(true), &[], t0 + 60 * MS);
+        assert!(at(&window, middle, Color::WHITE), "the thumb halfway");
+        let track = Studio::TOGGLE_OFF.lerp(Studio::ACCENT, 0.5);
+        assert!(at(&window, left, track), "the color halfway");
+        assert!(!window.frame(view(true), &[], t0 + 120 * MS));
+        assert!(
+            at(&window, right, Color::WHITE) && at(&window, left, Studio::ACCENT),
+            "end"
         );
     }
 

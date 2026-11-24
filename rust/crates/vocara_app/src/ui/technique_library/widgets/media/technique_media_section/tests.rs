@@ -1004,3 +1004,80 @@ fn a_video_card_plays_through_the_section() {
         "a video drives no analysis"
     );
 }
+
+// ---------------------------------------------------------------- animations
+
+mod animations {
+    use iced::time::Instant;
+    use iced::Point;
+
+    use super::*;
+    use crate::ui::core::motion::Lerp;
+    use crate::ui::core::widgets::animated::testing::{near, over, Frames, BACKGROUND, MS};
+
+    #[test]
+    fn the_hover_icons_fade_in_and_out_over_120_ms() {
+        let view = |hovered| hover_actions(hovered, true, true, "M0".into(), "Example 0".into());
+        let mut window = Frames::new(Size::new(80.0, 20.0));
+        let ink = |w: &Frames| w.ink(Point::ORIGIN, Point::new(80.0, 20.0));
+        let t0 = Instant::now();
+        window.frame(view(false), &[], t0);
+        assert_eq!(ink(&window), 0, "hidden at rest");
+        assert!(window.frame(view(true), &[], t0));
+        assert_eq!(ink(&window), 0, "start");
+        window.frame(view(true), &[], t0 + 60 * MS);
+        let half = ink(&window);
+        assert!(!window.frame(view(true), &[], t0 + 120 * MS));
+        let full = ink(&window);
+        assert!(full > 40, "shown: {full}");
+        assert!(half.abs_diff(full / 2) <= 3, "middle: {half} of {full}");
+        // And out again.
+        window.frame(view(false), &[], t0 + 200 * MS);
+        window.frame(view(false), &[], t0 + 260 * MS);
+        assert!(ink(&window).abs_diff(full / 2) <= 3);
+        window.frame(view(false), &[], t0 + 320 * MS);
+        assert_eq!(ink(&window), 0, "end");
+    }
+
+    #[test]
+    fn the_chevron_turns_half_a_turn_over_150_ms() {
+        let view = |expanded| expand_chevron(expanded, Message::ToggleExpand("M0".into()));
+        let mut window = Frames::new(Size::new(24.0, 24.0));
+        // A quarter turn puts an arm's end up at the glyph's top right,
+        // where neither chevron at rest has ink.
+        let turned = |w: &Frames| w.ink(Point::new(12.0, 4.0), Point::new(17.0, 9.0)) > 40;
+        let t0 = Instant::now();
+        window.frame(view(false), &[], t0);
+        let down = window.ink(Point::ORIGIN, Point::new(24.0, 24.0));
+        assert!(down > 0 && !turned(&window), "the down chevron");
+        assert!(window.frame(view(true), &[], t0));
+        assert!(!turned(&window), "start");
+        assert!(window.frame(view(true), &[], t0 + 75 * MS));
+        assert!(turned(&window), "a quarter turn");
+        assert!(!window.frame(view(true), &[], t0 + 150 * MS));
+        assert!(!turned(&window), "end: the up chevron");
+    }
+
+    #[test]
+    fn the_zone_lights_up_for_a_drag_over_120_ms() {
+        let page = Page::new(two());
+        let section = page.section(&edit);
+        let mut state = MediaSectionState::new();
+        let mut window = Frames::new(Size::new(300.0, 60.0));
+        // Inside the 1 px border, clear of the label.
+        let fill = Point::new(4.0, 20.0);
+        let (rest, lit) = (Studio::PANEL, alpha(Studio::ACCENT, 0.08));
+        let t0 = Instant::now();
+        window.frame(section.add_zone(&state), &[], t0);
+        assert!(near(window.pixel(fill), over(rest, BACKGROUND)));
+        state.dragging = true;
+        assert!(window.frame(section.add_zone(&state), &[], t0));
+        assert!(near(window.pixel(fill), over(rest, BACKGROUND)), "start");
+        window.frame(section.add_zone(&state), &[], t0 + 60 * MS);
+        // `Color.lerp`, alpha and all.
+        let middle = over(rest.lerp(lit, 0.5), BACKGROUND);
+        assert!(near(window.pixel(fill), middle), "middle");
+        assert!(!window.frame(section.add_zone(&state), &[], t0 + 120 * MS));
+        assert!(near(window.pixel(fill), over(lit, BACKGROUND)), "end");
+    }
+}

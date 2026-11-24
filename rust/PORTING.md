@@ -188,6 +188,25 @@ structure every screen follows, so screens ported by different hands fit:
   view; the drag bar starts a window drag; the close request runs the quit
   guard (kill separation sidecars, finalize recordings) before closing, as
   `main.dart`'s `_QuitGuard` and exit listener did.
+- **Animations**: `vocara_app::ui::core::motion` holds Flutter's curves
+  (with its cubic solver), the implicit animation every `Animated*` widget
+  ran (`Implicit`) and an `AnimationController` (`Controller`), both on
+  `iced::Animation`, each reading takes the time. The implicit widgets are
+  `widgets::animated` (`AnimatedContainer`, and `Animated`, which builds
+  its content from an animating value): they keep their animation in the
+  widget tree, take their time from `RedrawRequested` and ask for the next
+  frame only while they move; so do the widgets that port Material's own
+  motion (`material_tooltip`, `fading_scrollbar`, `slider_overlay`, the
+  `InkWell` highlights of `animated::ink_hover`, the FX chain's
+  reordering cards). A model that animates (the snack bars, `ui::snack`;
+  a page transition and a dialog coming in or going, the app's and the
+  pages' that draw their own; the license page; a lyrics list's scroll)
+  subscribes to `motion::frames(animating)`, the window's frames only
+  while something moves: an idle app does not redraw. The state never
+  waits for an animation; only its drawing does. iced has no subtree
+  opacity: what fades (a dialog card, a snack bar, a tooltip) takes every
+  color it draws at the fade's opacity. A sliding page moves its layout
+  with its drawing (`widgets::slide`), so a tap lands where it is drawn.
 - **Tests**: view models are unit-tested directly (the Dart widget tests
   mostly assert view-model behavior; port those assertions); screens get
   `iced_test` simulator tests where a Dart widget test checked what is on
@@ -238,9 +257,8 @@ fixes it rather than port the bug, and says so where the fix lives:
 Where iced or the platform layer has no counterpart, the difference is kept
 small and written down in the module that has it:
 
-- Nothing animates (fades, the separation bar's fill, the analyzer's settling
-  jump to their end state). Touch-only gestures (pointer cancel, a second
-  finger) do not exist on iced's desktop pointer.
+- Touch-only gestures (pointer cancel, a second finger) do not exist on
+  iced's desktop pointer.
 
 ## Tracking
 
@@ -353,7 +371,7 @@ behavior and its tests are ported and the gates pass.
 | `ui/song_practice_detail/widgets/fx_panel.dart` | 1723 | `vocara_app::ui::song_practice_detail::widgets::fx_panel` (plain data in — `FxPanel`: the target's id and chain, the EQ's input column under the playhead, the compressor's gain reduction — and `Message`s out, one per view-model call; the panel keys its state by its target; the analyzer ticks on redraws and stops once settled, any redraw waking it; the GR meter keeps its 50 ms poll over the reading the host passed in; a drag or Q debounce in flight when the screen stops showing the panel owes its `CommitFx` to the screen; the studio menus are `widgets::mixer_shared::PopupMenu`) | done |
 | `ui/song_practice_detail/widgets/left_panel.dart` | 1545 | `vocara_app::ui::song_practice_detail::widgets::left_panel` (plain data in — `Inspector`, `VoiceSummary` — and `Message`s out named after the view-model and mixer methods; the FX panel is a slot the screen fills with `fx_panel`'s view; the screen holds which chip menu is open, popped by `track_context_menu`'s host; the body is keyed by its channel; the post-frame heal is `Inspector::analysis_heal`) | done |
 | `ui/song_practice_detail/widgets/live_spectrogram.dart` | 150 | `vocara_app::ui::song_practice_detail::widgets::live_spectrogram` (the raster and its image live in the canvas's tree state, remade when it draws and the monitor's revision has moved) | done |
-| `ui/song_practice_detail/widgets/lyrics_panel.dart` | 1396 | `vocara_app::ui::song_practice_detail::widgets::lyrics_panel` (plain data in — `RightPanelData` — and `Message`s out; what the Dart widgets kept in `State` (the editor's text, the readers' latched line, the lists' scroll) is a `LyricsPanelState` the screen keeps and `sync`s after every update; `_importDrop` and Save's guards are `begin_import` / `end_import` and `save_ticket` / `save_landed` around the view-model calls; `RightTab` and `LyricsMode` are defined here; `ensureVisible` scrolls at once, unanimated) | done |
+| `ui/song_practice_detail/widgets/lyrics_panel.dart` | 1396 | `vocara_app::ui::song_practice_detail::widgets::lyrics_panel` (plain data in — `RightPanelData` — and `Message`s out; what the Dart widgets kept in `State` (the editor's text, the readers' latched line, the lists' scroll) is a `LyricsPanelState` the screen keeps and `sync`s after every update; `_importDrop` and Save's guards are `begin_import` / `end_import` and `save_ticket` / `save_landed` around the view-model calls; `RightTab` and `LyricsMode` are defined here; `ensureVisible`'s scroll animates on frames the screen feeds the panel while a list scrolls) | done |
 | `ui/song_practice_detail/widgets/mixer_strip.dart` | 1185 | `vocara_app::ui::song_practice_detail::widgets::mixer_strip` (plain data in — `MixerStrip`, `MicInput` — and `Message`s out, one per view-model, mixer or settings call; the rename and delete-bus prompts are the host's (`RenameBus`, `DeleteBus`); strips keep their state by key (`widgets::mixer_shared::Keyed`); `defaultTakeColor` and the palette are copied here until `track_context_menu` lands) | done |
 | `ui/song_practice_detail/widgets/note_editor.dart` | 195 | `vocara_app::ui::song_practice_detail::widgets::note_editor` (the screen holds the open `NoteEditor` and passes in the view model's `normalizeMarkerRange`; `update` returns Dart's result) | done |
 | `ui/song_practice_detail/widgets/pitch_lane.dart` | 648 | `vocara_app::ui::song_practice_detail::widgets::pitch_lane` | done (tests on hand-built metrics until `computeVoiceMetrics` lands) |

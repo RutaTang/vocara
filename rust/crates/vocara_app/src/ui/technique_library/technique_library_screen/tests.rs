@@ -317,6 +317,37 @@ fn the_page_loads_then_shows_the_grid() {
 }
 
 #[test]
+fn a_cards_border_turns_coral_over_120_ms_under_the_pointer() {
+    use crate::ui::core::motion::Lerp;
+    use crate::ui::core::widgets::animated::testing::{near, over, Frames, MS};
+    use iced::time::Instant;
+
+    let twang = stored("Twang", &[]);
+    let vm = Harness::library(vec![twang.clone()]).screen.vm;
+    let mut window = Frames::new(Size::new(280.0, 150.0));
+    let view =
+        || -> Element<'_, Message> { container(card(&twang, &vm)).width(280).height(150).into() };
+    // The left border, halfway down, over the card's face.
+    let edge = Point::new(0.0, 75.0);
+    let (rest, lit) = (Studio::BORDER, alpha(Studio::ACCENT, 0.6));
+    let shows = |w: &Frames, border: Color| near(w.pixel(edge), over(border, Studio::PANEL));
+    let t0 = Instant::now();
+    window.frame(view(), &[], t0);
+    assert!(shows(&window, rest));
+    window.point_at(Point::new(140.0, 75.0));
+    assert!(window.frame(view(), &[], t0));
+    assert!(shows(&window, rest), "start");
+    window.frame(view(), &[], t0 + 60 * MS);
+    assert!(
+        shows(&window, rest.lerp(lit, 0.5)),
+        "middle: {:?}",
+        window.pixel(edge)
+    );
+    assert!(!window.frame(view(), &[], t0 + 120 * MS));
+    assert!(shows(&window, lit), "end");
+}
+
+#[test]
 fn the_grid_keeps_cards_at_most_300_wide() {
     // 1392 px of content: five columns of 265.6.
     let (columns, width) = grid_columns(1440.0);
@@ -630,14 +661,19 @@ fn a_create_that_fails_says_so_for_four_seconds() {
     h.send(Message::NewTechniqueNamed(Some("Belt".into())));
     h.settle();
     assert_eq!(h.screen.snacks.len(), 2);
-    let seq = h.screen.snack_seq;
-    h.send(Message::SnackExpired(seq - 1));
+    let seq = h.screen.snacks.current_seq().expect("one showing");
+    h.send(Message::SnackExpired(seq + 1));
     assert_eq!(h.screen.snacks.len(), 2, "a stale timer hides nothing");
     h.send(Message::SnackExpired(seq));
     assert_eq!(h.screen.snacks.len(), 1);
-    h.send(Message::SnackExpired(h.screen.snack_seq));
+    let seq = h.screen.snacks.current_seq().expect("the next");
+    h.send(Message::SnackExpired(seq));
     assert_eq!(h.screen.snack(), None);
-    assert!(!h.shows(CREATE_FAILED));
+    assert!(h.shows(CREATE_FAILED), "leaving");
+    h.send(Message::SnackFrame(
+        std::time::Instant::now() + crate::ui::snack::TRANSITION,
+    ));
+    assert!(!h.shows(CREATE_FAILED), "gone");
 }
 
 #[test]

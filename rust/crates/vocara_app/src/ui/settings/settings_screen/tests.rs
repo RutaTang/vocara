@@ -1231,24 +1231,23 @@ fn a_toast_stays_its_time_and_a_new_one_replaces_it() {
     let second = page.screen.toast_seq().expect("a toast");
     page.send(Message::ToastExpired(second));
     assert!(page.screen.toast().is_none());
-    assert!(!page.shows_containing("Diagnostics saved"));
+    // (Drawn while it leaves.)
+    let left = std::time::Instant::now() + crate::ui::snack::TRANSITION;
+    page.send(Message::ToastFrame(left));
+    assert!(!page.shows_containing("Diagnostics saved"), "gone");
 }
 
 #[test]
-fn the_toast_timer_waits_3_5_s_then_reports_once() {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_time()
-        .build()
-        .expect("a runtime");
-    rt.block_on(async {
-        let started = std::time::Instant::now();
-        let mut stream = std::pin::pin!(toast_timer(&7));
-        assert_eq!(stream.next().await, Some(Message::ToastExpired(7)));
-        assert!(started.elapsed() >= TOAST_DURATION);
-        assert_eq!(TOAST_DURATION, Duration::from_millis(3500));
-        let more = tokio::time::timeout(Duration::from_millis(100), stream.next()).await;
-        assert!(more.is_err(), "then nothing more");
-    });
+fn the_toast_stays_3_5_s_from_the_end_of_its_entrance() {
+    use crate::ui::snack::TRANSITION;
+    let mut page = Setup::new().mount();
+    let before = std::time::Instant::now();
+    page.send(Message::Exported(Exported::Saved));
+    let after = std::time::Instant::now();
+    let timer = page.screen.toast_timer().expect("its timer");
+    assert_eq!(TOAST_DURATION, Duration::from_millis(3500));
+    assert!(timer.deadline >= before + TRANSITION + TOAST_DURATION);
+    assert!(timer.deadline <= after + TRANSITION + TOAST_DURATION);
 }
 
 // Dart: "Licenses opens the license page with the hand-maintained
@@ -1266,6 +1265,91 @@ fn licenses_opens_the_license_page_and_its_back_returns_to_settings() {
     assert!(!page.screen.licenses_open());
     assert!(page.shows("Check for updates"));
     assert!(page.navigations.is_empty(), "Settings stays");
+}
+
+#[test]
+fn the_switch_slides_and_grows_its_thumb_over_200_ms_easing_in() {
+    use crate::ui::core::motion::{Curve, Lerp};
+    use crate::ui::core::widgets::animated::testing::{near, Frames, MS};
+    use std::time::Instant;
+
+    let view = |on| material_switch(on, Message::Poll);
+    let mut window = Frames::new(Size::new(60.0, 40.0));
+    let row = |x: f32| iced::Point::new(x, 16.0);
+    let t0 = Instant::now();
+    window.frame(view(false), &[], t0);
+    // Off: the 16 px thumb centred at 16, on the inset track.
+    assert!(near(window.pixel(row(16.0)), Zinc::FOREGROUND), "the thumb");
+    assert!(near(window.pixel(row(36.0)), Studio::INSET), "the track");
+    assert!(window.frame(view(true), &[], t0));
+    assert!(near(window.pixel(row(16.0)), Zinc::FOREGROUND), "start");
+    window.frame(view(true), &[], t0 + 100 * MS);
+    // Halfway in time, eased in: the thumb's centre at 16 + 20 × eased.
+    let eased = Curve::EaseIn.transform(0.5);
+    let centre = 16.0 + 20.0 * eased;
+    let thumb = Zinc::FOREGROUND.lerp(Zinc::PRIMARY_FOREGROUND, eased);
+    assert!(near(window.pixel(row(centre)), thumb), "middle: the thumb");
+    let track = Studio::INSET.lerp(Studio::ACCENT, eased);
+    assert!(near(window.pixel(row(48.0)), track), "middle: the track");
+    assert!(!window.frame(view(true), &[], t0 + 200 * MS));
+    assert!(
+        near(window.pixel(row(36.0)), Zinc::PRIMARY_FOREGROUND),
+        "end"
+    );
+    assert!(
+        near(window.pixel(row(10.0)), Studio::ACCENT),
+        "end: the track"
+    );
+}
+
+#[test]
+fn the_license_page_slides_in_over_settings_and_back_out() {
+    use crate::ui::core::motion::Curve;
+    use crate::ui::core::widgets::slide::{cupertino, PAGE_TRANSITION};
+    use std::time::Instant;
+
+    let mut page = Setup::new().mount();
+    assert!(!page.screen.is_animating(Instant::now()), "idle: no frames");
+    let t0 = Instant::now();
+    page.send(Message::OpenLicenses);
+    assert!(page.screen.licenses_open(), "open at once");
+    assert!(
+        page.screen.is_animating(Instant::now()),
+        "frames while it slides"
+    );
+    let route = |page: &Page, t| {
+        let route = page.screen.licenses_route.as_ref().expect("sliding");
+        cupertino(route, t)
+    };
+    let (moving, covered, _) = route(&page, t0);
+    assert!((moving - 1.0).abs() < 1e-3 && covered.abs() < 1e-3, "start");
+    let (moving, _, _) = route(&page, t0 + PAGE_TRANSITION / 2);
+    let expected = 1.0 - Curve::FastEaseInToSlowEaseOut.transform(0.5);
+    assert!((moving - expected).abs() < 0.01, "middle: {moving}");
+    let (moving, covered, _) = route(&page, t0 + 2 * PAGE_TRANSITION);
+    assert!(
+        moving.abs() < 1e-3 && (covered + 1.0 / 3.0).abs() < 1e-3,
+        "end"
+    );
+    page.send(Message::Frame(Instant::now() + PAGE_TRANSITION));
+    assert!(page.screen.licenses_route.is_none());
+
+    // Back: it slides out, drawn (not reachable) until it has.
+    let t1 = Instant::now();
+    page.send(Message::Licenses(licenses::Message::Back));
+    assert!(!page.screen.licenses_open(), "closed at once");
+    assert!(page.screen.closed_licenses.is_some());
+    assert!(
+        !page.shows("Powered by iced"),
+        "the page going takes no part"
+    );
+    let (moving, _, _) = route(&page, t1);
+    assert!(moving.abs() < 1e-3, "it starts all in");
+    let (moving, _, _) = route(&page, t1 + 2 * PAGE_TRANSITION);
+    assert!((moving - 1.0).abs() < 1e-3, "and ends all out");
+    page.send(Message::Frame(Instant::now() + PAGE_TRANSITION));
+    assert!(page.screen.closed_licenses.is_none(), "let go");
+    assert!(!page.screen.is_animating(Instant::now()));
 }
 
 #[test]

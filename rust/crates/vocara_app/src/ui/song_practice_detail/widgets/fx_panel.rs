@@ -48,8 +48,9 @@
 //! - The gain-reduction meter's reading is the one the host passed at its
 //!   last view (Dart polled the engine itself); the meter keeps Dart's 50 ms
 //!   poll cadence, peak falloff and idle stop over it.
-//! - Flutter animated the toggles (130 ms) and the reorder; iced switches at
-//!   once.
+//! - A reorder's order changes at the drop, where Flutter reported it once
+//!   the dropped card had glided in; the cards slide as Flutter's did
+//!   (see `chain`).
 
 mod chain;
 pub mod eq;
@@ -75,7 +76,9 @@ use self::chain::InsertChain;
 use self::eq::{EqGraph, EQ_HEIGHT};
 use super::mixer_shared::{keyed_row, tap, MenuItem, Opens, PopupMenu};
 use crate::ui::core::icons::{self, Icon};
+use crate::ui::core::motion::Curve;
 use crate::ui::core::theme::{self, boxed, font, Studio};
+use crate::ui::core::widgets::animated::{animated_align, animated_container, Decoration};
 use crate::ui::core::widgets::cap_label::cap_label;
 use crate::ui::core::widgets::painter::KeyedCache;
 use crate::ui::core::widgets::studio_controls::fixed_width_readout;
@@ -690,9 +693,14 @@ fn insert_header<'a>(title: &str, on: bool, on_toggle: Vec<Message>) -> Element<
     .into()
 }
 
+/// How long [`fx_toggle`]'s color and thumb take to change.
+pub const TOGGLE_ANIMATION: Duration = Duration::from_millis(130);
+
 /// `_Toggle`: a compact studio-style on/off switch, 34 × 18 — the accent
 /// with a white thumb on the right when on, the border color with a grey
-/// thumb on the left when off. A tap reports `on_tap`.
+/// thumb on the left when off. A tap reports `on_tap`. The color changes
+/// over 130 ms, linear (`AnimatedContainer`), and the thumb slides over
+/// 130 ms, easing out (`AnimatedAlign`); its own color changes at once.
 fn fx_toggle<'a>(on: bool, on_tap: Vec<Message>) -> Element<'a, Message> {
     let thumb = container(Space::new().width(13).height(13)).style(move |_| {
         boxed(
@@ -705,23 +713,19 @@ fn fx_toggle<'a>(on: bool, on_tap: Vec<Message>) -> Element<'a, Message> {
             None,
         )
     });
-    let track = container(thumb)
+    let knob = animated_align(
+        container(thumb).padding(2.5),
+        (if on { 1.0 } else { -1.0 }, 0.0),
+        TOGGLE_ANIMATION,
+        Curve::EaseOut,
+    );
+    let track = animated_container(knob, TOGGLE_ANIMATION)
         .width(34)
         .height(18)
-        .padding(2.5)
-        .align_x(if on {
-            Horizontal::Right
-        } else {
-            Horizontal::Left
-        })
-        .align_y(Vertical::Center)
-        .style(move |_| {
-            boxed(
-                Some(if on { Studio::ACCENT } else { Studio::BORDER }),
-                9.0,
-                None,
-            )
-        });
+        .decoration(Decoration::fill(
+            if on { Studio::ACCENT } else { Studio::BORDER },
+            9.0,
+        ));
     tap(track, on_tap, None)
 }
 
