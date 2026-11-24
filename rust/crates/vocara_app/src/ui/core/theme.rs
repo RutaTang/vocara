@@ -426,9 +426,9 @@ pub const FIELD_PADDING: Padding = Padding {
 /// border: none)` inside an inset well, as `confirm_dialog.dart` and
 /// `studio_field.dart` build it): no fill or border of its own (the well
 /// draws them), `Studio.textPrimary` text, `Studio.textFaint` hint, faint
-/// text when disabled, and Material 3's selection color (primary at 40 %).
-/// iced draws the caret in the value color: the coral `cursorColor` has no
-/// counterpart.
+/// text when disabled, and the selection color a macOS field took
+/// (`CupertinoTheme.primaryColor`, the Material primary, at 40 %). The
+/// coral `cursorColor` is the field's own (`text_field`'s `caret_color`).
 pub fn studio_input(_: &Theme, status: text_input::Status) -> text_input::Style {
     let disabled = matches!(status, text_input::Status::Disabled);
     text_input::Style {

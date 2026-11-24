@@ -4520,6 +4520,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "unicode-segmentation",
  "vocara_model",
  "vocara_services",
  "vocara_store",

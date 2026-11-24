@@ -47,6 +47,9 @@ parking_lot = "0.12"
 indexmap = "2"
 png = "0.18"
 bytes = "1.9"
+# Word boundaries (UAX #29) for the text fields' right-click word selection;
+# iced's own fields segment with it.
+unicode-segmentation = "1"
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

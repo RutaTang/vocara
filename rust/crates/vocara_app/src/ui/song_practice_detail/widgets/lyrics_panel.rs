@@ -71,7 +71,7 @@ use iced::widget::canvas::{self, Frame, Geometry};
 use iced::widget::text::{Alignment, Wrapping};
 use iced::widget::{
     button, canvas as canvas_widget, center, column, container, responsive, row, scrollable, stack,
-    text_editor, Column, Space,
+    Column, Space,
 };
 use iced::{
     keyboard, mouse, widget, Border, Color, Element, Event, Length, Padding, Pixels, Point,
@@ -91,6 +91,7 @@ use crate::ui::core::widgets::holds_keyboard::holds_keyboard;
 use crate::ui::core::widgets::material_tooltip::material_tooltip;
 use crate::ui::core::widgets::studio_button::{studio_button, StudioButtonVariant};
 use crate::ui::core::widgets::studio_text::{fill_spaced_text, studio_text};
+use crate::ui::core::widgets::text_field::editor::{self as text_editor, text_editor};
 use crate::ui::core::widgets::visible_drop_target::visible_drop_target;
 use crate::ui::core::widgets::wrap::Wrap;
 
@@ -1232,6 +1233,7 @@ fn lyrics_editor<'a>(state: &'a LyricsPanelState, editor: &'a Editor) -> Element
             .line_height(1.4)
             .padding(theme::FIELD_PADDING)
             .height(Length::Fill)
+            .caret_color(Studio::ACCENT)
             .style(editor_style);
         let well = container(field)
             // 10 (4 compact) × 12, inside the well's 1 px border.

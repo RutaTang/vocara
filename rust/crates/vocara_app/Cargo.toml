@@ -29,6 +29,7 @@ lucide-icons.workspace = true
 png.workspace = true
 bytes.workspace = true
 indexmap.workspace = true
+unicode-segmentation.workspace = true
 
 [dev-dependencies]
 iced_test.workspace = true

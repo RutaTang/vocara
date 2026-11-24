@@ -4,21 +4,25 @@
 //! field — and [`parse_comma_list`], how the aliases and tags fields read.
 //!
 //! Flutter's one `TextField` was single-line by default and multi-line with
-//! `minLines`/`maxLines`; iced has a single-line `text_input` and a
-//! multi-line `text_editor`, so the field is [`studio_field`] over a `&str`
-//! (single line, Return submits) or [`studio_prose_field`] over a
-//! `text_editor::Content` (prose: it grows from `min_lines` to `max_lines`,
-//! then scrolls). `autofocus` is the owner's `iced::widget::operation::focus`
-//! task on the field's [`id`](StudioField::id) when it appears. iced draws
-//! the caret in the text colour (the coral `cursorColor` has no
-//! counterpart).
+//! `minLines`/`maxLines`; the app's text fields (`widgets::text_field`) are
+//! a single-line one and a multi-line one, so the field is
+//! [`studio_field`] over a `&str` (single line, Return submits) or
+//! [`studio_prose_field`] over a `text_field::Content` (prose: it grows
+//! from `min_lines` to `max_lines`, then scrolls). Both draw Flutter's
+//! macOS caret in the coral `cursorColor` and open its right-click menu;
+//! their text sits forui's content padding less compact density's inside
+//! the well (`theme::FIELD_PADDING`). `autofocus` is the owner's
+//! `iced::widget::operation::focus` task on the field's
+//! [`id`](StudioField::id) when it appears.
 
-use iced::widget::{column, container, text_editor, text_input, Space};
+use iced::widget::{column, container, Space};
 use iced::{widget, Background, Border, Color, Element, Length, Padding, Theme};
 use vocara_model::util::dart_string;
 
 use crate::ui::core::theme::{self, alpha, font, Studio, Zinc};
 use crate::ui::core::widgets::studio_text::studio_text;
+use crate::ui::core::widgets::text_field::editor::{self as text_editor, text_editor};
+use crate::ui::core::widgets::text_field::text_input;
 
 /// The field's text size and line height (`fontSize: 14, height: 1.45`).
 const TEXT_SIZE: f32 = 14.0;
@@ -199,6 +203,7 @@ impl<'a, M: Clone + 'a> From<StudioField<'a, M>> for Element<'a, M> {
                     .size(TEXT_SIZE)
                     .line_height(LINE_HEIGHT)
                     .padding(theme::FIELD_PADDING)
+                    .caret_color(theme::faded(Studio::ACCENT, opacity))
                     .style(move |t, s| theme::faded_input(theme::studio_input(t, s), opacity));
                 if let Some(id) = f.id {
                     input = input.id(id);
@@ -234,6 +239,7 @@ impl<'a, M: Clone + 'a> From<StudioField<'a, M>> for Element<'a, M> {
                         line * f32::from(max_lines.max(min_lines).max(1))
                             + theme::FIELD_PADDING.y(),
                     )
+                    .caret_color(theme::faded(Studio::ACCENT, opacity))
                     .style(move |t, s| faded_editor(studio_editor(t, s), opacity));
                 if let Some(id) = f.id {
                     editor = editor.id(id);

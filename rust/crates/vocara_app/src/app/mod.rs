@@ -62,6 +62,7 @@ use crate::ui::core::widgets::confirm_dialog::{
 };
 use crate::ui::core::widgets::fatal_open_screen::{self, FatalOpenScreen};
 use crate::ui::core::widgets::slide::{cupertino, inert, slide};
+use crate::ui::core::widgets::text_field;
 use crate::ui::core::widgets::window_drag_bar::window_drag_bar;
 use crate::ui::home::widgets::update_notice::open_url_task;
 use crate::ui::snack::SnackEvent;
@@ -173,6 +174,8 @@ pub enum Message {
     Fatal(fatal_open_screen::Message),
     /// The window opened (its id).
     WindowOpened(window::Id),
+    /// The window's scale factor, asked for when it opened.
+    ScaleFactor(f32),
     /// The user asked to close the window.
     CloseRequested(window::Id),
     /// macOS asked the app to quit (Cmd+Q, the app-menu Quit, a Dock quit,
@@ -463,14 +466,25 @@ impl App {
                     return Task::none();
                 }
                 self.window = Some(id);
+                // The text fields' caret sits by device pixels
+                // (`devicePixelRatio`); they follow a change of it
+                // themselves.
+                let scale_factor = window::scale_factor(id).map(Message::ScaleFactor);
                 // Dev-only preview hook: a PNG of the rendered app a while
                 // after its first frame, then exit. Avoids needing OS
                 // screen-recording access.
                 if self.boot.screenshot.is_some() {
-                    return Task::perform(tokio::time::sleep(SCREENSHOT_DELAY), |_| {
-                        Message::ScreenshotDue
-                    });
+                    return Task::batch([
+                        scale_factor,
+                        Task::perform(tokio::time::sleep(SCREENSHOT_DELAY), |_| {
+                            Message::ScreenshotDue
+                        }),
+                    ]);
                 }
+                scale_factor
+            }
+            Message::ScaleFactor(scale_factor) => {
+                text_field::set_scale_factor(scale_factor);
                 Task::none()
             }
             Message::CloseRequested(id) => {

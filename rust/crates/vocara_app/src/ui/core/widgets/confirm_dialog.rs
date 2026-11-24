@@ -460,13 +460,14 @@ fn prompt_card<'a>(
             )
             .push(Space::new().height(6));
     }
-    let field = text_input(&p.hint, value)
+    let field = super::text_field::text_input(&p.hint, value)
         .id(input)
         .on_input(Message::Input)
         .on_submit(Message::Confirm)
         .size(14)
         .line_height(1.0)
         .padding(theme::FIELD_PADDING)
+        .caret_color(fade.color(Studio::ACCENT))
         .style(fade.input(theme::studio_input));
     content = content
         .push(

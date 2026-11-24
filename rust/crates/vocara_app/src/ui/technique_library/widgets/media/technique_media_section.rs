@@ -53,8 +53,8 @@ use crate::ui::core::text;
 use iced::alignment::{Horizontal, Vertical};
 use iced::widget::canvas::{self, Frame, Geometry, Path};
 use iced::widget::{
-    button, canvas as canvas_widget, column, container, keyed_column, mouse_area, row, text_input,
-    Column, Space,
+    button, canvas as canvas_widget, column, container, keyed_column, mouse_area, row, Column,
+    Space,
 };
 use iced::{
     mouse, widget, Color, Element, Font, Length, Padding, Point, Rectangle, Renderer, Size,
@@ -74,6 +74,7 @@ use crate::ui::core::widgets::confirm_dialog::{self, modal, DialogResult, Fade};
 use crate::ui::core::widgets::material_tooltip::material_tooltip;
 use crate::ui::core::widgets::studio_hint::spinner;
 use crate::ui::core::widgets::studio_text::studio_text;
+use crate::ui::core::widgets::text_field::text_input;
 use crate::ui::core::widgets::visible_drop_target::visible_drop_target;
 
 /// How long the hover icons take to fade in or out (`AnimatedOpacity`).
@@ -1074,6 +1075,7 @@ impl RenameExampleDialog {
             .size(14)
             .line_height(1.0)
             .padding(theme::FIELD_PADDING)
+            .caret_color(fade.color(Studio::ACCENT))
             .style(fade.input(theme::studio_input));
         let card = container(
             column![
