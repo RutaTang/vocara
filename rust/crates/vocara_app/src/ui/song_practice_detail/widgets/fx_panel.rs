@@ -48,8 +48,9 @@
 //! - The gain-reduction meter's reading is the one the host passed at its
 //!   last view (Dart polled the engine itself); the meter keeps Dart's 50 ms
 //!   poll cadence, peak falloff and idle stop over it.
-//! - Flutter animated the reorder; iced moves the cards at once (see
-//!   `chain`).
+//! - A reorder's order changes at the drop, where Flutter reported it once
+//!   the dropped card had glided in; the cards slide as Flutter's did
+//!   (see `chain`).
 
 mod chain;
 pub mod eq;

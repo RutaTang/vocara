@@ -36,6 +36,8 @@ pub enum Curve {
     EaseIn,
     /// `Curves.easeOut`: `Cubic(0.0, 0.0, 0.58, 1.0)`.
     EaseOut,
+    /// `Curves.easeInOut`: `Cubic(0.42, 0.0, 0.58, 1.0)`.
+    EaseInOut,
     /// `Curves.fastOutSlowIn`: `Cubic(0.4, 0.0, 0.2, 1.0)`.
     FastOutSlowIn,
     /// `Curves.easeInOutQuart`: `Cubic(0.77, 0.0, 0.175, 1.0)`.
@@ -69,6 +71,7 @@ impl Curve {
             Curve::Ease => cubic(0.25, 0.1, 0.25, 1.0, t),
             Curve::EaseIn => cubic(0.42, 0.0, 1.0, 1.0, t),
             Curve::EaseOut => cubic(0.0, 0.0, 0.58, 1.0, t),
+            Curve::EaseInOut => cubic(0.42, 0.0, 0.58, 1.0, t),
             Curve::FastOutSlowIn => cubic(0.4, 0.0, 0.2, 1.0, t),
             Curve::EaseInOutQuart => cubic(0.77, 0.0, 0.175, 1.0, t),
             Curve::LinearToEaseOut => cubic(0.35, 0.91, 0.33, 0.97, t),
@@ -97,6 +100,7 @@ impl Curve {
             Curve::Ease => |t| Curve::Ease.transform(t),
             Curve::EaseIn => |t| Curve::EaseIn.transform(t),
             Curve::EaseOut => |t| Curve::EaseOut.transform(t),
+            Curve::EaseInOut => |t| Curve::EaseInOut.transform(t),
             Curve::FastOutSlowIn => |t| Curve::FastOutSlowIn.transform(t),
             Curve::EaseInOutQuart => |t| Curve::EaseInOutQuart.transform(t),
             Curve::LinearToEaseOut => |t| Curve::LinearToEaseOut.transform(t),
@@ -496,6 +500,8 @@ mod tests {
         assert!(close(Curve::EaseOut.transform(0.5), 0.6836));
         assert!(close(Curve::Ease.transform(0.5), 0.8020));
         assert!(close(Curve::EaseIn.transform(0.5), 0.3164));
+        assert!(close(Curve::EaseInOut.transform(0.5), 0.5));
+        assert!(close(Curve::EaseInOut.transform(0.25), 0.1287));
         assert!(close(Curve::FastOutSlowIn.transform(0.5), 0.7756));
         assert!(close(Curve::EaseInOutQuart.transform(0.5), 0.5933));
         assert!(close(Curve::LinearToEaseOut.transform(0.5), 0.9198));
