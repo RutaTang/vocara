@@ -2,5 +2,6 @@
 //! `client/lib/ui/core`).
 
 pub mod icons;
+pub mod motion;
 pub mod theme;
 pub mod widgets;

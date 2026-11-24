@@ -1,5 +1,6 @@
 //! The shared widgets (port of `client/lib/ui/core/widgets`).
 
+pub mod animated;
 pub mod cap_label;
 pub mod confirm_dialog;
 pub mod fatal_open_screen;
