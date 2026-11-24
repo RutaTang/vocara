@@ -66,6 +66,10 @@
 //!   longer lay under it, as when the layout moved it away or something
 //!   came over it). Content scrolling under a still pointer changes
 //!   nothing for the bar: its hover was only ever re-tested on motion.
+//! - A text field inside that reveals its caret asks the view to show it
+//!   (`text_field::show_on_screen`): the view scrolls the least that
+//!   shows the caret's rectangle, over 100 ms on `Curves.fastOutSlowIn`
+//!   or at once, as the field asked, a scroll like any other to the bar.
 //! - A page that would move the view less than a device pixel jumps
 //!   instead (`nearEqual` against `1 / devicePixelRatio`, the window's
 //!   scale factor, `ui::core::scale_factor`).
@@ -96,6 +100,7 @@ use iced::{
 use crate::ui::core::motion::{self, Controller, Curve, Lerp};
 use crate::ui::core::scale_factor::{scale_factor, set_scale_factor};
 use crate::ui::core::theme;
+use crate::ui::core::widgets::text_field::show_on_screen;
 
 /// How long the thumb takes to fade in or out (`_kScrollbarFadeDuration`).
 pub const FADE: Duration = Duration::from_millis(300);
@@ -426,13 +431,15 @@ struct Drag {
     live: bool,
 }
 
-/// A press on the track's scroll (`DrivenScrollActivity`).
+/// A scroll over 100 ms (`DrivenScrollActivity`): a press on the track's
+/// page, or a text field's caret shown.
 #[derive(Debug, Clone, Copy)]
 struct Page {
     from: f32,
     to: f32,
     /// Its first frame, once it had one.
     start: Option<Instant>,
+    curve: Curve,
 }
 
 /// What the timer is told, the last word counting.
@@ -481,6 +488,9 @@ struct State {
     now: Option<Instant>,
     /// The keyboard's modifiers (Shift, for the wheel).
     modifiers: keyboard::Modifiers,
+    /// The text fields' request count it last looked at
+    /// (`text_field::show_on_screen`).
+    asked: u64,
 }
 
 /// `controller` is heading in or in (`isForwardOrCompleted`).
@@ -521,6 +531,7 @@ impl State {
             pixels: None,
             now: None,
             modifiers: keyboard::Modifiers::default(),
+            asked: show_on_screen::asked(),
         }
     }
 
@@ -671,7 +682,7 @@ impl State {
         let page = self.page.as_mut()?;
         let start = *page.start.get_or_insert(now);
         let t = (now.duration_since(start).as_secs_f32() / PAGE.as_secs_f32()).min(1.0);
-        let y = page.from + (page.to - page.from) * Curve::EaseInOut.transform(t);
+        let y = page.from + (page.to - page.from) * page.curve.transform(t);
         Some((y, t >= 1.0))
     }
 
@@ -926,6 +937,7 @@ impl<M> Widget<M, Theme, Renderer> for FadingScrollbar<'_, M> {
                                 from: pixels,
                                 to,
                                 start: None,
+                                curve: Curve::EaseInOut,
                             });
                             state.dirty = true;
                         }
@@ -1033,6 +1045,44 @@ impl<M> Widget<M, Theme, Renderer> for FadingScrollbar<'_, M> {
             );
             // What the event scrolled.
             state.observe(read(scrollable, child, layout, renderer), range);
+            // A text field inside asked to have its caret shown.
+            if state.asked != show_on_screen::asked() {
+                state.asked = show_on_screen::asked();
+                let mut take = show_on_screen::Take::default();
+                scrollable
+                    .as_widget_mut()
+                    .operate(child, layout, renderer, &mut take);
+                let content_top = layout
+                    .children()
+                    .next()
+                    .map_or(bounds.y, |content| content.bounds().y);
+                for request in take.0 {
+                    let pixels = state.pixels.unwrap_or(0.0);
+                    let Some(to) = show_on_screen::target(
+                        bounds.height,
+                        content_top,
+                        pixels,
+                        range,
+                        request.rect,
+                    ) else {
+                        continue;
+                    };
+                    if request.animate && (to - pixels).abs() >= near() {
+                        // `moveTo` over the caret's 100 ms.
+                        state.page = Some(Page {
+                            from: pixels,
+                            to,
+                            start: None,
+                            curve: Curve::FastOutSlowIn,
+                        });
+                        state.dirty = true;
+                    } else if to != pixels {
+                        state.page = None;
+                        scroll(scrollable, child, to);
+                        state.moved(to, true);
+                    }
+                }
+            }
         }
         if std::mem::take(&mut state.dirty) {
             shell.request_redraw();
@@ -1614,5 +1664,70 @@ mod tests {
         window.frame_still(view(201.0), &[], t1 + 616 * MS);
         window.frame_still(view(201.0), &[], t1 + 1000 * MS);
         assert!(near(window.pixel(thumb_at(201.0)), BACKGROUND), "faded");
+    }
+
+    #[test]
+    fn a_text_field_inside_has_its_caret_shown_with_its_scroll_padding() {
+        use crate::ui::core::widgets::focus_traversal::focus_scope;
+        use crate::ui::core::widgets::text_field::text_input;
+        use iced::keyboard::{self, key::Named};
+
+        // Two 14 px fields 300 apart in a 100 px view, room below them.
+        let field = || {
+            text_input("", "text")
+                .on_input(|_| -1.0)
+                .size(14)
+                .line_height(1.0)
+                .padding(0)
+        };
+        let view = || -> Element<'_, f32> {
+            focus_scope(fading_scrollbar(
+                scrollable(column![
+                    field(),
+                    Space::new().height(300),
+                    field(),
+                    Space::new().height(100)
+                ])
+                .width(100)
+                .height(100),
+            ))
+        };
+        let tab = || iced_test::simulator::press_key(keyboard::Key::Named(Named::Tab), None);
+        let mut window = window();
+        let offset = |window: &mut Frames| {
+            let mut read = Read::default();
+            window.operate(view(), &mut read);
+            read.0.expect("a scrollable")
+        };
+        let t0 = Instant::now();
+        window.frame(view(), &[tab()], t0);
+        window.frame(view(), &[], t0 + 16 * MS);
+        window.frame(view(), &[], t0 + 200 * MS);
+        assert_eq!(offset(&mut window), 0.0, "the first is in view");
+
+        // Tab to the second: at once its text box ends at the view's
+        // bottom (`ensureVisible`); after its frame, the view runs on over
+        // 100 ms until its selection's line (Tab selected all its text) and
+        // 24 px of scroll padding below it show.
+        let t1 = t0 + 300 * MS;
+        window.frame(view(), &[tab()], t1);
+        assert_eq!(offset(&mut window), 314.0 + 14.0 - 100.0);
+        window.frame(view(), &[], t1 + 16 * MS);
+        assert_eq!(offset(&mut window), 228.0, "the run's first frame");
+        window.frame(view(), &[], t1 + 66 * MS);
+        // (The scroll view draws on whole pixels.)
+        let half = 228.0 + 24.0 * Curve::FastOutSlowIn.transform(0.5);
+        assert_eq!(offset(&mut window), half.round());
+        window.frame(view(), &[], t1 + 116 * MS);
+        assert_eq!(offset(&mut window), 314.0 + 14.0 + 24.0 - 100.0);
+
+        // Round to the first, above the view: `ensureVisible` going forward
+        // leaves it; its caret's reveal brings the view back to the top.
+        let t2 = t1 + 300 * MS;
+        window.frame(view(), &[tab()], t2);
+        assert_eq!(offset(&mut window), 252.0);
+        window.frame(view(), &[], t2 + 16 * MS);
+        window.frame(view(), &[], t2 + 116 * MS);
+        assert_eq!(offset(&mut window), 0.0);
     }
 }

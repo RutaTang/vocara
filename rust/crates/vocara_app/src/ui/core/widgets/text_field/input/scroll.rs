@@ -31,6 +31,10 @@
 //!   at its end); a run that would cross an end stops there.
 //! - **A wheel or a trackpad** scrolls it by the horizontal delta
 //!   (`pointerScroll`), within the range.
+//!
+//! Each reveal also asks the scroll view around the field to show the
+//! caret, as `RenderEditable.showOnScreen` did (see
+//! [`show_on_screen`](super::super::show_on_screen)).
 
 use iced::time::{Duration, Instant};
 use iced::Rectangle;
@@ -215,20 +219,23 @@ impl Scroll {
     }
 
     /// Runs a reveal whose frame has been drawn: anything happening now
-    /// comes after it. `x` is the caret's glyph edge.
-    pub fn flush(&mut self, geometry: &Geometry, x: f32) {
-        if let Some(PostFrame {
+    /// comes after it. `x` is the caret's glyph edge. Which reveal ran, if
+    /// one did.
+    pub fn flush(&mut self, geometry: &Geometry, x: f32) -> Option<Reveal> {
+        let Some(PostFrame {
             reveal,
             drawn: true,
         }) = self.post_frame
-        {
-            self.post_frame = None;
-            let to = self.reveal_target(geometry, x);
-            match reveal {
-                Reveal::Animate => self.animate_to(to),
-                Reveal::Jump => self.jump_to(to),
-            }
+        else {
+            return None;
+        };
+        self.post_frame = None;
+        let to = self.reveal_target(geometry, x);
+        match reveal {
+            Reveal::Animate => self.animate_to(to),
+            Reveal::Jump => self.jump_to(to),
         }
+        Some(reveal)
     }
 
     /// `pointerScroll(delta)`: by `delta` within the range, any run

@@ -67,6 +67,7 @@
 pub mod caret;
 pub mod editor;
 pub mod input;
+pub mod show_on_screen;
 pub mod toolbar;
 
 pub use caret::set_scale_factor;

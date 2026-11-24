@@ -169,6 +169,22 @@ impl Frames {
         (more, messages)
     }
 
+    /// Runs `operation` over `view`, as the last frame left it.
+    pub fn operate<'a, M>(
+        &mut self,
+        view: impl Into<Element<'a, M>>,
+        operation: &mut dyn iced::advanced::widget::Operation,
+    ) {
+        let mut ui = UserInterface::build(
+            view,
+            self.size,
+            std::mem::take(&mut self.cache),
+            &mut self.renderer,
+        );
+        ui.operate(&self.renderer, operation);
+        self.cache = ui.into_cache();
+    }
+
     /// The cursor the last frame asked for under the pointer.
     pub fn interaction(&self) -> mouse::Interaction {
         self.interaction

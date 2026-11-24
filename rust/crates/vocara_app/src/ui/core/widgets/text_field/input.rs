@@ -46,6 +46,7 @@ pub use cursor::Cursor;
 use editor::Editor;
 use scroll::{Geometry, Reveal, Scroll};
 
+use super::show_on_screen::{self, Request};
 use super::toolbar::{self, Item};
 use super::{caret, DEFAULT_CARET};
 
@@ -460,7 +461,7 @@ impl<Message> toolbar::Field<Message> for Menu<'_, Message> {
                     );
                     // `copySelection(toolbar)`'s `bringIntoView`.
                     let x = extent_x(state, self.value);
-                    state.scroll.bring_into_view(&self.geometry, x);
+                    bring_into_view(state, &self.geometry, x);
                 }
             }
             Item::Cut => {
@@ -620,9 +621,9 @@ impl<'a, Message: Clone + 'a> Widget<Message, Theme, Renderer> for TextInput<'a,
             // A reveal whose frame has been drawn ran at that frame's end,
             // before this.
             let state = state(tree);
-            let geometry = geometry(state, layout);
-            let x = extent_x(state, &self.value);
-            state.scroll.flush(&geometry, x);
+            // What the views around took is gone; what they did not, stale.
+            state.requests.clear();
+            flush_reveal(state, layout, &self.value);
         }
 
         match &event {
@@ -794,7 +795,7 @@ impl<'a, Message: Clone + 'a> Widget<Message, Theme, Renderer> for TextInput<'a,
                     if cursor_before != state.cursor {
                         let geometry = geometry(state, layout);
                         let x = extent_x(state, &value);
-                        state.scroll.bring_into_view(&geometry, x);
+                        bring_into_view(state, &geometry, x);
                         shell.request_redraw();
                     }
 
@@ -911,7 +912,7 @@ impl<'a, Message: Clone + 'a> Widget<Message, Theme, Renderer> for TextInput<'a,
                             // `_updateSelection`'s `bringIntoView`.
                             let geometry = geometry(state, layout);
                             let x = extent_x(state, &self.value);
-                            state.scroll.bring_into_view(&geometry, x);
+                            bring_into_view(state, &geometry, x);
 
                             shell.capture_event();
                             return;
@@ -1023,7 +1024,7 @@ impl<'a, Message: Clone + 'a> Widget<Message, Theme, Renderer> for TextInput<'a,
                             // `scrollToBeginningOfDocument:`: the text
                             // scrolls to its start; the caret stays.
                             let geometry = geometry(state, layout);
-                            state.scroll.bring_into_view(&geometry, glyph_x(state, 0));
+                            bring_into_view(state, &geometry, glyph_x(state, 0));
                             shell.request_redraw();
                             shell.capture_event();
                         }
@@ -1033,7 +1034,7 @@ impl<'a, Message: Clone + 'a> Widget<Message, Theme, Renderer> for TextInput<'a,
                             // `scrollToEndOfDocument:`.
                             let geometry = geometry(state, layout);
                             let end = glyph_x(state, self.value.len());
-                            state.scroll.bring_into_view(&geometry, end);
+                            bring_into_view(state, &geometry, end);
                             shell.request_redraw();
                             shell.capture_event();
                         }
@@ -1056,7 +1057,7 @@ impl<'a, Message: Clone + 'a> Widget<Message, Theme, Renderer> for TextInput<'a,
 
                             let geometry = geometry(state, layout);
                             let x = extent_x(state, &self.value);
-                            state.scroll.bring_into_view(&geometry, x);
+                            bring_into_view(state, &geometry, x);
 
                             shell.capture_event();
                         }
@@ -1080,7 +1081,7 @@ impl<'a, Message: Clone + 'a> Widget<Message, Theme, Renderer> for TextInput<'a,
 
                             let geometry = geometry(state, layout);
                             let x = extent_x(state, &self.value);
-                            state.scroll.bring_into_view(&geometry, x);
+                            bring_into_view(state, &geometry, x);
 
                             shell.capture_event();
                         }
@@ -1115,7 +1116,7 @@ impl<'a, Message: Clone + 'a> Widget<Message, Theme, Renderer> for TextInput<'a,
 
                             let geometry = geometry(state, layout);
                             let x = extent_x(state, &self.value);
-                            state.scroll.bring_into_view(&geometry, x);
+                            bring_into_view(state, &geometry, x);
 
                             shell.capture_event();
                         }
@@ -1151,7 +1152,7 @@ impl<'a, Message: Clone + 'a> Widget<Message, Theme, Renderer> for TextInput<'a,
 
                             let geometry = geometry(state, layout);
                             let x = extent_x(state, &self.value);
-                            state.scroll.bring_into_view(&geometry, x);
+                            bring_into_view(state, &geometry, x);
 
                             shell.capture_event();
                         }
@@ -1270,6 +1271,8 @@ impl<'a, Message: Clone + 'a> Widget<Message, Theme, Renderer> for TextInput<'a,
             Event::Window(window::Event::RedrawRequested(now)) => {
                 let state = state(tree);
 
+                state.requests.clear();
+                flush_reveal(state, layout, &self.value);
                 let geometry = geometry(state, layout);
                 let x = extent_x(state, &self.value);
                 if state.scroll.frame(*now, &geometry, x) {
@@ -1402,6 +1405,9 @@ pub struct State {
     toolbar: Option<toolbar::State>,
     /// The text's horizontal scroll.
     scroll: Scroll,
+    /// What it asks the scroll view around it to show
+    /// (`show_on_screen`).
+    pub(super) requests: Vec<Request>,
     /// It cannot be edited (`enabled: false`): it takes no focus from the
     /// keyboard's traversal.
     disabled: bool,
@@ -1570,6 +1576,54 @@ fn geometry(state: &State, layout: Layout<'_>) -> Geometry {
         bounds: text_bounds(layout),
         text_width: state.value.raw().min_width(),
     }
+}
+
+/// `bringIntoView`: the text scrolls at once to show the caret at the
+/// glyph edge `x`, and asks the view around it to show the bare caret at
+/// once (`renderEditable.showOnScreen(rect: targetOffset.rect)`).
+fn bring_into_view(state: &mut State, geometry: &Geometry, x: f32) {
+    state.scroll.bring_into_view(geometry, x);
+    let rect = caret_box(geometry.bounds, true);
+    ask(state, rect, false);
+}
+
+/// A reveal whose frame has been drawn runs (`_scheduleShowCaretOnScreen`
+/// after its frame): the text scrolls to the caret, and the view around it
+/// is asked to show the caret (or the selection's line) with the field's
+/// scroll padding over the animation; after a post-frame `bringIntoView`
+/// (the menu's Cut and Paste), the bare caret at once as well.
+fn flush_reveal(state: &mut State, layout: Layout<'_>, value: &Value) {
+    let geometry = geometry(state, layout);
+    let x = extent_x(state, value);
+    let Some(reveal) = state.scroll.flush(&geometry, x) else {
+        return;
+    };
+    let collapsed = state.cursor.selection(value).is_none();
+    let line = caret_box(geometry.bounds, collapsed);
+    ask(state, line.expand(show_on_screen::CARET_PADDING), true);
+    if reveal == Reveal::Jump {
+        ask(state, caret_box(geometry.bounds, true), false);
+    }
+}
+
+/// The caret's rectangle down the text box `bounds` (a pixel above and
+/// below the line), or the selection's line box; across, the box.
+fn caret_box(bounds: Rectangle, caret: bool) -> Rectangle {
+    if caret {
+        bounds.expand(Padding {
+            top: caret::OVERHANG,
+            bottom: caret::OVERHANG,
+            ..Padding::ZERO
+        })
+    } else {
+        bounds
+    }
+}
+
+/// Leaves `rect` for the scroll view around the field to show.
+fn ask(state: &mut State, rect: Rectangle, animate: bool) {
+    state.requests.push(Request { rect, animate });
+    show_on_screen::ask();
 }
 
 /// The glyph edge of the selection's moving end (`selection.extent`).

@@ -54,6 +54,7 @@ pub use iced::widget::text_editor::{
     Action, Cursor, Edit, Line, LineEnding, Motion, Position, Selection,
 };
 
+use super::show_on_screen::{self, Request};
 use super::toolbar::{self, Item};
 use super::{caret, DEFAULT_CARET};
 
@@ -208,6 +209,28 @@ impl<'a, Message> TextEditor<'a, Message> {
     /// Whether it takes no input: not editable, not selectable.
     fn is_disabled(&self) -> bool {
         self.on_edit.is_none() && !self.read_only
+    }
+
+    /// The caret's rectangle down the text (a pixel above and below its
+    /// line), or the selection's last line box; across, the text box: in
+    /// layout coordinates, what the view around is asked to show.
+    fn caret_line(&self, layout: Layout<'_>, renderer: &Renderer) -> Rectangle {
+        let text_bounds = layout.bounds().shrink(self.padding);
+        let line = self.line_height_px(renderer);
+        let internal = self.content.0.borrow();
+        let (top, height) = match internal.editor.selection() {
+            Selection::Caret(position) => {
+                (position.y - caret::OVERHANG, line + 2.0 * caret::OVERHANG)
+            }
+            Selection::Range(ranges) => ranges
+                .last()
+                .map_or((0.0, line), |range| (range.y, range.height)),
+        };
+        Rectangle {
+            y: text_bounds.y + top,
+            height,
+            ..text_bounds
+        }
     }
 
     fn line_height_px(&self, renderer: &Renderer) -> f32 {
@@ -511,6 +534,13 @@ pub struct State {
     /// It can be neither edited nor selected from: it takes no focus from
     /// the keyboard's traversal.
     disabled: bool,
+    /// The keyboard's traversal focused it: after the frame that shows it,
+    /// the view around it is asked to show its caret (`true` once that
+    /// frame has been drawn).
+    reveal: Option<bool>,
+    /// What it asks the scroll view around it to show
+    /// (`show_on_screen`).
+    pub(super) requests: Vec<Request>,
 }
 
 #[derive(Debug, Clone)]
@@ -561,9 +591,12 @@ impl crate::ui::core::widgets::focus_traversal::Traversable for State {
         self.focus.is_some()
     }
 
-    /// Focused from elsewhere: a multi-line field keeps its selection.
+    /// Focused from elsewhere: a multi-line field keeps its selection,
+    /// and the view around it shows its caret after the frame
+    /// (`_handleFocusChanged`'s `_scheduleShowCaretOnScreen`).
     fn focus_by_traversal(&mut self) {
         self.focus = Some(Focus::now());
+        self.reveal = Some(false);
     }
 
     fn unfocus_by_traversal(&mut self) {
@@ -766,6 +799,26 @@ impl<Message> Widget<Message, Theme, Renderer> for TextEditor<'_, Message> {
 
         let state = tree.state.downcast_mut::<State>();
         let is_redraw = matches!(event, Event::Window(window::Event::RedrawRequested(_now)),);
+        // What the views around took is gone; what they did not, stale.
+        state.requests.clear();
+        if is_redraw {
+            match state.reveal {
+                Some(false) => {
+                    state.reveal = Some(true);
+                    shell.request_redraw();
+                }
+                Some(true) => {
+                    state.reveal = None;
+                    let rect = self.caret_line(layout, renderer);
+                    state.requests.push(Request {
+                        rect: rect.expand(show_on_screen::CARET_PADDING),
+                        animate: true,
+                    });
+                    show_on_screen::ask();
+                }
+                None => {}
+            }
+        }
 
         match event {
             Event::Window(window::Event::Unfocused) => {

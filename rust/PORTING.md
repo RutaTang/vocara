@@ -226,7 +226,12 @@ structure every screen follows, so screens ported by different hands fit:
   coming, at once for a keyboard move or a drag of the selection; it stays
   where it is while the field is unfocused, Home and End only scroll on
   macOS (`scrollToBeginningOfDocument:`), and a wheel's or trackpad's
-  horizontal delta scrolls it. A press of any button outside a field
+  horizontal delta scrolls it. As a field reveals its caret, the scroll
+  view around it (a `.fading()` one) shows the caret too
+  (`text_field::show_on_screen`, `RenderObject.showOnScreen`): with the
+  field's 20 px `scrollPadding` (24 below) over the same 100 ms after an
+  edit or the focus coming, bare and at once for a keyboard move. A press
+  of any button outside a field
   unfocuses it, as `TextFieldTapRegion` did. Tab and Shift+Tab move the
   focus to the next and the previous field (`widgets::focus_traversal`):
   within the top page, a dialog or an overlay holding the keyboard (each a
