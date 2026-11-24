@@ -286,31 +286,77 @@ mod macos {
         }
     }
 
+    /// Whether `next`, dequeued, is the event `sent` was posted as. Not by
+    /// timestamp: AppKit keeps a made event's time in its CGEvent, in whole
+    /// nanoseconds, so the seconds read back after the queue need not be the
+    /// same double (macOS 26 runner: the posted ⌘C was dispatched, then not
+    /// recognized). By what the event says instead.
+    fn same_event(next: &NSEvent, sent: &NSEvent) -> bool {
+        if next.r#type() != sent.r#type() {
+            return false;
+        }
+        match sent.r#type() {
+            NSEventType::KeyDown | NSEventType::KeyUp => {
+                next.keyCode() == sent.keyCode()
+                    && next.characters().map(|c| c.to_string())
+                        == sent.characters().map(|c| c.to_string())
+                    && (next.modifierFlags() & NSEventModifierFlags::DeviceIndependentFlagsMask)
+                        == (sent.modifierFlags() & NSEventModifierFlags::DeviceIndependentFlagsMask)
+            }
+            NSEventType::ApplicationDefined => {
+                next.subtype() == sent.subtype() && next.data1() == sent.data1()
+            }
+            _ => close_in_time(next.timestamp(), sent.timestamp()),
+        }
+    }
+
+    /// Two event times that are the same instant, as AppKit hands them back.
+    fn close_in_time(a: f64, b: f64) -> bool {
+        (a - b).abs() < 1e-3
+    }
+
     /// Sends `event` through the app as its run loop does: posted, dequeued
     /// (so it is `NSApp.currentEvent` while it is handled), then
-    /// `sendEvent:`, key equivalents first. Whether it went through.
-    fn dispatch(app: &NSApplication, event: &NSEvent) -> bool {
+    /// `sendEvent:`, key equivalents first. `Err` lists what came off the
+    /// queue instead, for the failure message.
+    fn dispatch(app: &NSApplication, event: &NSEvent) -> Result<(), String> {
         app.postEvent_atStart(event, false);
         let deadline = Instant::now() + Duration::from_secs(5);
+        let mut seen = Vec::new();
         while Instant::now() < deadline {
             let Some(next) = pump_once(app, 0.1) else {
                 continue;
             };
-            if next.r#type() == event.r#type() && next.timestamp() == event.timestamp() {
-                return true;
+            if same_event(&next, event) {
+                return Ok(());
+            }
+            if seen.len() < 20 {
+                seen.push(format!(
+                    "{:?} at {:.6} (sent at {:.6})",
+                    next.r#type(),
+                    next.timestamp(),
+                    event.timestamp()
+                ));
             }
         }
-        false
+        Err(if seen.is_empty() {
+            "nothing came off the queue".to_string()
+        } else {
+            format!("dequeued instead: {}", seen.join("; "))
+        })
     }
 
-    /// A keyDown of `key` with ⌘ for `window` (the ANSI key code given).
+    /// A keyDown of `key` with ⌘ for `window` (the ANSI key code given). Its
+    /// time is 100 s in the past, so a keyDown the edit target made afresh
+    /// (stamped now) cannot pass for it: only the event sent itself is within
+    /// a millisecond of it.
     fn command_key(key: &str, code: u16, window: &NSWindow) -> Retained<NSEvent> {
         let chars = NSString::from_str(key);
         NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
             NSEventType::KeyDown,
             NSPoint::ZERO,
             NSEventModifierFlags::Command,
-            uptime(),
+            uptime() - 100.0,
             window.windowNumber(),
             None,
             &chars,
@@ -325,9 +371,9 @@ mod macos {
     /// through the queue; returns the event sent.
     fn press(app: &NSApplication, key: &str, code: u16, window: &NSWindow) -> Retained<NSEvent> {
         let event = command_key(key, code, window);
-        if !dispatch(app, &event) {
+        if let Err(seen) = dispatch(app, &event) {
             fatal(&format!(
-                "the posted ⌘{key} keyDown never came back from the queue"
+                "the posted ⌘{key} keyDown never came back from the queue ({seen})"
             ));
         }
         event
@@ -336,6 +382,9 @@ mod macos {
     /// Makes `NSApp.currentEvent` an event that is not a key event, as
     /// during a click on a menu item.
     fn no_key_event_current(app: &NSApplication) {
+        // Each one tagged (`data1`), so `same_event` finds this one.
+        static TAG: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(1);
+        let tag = TAG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let event = NSEvent::otherEventWithType_location_modifierFlags_timestamp_windowNumber_context_subtype_data1_data2(
             NSEventType::ApplicationDefined,
             NSPoint::ZERO,
@@ -344,12 +393,14 @@ mod macos {
             0,
             None,
             0,
-            0,
+            tag,
             0,
         )
         .unwrap_or_else(|| fatal("could not make an application-defined event"));
-        if !dispatch(app, &event) {
-            fatal("the posted application-defined event never came back from the queue");
+        if let Err(seen) = dispatch(app, &event) {
+            fatal(&format!(
+                "the posted application-defined event never came back from the queue ({seen})"
+            ));
         }
     }
 
@@ -540,8 +591,13 @@ mod macos {
             checks.check(title_ok, format!("{name} is \"{item_title}\""));
             let item_key = item.keyEquivalent().to_string();
             let item_mask = item.keyEquivalentModifierMask();
+            // macOS 26 gives the standard full-screen item the system's own
+            // shortcut, fn-F (Globe-F), in every app (Flutter's included):
+            // AppKit rewrote the xib's ⌃⌘F on the CI runner.
+            let system_full_screen =
+                name == "toggleFullScreen:" && item_mask == NSEventModifierFlags::Function;
             checks.check(
-                item_key == key && item_mask == mask,
+                item_key == key && (item_mask == mask || system_full_screen),
                 format!("\"{item_title}\" has key \"{item_key}\" with {item_mask:?}, the xib's {mask:?} {key}"),
             );
             if matches!(name, "cut:" | "copy:" | "paste:" | "selectAll:") {
@@ -598,7 +654,7 @@ mod macos {
             checks.check(
                 downs
                     .first()
-                    .is_some_and(|down| down.time == sent.timestamp()),
+                    .is_some_and(|down| close_in_time(down.time, sent.timestamp())),
                 format!("⌘{key} reaches the view as the keyDown that was sent"),
             );
         }
