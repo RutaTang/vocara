@@ -78,9 +78,12 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
     "std",
     "NSApplication",
     "NSEvent",
+    # NSEvent's key-event constructor (the menu's edit target).
+    "NSGraphicsContext",
     "NSMenu",
     "NSMenuItem",
     "NSResponder",
+    "NSWindow",
 ] }
 # Not only with `device`: the menu bar needs it too.
 objc2-foundation = { version = "0.3", default-features = false, features = [
