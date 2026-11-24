@@ -918,3 +918,58 @@ fn cut_without_a_selection_cuts_nothing() {
     let (messages, _) = window.run(field("abc"), at, &[command(), typed("x")], t0 + 16 * MS);
     assert_eq!(messages, vec![]);
 }
+
+// --------------------------------------------------- the toolbar's look
+
+#[test]
+fn the_toolbar_fills_its_superellipse_seventy_percent_over_what_lies_behind() {
+    let mut window = window();
+    let value = "alpha beta";
+    let anchor = Point::new(TEXT_X + 3.0, MIDDLE);
+    // The menu away from the pointer: nothing hovered.
+    window.run(field(value), anchor, &right_click(), Instant::now());
+    window.run(field(value), Point::new(390.0, 190.0), &[], Instant::now());
+    let menu = toolbar::place(anchor, toolbar::size(2), window.size);
+    // Past the labels, on the box's middle and between its items: the
+    // 70 % fill over the window's black (and the shadow's black under it).
+    let x = (menu.x + toolbar::WIDTH - 20.0) as u32;
+    let y = (menu.y + toolbar::PADDING + toolbar::item_height()) as u32;
+    assert!(near(
+        window.pixel(x, y),
+        over(toolbar::BACKGROUND, BACKGROUND)
+    ));
+    // The corner itself is outside the shape: the window's.
+    let corner = window.pixel(menu.x as u32, menu.y as u32);
+    assert!(!near(corner, toolbar::BORDER), "{corner:?}");
+}
+
+/// The macOS system UI font Flutter set the labels in, on macOS, where the
+/// font system loads `/System/Library/Fonts`: its face is there, under a
+/// family name (a hidden one, `.SF NS`) that a query by that name finds.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_system_ui_font_is_reachable_by_its_family_name() {
+    use iced::advanced::graphics::text::cosmic_text::fontdb::{Family, Query, Source};
+    use iced::advanced::graphics::text::font_system;
+    let mut fonts = font_system().write().expect("the font system");
+    let db = fonts.raw().db();
+    let path = |source: &Source| match source {
+        Source::File(path) | Source::SharedFile(path, _) => Some(path.clone()),
+        Source::Binary(_) => None,
+    };
+    let sf = db
+        .faces()
+        .find(|face| {
+            path(&face.source).is_some_and(|p| p.ends_with("System/Library/Fonts/SFNS.ttf"))
+        })
+        .expect("SFNS.ttf, the system UI font, loaded from /System/Library/Fonts");
+    let family = sf.families[0].0.clone();
+    let found = db
+        .query(&Query {
+            families: &[Family::Name(&family)],
+            ..Query::default()
+        })
+        .and_then(|id| db.face(id))
+        .expect("a face of the family");
+    assert_eq!(path(&found.source), path(&sf.source), "{family}");
+}

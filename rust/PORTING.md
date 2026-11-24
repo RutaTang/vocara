@@ -346,12 +346,15 @@ small and written down in the module that has it:
   waited out the gesture arena (to the release, or 100 ms) when a
   recognizer above the view wanted the press too: iced has no arena
   (`fading_scrollbar`).
-- A text field's right-click toolbar (`text_field::toolbar`) shows what
-  lies behind it unblurred and unsaturated (Flutter's `BackdropFilter`;
-  iced has no backdrop filter), its shadow without its 0.5 px spread, its
-  corners as circular arcs, not superellipses, and its labels in Inter at
-  Inter's natural line height, where Flutter set them in the system UI
-  font (iced cannot name that hidden family).
+- A text field's right-click toolbar (`text_field::toolbar`, its
+  superellipse corners and its shadow's spread Flutter's) shows what lies
+  behind it unblurred and unsaturated (Flutter's `BackdropFilter`; iced
+  has no backdrop filter), its shadow faded on iced's curve, not a
+  Gaussian, and its labels in Inter at Inter's natural line height, where
+  Flutter set them in the macOS system UI font: the font system reaches
+  that face by its hidden family name, but cosmic-text varies a face
+  along its weight axis alone, so it would draw the variable system font
+  at its default optical size, not the 14 px one CoreText set.
 
 ## Tracking
 
