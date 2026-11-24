@@ -9,6 +9,7 @@ pub mod stable_subtree;
 pub mod studio_button;
 pub mod studio_controls;
 pub mod studio_hint;
+pub mod studio_text;
 pub mod tick_boundary;
 pub mod visible_drop_target;
 pub mod waveform_painter;
