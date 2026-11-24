@@ -28,7 +28,10 @@
 //! set actually changed). Toasts (Dart's floating SnackBars) and the license
 //! page (a `MaterialPageRoute` pushed over Settings) draw inside the page,
 //! under the window drag bar; the studio dialogs (the repair confirmation,
-//! the update download dialog) go through the app's dialog stack.
+//! the update download dialog) go through the app's dialog stack. A toast
+//! still up when Settings leaves stays up over Home for the time it has left
+//! (the app's, `app::messenger`), as under Dart's app-wide
+//! `ScaffoldMessenger`.
 //!
 //! Flutter's Material slider and switch are drawn here with iced's slider and
 //! a switch built to Material 3's geometry, without their hover/press
@@ -36,11 +39,12 @@
 //! and the switch's semantics label has no counterpart.
 
 use std::collections::VecDeque;
+use std::convert::Infallible;
 use std::hash::{Hash, Hasher};
 use std::io;
 use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use iced::alignment::{Horizontal, Vertical};
 use iced::border::Radius;
@@ -71,7 +75,7 @@ use crate::ui::core::theme::{self, alpha, bare_button, boxed, font, Studio, Zinc
 use crate::ui::core::widgets::confirm_dialog::ConfirmDialog;
 use crate::ui::core::widgets::studio_hint::spinner;
 use crate::ui::home::widgets::update_notice::UpdateDownloadDialog;
-use crate::ui::{Screen, Update};
+use crate::ui::{Screen, SnackBar, Update};
 use crate::util::to_string_as_fixed;
 
 /// How often the device lists are re-read while Settings is open.
@@ -369,6 +373,8 @@ pub enum Message {
 struct Toast {
     seq: u64,
     text: String,
+    /// Since when it has shown.
+    since: Instant,
 }
 
 // ------------------------------------------------------------------ screen
@@ -573,6 +579,7 @@ impl SettingsScreen {
         self.toast = Some(Toast {
             seq: self.toasts,
             text: text.into(),
+            since: Instant::now(),
         });
     }
 
@@ -831,6 +838,17 @@ impl Screen for SettingsScreen {
         if let Err(e) = spawned {
             DiagnosticsLog::instance().log("settings", &format!("flush failed: {e}"));
         }
+    }
+
+    /// The toast, for the time it has left; it replaced the ones before it.
+    fn take_snack_bars(&mut self) -> Vec<SnackBar> {
+        let Some(toast) = self.toast.take() else {
+            return Vec::new();
+        };
+        let look = toast_bar::<Infallible>;
+        SnackBar::showing(toast.text, TOAST_DURATION, toast.since, true, look)
+            .into_iter()
+            .collect()
     }
 
     fn view(&self) -> Element<'_, Message> {
@@ -1689,8 +1707,9 @@ fn info_row<'a>(icon: Icon, title: &'a str, subtitle: String) -> Element<'a, Mes
 
 /// The result toast (home's SnackBar pattern): floating 16 in from the
 /// page's edges at its bottom, `Studio.surfaceRaised`, radius 8,
-/// `Studio.border`, 13 px text.
-fn toast_bar(message: &str) -> Element<'_, Message> {
+/// `Studio.border`, 13 px text. (Of any message type: the app draws it too,
+/// once the page has handed it over.)
+fn toast_bar<M: 'static>(message: &str) -> Element<'_, M> {
     let bar = container(text(message).size(13).color(Studio::TEXT_PRIMARY))
         .width(Length::Fill)
         .padding(Padding::from([14, 16]))

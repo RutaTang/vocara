@@ -22,11 +22,18 @@
 //! and the SnackBar. The studio dialogs (new practice, delete confirmation,
 //! update download) go through the app's dialog stack and cover the whole
 //! window, as Flutter's dialog routes did.
+//!
+//! The toast is the page's own while Home is on top and the app shows none;
+//! a page Home pushes takes it over (the app keeps it up over that page,
+//! `app::messenger`), and a toast Home shows while the app shows one
+//! replaces that one (`clearSnackBars`), as under Dart's app-wide
+//! `ScaffoldMessenger`.
 
 use std::collections::VecDeque;
+use std::convert::Infallible;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use iced::alignment::{Horizontal, Vertical};
 use iced::futures::{stream, Stream, StreamExt};
@@ -52,7 +59,7 @@ use crate::ui::core::theme::{self, alpha, bare_button, boxed, font, Studio};
 use crate::ui::core::widgets::confirm_dialog::ConfirmDialog;
 use crate::ui::core::widgets::studio_button::{studio_button, StudioButtonVariant};
 use crate::ui::core::widgets::studio_hint::spinner;
-use crate::ui::{Screen, Update};
+use crate::ui::{Screen, SnackBar, Update};
 
 /// How long after home mounts the once-per-run update auto-check fires: a
 /// beat later, so it never competes with first paint.
@@ -164,6 +171,8 @@ struct Opening {
 struct Snack {
     seq: u64,
     text: String,
+    /// Since when it has shown.
+    since: Instant,
 }
 
 /// The home page (see the module docs).
@@ -308,6 +317,7 @@ impl HomeScreen {
         self.snack = Some(Snack {
             seq: self.snacks,
             text: message.to_string(),
+            since: Instant::now(),
         });
     }
 
@@ -544,6 +554,17 @@ impl Screen for HomeScreen {
     fn dispose(&mut self, _services: &Services) {
         self.vm.dispose();
     }
+
+    /// The toast, for the time it has left; it replaced the ones before it.
+    fn take_snack_bars(&mut self) -> Vec<SnackBar> {
+        let Some(snack) = self.snack.take() else {
+            return Vec::new();
+        };
+        let look = snack_bar::<Infallible>;
+        SnackBar::showing(snack.text, SNACK_DURATION, snack.since, true, look)
+            .into_iter()
+            .collect()
+    }
 }
 
 /// A timer's one-shot stream: its message after its delay, then nothing.
@@ -742,7 +763,9 @@ fn opening_dialog<'a>() -> Element<'a, Message> {
 
 /// The failure toast: a floating SnackBar 16 in from the page's edges at its
 /// bottom, `Studio.surfaceRaised`, radius 8, `Studio.border`, 13 px text.
-fn snack_bar(message: &str) -> Element<'_, Message> {
+/// (Of any message type: the app draws it too, once the page has handed it
+/// over.)
+fn snack_bar<M: 'static>(message: &str) -> Element<'_, M> {
     let bar = container(text(message).size(13).color(Studio::TEXT_PRIMARY))
         .width(Length::Fill)
         .padding(Padding::from([14, 16]))
