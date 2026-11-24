@@ -360,19 +360,14 @@ pub const TOOLTIP_PADDING: [f32; 2] = [4.0, 8.0];
 /// Material 3 tooltip text: `bodySmall`, forui `typography.xs` (12 px).
 pub const TOOLTIP_TEXT_SIZE: f32 = 12.0;
 
-/// A floating snack bar on [`background`] (the screens pass
-/// `Studio.surfaceRaised`; Material's default is the inverse surface):
-/// Material 3's floating shape, radius 4.
-pub fn snack_bar(background: Color) -> impl Fn(&Theme) -> container::Style {
-    move |_| container::Style {
-        shadow: Shadow {
-            color: Color::from_rgba8(0, 0, 0, 0.4),
-            offset: Vector::new(0.0, 3.0),
-            blur_radius: 8.0,
-        },
-        ..boxed(Some(background), 4.0, None)
-    }
-}
+/// A snack bar's corner radius when it sets no shape of its own: forui's
+/// `snackBarTheme` gives every snack bar, fixed or floating,
+/// `RoundedRectangleBorder(borderRadius: style.borderRadius)` (no border
+/// side), which `SnackBar` takes before Material 3's own defaults (a
+/// floating radius 4, a square fixed bar). forui's radius is
+/// `FLerpBorderRadius.all(Radius.circular(8), min: 24)`: 8 on a box at
+/// least 24 tall, which every snack bar is.
+pub const SNACK_BAR_RADIUS: f32 = 8.0;
 
 /// Material 3's default snack-bar colors under the zinc scheme.
 pub const SNACK_BAR_DEFAULT_BACKGROUND: Color = Zinc::FOREGROUND;

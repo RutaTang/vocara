@@ -13,7 +13,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use iced::keyboard::{self, key::Named};
-use iced::{mouse, Point, Rectangle, Size};
+use iced::{mouse, Color, Point, Rectangle, Size};
 use iced_test::selector::{Candidate, Target};
 use iced_test::Simulator;
 use vocara_model::config::environment::AppEnvironment;

@@ -255,3 +255,20 @@ fn a_fixed_snack_bar_is_drawn_revealed_from_the_bottom_edge() {
         "end: all of it"
     );
 }
+
+#[test]
+fn a_fixed_snack_bar_has_forui_s_rounded_corners() {
+    use crate::ui::core::widgets::animated::testing::BACKGROUND;
+    // forui's snackBarTheme shape: radius 8, no border side.
+    let mut window = Frames::new(Size::new(200.0, 60.0));
+    window.frame(fixed_bar("Saved", 1.0), &[], Instant::now());
+    let bar = theme::SNACK_BAR_DEFAULT_BACKGROUND;
+    let at = |x: f32, y: f32| window.pixel(Point::new(x, y));
+    // The corners' 8 px arcs leave their outermost pixels unpainted...
+    assert!(near(at(0.0, 0.0), BACKGROUND), "{:?}", at(0.0, 0.0));
+    assert!(near(at(199.0, 0.0), BACKGROUND), "{:?}", at(199.0, 0.0));
+    // ... while the straight edges are the bar's, with no border.
+    assert!(near(at(0.0, 20.0), bar), "{:?}", at(0.0, 20.0));
+    assert!(near(at(100.0, 0.0), bar), "{:?}", at(100.0, 0.0));
+    assert!(near(at(8.0, 8.0), bar), "{:?}", at(8.0, 8.0));
+}

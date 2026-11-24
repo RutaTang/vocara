@@ -28,10 +28,14 @@ use iced::advanced::widget::{Operation, Tree};
 use iced::advanced::{renderer, Clipboard, Renderer as _, Shell, Widget};
 use iced::alignment::Vertical;
 use iced::time::Instant;
-use iced::widget::{container, stack};
-use iced::{mouse, Element, Event, Length, Rectangle, Renderer, Size, Subscription, Theme};
+use iced::widget::{container, opaque, stack};
+use iced::{
+    mouse, Color, Element, Event, Length, Rectangle, Renderer, Shadow, Size, Subscription, Theme,
+    Vector,
+};
 
 use crate::ui::core::motion::{self, Controller, Curve};
+use crate::ui::core::theme;
 
 /// How long a snack bar takes to enter, and to leave
 /// (`_snackBarTransitionDuration`).
@@ -360,6 +364,35 @@ fn timer_stream(timer: &SnackTimer) -> impl iced::futures::Stream<Item = SnackEv
         SnackEvent::Expired(seq)
     })
     .chain(iced::futures::stream::pending())
+}
+
+/// Material 3's fixed snack bar with the text `message`, as a `SnackBar`
+/// with no shape, color or padding of its own drew it under forui's theme:
+/// the inverse surface, forui's rounded shape ([`theme::SNACK_BAR_RADIUS`]),
+/// 14 px text, 24 / 14 of padding, elevation 6. It takes its own taps. It
+/// slides rather than fades, so it is always opaque.
+pub fn fixed_bar(message: &str, _opacity: f32) -> Element<'_, Infallible> {
+    let bar = container(
+        crate::ui::core::text(message)
+            .size(14)
+            .line_height(1.0)
+            .color(theme::SNACK_BAR_DEFAULT_TEXT),
+    )
+    .width(Length::Fill)
+    .padding([14, 24])
+    .style(|_| container::Style {
+        shadow: Shadow {
+            color: Color::from_rgba8(0, 0, 0, 0.3),
+            offset: Vector::new(0.0, 3.0),
+            blur_radius: 6.0,
+        },
+        ..theme::boxed(
+            Some(theme::SNACK_BAR_DEFAULT_BACKGROUND),
+            theme::SNACK_BAR_RADIUS,
+            None,
+        )
+    });
+    opaque(bar)
 }
 
 /// How far in `bar` is at `now` on `controller`: `(opacity, height factor)`
