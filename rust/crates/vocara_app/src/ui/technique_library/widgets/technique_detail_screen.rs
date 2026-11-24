@@ -90,6 +90,7 @@ use crate::services::Services;
 use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::theme::{self, alpha, bare_button, boxed, font, Studio};
 use crate::ui::core::widgets::confirm_dialog::ConfirmDialog;
+use crate::ui::core::widgets::fading_scrollbar::Fading;
 use crate::ui::core::widgets::spectrogram_painter::{release_spectrogram_images, RenderRequest};
 use crate::ui::core::widgets::studio_button::{studio_button, StudioButtonVariant};
 use crate::ui::core::widgets::studio_hint::spinner;
@@ -1122,7 +1123,7 @@ impl TechniqueDetailScreen {
         scrollable(page)
             .width(Length::Fill)
             .height(Length::Fill)
-            .style(theme::scrollbar)
+            .fading()
             .into()
     }
 
@@ -1228,7 +1229,7 @@ impl TechniqueDetailScreen {
         }))
         .width(Length::Fill)
         .height(Length::Fill)
-        .style(theme::scrollbar)
+        .fading()
         .into()
     }
 }

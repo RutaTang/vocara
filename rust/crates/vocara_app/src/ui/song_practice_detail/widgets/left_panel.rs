@@ -72,8 +72,9 @@ use super::track_context_menu::{
     argb, menu_host, studio_menu, MenuAnchor, StudioMenuItem, MENU_ANCHOR_BELOW_DY,
 };
 use crate::ui::core::icons::{self, Icon};
-use crate::ui::core::theme::{self, alpha, bare_button, boxed, fill, font, Studio};
+use crate::ui::core::theme::{alpha, bare_button, boxed, fill, font, Studio};
 use crate::ui::core::widgets::cap_label::cap_label;
+use crate::ui::core::widgets::fading_scrollbar::Fading;
 use crate::ui::core::widgets::studio_controls::{fader_db_readout, studio_fader, studio_pan_knob};
 use crate::ui::core::widgets::studio_hint::spinner;
 use crate::ui::core::widgets::studio_text::{fill_spaced_text, studio_text};
@@ -1003,7 +1004,7 @@ fn fx_padding() -> Padding {
 /// The strip as one scrolling column.
 fn scrolled<'a, M: 'a>(content: Column<'a, M>) -> Element<'a, M> {
     scrollable(content.width(Length::Fill))
-        .style(theme::scrollbar)
+        .fading()
         .width(Length::Fill)
         .height(Length::Fill)
         .into()
@@ -1475,7 +1476,7 @@ pub fn voice_summary_view<'a>(summary: VoiceSummary<'a>) -> Element<'a, Message>
                 left: 16.0,
             }),
     )
-    .style(theme::scrollbar)
+    .fading()
     .width(Length::Fill)
     .height(Length::Fill)
     .into()

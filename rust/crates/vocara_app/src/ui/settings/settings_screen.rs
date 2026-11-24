@@ -78,6 +78,7 @@ use crate::ui::core::motion::{self, Controller, Curve, Lerp};
 use crate::ui::core::theme::{self, alpha, bare_button, boxed, font, Studio, Zinc};
 use crate::ui::core::widgets::animated::{animated, ink_hover};
 use crate::ui::core::widgets::confirm_dialog::ConfirmDialog;
+use crate::ui::core::widgets::fading_scrollbar::Fading;
 use crate::ui::core::widgets::slide::{cupertino, slide, PAGE_TRANSITION};
 use crate::ui::core::widgets::slider_overlay::slider_overlay;
 use crate::ui::core::widgets::studio_hint::spinner;
@@ -909,7 +910,7 @@ impl Screen for SettingsScreen {
                 scrollable(self.body())
                     .width(Length::Fill)
                     .height(Length::Fill)
-                    .style(theme::scrollbar),
+                    .fading(),
             ]
             .into()
         };

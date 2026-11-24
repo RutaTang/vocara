@@ -63,6 +63,7 @@ use vocara_services::app_settings_service::AppSettingsService;
 use super::mixer_shared::{argb, keyed_row, tap, MenuItem, Opens, PopupMenu};
 use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::theme::{self, alpha, bare_button, boxed, font, Studio};
+use crate::ui::core::widgets::fading_scrollbar::Fading;
 use crate::ui::core::widgets::material_tooltip::material_tooltip;
 use crate::ui::core::widgets::painter::{color_key, KeyedCache};
 use crate::ui::core::widgets::studio_controls::{fader_db, studio_pan_knob};
@@ -279,7 +280,7 @@ impl<'a> MixerStrip<'a> {
             .direction(Direction::Horizontal(Scrollbar::default()))
             .width(Length::Fill)
             .height(Length::Fill)
-            .style(theme::scrollbar)
+            .fading()
             .into()
     }
 }
@@ -378,7 +379,7 @@ fn strip_body<'a>(build: impl Fn(bool) -> Vec<Element<'a, Message>> + 'a) -> Ele
             )
             .width(Length::Fill)
             .height(Length::Fill)
-            .style(theme::scrollbar)
+            .fading()
             .into()
         }
     })

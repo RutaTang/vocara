@@ -434,7 +434,9 @@ pub const SCROLLBAR_WIDTH: f32 = 8.0;
 
 /// Material 3's desktop scrollbar under the zinc scheme: no track, a
 /// radius-8 thumb in `onSurface` at 30 %, 50 % hovered, 60 % dragged.
-/// (Flutter fades the thumb in on scroll; iced keeps it shown.)
+/// Scrollables take it through `widgets::fading_scrollbar`, which fades the
+/// thumb in on a scroll and out after it, and eases its hover color, as
+/// Flutter did.
 pub fn scrollbar(_: &Theme, status: scrollable::Status) -> scrollable::Style {
     let (h, v) = match status {
         scrollable::Status::Active { .. } => (0.30, 0.30),

@@ -85,6 +85,7 @@ use vocara_model::util::format::format_clock_ms;
 use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::motion::{Curve, Implicit};
 use crate::ui::core::theme::{self, alpha, boxed, fill, font, Studio};
+use crate::ui::core::widgets::fading_scrollbar::Fading;
 use crate::ui::core::widgets::holds_keyboard::holds_keyboard;
 use crate::ui::core::widgets::material_tooltip::material_tooltip;
 use crate::ui::core::widgets::studio_button::{studio_button, StudioButtonVariant};
@@ -1139,7 +1140,7 @@ fn empty_state<'a>() -> Element<'a, Message> {
             .color(Studio::TEXT_FAINT),
     ]
     .align_x(Horizontal::Center);
-    center(scrollable(container(content).padding(24)).style(theme::scrollbar)).into()
+    center(scrollable(container(content).padding(24)).fading()).into()
 }
 
 // -------------------------------------------------------------- the reader
@@ -1211,7 +1212,7 @@ fn lyrics_reader<'a>(
         .id(state.list_id(list))
         .width(Length::Fill)
         .height(Length::Fill)
-        .style(theme::scrollbar)
+        .fading()
         .into()
 }
 
@@ -1333,7 +1334,7 @@ fn lyrics_sync<'a>(state: &'a LyricsPanelState, data: RightPanelData<'a>) -> Ele
         .id(state.list_id(List::Sync))
         .width(Length::Fill)
         .height(Length::Fill)
-        .style(theme::scrollbar);
+        .fading();
         // The hint's pinned slot stays when it goes, so the list keeps its
         // place in the tree.
         let top: Element<'a, Message> = if pin_hint {
@@ -1462,7 +1463,7 @@ fn tab_list<'a>(items: Column<'a, Message>) -> Element<'a, Message> {
     )
     .width(Length::Fill)
     .height(Length::Fill)
-    .style(theme::scrollbar)
+    .fading()
     .into()
 }
 

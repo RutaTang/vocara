@@ -61,6 +61,7 @@ use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::theme::{self, alpha, bare_button, font, Studio};
 use crate::ui::core::widgets::animated::{animated_container, ink_hover, Decoration};
 use crate::ui::core::widgets::confirm_dialog::ConfirmDialog;
+use crate::ui::core::widgets::fading_scrollbar::Fading;
 use crate::ui::core::widgets::studio_button::{studio_button, StudioButtonVariant};
 use crate::ui::core::widgets::studio_hint::spinner;
 use crate::ui::core::widgets::studio_text::studio_text;
@@ -770,7 +771,7 @@ fn grid(vm: &TechniqueLibraryViewModel) -> Element<'_, Message> {
         scrollable(rows)
             .width(Length::Fill)
             .height(Length::Fill)
-            .style(theme::scrollbar)
+            .fading()
             .into()
     })
     .into()

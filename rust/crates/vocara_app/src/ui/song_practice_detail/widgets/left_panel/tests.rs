@@ -26,6 +26,7 @@ use vocara_model::models::audio_track::AudioTrackKind;
 use vocara_model::util::dart_num::pow_f64;
 
 use super::*;
+use crate::ui::core::theme;
 use crate::ui::song_practice_detail::widgets::live_ui::{move_to, press, release, LiveUi};
 
 /// The inspector pins its footer only above a minimum height: a real

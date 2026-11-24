@@ -34,6 +34,7 @@ use vocara_model::util::dart_string;
 use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::theme::{self, font, Studio};
 use crate::ui::core::widgets::confirm_dialog::{barrier, Fade};
+use crate::ui::core::widgets::fading_scrollbar::Fading;
 use crate::ui::core::widgets::studio_hint::spinner;
 use crate::ui::core::widgets::studio_text::studio_text;
 use crate::ui::core::widgets::wrap::Wrap;
@@ -216,7 +217,7 @@ impl TechniquePicker {
         let rows = Column::with_children(filtered.into_iter().map(|t| technique_row(t, fade)))
             .width(Length::Fill)
             .padding([6, 0]);
-        container(scrollable(rows).style(fade.scrollbar(theme::scrollbar)))
+        container(scrollable(rows).fading_with(fade.scrollbar(theme::scrollbar)))
             .width(Length::Fill)
             .max_height(LIST_MAX_HEIGHT)
             .into()

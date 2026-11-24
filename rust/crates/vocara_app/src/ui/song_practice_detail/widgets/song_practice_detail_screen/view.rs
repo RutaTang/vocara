@@ -34,6 +34,7 @@ use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::motion::Curve;
 use crate::ui::core::theme::{self, alpha, bare_button, boxed, fill, font, Studio};
 use crate::ui::core::widgets::animated::{animated, animated_container, Decoration};
+use crate::ui::core::widgets::fading_scrollbar::Fading;
 use crate::ui::core::widgets::holds_keyboard::holds_keyboard;
 use crate::ui::core::widgets::slide::inert;
 use crate::ui::core::widgets::studio_button::studio_button;
@@ -428,7 +429,7 @@ impl SongPracticeDetailScreen {
         )
         .width(Length::Fill)
         .height(Length::Fill)
-        .style(theme::scrollbar);
+        .fading();
         let lanes = container(pan_area(list.into(), dur))
             .width(Length::Fill)
             .height(Length::Fill)

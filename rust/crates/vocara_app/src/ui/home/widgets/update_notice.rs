@@ -29,6 +29,7 @@ use vocara_services::update_check_service::{UpdateCheckService, UpdateInfo};
 use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::theme::{self, alpha, bare_button, font, Studio, Zinc};
 use crate::ui::core::widgets::confirm_dialog::{modal, Fade};
+use crate::ui::core::widgets::fading_scrollbar::Fading;
 use crate::ui::core::widgets::material_tooltip::material_tooltip;
 use crate::ui::core::widgets::studio_button::{studio_button, StudioButtonVariant};
 use crate::ui::core::widgets::studio_text::studio_text;
@@ -206,7 +207,7 @@ impl UpdateDownloadDialog {
                             .color(fade.color(Studio::TEXT_SECONDARY))
                             .width(Length::Fill),
                     )
-                    .style(theme::scrollbar),
+                    .fading(),
                 )
                 .max_height(200),
             );

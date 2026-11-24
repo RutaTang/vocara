@@ -60,6 +60,7 @@ use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::motion;
 use crate::ui::core::theme::{self, alpha, bare_button, boxed, font, Studio};
 use crate::ui::core::widgets::confirm_dialog::{barrier, ConfirmDialog, DialogMotion, Fade};
+use crate::ui::core::widgets::fading_scrollbar::Fading;
 use crate::ui::core::widgets::material_tooltip::material_tooltip;
 use crate::ui::core::widgets::slide::inert;
 use crate::ui::core::widgets::studio_button::{studio_button, StudioButtonVariant};
@@ -688,7 +689,7 @@ fn practice_grid(projects: &[PracticeSummary]) -> Element<'_, Message> {
         scrollable(container(rows).padding(GRID_PADDING).width(Length::Fill))
             .width(Length::Fill)
             .height(Length::Fill)
-            .style(theme::scrollbar)
+            .fading()
             .into()
     })
     .into()

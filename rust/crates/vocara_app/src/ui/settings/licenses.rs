@@ -68,6 +68,7 @@ use vocara_services::update_check_service::UpdateCheckService;
 use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::motion::{Controller, Curve};
 use crate::ui::core::theme::{self, alpha, font, Studio, Zinc};
+use crate::ui::core::widgets::fading_scrollbar::Fading;
 use crate::ui::core::widgets::slide::slide;
 use crate::ui::core::widgets::studio_hint::spinner;
 
@@ -736,7 +737,7 @@ fn master(data: &LicenseData, selected: usize) -> Element<'_, Message> {
     }
     scrollable(list.width(Length::Fill))
         .height(Length::Fill)
-        .style(theme::scrollbar)
+        .fading()
         .into()
 }
 
@@ -860,7 +861,7 @@ fn detail<'a>(
             left: GUTTER,
         }))
         .height(Length::Fill)
-        .style(theme::scrollbar),
+        .fading(),
     ];
     container(content)
         .width(Length::Fill)
