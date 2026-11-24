@@ -30,10 +30,17 @@ FRAMEWORKS=(
   AudioToolbox
   AVFoundation
   Carbon
+  # Public from macOS 10.13 (inside ApplicationServices before): the
+  # current SDK's linker records it for what winit links through
+  # ApplicationServices (CGDisplayCreateUUIDFromDisplayID).
+  ColorSync
   CoreAudio
   CoreFoundation
   CoreGraphics
   CoreMedia
+  # macOS 10.0: recorded, like ColorSync, for what ApplicationServices and
+  # CoreFoundation re-export from it.
+  CoreServices
   CoreVideo
   Foundation
   Metal
