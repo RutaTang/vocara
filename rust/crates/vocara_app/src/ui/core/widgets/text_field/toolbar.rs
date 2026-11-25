@@ -70,15 +70,15 @@
 //!   (`Clip.hardEdge` around the backdrop filter); iced fills it
 //!   antialiased;
 //! - the labels' style set `inherit: false` and no family, so Flutter set
-//!   them in the macOS system UI font (SF Pro, CoreText's `.AppleSystemUIFont`).
-//!   The font system does load it on macOS, under its hidden family (see
-//!   the macOS test `the_system_ui_font_is_reachable_by_its_family_name`),
-//!   but setting the labels in it would not be Flutter's: the face is a
-//!   variable font whose optical size CoreText set from the text's size,
-//!   and cosmic-text (iced's text engine) varies a face along its weight
-//!   axis alone, so it would draw the face's default instance, not the 14
-//!   px one. They stay in the bundled Inter, at Inter's natural line height
-//!   (1.21 em), the box Flutter's line took from its font's metrics.
+//!   them in the macOS system UI font (SF Pro, CoreText's `.AppleSystemUIFont`),
+//!   a variable face whose optical size CoreText set from the text's size,
+//!   where cosmic-text (iced's text engine) varies a face along its weight
+//!   axis alone and draws every other axis at its default. The labels take
+//!   that face, at its own line box, only where its default is the 14 px
+//!   instance and the shapers' tracking agrees (read off the face, see
+//!   [`toolbar_face`](super::toolbar_face)); otherwise, and off macOS, they
+//!   are in the bundled Inter, at Inter's natural line height (1.21 em),
+//!   the box Flutter's line took from its font's metrics.
 
 use std::cell::RefCell;
 use std::sync::Arc;
@@ -99,9 +99,11 @@ use iced::{
 };
 
 use crate::ui::core::motion::{cubic_curve, Lerp};
-use crate::ui::core::theme::{font, Zinc};
+use crate::ui::core::theme::Zinc;
 use crate::ui::core::widgets::rsuperellipse;
 use crate::ui::core::widgets::studio_text::{draw_line, lay_out, Spec};
+
+use super::toolbar_face::label_face;
 
 /// `_kToolbarScreenPadding`: the room kept between the toolbar and the
 /// window's edges.
@@ -139,7 +141,8 @@ pub const BUTTON_RADIUS: f32 = 4.0;
 /// `_kToolbarButtonFontStyle`'s size and letter spacing.
 pub const LABEL_SIZE: f32 = 14.0;
 pub const LABEL_SPACING: f32 = -0.15;
-/// Inter's natural line box (ascent + descent), in ems.
+/// Inter's natural line box (ascent + descent), in ems: the labels' unless
+/// they are in the system UI font ([`label_face`]).
 pub const LABEL_LINE_HEIGHT: f32 = 1.21;
 /// An item's label: `CupertinoColors.white` (dark).
 pub const LABEL: Color = Color::WHITE;
@@ -204,7 +207,7 @@ pub fn clipboard_has_text(clipboard: &mut dyn Clipboard) -> bool {
 
 /// An item's height: its padding around one label line.
 pub fn item_height() -> f32 {
-    BUTTON_PADDING.top + LABEL_SIZE * LABEL_LINE_HEIGHT + BUTTON_PADDING.bottom
+    BUTTON_PADDING.top + LABEL_SIZE * label_face().line_height + BUTTON_PADDING.bottom
 }
 
 /// The toolbar's size with `count` items.
@@ -322,6 +325,8 @@ fn label(item: Item) -> (Arc<Buffer>, Size) {
     thread_local! {
         static LABELS: RefCell<Vec<Laid>> = const { RefCell::new(Vec::new()) };
     }
+    // Before the font system's lock: the first call takes it.
+    let face = label_face();
     let version = font_system().read().expect("Read font system").version();
     LABELS.with(|labels| {
         let found = labels
@@ -335,8 +340,8 @@ fn label(item: Item) -> (Arc<Buffer>, Size) {
         let spec = Spec {
             content: item.label(),
             size: LABEL_SIZE,
-            line_height: LABEL_SIZE * LABEL_LINE_HEIGHT,
-            font: font::REGULAR,
+            line_height: LABEL_SIZE * face.line_height,
+            font: face.font,
             align_x: Alignment::Default,
             wrapping: Wrapping::None,
             letter_spacing: LABEL_SPACING,

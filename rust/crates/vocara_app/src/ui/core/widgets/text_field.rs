@@ -69,6 +69,7 @@ pub mod editor;
 pub mod input;
 pub mod show_on_screen;
 pub mod toolbar;
+pub mod toolbar_face;
 
 pub use caret::set_scale_factor;
 pub use editor::{text_editor, Content, TextEditor};
