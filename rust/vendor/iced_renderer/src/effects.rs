@@ -1,6 +1,7 @@
 //! vocara: compositing iced's own primitives cannot express, as Flutter
 //! composited: a subtree drawn as one layer at an opacity (`Opacity`,
-//! `FadeTransition`), and a filter of what lies behind a shape
+//! `FadeTransition`), a subtree cut by a hard-edged clip (`ClipPath` with
+//! `Clip.hardEdge`), and a filter of what lies behind a shape
 //! (`BackdropFilter`). Both concrete renderers implement it, and so does
 //! the fallback renderer that is `iced::Renderer`, through them.
 use crate::core::Rectangle;
@@ -89,11 +90,43 @@ pub trait Effects {
         self.end_opacity_layer();
     }
 
+    /// Starts a group cut, when
+    /// [`end_clip_layer`](Self::end_clip_layer) ends it, by `clip` with a
+    /// hard edge (Flutter's `ClipPath` with `Clip.hardEdge`, Skia's clip
+    /// without antialiasing): inside it everything is drawn as it would be
+    /// without the clip (antialiased edges and all), and every pixel whose
+    /// center `clip` does not hold (nonzero winding) keeps what was there
+    /// before the group. Both renderers find those pixels alike, so they
+    /// clip the same ones. Text, images, quads, meshes and canvases inside
+    /// it all go into the group; clips and transformations go on working,
+    /// and the clip of the layer it is started in clips it too. Like a
+    /// layer, it is drawn over what was drawn before it.
+    #[cfg(feature = "geometry")]
+    fn start_clip_layer(&mut self, clip: &Path);
+
+    /// Ends the group [`start_clip_layer`](Self::start_clip_layer)
+    /// started.
+    fn end_clip_layer(&mut self);
+
+    /// Draws what `draw` draws inside `clip`, cut with a hard edge (see
+    /// [`start_clip_layer`](Self::start_clip_layer)).
+    #[cfg(feature = "geometry")]
+    fn with_clip_layer(&mut self, clip: &Path, draw: impl FnOnce(&mut Self))
+    where
+        Self: Sized,
+    {
+        self.start_clip_layer(clip);
+        draw(self);
+        self.end_clip_layer();
+    }
+
     /// Filters what was drawn before under `clip`, a hard-edged clip (the
-    /// pixels whose centers it holds): the filtered backdrop is drawn over
-    /// the backdrop (source over), as Flutter's `BackdropFilter` inside a
-    /// `Clip.hardEdge` drew it. It is a layer of its own, so what goes
-    /// over it must be drawn in a later layer.
+    /// pixels whose centers it holds, as
+    /// [`start_clip_layer`](Self::start_clip_layer) finds them): the
+    /// filtered backdrop is drawn over the backdrop (source over), as
+    /// Flutter's `BackdropFilter` inside a `Clip.hardEdge` drew it. It is a
+    /// layer of its own, so what goes over it must be drawn in a later
+    /// layer.
     #[cfg(feature = "geometry")]
     fn draw_backdrop_filter(&mut self, clip: &Path, filter: BackdropFilter);
 }
@@ -106,6 +139,15 @@ impl Effects for iced_wgpu::Renderer {
 
     fn end_opacity_layer(&mut self) {
         iced_wgpu::Renderer::end_opacity_layer(self);
+    }
+
+    #[cfg(feature = "geometry")]
+    fn start_clip_layer(&mut self, clip: &Path) {
+        iced_wgpu::Renderer::start_clip_layer(self, clip);
+    }
+
+    fn end_clip_layer(&mut self) {
+        iced_wgpu::Renderer::end_clip_layer(self);
     }
 
     #[cfg(feature = "geometry")]
@@ -127,6 +169,15 @@ impl Effects for iced_tiny_skia::Renderer {
 
     fn end_opacity_layer(&mut self) {
         iced_tiny_skia::Renderer::end_opacity_layer(self);
+    }
+
+    #[cfg(feature = "geometry")]
+    fn start_clip_layer(&mut self, clip: &Path) {
+        iced_tiny_skia::Renderer::start_clip_layer(self, clip);
+    }
+
+    fn end_clip_layer(&mut self) {
+        iced_tiny_skia::Renderer::end_clip_layer(self);
     }
 
     #[cfg(feature = "geometry")]
@@ -160,6 +211,21 @@ where
         match self {
             Self::Primary(renderer) => renderer.end_opacity_layer(),
             Self::Secondary(renderer) => renderer.end_opacity_layer(),
+        }
+    }
+
+    #[cfg(feature = "geometry")]
+    fn start_clip_layer(&mut self, clip: &Path) {
+        match self {
+            Self::Primary(renderer) => renderer.start_clip_layer(clip),
+            Self::Secondary(renderer) => renderer.start_clip_layer(clip),
+        }
+    }
+
+    fn end_clip_layer(&mut self) {
+        match self {
+            Self::Primary(renderer) => renderer.end_clip_layer(),
+            Self::Secondary(renderer) => renderer.end_clip_layer(),
         }
     }
 

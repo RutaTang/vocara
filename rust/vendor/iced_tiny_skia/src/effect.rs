@@ -1,13 +1,163 @@
 //! vocara: the effects' layers (`layer::Effect`): a subtree composited at
-//! an opacity, and a filter of what lies under a shape.
+//! an opacity, a subtree inside a hard-edged clip, and a filter of what
+//! lies under a shape.
 //!
-//! Both are computed here pixel by pixel, in the same float arithmetic as
+//! All are computed here pixel by pixel, in the same float arithmetic as
 //! the wgpu renderer's shaders (`iced_wgpu`'s `effect` module), so that the
 //! two renderers draw the same 8-bit values: colors are premultiplied,
 //! sRGB-encoded (blended as iced blends them, `web-colors`), and each
-//! result is rounded once, to the nearest 8-bit value.
+//! result is rounded once, to the nearest 8-bit value. The pixels a
+//! hard-edged clip holds are found here for both ([`HardClip`]).
 use crate::core::{Rectangle, Transformation};
 use crate::layer::Backdrop;
+
+/// vocara: a hard-edged clip (Flutter's `Clip.hardEdge`, Skia's clip
+/// without antialiasing): a path, under the transformation it was drawn
+/// with, that holds a pixel when it holds the pixel's center (nonzero
+/// winding). Both renderers find the pixels it holds with
+/// [`HardClip::mask`], so they clip the same ones.
+#[derive(Debug, Clone)]
+pub struct HardClip {
+    path: tiny_skia::Path,
+    transformation: Transformation,
+}
+
+/// vocara: a box of physical pixels: columns `x0..x1`, rows `y0..y1`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PixelBox {
+    /// The first column.
+    pub x0: usize,
+    /// The first row.
+    pub y0: usize,
+    /// The column past the last.
+    pub x1: usize,
+    /// The row past the last.
+    pub y1: usize,
+}
+
+impl PixelBox {
+    /// Its width.
+    pub fn width(&self) -> usize {
+        self.x1 - self.x0
+    }
+
+    /// Its height.
+    pub fn height(&self) -> usize {
+        self.y1 - self.y0
+    }
+
+    /// The pixels a physical rectangle touches in a `width` × `height`
+    /// target (its edges rounded outwards to pixel boundaries).
+    pub fn around(bounds: Rectangle, width: u32, height: u32) -> Self {
+        let clamp = |v: f32, max: u32| v.clamp(0.0, max as f32) as usize;
+
+        Self {
+            x0: clamp(bounds.x.floor(), width),
+            y0: clamp(bounds.y.floor(), height),
+            x1: clamp((bounds.x + bounds.width).ceil(), width),
+            y1: clamp((bounds.y + bounds.height).ceil(), height),
+        }
+    }
+
+    /// The pixels both hold, if any.
+    pub fn intersection(&self, other: &Self) -> Option<Self> {
+        let result = Self {
+            x0: self.x0.max(other.x0),
+            y0: self.y0.max(other.y0),
+            x1: self.x1.min(other.x1),
+            y1: self.y1.min(other.y1),
+        };
+
+        (result.x0 < result.x1 && result.y0 < result.y1).then_some(result)
+    }
+}
+
+impl HardClip {
+    /// `clip`, drawn under `transformation`; `None` if it encloses
+    /// nothing.
+    #[cfg(feature = "geometry")]
+    pub fn new(
+        clip: &crate::graphics::geometry::Path,
+        transformation: Transformation,
+    ) -> Option<Self> {
+        Some(Self {
+            path: crate::geometry::convert_path(clip)?,
+            transformation,
+        })
+    }
+
+    /// Its bounds, in logical pixels.
+    pub fn bounds(&self) -> Rectangle {
+        let shape = self.path.bounds();
+
+        Rectangle {
+            x: shape.x(),
+            y: shape.y(),
+            width: shape.width(),
+            height: shape.height(),
+        } * self.transformation
+    }
+
+    /// The scale it was drawn at, times `scale_factor`: what its blur's
+    /// standard deviation is multiplied by in physical pixels.
+    pub fn scale(&self, scale_factor: f32) -> f32 {
+        (Transformation::scale(scale_factor) * self.transformation)
+            .scale_factor()
+    }
+
+    /// The path in physical pixels at `scale_factor`.
+    fn physical(&self, scale_factor: f32) -> Option<tiny_skia::Path> {
+        self.path.clone().transform(crate::engine::into_transform(
+            Transformation::scale(scale_factor) * self.transformation,
+        ))
+    }
+
+    /// The pixels of a `width` × `height` target at `scale_factor` that
+    /// it may hold, inside `within`, if any.
+    pub fn pixels(
+        &self,
+        scale_factor: f32,
+        width: u32,
+        height: u32,
+        within: PixelBox,
+    ) -> Option<PixelBox> {
+        let shape = self.physical(scale_factor)?.bounds();
+
+        PixelBox::around(
+            Rectangle {
+                x: shape.x(),
+                y: shape.y(),
+                width: shape.width(),
+                height: shape.height(),
+            },
+            width,
+            height,
+        )
+        .intersection(&within)
+    }
+
+    /// Which pixels of `region` it holds at `scale_factor`, row by row: 255
+    /// for each whose center it holds, 0 for the rest.
+    pub fn mask(&self, scale_factor: f32, region: PixelBox) -> Option<Vec<u8>> {
+        let path = self.physical(scale_factor)?;
+        let mut mask = tiny_skia::Mask::new(
+            region.width() as u32,
+            region.height() as u32,
+        )?;
+
+        mask.fill_path(
+            &path,
+            tiny_skia::FillRule::Winding,
+            false,
+            tiny_skia::Transform::from_translate(
+                -(region.x0 as f32),
+                -(region.y0 as f32),
+            ),
+        );
+
+        Some(mask.data().to_vec())
+    }
+}
 
 /// The longest blur radius, in physical pixels (the wgpu renderer's
 /// uniform holds this many weights).
@@ -90,6 +240,66 @@ pub fn composite(
     }
 }
 
+/// Draws a subtree inside `clip`, inside `bounds` (physical): `draw` draws
+/// it into `pixels` as it would without the clip, inside the pixels it is
+/// given, then every one of those whose center `clip` does not hold is put
+/// back as it was (Skia's clip without antialiasing, which keeps each
+/// drawing off those pixels: the same pixels).
+pub fn draw_clipped(
+    clip: &HardClip,
+    scale_factor: f32,
+    pixels: &mut tiny_skia::PixmapMut<'_>,
+    bounds: Rectangle,
+    draw: impl FnOnce(&mut tiny_skia::PixmapMut<'_>, Rectangle),
+) {
+    let (width, height) = (pixels.width(), pixels.height());
+    let within = PixelBox::around(bounds, width, height);
+    let Some(region) = clip.pixels(scale_factor, width, height, within) else {
+        return;
+    };
+    let Some(mask) = clip.mask(scale_factor, region) else {
+        return;
+    };
+    let stride = width as usize * 4;
+    let (row, w) = (region.x0 * 4..region.x1 * 4, region.width());
+    let saved: Vec<u8> = {
+        let source = pixels.as_ref();
+        let data = source.data();
+
+        (region.y0..region.y1)
+            .flat_map(|y| {
+                data[y * stride + row.start..y * stride + row.end]
+                    .iter()
+                    .copied()
+            })
+            .collect()
+    };
+
+    draw(
+        pixels,
+        Rectangle {
+            x: region.x0 as f32,
+            y: region.y0 as f32,
+            width: w as f32,
+            height: region.height() as f32,
+        },
+    );
+
+    let target = pixels.data_mut();
+
+    for (j, y) in (region.y0..region.y1).enumerate() {
+        for x in 0..w {
+            if mask[j * w + x] != 0 {
+                continue;
+            }
+
+            let (i, s) = (y * stride + row.start + x * 4, (j * w + x) * 4);
+
+            target[i..i + 4].copy_from_slice(&saved[s..s + 4]);
+        }
+    }
+}
+
 /// Filters what `pixels` hold under `backdrop`'s clip, inside `bounds`
 /// (physical): blurs it (each pixel beyond the pixmap's edge taken as the
 /// nearest one inside, Flutter's `TileMode.clamp`), applies the color
@@ -101,42 +311,27 @@ pub fn draw_backdrop(
     pixels: &mut tiny_skia::PixmapMut<'_>,
     bounds: Rectangle,
 ) {
-    let transformation =
-        Transformation::scale(scale_factor) * backdrop.transformation;
-    let Some(clip) = backdrop
-        .clip
-        .clone()
-        .transform(crate::engine::into_transform(transformation))
+    let (width, height) = (pixels.width(), pixels.height());
+    let (cx0, cy0, cx1, cy1) = pixel_range(bounds, width, height);
+    let within = PixelBox {
+        x0: cx0,
+        y0: cy0,
+        x1: cx1,
+        y1: cy1,
+    };
+    let Some(region) =
+        backdrop.clip.pixels(scale_factor, width, height, within)
     else {
         return;
     };
-
-    let (width, height) = (pixels.width(), pixels.height());
-    let (cx0, cy0, cx1, cy1) = pixel_range(bounds, width, height);
-    let shape = clip.bounds();
-    let x0 = (shape.left().floor().max(0.0) as usize).max(cx0);
-    let y0 = (shape.top().floor().max(0.0) as usize).max(cy0);
-    let x1 = (shape.right().ceil().max(0.0) as usize).min(cx1);
-    let y1 = (shape.bottom().ceil().max(0.0) as usize).min(cy1);
-
-    if x0 >= x1 || y0 >= y1 {
-        return;
-    }
-
-    let (w, h) = (x1 - x0, y1 - y0);
-    let Some(mut mask) = tiny_skia::Mask::new(w as u32, h as u32) else {
+    let Some(mask) = backdrop.clip.mask(scale_factor, region) else {
         return;
     };
-
-    mask.fill_path(
-        &clip,
-        tiny_skia::FillRule::Winding,
-        false,
-        tiny_skia::Transform::from_translate(-(x0 as f32), -(y0 as f32)),
-    );
+    let PixelBox { x0, y0, y1, .. } = region;
+    let w = region.width();
 
     let kernel =
-        blur_kernel(backdrop.blur_sigma * transformation.scale_factor());
+        blur_kernel(backdrop.blur_sigma * backdrop.clip.scale(scale_factor));
     let radius = kernel.len() - 1;
     let stride = width as usize;
     let last_x = stride - 1;
@@ -182,7 +377,7 @@ pub fn draw_backdrop(
 
     for y in y0..y1 {
         for x in 0..w {
-            if mask.data()[(y - y0) * w + x] == 0 {
+            if mask[(y - y0) * w + x] == 0 {
                 continue;
             }
 

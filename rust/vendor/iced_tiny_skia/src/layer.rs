@@ -10,6 +10,8 @@ use crate::graphics::{self, Image};
 
 use std::sync::Arc;
 
+use crate::effect::HardClip; // vocara
+
 pub type Stack = layer::Stack<Layer>;
 
 #[derive(Debug, Clone)]
@@ -20,7 +22,8 @@ pub struct Layer {
     pub images: Vec<Image>,
     pub text: Vec<Item<Text>>,
     // vocara: what the layer composites instead of primitives of its own
-    // (a subtree at an opacity, or a filter of its backdrop).
+    // (a subtree at an opacity or inside a hard-edged clip, or a filter of
+    // its backdrop).
     pub effect: Option<Effect>,
 }
 
@@ -32,6 +35,19 @@ pub enum Effect {
     Group(Arc<Group>),
     /// What lies under a shape, filtered.
     Backdrop(Arc<Backdrop>),
+    /// A subtree drawn in place, then cut by a hard-edged clip.
+    Clip(Arc<Clip>),
+}
+
+/// vocara: a subtree inside a hard-edged clip (Flutter's `ClipPath` with
+/// `Clip.hardEdge`): drawn as it would be without the clip, then every
+/// pixel whose center the clip does not hold is put back as it was.
+#[derive(Debug)]
+pub struct Clip {
+    /// The clip.
+    pub clip: HardClip,
+    /// What the subtree drew, layered as at the top level.
+    pub layers: Stack,
 }
 
 /// vocara: a subtree composited as one layer (Flutter's `Opacity`).
@@ -48,10 +64,8 @@ pub struct Group {
 /// was there (source over), inside a hard-edged clip.
 #[derive(Debug)]
 pub struct Backdrop {
-    /// The clip, in the coordinates `transformation` maps.
-    pub clip: tiny_skia::Path,
-    /// The transformation the clip was drawn under.
-    pub transformation: Transformation,
+    /// The clip.
+    pub clip: HardClip,
     /// The blur's standard deviation, in logical pixels.
     pub blur_sigma: f32,
     /// The color matrix: 4 rows of 5 (red, green, blue, alpha, then an

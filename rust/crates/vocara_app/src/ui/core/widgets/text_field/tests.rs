@@ -1055,6 +1055,97 @@ fn the_toolbar_fills_its_superellipse_seventy_percent_over_what_lies_behind() {
     assert!(!near(corner, toolbar::BORDER), "{corner:?}");
 }
 
+/// The toolbar's outline at `bounds` (`RoundedSuperellipseBorder`), its
+/// cubics cut fine into a polygon.
+fn outline_polygon(bounds: Rectangle) -> Vec<Point> {
+    let (start, cubics) = crate::ui::core::widgets::rsuperellipse::outline(bounds, toolbar::RADIUS);
+    let mut points = vec![start];
+    let mut from = start;
+    for [a, b, to] in cubics {
+        for step in 1..=64 {
+            let t = step as f32 / 64.0;
+            let u = 1.0 - t;
+            let at = |p0: f32, p1: f32, p2: f32, p3: f32| {
+                u * u * u * p0 + 3.0 * u * u * t * p1 + 3.0 * u * t * t * p2 + t * t * t * p3
+            };
+            points.push(Point::new(
+                at(from.x, a.x, b.x, to.x),
+                at(from.y, a.y, b.y, to.y),
+            ));
+        }
+        from = to;
+    }
+    points
+}
+
+/// How far `point` lies inside `polygon`'s edge (negative: outside).
+fn depth_in(polygon: &[Point], point: Point) -> f32 {
+    let mut inside = false;
+    let mut distance = f32::INFINITY;
+    for (i, a) in polygon.iter().enumerate() {
+        let b = polygon[(i + 1) % polygon.len()];
+        if (a.y > point.y) != (b.y > point.y)
+            && point.x < a.x + (point.y - a.y) / (b.y - a.y) * (b.x - a.x)
+        {
+            inside = !inside;
+        }
+        let (dx, dy) = (b.x - a.x, b.y - a.y);
+        let length = dx * dx + dy * dy;
+        let t = if length > 0.0 {
+            (((point.x - a.x) * dx + (point.y - a.y) * dy) / length).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let (ex, ey) = (a.x + t * dx - point.x, a.y + t * dy - point.y);
+        distance = distance.min((ex * ex + ey * ey).sqrt());
+    }
+    if inside {
+        distance
+    } else {
+        -distance
+    }
+}
+
+#[test]
+fn the_toolbar_cuts_its_fill_and_border_at_its_outline_with_a_hard_edge() {
+    // `Container(clipBehavior: Clip.hardEdge)` clipped the box's fill and
+    // border (antialiased, as drawn) to its outline without antialiasing:
+    // a pixel whose center lies outside shows none of them, however much
+    // of it they cover, and one inside shows them as drawn.
+    let mut window = window();
+    let value = "alpha beta";
+    let anchor = Point::new(TEXT_X + 3.0, MIDDLE);
+    window.run(field(value), anchor, &right_click(), Instant::now());
+    window.run(field(value), Point::new(390.0, 190.0), &[], Instant::now());
+    let size = toolbar::size(2);
+    let bounds = Rectangle::new(toolbar::place(anchor, size, window.size), size);
+    let outline = outline_polygon(bounds);
+    let mut cut = 0;
+    // The bottom corners, below the field, over the window's black (and
+    // the shadow's, black too).
+    let bottom = (bounds.y + bounds.height) as u32;
+    for left in [bounds.x as u32 - 2, (bounds.x + bounds.width) as u32 - 8] {
+        for y in bottom - 8..bottom + 2 {
+            for x in left..left + 10 {
+                let depth = depth_in(&outline, Point::new(x as f32 + 0.5, y as f32 + 0.5));
+                if depth.abs() < 0.25 {
+                    // On the edge, to within how the rasterizer cuts it.
+                    continue;
+                }
+                let drawn = window.pixel(x, y);
+                if depth < 0.0 {
+                    assert_eq!(drawn, BACKGROUND, "({x}, {y}), {:.2} outside", -depth);
+                    // The antialiased fill and border reach this one.
+                    cut += usize::from(depth > -0.7);
+                } else if depth < 1.0 {
+                    assert_ne!(drawn, BACKGROUND, "({x}, {y}), {depth:.2} inside");
+                }
+            }
+        }
+    }
+    assert!(cut >= 4, "{cut} pixels cut");
+}
+
 /// The backdrop's colors either side of its edge (8-bit exact, muted
 /// enough that the saturation boost clamps nothing).
 const LEFT: Color = Color::from_rgb8(153, 128, 102);

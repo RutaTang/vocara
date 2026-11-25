@@ -1,12 +1,17 @@
 //! vocara: the effects' layers (`layer::Effect`): a subtree drawn into an
-//! offscreen texture and composited at an opacity, and what lies under a
-//! shape blurred and color-filtered (`shader/effect.wgsl`).
+//! offscreen texture and composited at an opacity, a subtree inside a
+//! hard-edged clip, and what lies under a shape blurred and color-filtered
+//! (`shader/effect.wgsl`).
 //!
 //! The arithmetic is iced_tiny_skia's `effect` module's, so the two
 //! renderers draw the same 8-bit values: colors premultiplied and
 //! sRGB-encoded (blended as iced blends them, `web-colors`), each result
-//! rounded once by the target's conversion.
+//! rounded once by the target's conversion. Which pixels a hard-edged clip
+//! holds is iced_tiny_skia's own answer ([`HardClip::mask`], uploaded as a
+//! texture), so both renderers clip the same pixels.
 use crate::core::{Rectangle, Size};
+
+use iced_tiny_skia::{HardClip, PixelBox};
 
 use std::borrow::Cow;
 use wgpu::util::DeviceExt;
@@ -47,8 +52,10 @@ struct Uniforms {
     origin: [i32; 2],
     size: [i32; 2],
     source: [i32; 2],
+    mask: [i32; 2],
     radius: i32,
     opacity: f32,
+    _padding: [f32; 2],
     rows: [[f32; 4]; 4],
     offset: [f32; 4],
     weights: [[f32; 4]; 64],
@@ -60,8 +67,10 @@ impl Uniforms {
             origin: [0, 0],
             size: [size.width as i32, size.height as i32],
             source: [0, 0],
+            mask: [0, 0],
             radius: 0,
             opacity: 1.0,
+            _padding: [0.0; 2],
             rows: [[0.0; 4]; 4],
             offset: [0.0; 4],
             weights: [[0.0; 4]; 64],
@@ -76,6 +85,9 @@ pub struct Pipeline {
     composite: wgpu::RenderPipeline,
     horizontal: wgpu::RenderPipeline,
     vertical: wgpu::RenderPipeline,
+    restore: wgpu::RenderPipeline,
+    /// The mask bound where a pass reads none.
+    no_mask: wgpu::TextureView,
 }
 
 /// The format of the blur's horizontal pass: floats, so the vertical pass
@@ -83,8 +95,25 @@ pub struct Pipeline {
 const HORIZONTAL_FORMAT: wgpu::TextureFormat =
     wgpu::TextureFormat::Rgba16Float;
 
+/// The format of a hard-edged clip's mask: 255 where it holds a pixel, 0
+/// elsewhere.
+const MASK_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R8Unorm;
+
 impl Pipeline {
     pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
+        let texture = |binding: u32| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float {
+                    filterable: false,
+                },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        };
+
         let layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("iced_wgpu.effect.layout"),
@@ -102,18 +131,8 @@ impl Pipeline {
                         },
                         count: None,
                     },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Texture {
-                            sample_type: wgpu::TextureSampleType::Float {
-                                filterable: false,
-                            },
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                            multisampled: false,
-                        },
-                        count: None,
-                    },
+                    texture(1),
+                    texture(2),
                 ],
             });
 
@@ -133,8 +152,6 @@ impl Pipeline {
             });
 
         let pipeline = |label: &'static str,
-                        vertex: &'static str,
-                        buffers: &[wgpu::VertexBufferLayout<'_>],
                         fragment: &'static str,
                         format: wgpu::TextureFormat,
                         blend: Option<wgpu::BlendState>| {
@@ -143,8 +160,8 @@ impl Pipeline {
                 layout: Some(&pipeline_layout),
                 vertex: wgpu::VertexState {
                     module: &shader,
-                    entry_point: Some(vertex),
-                    buffers,
+                    entry_point: Some("cover"),
+                    buffers: &[],
                     compilation_options:
                         wgpu::PipelineCompilationOptions::default(),
                 },
@@ -178,8 +195,6 @@ impl Pipeline {
 
         let composite = pipeline(
             "iced_wgpu.effect.composite",
-            "cover",
-            &[],
             "composite",
             format,
             Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
@@ -187,8 +202,6 @@ impl Pipeline {
 
         let horizontal = pipeline(
             "iced_wgpu.effect.horizontal",
-            "cover",
-            &[],
             "horizontal",
             HORIZONTAL_FORMAT,
             None,
@@ -196,22 +209,39 @@ impl Pipeline {
 
         let vertical = pipeline(
             "iced_wgpu.effect.vertical",
-            "clip",
-            &[wgpu::VertexBufferLayout {
-                array_stride: std::mem::size_of::<[f32; 2]>() as u64,
-                step_mode: wgpu::VertexStepMode::Vertex,
-                attributes: &wgpu::vertex_attr_array!(0 => Float32x2),
-            }],
             "vertical",
             format,
             Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
         );
+
+        // What was there, put back as it was.
+        let restore =
+            pipeline("iced_wgpu.effect.restore", "restore", format, None);
+
+        let no_mask = device
+            .create_texture(&wgpu::TextureDescriptor {
+                label: Some("iced_wgpu.effect.no_mask"),
+                size: wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: MASK_FORMAT,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            })
+            .create_view(&wgpu::TextureViewDescriptor::default());
 
         Self {
             layout,
             composite,
             horizontal,
             vertical,
+            restore,
+            no_mask,
         }
     }
 
@@ -220,6 +250,7 @@ impl Pipeline {
         device: &wgpu::Device,
         uniforms: &Uniforms,
         source: &wgpu::TextureView,
+        mask: Option<&wgpu::TextureView>,
     ) -> wgpu::BindGroup {
         let buffer =
             device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -239,6 +270,12 @@ impl Pipeline {
                 wgpu::BindGroupEntry {
                     binding: 1,
                     resource: wgpu::BindingResource::TextureView(source),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(
+                        mask.unwrap_or(&self.no_mask),
+                    ),
                 },
             ],
         })
@@ -260,7 +297,7 @@ impl Pipeline {
             opacity: opacity.clamp(0.0, 1.0),
             ..Uniforms::new(size)
         };
-        let bind_group = self.bind_group(device, &uniforms, layer);
+        let bind_group = self.bind_group(device, &uniforms, layer, None);
         let mut pass = begin_pass(encoder, target, "iced_wgpu.effect.composite");
 
         pass.set_pipeline(&self.composite);
@@ -274,6 +311,120 @@ impl Pipeline {
         pass.draw(0..3, 0..1);
     }
 
+    /// Saves what `target` holds inside `bounds` (physical), and which of
+    /// those pixels `clip` holds, before a subtree inside `clip` is drawn
+    /// over it in place; [`Pipeline::restore`] then puts back every pixel
+    /// `clip` does not hold.
+    ///
+    /// The target must allow copies from it; when it does not (a surface
+    /// that cannot), nothing is saved and the subtree goes unclipped.
+    #[allow(clippy::too_many_arguments)]
+    pub fn save(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &wgpu::TextureView,
+        size: Size<u32>,
+        clip: &HardClip,
+        scale_factor: f32,
+        bounds: Rectangle,
+    ) -> Option<Saved> {
+        let texture = target.texture();
+
+        static WARNED: std::sync::Once = std::sync::Once::new();
+
+        if !copyable(
+            texture,
+            &WARNED,
+            "A clip layer needs a target it can copy from; it is drawn \
+             unclipped",
+        ) {
+            return None;
+        }
+
+        // Every pixel the subtree can draw on (its layers' scissors lie
+        // inside its bounds).
+        let region = PixelBox::around(bounds, size.width, size.height);
+
+        if region.width() == 0 || region.height() == 0 {
+            return None;
+        }
+
+        let mask = clip
+            .mask(scale_factor, region)
+            .unwrap_or_else(|| vec![0; region.width() * region.height()]);
+        let extent = wgpu::Extent3d {
+            width: region.width() as u32,
+            height: region.height() as u32,
+            depth_or_array_layers: 1,
+        };
+
+        let copy = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("iced_wgpu.effect.saved"),
+            size: extent,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: texture.format(),
+            usage: wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+
+        encoder.copy_texture_to_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d {
+                    x: region.x0 as u32,
+                    y: region.y0 as u32,
+                    z: 0,
+                },
+                aspect: wgpu::TextureAspect::All,
+            },
+            copy.as_image_copy(),
+            extent,
+        );
+
+        Some(Saved {
+            region,
+            copy: copy.create_view(&wgpu::TextureViewDescriptor::default()),
+            mask: upload_mask(device, queue, region, &mask),
+        })
+    }
+
+    /// Puts back what [`Pipeline::save`] saved of `target` on every pixel
+    /// the clip does not hold.
+    pub fn restore(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &wgpu::TextureView,
+        size: Size<u32>,
+        saved: &Saved,
+    ) {
+        let region = saved.region;
+        let uniforms = Uniforms {
+            origin: [region.x0 as i32, region.y0 as i32],
+            mask: [region.x0 as i32, region.y0 as i32],
+            ..Uniforms::new(size)
+        };
+        let bind_group =
+            self.bind_group(device, &uniforms, &saved.copy, Some(&saved.mask));
+        let mut pass = begin_pass(encoder, target, "iced_wgpu.effect.restore");
+
+        pass.set_pipeline(&self.restore);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.set_scissor_rect(
+            region.x0 as u32,
+            region.y0 as u32,
+            region.width() as u32,
+            region.height() as u32,
+        );
+        pass.draw(0..3, 0..1);
+    }
+
     /// Filters what `target` holds under `backdrop`'s clip, inside
     /// `bounds` (physical): blurs it (each pixel beyond the target's edge
     /// taken as the nearest one inside, Flutter's `TileMode.clamp`),
@@ -282,9 +433,11 @@ impl Pipeline {
     ///
     /// The target must allow copies from it; when it does not (a surface
     /// that cannot), nothing is drawn.
+    #[allow(clippy::too_many_arguments)]
     pub fn backdrop(
         &self,
         device: &wgpu::Device,
+        queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         target: &wgpu::TextureView,
         size: Size<u32>,
@@ -294,37 +447,39 @@ impl Pipeline {
     ) {
         let texture = target.texture();
 
-        if !texture.usage().contains(wgpu::TextureUsages::COPY_SRC) {
-            static WARNED: std::sync::Once = std::sync::Once::new();
+        static WARNED: std::sync::Once = std::sync::Once::new();
 
-            WARNED.call_once(|| {
-                log::warn!(
-                    "A backdrop filter needs a target it can copy from; \
-                     none is drawn"
-                );
-            });
+        if !copyable(
+            texture,
+            &WARNED,
+            "A backdrop filter needs a target it can copy from; none is drawn",
+        ) {
             return;
         }
 
         let (width, height) = (size.width as usize, size.height as usize);
         let snap = |v: f32, max: usize| v.round().clamp(0.0, max as f32) as usize;
-        let (cx0, cy0) = (snap(bounds.x, width), snap(bounds.y, height));
-        let (cx1, cy1) = (
-            snap(bounds.x + bounds.width, width),
-            snap(bounds.y + bounds.height, height),
-        );
+        let within = PixelBox {
+            x0: snap(bounds.x, width),
+            y0: snap(bounds.y, height),
+            x1: snap(bounds.x + bounds.width, width),
+            y1: snap(bounds.y + bounds.height, height),
+        };
 
-        let shape = backdrop.bounds * scale_factor;
-        let x0 = (shape.x.floor().max(0.0) as usize).max(cx0);
-        let y0 = (shape.y.floor().max(0.0) as usize).max(cy0);
-        let x1 = ((shape.x + shape.width).ceil().max(0.0) as usize).min(cx1);
-        let y1 = ((shape.y + shape.height).ceil().max(0.0) as usize).min(cy1);
-
-        if x0 >= x1 || y0 >= y1 || backdrop.indices.is_empty() {
+        let Some(region) =
+            backdrop
+                .clip
+                .pixels(scale_factor, size.width, size.height, within)
+        else {
             return;
-        }
+        };
+        let Some(mask) = backdrop.clip.mask(scale_factor, region) else {
+            return;
+        };
+        let PixelBox { x0, y0, x1, y1 } = region;
 
-        let kernel = blur_kernel(backdrop.blur_sigma * scale_factor);
+        let kernel =
+            blur_kernel(backdrop.blur_sigma * backdrop.clip.scale(scale_factor));
         let radius = kernel.len() - 1;
 
         // What the blur reads: the clip's box and the blur's reach,
@@ -384,6 +539,7 @@ impl Pipeline {
         let horizontal_view =
             horizontal.create_view(&wgpu::TextureViewDescriptor::default());
         let copy_view = copy.create_view(&wgpu::TextureViewDescriptor::default());
+        let mask_view = upload_mask(device, queue, region, &mask);
 
         let mut weights = [[0.0; 4]; 64];
 
@@ -395,6 +551,7 @@ impl Pipeline {
         let uniforms = Uniforms {
             origin: [x0 as i32, ry0 as i32],
             source: [rx0 as i32, ry0 as i32],
+            mask: [x0 as i32, y0 as i32],
             radius: radius as i32,
             rows: [
                 [m[0], m[1], m[2], m[3]],
@@ -408,7 +565,8 @@ impl Pipeline {
         };
 
         {
-            let bind_group = self.bind_group(device, &uniforms, &copy_view);
+            let bind_group =
+                self.bind_group(device, &uniforms, &copy_view, None);
             let mut pass = begin_pass(
                 encoder,
                 &horizontal_view,
@@ -420,27 +578,12 @@ impl Pipeline {
             pass.draw(0..3, 0..1);
         }
 
-        let vertices: Vec<[f32; 2]> = backdrop
-            .vertices
-            .iter()
-            .map(|[x, y]| [x * scale_factor, y * scale_factor])
-            .collect();
-
-        let vertex_buffer =
-            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("iced_wgpu.effect.clip.vertices"),
-                contents: bytemuck::cast_slice(&vertices),
-                usage: wgpu::BufferUsages::VERTEX,
-            });
-
-        let index_buffer =
-            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("iced_wgpu.effect.clip.indices"),
-                contents: bytemuck::cast_slice(&backdrop.indices),
-                usage: wgpu::BufferUsages::INDEX,
-            });
-
-        let bind_group = self.bind_group(device, &uniforms, &horizontal_view);
+        let bind_group = self.bind_group(
+            device,
+            &uniforms,
+            &horizontal_view,
+            Some(&mask_view),
+        );
         let mut pass = begin_pass(encoder, target, "iced_wgpu.effect.vertical");
 
         pass.set_pipeline(&self.vertical);
@@ -451,10 +594,66 @@ impl Pipeline {
             (x1 - x0) as u32,
             (y1 - y0) as u32,
         );
-        pass.set_vertex_buffer(0, vertex_buffer.slice(..));
-        pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-        pass.draw_indexed(0..backdrop.indices.len() as u32, 0, 0..1);
+        pass.draw(0..3, 0..1);
     }
+}
+
+/// What a clip layer saved of its target ([`Pipeline::save`]).
+#[derive(Debug)]
+pub struct Saved {
+    /// The pixels saved.
+    region: PixelBox,
+    /// What they held.
+    copy: wgpu::TextureView,
+    /// Which of them the clip holds.
+    mask: wgpu::TextureView,
+}
+
+/// Whether `texture` can be copied from; when it cannot, logs `warning`
+/// the first time `warned` is passed.
+fn copyable(
+    texture: &wgpu::Texture,
+    warned: &std::sync::Once,
+    warning: &str,
+) -> bool {
+    if texture.usage().contains(wgpu::TextureUsages::COPY_SRC) {
+        return true;
+    }
+
+    warned.call_once(|| log::warn!("{warning}"));
+
+    false
+}
+
+/// A hard-edged clip's `mask` of `region` as a texture.
+fn upload_mask(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    region: PixelBox,
+    mask: &[u8],
+) -> wgpu::TextureView {
+    device
+        .create_texture_with_data(
+            queue,
+            &wgpu::TextureDescriptor {
+                label: Some("iced_wgpu.effect.mask"),
+                size: wgpu::Extent3d {
+                    width: region.width() as u32,
+                    height: region.height() as u32,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: MASK_FORMAT,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            },
+            wgpu::util::TextureDataOrder::LayerMajor,
+            mask,
+        )
+        .create_view(&wgpu::TextureViewDescriptor::default())
 }
 
 /// A pass drawing over what `target` holds.
@@ -543,45 +742,4 @@ impl Targets {
 
         self.used = false;
     }
-}
-
-/// The triangles of `clip` under `transformation` (logical pixels): what a
-/// backdrop filter draws through.
-#[cfg(feature = "geometry")]
-pub fn tessellate(
-    clip: &crate::graphics::geometry::Path,
-    transformation: crate::core::Transformation,
-) -> Option<(Vec<[f32; 2]>, Vec<u32>)> {
-    use lyon::tessellation;
-
-    let scale = transformation.scale_factor();
-    let translation = transformation.translation();
-    let path = clip.transform(&lyon::math::Transform::new(
-        scale,
-        0.0,
-        0.0,
-        scale,
-        translation.x,
-        translation.y,
-    ));
-
-    let mut buffers: tessellation::VertexBuffers<[f32; 2], u32> =
-        tessellation::VertexBuffers::new();
-
-    tessellation::FillTessellator::new()
-        .tessellate_path(
-            path.raw(),
-            &tessellation::FillOptions::default()
-                .with_tolerance(0.01)
-                .with_fill_rule(tessellation::FillRule::NonZero),
-            &mut tessellation::BuffersBuilder::new(
-                &mut buffers,
-                |vertex: tessellation::FillVertex<'_>| {
-                    vertex.position().to_array()
-                },
-            ),
-        )
-        .ok()?;
-
-    Some((buffers.vertices, buffers.indices))
 }

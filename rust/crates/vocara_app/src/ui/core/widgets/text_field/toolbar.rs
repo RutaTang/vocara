@@ -58,14 +58,25 @@
 //! box grown by its 0.5 spread on every side (`ShapeDecoration` shadows
 //! `rect.shift(offset).inflate(spreadRadius)`).
 //!
-//! Behind the box, the toolbar blurred what lay there (its own shadow
-//! included) by a Gaussian of sigma 20, then saturated it threefold
-//! (`BackdropFilter` with `ImageFilter.compose(outer:
+//! Flutter 3.38's `_defaultToolbarBuilder` is a `Container` of the shadow
+//! (`ShapeDecoration(shadows:, shape: RoundedSuperellipseBorder)`) with
+//! `clipBehavior: Clip.hardEdge`, which `Container.build` turns into a
+//! `DecoratedBox` (the shadow) around a `ClipPath` of the decoration's
+//! outline (`_DecorationClipper`, `ShapeBorder.getOuterPath`) around the
+//! `BackdropFilter`, the `DecoratedBox` of the fill and border, and the
+//! items. A hard-edged clip is Skia's clip without antialiasing: each
+//! thing inside is drawn as without it (the fill and border antialiased)
+//! but only on the pixels whose centers the outline holds, so their edge
+//! is their coverage times that pixel's inside-or-outside. The port draws
+//! the same: the shadow, then, in later layers, what lay behind the box
+//! (its own shadow included) blurred by a Gaussian of sigma 20 and
+//! saturated threefold (`ImageFilter.compose(outer:
 //! ColorFilter.matrix(_matrixWithSaturation(3)), inner:
 //! ImageFilter.blur(20, 20))`, whose blur, composed, takes the window's
-//! edge pixels beyond it), inside the box's hard-edged clip: the renderer
-//! does the same (`opacity_layer::Effects::draw_backdrop_filter`), and the
-//! box and its items go over it in a later layer. Each item fades as one
+//! edge pixels beyond it; `opacity_layer::Effects::draw_backdrop_filter`)
+//! and the box and its items inside a clip layer of the same outline
+//! (`Effects::with_clip_layer`); both renderers find the pixels that
+//! outline holds alike (`rust/vendor/README.md`). Each item fades as one
 //! layer (its hover fill and label together, the `FadeTransition` inside
 //! `CupertinoButton`).
 //!
@@ -74,9 +85,11 @@
 //!   sigma 6.27 for the blur radius 10); iced's shadow is a quad's (a
 //!   circular-cornered box, radius 8, faded out over the blur radius on
 //!   its own curve), so only its place and spread are Flutter's;
-//! - the hard-edged clip of the box's shape (`Clip.hardEdge`) also cut its
-//!   fill and border; iced has no clip of a shape, so those are filled
-//!   antialiased (the filtered backdrop alone is cut hard);
+//! - the box and its items inside the clip are drawn by iced's renderers,
+//!   not Skia: the fill's and border's antialiasing (tiny-skia's coverage,
+//!   wgpu's 4× multisampling) is theirs, and Skia drew them straight onto
+//!   the backdrop filter's layer where the port draws them onto the
+//!   window (the same values, but for each renderer's rounding);
 //! - the labels' style set `inherit: false` and no family, so Flutter set
 //!   them in the macOS system UI font (SF Pro, CoreText's `.AppleSystemUIFont`),
 //!   a variable face whose optical size CoreText set from the text's size,
@@ -422,15 +435,16 @@ impl<Message> overlay::Overlay<Message, Theme, Renderer> for Toolbar<'_, Message
         );
         // What lies behind the box, the shadow included, blurred and
         // saturated inside its hard-edged clip.
+        let clip = rsuperellipse::path(bounds, RADIUS);
         renderer.draw_backdrop_filter(
-            &rsuperellipse::path(bounds, RADIUS),
+            &clip,
             BackdropFilter {
                 blur_sigma: BLUR_SIGMA,
                 color_matrix: BackdropFilter::saturation_matrix(SATURATION),
             },
         );
-        // The rest over it, in a later layer.
-        renderer.with_layer(bounds.expand(1.0), |renderer| {
+        // The rest over it, in a later layer, inside the same clip.
+        renderer.with_clip_layer(&clip, |renderer| {
             draw_box(renderer, bounds, &items, menu, cursor);
         });
     }

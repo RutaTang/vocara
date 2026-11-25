@@ -249,8 +249,12 @@ structure every screen follows, so screens ported by different hands fit:
   `Effects`, which `iced::Renderer` implements) composite what iced has no
   primitive for, as Flutter's layers did: a subtree drawn offscreen and
   composited at an opacity (`widgets::opacity_layer`, Flutter's `Opacity`
-  and `FadeTransition`), and a backdrop blurred and color-filtered inside a
-  hard-edged clip (`BackdropFilter`), in the same arithmetic, so both draw
+  and `FadeTransition`), a subtree cut by a hard-edged clip of any path
+  (Flutter's `ClipPath` with `Clip.hardEdge`: drawn as without it, then
+  every pixel whose center the path does not hold put back as it was), and
+  a backdrop blurred and color-filtered inside a hard-edged clip
+  (`BackdropFilter`), in the same arithmetic and with the same pixels held
+  by a clip (both take them from `iced_tiny_skia::HardClip`), so both draw
   the same pixels. Text always uses the bundled Inter
   (`theme::font::install`), never a copy installed on the machine; only
   the text toolbar's labels, which Flutter set in the system UI font, may
@@ -460,10 +464,12 @@ small and written down in the module that has it:
   reads no touches. Two fingers landing (a pan-zoom start) stop it, as
   in Flutter (`fading_scrollbar`).
 - A text field's right-click toolbar (`text_field::toolbar`, its
-  superellipse corners, its shadow's spread and its blurred and saturated
-  backdrop Flutter's) fills and strokes its box antialiased, where
-  Flutter's hard-edged clip cut them, and its shadow faded on iced's
-  curve, not a Gaussian. Its labels are in the macOS system UI font, as
+  superellipse corners, its shadow's spread, its blurred and saturated
+  backdrop and the hard-edged clip of its box and items Flutter's) draws
+  its shadow faded on iced's curve, not a Gaussian, and its fill, border
+  and items with iced's renderers' antialiasing, not Skia's, onto the
+  window where Skia drew them onto the backdrop filter's layer (each
+  renderer's rounding apart, the same values). Its labels are in the macOS system UI font, as
   Flutter's, only where cosmic-text draws that variable face as Flutter
   did (it varies a face along its weight axis alone, so the face's default
   optical size must be the one CoreText set at 14 px, and the shapers'

@@ -1664,6 +1664,7 @@ dependencies = [
  "guillotiere",
  "iced_debug",
  "iced_graphics",
+ "iced_tiny_skia",
  "log",
  "lyon",
  "rustc-hash 2.1.3",

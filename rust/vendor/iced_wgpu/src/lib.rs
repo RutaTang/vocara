@@ -96,22 +96,33 @@ pub struct Renderer {
 
     staging_belt: wgpu::util::StagingBelt,
 
-    // vocara: the opacity layers drawing, innermost last: each holds the
-    // stack it interrupted (`layers` is the group's own meanwhile).
+    // vocara: the opacity and clip layers drawing, innermost last: each
+    // holds the stack it interrupted (`layers` is the group's own
+    // meanwhile).
     groups: Vec<OpenGroup>,
     // vocara: the groups' offscreen targets.
     group_targets: effect::Targets,
 }
 
-/// vocara: an opacity layer being drawn.
+/// vocara: an opacity or clip layer being drawn.
 #[derive(Debug)]
 struct OpenGroup {
     /// The stack the group's layer goes into when it ends.
     parent: layer::Stack,
     /// The group's clip, transformed and inside the layer it is in.
     bounds: Rectangle,
-    /// The opacity it is composited at.
-    opacity: f32,
+    /// What it is.
+    kind: GroupKind,
+}
+
+/// vocara: what a group does with what it draws.
+#[derive(Debug)]
+enum GroupKind {
+    /// Composites it at an opacity.
+    Opacity(f32),
+    /// Cuts it by a hard-edged clip (one that holds nothing: drops it).
+    #[cfg_attr(not(feature = "geometry"), allow(dead_code))]
+    Clip(Option<iced_tiny_skia::HardClip>),
 }
 
 /// vocara: how many of each kind of prepared batch the layers drawn so far
@@ -171,10 +182,52 @@ impl Renderer {
     /// translucent parts. Clips and transformations go on working inside,
     /// and the clip of the layer it is drawn in clips it too.
     pub fn start_opacity_layer(&mut self, bounds: Rectangle, opacity: f32) {
-        let (layer, transformation) = self.layers.current_mut();
-        let bounds = (bounds * transformation)
-            .intersection(&layer.bounds)
+        let transformation = self.layers.current_mut().1;
+
+        self.start_group(bounds * transformation, GroupKind::Opacity(opacity));
+    }
+
+    /// vocara: ends the group [`start_opacity_layer`] started; it is
+    /// composited above what was drawn before it, like a layer started
+    /// there.
+    ///
+    /// [`start_opacity_layer`]: Self::start_opacity_layer
+    pub fn end_opacity_layer(&mut self) {
+        self.end_group();
+    }
+
+    /// vocara: starts a group that is drawn as it would be without it and,
+    /// when [`end_clip_layer`](Self::end_clip_layer) ends it, cut by `clip`
+    /// with a hard edge (Flutter's `ClipPath` with `Clip.hardEdge`): every
+    /// pixel whose center `clip` does not hold keeps what was there before
+    /// the group. Clips and transformations go on working inside, and the
+    /// clip of the layer it is drawn in clips it too. The target must allow
+    /// copies from it, as for a backdrop filter; where it does not, the
+    /// group is drawn unclipped.
+    #[cfg(feature = "geometry")]
+    pub fn start_clip_layer(&mut self, clip: &graphics::geometry::Path) {
+        let transformation = self.layers.current_mut().1;
+        let clip = iced_tiny_skia::HardClip::new(clip, transformation);
+        let bounds = clip
+            .as_ref()
+            .map(iced_tiny_skia::HardClip::bounds)
             .unwrap_or_default();
+
+        self.start_group(bounds, GroupKind::Clip(clip));
+    }
+
+    /// vocara: ends the group [`start_clip_layer`] started; it is drawn
+    /// above what was drawn before it, like a layer started there.
+    ///
+    /// [`start_clip_layer`]: Self::start_clip_layer
+    pub fn end_clip_layer(&mut self) {
+        self.end_group();
+    }
+
+    /// vocara: starts a group inside `bounds` (transformed).
+    fn start_group(&mut self, bounds: Rectangle, kind: GroupKind) {
+        let (layer, transformation) = self.layers.current_mut();
+        let bounds = bounds.intersection(&layer.bounds).unwrap_or_default();
         let mut group = layer::Stack::new();
 
         group.reset(bounds);
@@ -185,16 +238,12 @@ impl Renderer {
         self.groups.push(OpenGroup {
             parent,
             bounds,
-            opacity,
+            kind,
         });
     }
 
-    /// vocara: ends the group [`start_opacity_layer`] started; it is
-    /// composited above what was drawn before it, like a layer started
-    /// there.
-    ///
-    /// [`start_opacity_layer`]: Self::start_opacity_layer
-    pub fn end_opacity_layer(&mut self) {
+    /// vocara: ends the innermost group, whatever it is.
+    fn end_group(&mut self) {
         let Some(open) = self.groups.pop() else {
             return;
         };
@@ -202,13 +251,25 @@ impl Renderer {
         let mut group = std::mem::replace(&mut self.layers, open.parent);
         group.merge();
 
+        let effect = match open.kind {
+            GroupKind::Opacity(opacity) => {
+                layer::Effect::Group(Box::new(layer::Group {
+                    opacity,
+                    layers: group,
+                }))
+            }
+            GroupKind::Clip(Some(clip)) => {
+                layer::Effect::Clip(Box::new(layer::Clip {
+                    clip,
+                    layers: group,
+                }))
+            }
+            GroupKind::Clip(None) => return,
+        };
+
         self.layers.push_clip(Rectangle::default());
         self.layers.current_mut().0.bounds = open.bounds;
-        self.layers.current_mut().0.effect =
-            Some(layer::Effect::Group(Box::new(layer::Group {
-                opacity: open.opacity,
-                layers: group,
-            })));
+        self.layers.current_mut().0.effect = Some(effect);
         self.layers.pop_clip();
     }
 
@@ -229,29 +290,21 @@ impl Renderer {
         color_matrix: [f32; 20],
     ) {
         let (layer, transformation) = self.layers.current_mut();
-        let Some((vertices, indices)) =
-            effect::tessellate(clip, transformation)
+        let Some(clip) = iced_tiny_skia::HardClip::new(clip, transformation)
         else {
             return;
         };
-
-        let shape = lyon::algorithms::aabb::fast_bounding_box(clip.raw());
-        let shape = Rectangle {
-            x: shape.min.x,
-            y: shape.min.y,
-            width: shape.width(),
-            height: shape.height(),
-        } * transformation;
-        let bounds = shape.intersection(&layer.bounds).unwrap_or_default();
+        let bounds = clip
+            .bounds()
+            .intersection(&layer.bounds)
+            .unwrap_or_default();
 
         self.layers.push_clip(Rectangle::default());
         self.layers.current_mut().0.bounds = bounds;
         self.layers.current_mut().0.effect =
             Some(layer::Effect::Backdrop(Box::new(layer::Backdrop {
-                vertices,
-                indices,
-                bounds: shape,
-                blur_sigma: blur_sigma * transformation.scale_factor(),
+                clip,
+                blur_sigma,
                 color_matrix,
             })));
         self.layers.pop_clip();
@@ -465,6 +518,11 @@ impl Renderer {
             }
 
             if let Some(layer::Effect::Group(group)) = &layer.effect {
+                self.prepare_layers(encoder, viewport, group.layers.as_slice());
+                continue;
+            }
+
+            if let Some(layer::Effect::Clip(group)) = &layer.effect {
                 self.prepare_layers(encoder, viewport, group.layers.as_slice());
                 continue;
             }
@@ -705,6 +763,7 @@ impl Renderer {
                     layer::Effect::Backdrop(backdrop) => {
                         self.engine.effect_pipeline.backdrop(
                             &self.engine.device,
+                            &self.engine.queue,
                             encoder,
                             frame,
                             viewport.physical_size(),
@@ -712,6 +771,39 @@ impl Renderer {
                             scale_factor,
                             physical_bounds,
                         );
+                    }
+                    layer::Effect::Clip(group) => {
+                        // Drawn in place, as at the top level, then cut.
+                        let saved = self.engine.effect_pipeline.save(
+                            &self.engine.device,
+                            &self.engine.queue,
+                            encoder,
+                            frame,
+                            viewport.physical_size(),
+                            &group.clip,
+                            scale_factor,
+                            physical_bounds,
+                        );
+
+                        self.render_layers(
+                            encoder,
+                            frame,
+                            None,
+                            viewport,
+                            group.layers.as_slice(),
+                            counts,
+                            depth,
+                        );
+
+                        if let Some(saved) = saved {
+                            self.engine.effect_pipeline.restore(
+                                &self.engine.device,
+                                encoder,
+                                frame,
+                                viewport.physical_size(),
+                                &saved,
+                            );
+                        }
                     }
                 }
 

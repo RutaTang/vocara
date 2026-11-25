@@ -23,7 +23,8 @@ pub use iced_graphics as graphics;
 pub use iced_graphics::core;
 
 pub use layer::Layer;
-pub use layer::{Backdrop, Effect, Group}; // vocara
+pub use effect::{HardClip, PixelBox}; // vocara
+pub use layer::{Backdrop, Clip, Effect, Group}; // vocara
 pub use primitive::Primitive;
 pub use settings::Settings;
 
@@ -49,20 +50,30 @@ pub struct Renderer {
     default_text_size: Pixels,
     layers: layer::Stack,
     engine: Engine, // TODO: Shared engine
-    // vocara: the opacity layers drawing, innermost last: each holds the
-    // stack it interrupted (`layers` is the group's own meanwhile).
+    // vocara: the opacity and clip layers drawing, innermost last: each
+    // holds the stack it interrupted (`layers` is the group's own
+    // meanwhile).
     groups: Vec<OpenGroup>,
 }
 
-/// vocara: an opacity layer being drawn.
+/// vocara: an opacity or clip layer being drawn.
 #[derive(Debug)]
 struct OpenGroup {
     /// The stack the group's layer goes into when it ends.
     parent: layer::Stack,
     /// The group's clip, transformed and inside the layer it is in.
     bounds: Rectangle,
-    /// The opacity it is composited at.
-    opacity: f32,
+    /// What it is.
+    kind: GroupKind,
+}
+
+/// vocara: what a group does with what it draws.
+#[derive(Debug)]
+enum GroupKind {
+    /// Composites it at an opacity.
+    Opacity(f32),
+    /// Cuts it by a hard-edged clip (one that holds nothing: drops it).
+    Clip(Option<HardClip>),
 }
 
 impl Renderer {
@@ -83,10 +94,50 @@ impl Renderer {
     /// translucent parts. Clips and transformations go on working inside,
     /// and the clip of the layer it is drawn in clips it too.
     pub fn start_opacity_layer(&mut self, bounds: Rectangle, opacity: f32) {
-        let (layer, transformation) = self.layers.current_mut();
-        let bounds = (bounds * transformation)
-            .intersection(&layer.bounds)
+        let transformation = self.layers.current_mut().1;
+
+        self.start_group(bounds * transformation, GroupKind::Opacity(opacity));
+    }
+
+    /// vocara: ends the group [`start_opacity_layer`] started; it is
+    /// composited above what was drawn before it, like a layer started
+    /// there.
+    ///
+    /// [`start_opacity_layer`]: Self::start_opacity_layer
+    pub fn end_opacity_layer(&mut self) {
+        self.end_group();
+    }
+
+    /// vocara: starts a group that is drawn as it would be without it and,
+    /// when [`end_clip_layer`](Self::end_clip_layer) ends it, cut by `clip`
+    /// with a hard edge (Flutter's `ClipPath` with `Clip.hardEdge`): every
+    /// pixel whose center `clip` does not hold keeps what was there before
+    /// the group. Clips and transformations go on working inside, and the
+    /// clip of the layer it is drawn in clips it too.
+    #[cfg(feature = "geometry")]
+    pub fn start_clip_layer(&mut self, clip: &graphics::geometry::Path) {
+        let transformation = self.layers.current_mut().1;
+        let clip = HardClip::new(clip, transformation);
+        let bounds = clip
+            .as_ref()
+            .map(HardClip::bounds)
             .unwrap_or_default();
+
+        self.start_group(bounds, GroupKind::Clip(clip));
+    }
+
+    /// vocara: ends the group [`start_clip_layer`] started; it is drawn
+    /// above what was drawn before it, like a layer started there.
+    ///
+    /// [`start_clip_layer`]: Self::start_clip_layer
+    pub fn end_clip_layer(&mut self) {
+        self.end_group();
+    }
+
+    /// vocara: starts a group inside `bounds` (transformed).
+    fn start_group(&mut self, bounds: Rectangle, kind: GroupKind) {
+        let (layer, transformation) = self.layers.current_mut();
+        let bounds = bounds.intersection(&layer.bounds).unwrap_or_default();
         let mut group = layer::Stack::new();
 
         group.reset(bounds);
@@ -97,16 +148,12 @@ impl Renderer {
         self.groups.push(OpenGroup {
             parent,
             bounds,
-            opacity,
+            kind,
         });
     }
 
-    /// vocara: ends the group [`start_opacity_layer`] started; it is
-    /// composited above what was drawn before it, like a layer started
-    /// there.
-    ///
-    /// [`start_opacity_layer`]: Self::start_opacity_layer
-    pub fn end_opacity_layer(&mut self) {
+    /// vocara: ends the innermost group, whatever it is.
+    fn end_group(&mut self) {
         let Some(open) = self.groups.pop() else {
             return;
         };
@@ -114,13 +161,25 @@ impl Renderer {
         let mut group = std::mem::replace(&mut self.layers, open.parent);
         group.flush();
 
+        let effect = match open.kind {
+            GroupKind::Opacity(opacity) => {
+                layer::Effect::Group(std::sync::Arc::new(layer::Group {
+                    opacity,
+                    layers: group,
+                }))
+            }
+            GroupKind::Clip(Some(clip)) => {
+                layer::Effect::Clip(std::sync::Arc::new(layer::Clip {
+                    clip,
+                    layers: group,
+                }))
+            }
+            GroupKind::Clip(None) => return,
+        };
+
         self.layers.push_clip(Rectangle::default());
         self.layers.current_mut().0.bounds = open.bounds;
-        self.layers.current_mut().0.effect =
-            Some(layer::Effect::Group(std::sync::Arc::new(layer::Group {
-                opacity: open.opacity,
-                layers: group,
-            })));
+        self.layers.current_mut().0.effect = Some(effect);
         self.layers.pop_clip();
     }
 
@@ -138,18 +197,12 @@ impl Renderer {
         blur_sigma: f32,
         color_matrix: [f32; 20],
     ) {
-        let Some(path) = geometry::convert_path(clip) else {
+        let (layer, transformation) = self.layers.current_mut();
+        let Some(clip) = HardClip::new(clip, transformation) else {
             return;
         };
-
-        let shape = path.bounds();
-        let (layer, transformation) = self.layers.current_mut();
-        let bounds = (Rectangle {
-            x: shape.x(),
-            y: shape.y(),
-            width: shape.width(),
-            height: shape.height(),
-        } * transformation)
+        let bounds = clip
+            .bounds()
             .intersection(&layer.bounds)
             .unwrap_or_default();
 
@@ -157,8 +210,7 @@ impl Renderer {
         self.layers.current_mut().0.bounds = bounds;
         self.layers.current_mut().0.effect =
             Some(layer::Effect::Backdrop(std::sync::Arc::new(layer::Backdrop {
-                clip: path,
-                transformation,
+                clip,
                 blur_sigma,
                 color_matrix,
             })));
@@ -278,6 +330,27 @@ fn draw_layers(
                     scale_factor,
                     pixels,
                     layer_bounds,
+                );
+
+                continue;
+            }
+            Some(layer::Effect::Clip(group)) => {
+                // Drawn in place, as at the top level, then cut.
+                effect::draw_clipped(
+                    &group.clip,
+                    scale_factor,
+                    pixels,
+                    layer_bounds,
+                    |pixels, bounds| {
+                        draw_layers(
+                            engine,
+                            group.layers.as_slice(),
+                            scale_factor,
+                            pixels,
+                            clip_mask,
+                            bounds,
+                        );
+                    },
                 );
 
                 continue;
