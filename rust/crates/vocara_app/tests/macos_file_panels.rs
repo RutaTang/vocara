@@ -147,6 +147,11 @@ mod macos {
     /// A typed path or name settling (the Go to Folder sheet completes
     /// paths as they are typed).
     const TYPED_WAIT: Duration = Duration::from_secs(1);
+    /// How long the save panel's name field may take to read a name typed
+    /// to it, and how many times it is typed (⌘A, then the name) before the
+    /// run goes on with what it reads.
+    const NAME_WAIT: Duration = Duration::from_secs(2);
+    const NAME_TRIES: usize = 3;
     /// How long a panel gets to show the folder (and the file) Go to
     /// Folder's Return took it to.
     const GO_WAIT: Duration = Duration::from_secs(5);
@@ -887,6 +892,18 @@ mod macos {
         })
     }
 
+    /// What the save panel up now's name field reads, if its object says.
+    fn name_field() -> Option<String> {
+        on_main(|mtm| {
+            let app = NSApplication::sharedApplication(mtm);
+            find_panel(&app).and_then(|(panel, _)| {
+                guarded("nameFieldStringValue", || {
+                    panel.nameFieldStringValue().to_string()
+                })
+            })
+        })
+    }
+
     /// The folder the panel up now's object reports it shows.
     fn shown_folder() -> Option<PathBuf> {
         on_main(|mtm| {
@@ -1013,17 +1030,35 @@ mod macos {
 
     /// Saves as `name` in `folder` in the save panel up now as a user does
     /// from the keyboard: the name typed over the one suggested (⌘A, then
-    /// the name: the name field has the keyboard when the panel opens),
-    /// the folder through the Go to Folder sheet, then Return to save (a
-    /// second Return if the first leaves the panel up: the sheet's first
-    /// Return may only have taken the path it completed). `Ok` once the
-    /// panel closed (what it answered is the caller's check); `Err` says
-    /// how it stayed up.
+    /// the name, again if the field does not read it: the name field has
+    /// the keyboard when the panel opens), the folder through the Go to
+    /// Folder sheet, then Return to save (a second Return if the first
+    /// leaves the panel up: the sheet's first Return may only have taken
+    /// the path it completed). `Ok` once the panel closed (what it answered
+    /// is the caller's check); `Err` says how it stayed up.
     fn accept_save(what: &str, folder: &Path, name: &str) -> Result<(), String> {
-        println!("  typing ⌘A, then {name:?} to the {what}'s name field");
-        typed::command(typed::A, false);
-        typed::text(name);
-        thread::sleep(TYPED_WAIT);
+        // The panel selects the suggested name's stem itself once it is up,
+        // and that can land after a quick ⌘A: the name typed then replaces
+        // the stem only ("chosen.zip.zip"). So the name is typed until the
+        // field reads it, as a user would retype it.
+        for attempt in 1..=NAME_TRIES {
+            let again = if attempt > 1 { " again" } else { "" };
+            println!("  typing ⌘A, then {name:?} to the {what}'s name field{again}");
+            typed::command(typed::A, false);
+            typed::text(name);
+            thread::sleep(TYPED_WAIT);
+            if wait_until(NAME_WAIT, || name_field().as_deref() == Some(name)) {
+                break;
+            }
+            if closed() {
+                return Err(format!("the {what} closed while {name:?} was typed to it"));
+            }
+            note(format!(
+                "the {what}'s name field reads {:?} after ⌘A and {name:?} (try {attempt} of \
+                 {NAME_TRIES})",
+                name_field()
+            ));
+        }
         report(what);
         let path = format!("{}/", folder.display());
         go_to(what, &path)?;
