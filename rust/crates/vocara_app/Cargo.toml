@@ -20,6 +20,7 @@ vocara_model.workspace = true
 vocara_store.workspace = true
 vocara_services.workspace = true
 iced.workspace = true
+iced_winit.workspace = true
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -34,6 +35,41 @@ unicode-segmentation.workspace = true
 [dev-dependencies]
 iced_test.workspace = true
 tempfile.workspace = true
+
+# The scroll phases the run loop reads off AppKit, on a real Mac: AppKit
+# wants the main thread, so `main` is the test's own (see the file).
+[[test]]
+name = "macos_scroll_phases"
+harness = false
+
+# What tests/macos_scroll_phases.rs makes its scroll events with and runs
+# them on (objc2 0.6's bindings, the services' and the run loop's).
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSApplication",
+    "NSEvent",
+    "NSResponder",
+    "NSView",
+    "NSWindow",
+    "objc2-core-foundation",
+    "objc2-core-graphics",
+] }
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSArray",
+    "NSDate",
+    "NSObjCRuntime",
+    "NSRunLoop",
+    "NSString",
+] }
+objc2-core-graphics = { version = "0.3", default-features = false, features = [
+    "std",
+    "CGEvent",
+    "CGEventTypes",
+] }
+dispatch2 = { version = "0.3", default-features = false, features = ["std"] }
 
 [lints]
 workspace = true

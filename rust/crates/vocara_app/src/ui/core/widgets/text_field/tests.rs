@@ -22,7 +22,9 @@ use super::*;
 use crate::ui::core::motion::Curve;
 use crate::ui::core::theme::{self, app_theme, font, Studio, DEFAULT_TEXT_SIZE};
 use crate::ui::core::widgets::animated::testing::{near, over, BACKGROUND};
+use crate::ui::core::widgets::pan_zoom::testing::{set_event_time, Sent, Trackpad};
 use crate::ui::core::widgets::studio_text::testing::{laid, load_fonts, spec};
+use iced_winit::gesture::Phase;
 
 const MS: Duration = Duration::from_millis(1);
 
@@ -86,6 +88,34 @@ impl Window {
         events: &[Event],
         now: Instant,
     ) -> (Vec<M>, Vec<event::Status>) {
+        self.run_with(view, at, events, &[], now)
+    }
+
+    /// [`Window::run`] for wheel events with the gestures the run loop
+    /// hands along (`pan_zoom::testing`), handled at `now`.
+    fn run_sent<'a, M>(
+        &mut self,
+        view: impl Into<Element<'a, M>>,
+        at: Point,
+        sent: &[Sent],
+        now: Instant,
+    ) -> (Vec<M>, Vec<event::Status>) {
+        let events: Vec<Event> = sent.iter().map(|(event, _)| event.clone()).collect();
+        let wheels: Vec<_> = sent.iter().map(|(_, wheel)| *wheel).collect();
+        set_event_time(Some(now));
+        let ran = self.run_with(view, at, &events, &wheels, now);
+        set_event_time(None);
+        ran
+    }
+
+    fn run_with<'a, M>(
+        &mut self,
+        view: impl Into<Element<'a, M>>,
+        at: Point,
+        events: &[Event],
+        wheels: &[Option<iced_winit::gesture::Wheel>],
+        now: Instant,
+    ) -> (Vec<M>, Vec<event::Status>) {
         self.cursor = at;
         let cursor = mouse::Cursor::Available(at);
         let mut ui = UserInterface::build(
@@ -97,13 +127,10 @@ impl Window {
         let mut messages = Vec::new();
         let mut all = vec![Event::Mouse(mouse::Event::CursorMoved { position: at })];
         all.extend_from_slice(events);
-        let (_, statuses) = ui.update(
-            &all,
-            cursor,
-            &mut self.renderer,
-            &mut self.board,
-            &mut messages,
-        );
+        let (renderer, board) = (&mut self.renderer, &mut self.board);
+        let (_, statuses) = iced_winit::gesture::update_each(&all, wheels, |events| {
+            ui.update(events, cursor, renderer, board, &mut messages)
+        });
         let _ = ui.update(
             &[Event::Window(window::Event::RedrawRequested(now))],
             cursor,
@@ -885,28 +912,111 @@ fn a_keyboard_move_reveals_the_caret_at_once() {
 }
 
 #[test]
-fn a_trackpad_swipe_across_the_field_scrolls_it_within_its_range() {
+fn a_scroll_signal_across_the_field_scrolls_it_and_one_down_is_the_pages() {
     caret::set_scale_factor(1.0);
     let mut window = window();
     let text = format!("{}WWWW", filler());
     let at = Point::new(150.0, MIDDLE);
-    let swipe = |x: f32, y: f32| {
-        Event::Mouse(mouse::Event::WheelScrolled {
-            delta: mouse::ScrollDelta::Pixels { x, y },
-        })
-    };
     let t0 = Instant::now();
-    let (_, statuses) = window.run(field(&text), at, &[swipe(-30.0, 2.0)], t0);
+    let mut pad = Trackpad::new();
+    // A precise device's points without phases: a signal, by its delta.
+    let (_, statuses) = window.run_sent(field(&text), at, &[pad.pixels(-30.0, 2.0, t0)], t0);
     assert_eq!(statuses, vec![event::Status::Captured]);
     assert_eq!(window.scroll(field(&text)), 30.0);
-    // Mostly down: the page's, not the field's.
-    let (_, statuses) = window.run(field(&text), at, &[swipe(-3.0, -20.0)], t0);
+    // Down: no delta across, the page's.
+    let (_, statuses) = window.run_sent(field(&text), at, &[pad.pixels(0.0, -20.0, t0)], t0);
     assert_eq!(statuses, vec![event::Status::Ignored]);
-    assert_eq!(window.scroll(field(&text)), 30.0);
     // No further than the line and the caret's room.
-    window.run(field(&text), at, &[swipe(-500.0, 0.0)], t0);
+    window.run_sent(field(&text), at, &[pad.pixels(-500.0, 0.0, t0)], t0);
     let max = width(&text) + caret::MARGIN - BOX;
     assert!((window.scroll(field(&text)) - max).abs() < 0.01);
+}
+
+#[test]
+fn a_two_finger_swipe_alone_on_the_field_drags_it_and_flings_it() {
+    caret::set_scale_factor(1.0);
+    let mut window = window();
+    let text = format!("{}WWWWWWWWWWWWWWWWWWWW", filler());
+    let max = width(&text) + caret::MARGIN - BOX;
+    let at = Point::new(150.0, MIDDLE);
+    let t0 = Instant::now();
+    let mut pad = Trackpad::new();
+    // Alone in its arena: it drags from the first move, by the pan across
+    // only.
+    let (_, statuses) = window.run_sent(field(&text), at, &[pad.began(t0)], t0);
+    assert_eq!(statuses, vec![event::Status::Captured]);
+    let mut t = t0;
+    for _ in 0..4 {
+        t += 10 * MS;
+        let (_, statuses) = window.run_sent(field(&text), at, &[pad.changed(-10.0, -6.0, t)], t);
+        assert_eq!(statuses, vec![event::Status::Captured]);
+    }
+    assert_eq!(window.scroll(field(&text)), 40.0);
+    // The fingers lift at 1000 px/s: it flies on, slowing, past where they
+    // left it, and the momentum macOS sends moves nothing.
+    let up = t + 2 * MS;
+    window.run_sent(field(&text), at, &[pad.ended(up)], up);
+    window.run(field(&text), at, &[], up + 16 * MS);
+    let (_, statuses) = window.run_sent(
+        field(&text),
+        at,
+        &[pad.momentum(Phase::Began, -400.0, 0.0, up)],
+        up + 32 * MS,
+    );
+    assert_eq!(statuses, vec![event::Status::Captured]);
+    let early = window.scroll(field(&text));
+    assert!(early > 40.0, "{early}");
+    let mut now = up + 48 * MS;
+    for _ in 0..40 {
+        window.run(field(&text), at, &[], now);
+        now += 16 * MS;
+    }
+    let done = window.scroll(field(&text));
+    assert!(done > early && done <= max, "{early} {done} {max}");
+    window.run(field(&text), at, &[], now + 16 * MS);
+    assert_eq!(window.scroll(field(&text)), done, "stopped");
+}
+
+#[test]
+fn in_a_scroll_view_a_swipe_is_the_fields_past_18_px_across_or_the_views_past_18_down() {
+    use crate::ui::core::widgets::fading_scrollbar::Fading;
+
+    caret::set_scale_factor(1.0);
+    let mut window = window();
+    let text = format!("{}WWWW", filler());
+    let at = Point::new(150.0, MIDDLE);
+    fn page(text: &str) -> Element<'_, Msg> {
+        iced::widget::scrollable(column![field(text), Space::new().height(400)])
+            .width(Length::Fill)
+            .height(200)
+            .fading()
+            .into()
+    }
+    let t0 = Instant::now();
+    let mut pad = Trackpad::new();
+    // Across: neither moves until it is past 18 px; then the rest of it is
+    // the field's.
+    let mut sent = vec![pad.began(t0)];
+    for _ in 0..3 {
+        sent.push(pad.changed(-7.0, -1.0, t0));
+    }
+    let (_, statuses) = window.run_sent(page(&text), at, &sent, t0);
+    assert!(statuses.iter().all(|s| *s == event::Status::Captured));
+    assert_eq!(window.scroll(page(&text)), 0.0, "the pan before it won");
+    window.run_sent(page(&text), at, &[pad.changed(-5.0, -3.0, t0)], t0);
+    assert_eq!(window.scroll(page(&text)), 5.0);
+    window.run_sent(page(&text), at, &[pad.ended(t0 + 200 * MS)], t0 + 200 * MS);
+    // Down: the view's past 18 px; the field moves not, nor takes the rest.
+    let t1 = t0 + 300 * MS;
+    let sent = [
+        pad.began(t1),
+        pad.changed(-2.0, -10.0, t1),
+        pad.changed(-2.0, -10.0, t1),
+    ];
+    window.run_sent(page(&text), at, &sent, t1);
+    let (_, statuses) = window.run_sent(page(&text), at, &[pad.changed(-30.0, -5.0, t1)], t1);
+    assert_eq!(statuses, vec![event::Status::Captured], "the view scrolled");
+    assert_eq!(window.scroll(page(&text)), 5.0);
 }
 
 #[test]

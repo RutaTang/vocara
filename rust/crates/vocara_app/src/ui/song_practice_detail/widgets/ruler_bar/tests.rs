@@ -158,17 +158,15 @@ fn a_narrow_loop_whose_start_grip_shows_still_shrinks_from_the_end() {
 
 #[test]
 fn a_two_finger_trackpad_swipe_over_a_loop_handle_leaves_it() {
-    // iced delivers the swipe as wheel scrolls, never as a button drag.
-    let swipe = |dx| {
-        Event::Mouse(mouse::Event::WheelScrolled {
-            delta: mouse::ScrollDelta::Pixels { x: dx, y: 0.0 },
-        })
-    };
-    let messages = run(
-        ruler(0, TIMELINE_MS, 2000, 8000),
-        at(8000.0),
-        vec![swipe(-40.0), swipe(-120.0)],
-    );
+    // iced delivers the swipe as wheel scrolls (a pan-zoom gesture's),
+    // never as a button drag.
+    use crate::ui::core::widgets::pan_zoom::testing as pan_zoom;
+
+    let mut ui = pump(ruler(0, TIMELINE_MS, 2000, 8000));
+    ui.point_at(at(8000.0));
+    let swipe = pan_zoom::swipe(&[(-40.0, 0.0), (-120.0, 0.0)], iced::time::Instant::now());
+    pan_zoom::simulate(&mut ui, swipe);
+    let messages: Vec<Message> = ui.into_messages().collect();
     assert!(messages.is_empty(), "{messages:?}");
 }
 

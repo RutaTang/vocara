@@ -19,6 +19,7 @@ use vocara_model::models::fx_presets::FxPresets;
 use super::chain::{reorder_target, reordered};
 use super::eq::*;
 use super::*;
+use crate::ui::core::widgets::pan_zoom::testing as pan_zoom;
 use crate::ui::song_practice_detail::widgets::mixer_shared::testing::*;
 
 /// The inspector's width (LeftPanel's `_panelWidth`), tall enough that the
@@ -446,9 +447,25 @@ fn a_two_finger_trackpad_swipe_over_the_editors_moves_nothing() {
     let graph = eq_box(&mut ui).center();
     for at in [slider, graph] {
         ui.point_at(at);
-        let _ = ui.simulate([swipe(30.0, -20.0), swipe(60.0, -40.0)]);
+        let swipe = pan_zoom::swipe(&[(30.0, -20.0), (60.0, -40.0)], Instant::now());
+        pan_zoom::simulate(&mut ui, swipe);
     }
     assert!(ui.into_messages().next().is_none());
+}
+
+#[test]
+fn a_wheel_over_the_eq_sets_the_nearest_bands_q_and_a_precise_one_too() {
+    // `onPointerSignal`: a scroll signal, a mouse wheel's (40 px a line)
+    // or a precise device's without gesture phases (its points).
+    let fx = with(|fx| fx.eq_on = true);
+    let mut ui = simulator(SIZE, view(track(Some(&fx))));
+    let graph = eq_box(&mut ui).center();
+    ui.point_at(graph);
+    let mut pad = pan_zoom::Trackpad::new();
+    let t = Instant::now();
+    pan_zoom::simulate(&mut ui, [pad.lines(0.0, 1.0, t), pad.pixels(0.0, -40.0, t)]);
+    let messages: Vec<_> = ui.into_messages().collect();
+    assert_eq!(messages.len(), 2, "{messages:?}");
 }
 
 // ------------------------------------------------------------------- EQ

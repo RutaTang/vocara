@@ -834,14 +834,12 @@ mod tests {
     // jumped the take's volume.
     #[test]
     fn a_two_finger_trackpad_swipe_leaves_the_level_alone() {
+        use crate::ui::core::widgets::pan_zoom::testing as pan_zoom;
+
         let mut ui = simulator(fader());
         ui.point_at(Point::new(100.0, 8.0));
-        let swipe = |dx| {
-            Event::Mouse(mouse::Event::WheelScrolled {
-                delta: mouse::ScrollDelta::Pixels { x: dx, y: 0.0 },
-            })
-        };
-        let _ = ui.simulate([swipe(-40.0), swipe(-80.0)]);
+        let swipe = pan_zoom::swipe(&[(-40.0, 0.0), (-80.0, 0.0)], Instant::now());
+        pan_zoom::simulate(&mut ui, swipe);
         assert!(ui.into_messages().next().is_none());
     }
 

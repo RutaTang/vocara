@@ -1,7 +1,11 @@
 //! The FX panel's interactive EQ (`_EqGraph`): a live input/output spectrum
 //! analyzer behind the combined response curve, plus a draggable dot per
 //! band (x = freq, y = gain), and the scroll wheel widening or narrowing the
-//! nearest band's Q.
+//! nearest band's Q: a scroll signal's (`onPointerSignal`, a mouse wheel's,
+//! or a precise device's without gesture phases), never a trackpad's
+//! two-finger swipe, which reached Flutter as a pan-zoom gesture the
+//! band's drag (`kPointerDragDevices`) left to the panel's scroll, nor the
+//! momentum after it (`pan_zoom`).
 //!
 //! The math is pure and tested: the RBJ biquads (mirroring the Rust engine,
 //! so the curve matches the sound), the log-frequency and dB mappings, and
@@ -24,7 +28,7 @@ use iced::alignment::Vertical;
 use iced::border::Radius;
 use iced::widget::canvas::{self, Frame, Geometry, LineJoin, Path, Stroke};
 use iced::widget::text::Alignment;
-use iced::{mouse, window, Color, Pixels, Point, Rectangle, Renderer, Size, Theme};
+use iced::{keyboard, mouse, window, Color, Pixels, Point, Rectangle, Renderer, Size, Theme};
 use vocara_model::models::audio_fx::{EqBand, EqBandKind};
 use vocara_model::util::dart_num::{clamp_f64, floor_to_i64, pow_f64};
 
@@ -32,6 +36,7 @@ use super::Message;
 use crate::ui::core::theme::{alpha, font, Studio};
 use crate::ui::core::widgets::gesture::{Gesture, PanDoubleTap};
 use crate::ui::core::widgets::painter::KeyedCache;
+use crate::ui::core::widgets::pan_zoom::{self, Scroll};
 use crate::util::to_string_as_fixed;
 
 pub const EQ_MIN_HZ: f64 = 20.0;
@@ -45,10 +50,6 @@ pub const EQ_HEIGHT: f32 = 120.0;
 /// The wheel's Q debounce: a wheel edit persists this long after its last
 /// tick.
 pub const Q_COMMIT_DELAY: Duration = Duration::from_millis(400);
-
-/// Flutter's macOS embedder scales a line-based wheel delta by 40 (as
-/// Chromium does) before it reaches `PointerScrollEvent.scrollDelta`.
-pub const WHEEL_LINE_PIXELS: f32 = 40.0;
 
 // --- RBJ EQ magnitude response (mirrors the Rust engine so the curve matches the sound) ---
 
@@ -399,6 +400,8 @@ pub struct EqState {
     dragging: Option<usize>,
     /// When the last wheel Q edit is due to persist.
     q_commit_at: Option<Instant>,
+    /// Shift is held (macOS turns the wheel sideways under it).
+    shift: bool,
     spectrum: SpectrumData,
     ticker: SpectrumTicker,
     /// The response at the render points, for the bands it was summed for.
@@ -472,21 +475,27 @@ impl canvas::Program<Message> for EqGraph<'_> {
                     _ => None,
                 }
             }
+            canvas::Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers)) => {
+                state.shift = modifiers.shift();
+                None
+            }
             // Scroll over a band to widen / narrow its Q (bandwidth); the
             // scroll is consumed here and doesn't also scroll the FX list.
-            // A mouse wheel only: a trackpad's two-finger swipe (pixel
-            // deltas) scrolls the panel, as it reached Flutter as a pan-zoom
-            // gesture, never as a pointer scroll.
-            canvas::Event::Mouse(mouse::Event::WheelScrolled {
-                delta: mouse::ScrollDelta::Lines { y, .. },
-            }) => {
+            // A scroll signal only (`scrollDelta.dy`, Shift's swap on macOS
+            // put back): a trackpad's two-finger swipe scrolls the panel,
+            // as it reached Flutter as a pan-zoom gesture, never as a
+            // pointer scroll, and its momentum reached nothing.
+            canvas::Event::Mouse(mouse::Event::WheelScrolled { delta }) => {
+                if pan_zoom::current() != Scroll::Signal {
+                    return None;
+                }
                 let p = cursor.position_in(bounds)?;
                 if self.bands.is_empty() {
                     return None;
                 }
                 let i = nearest_band(self.bands, f64::from(p.x), w);
                 let b = self.bands[i];
-                let scroll_dy = f64::from(-y * WHEEL_LINE_PIXELS);
+                let scroll_dy = f64::from(pan_zoom::scroll_delta(*delta, state.shift).y);
                 let next = EqBand {
                     q: q_after_wheel(b.q, scroll_dy),
                     enabled: true,

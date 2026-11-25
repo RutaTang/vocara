@@ -37,6 +37,7 @@ use crate::ui::core::theme::{self, alpha, bare_button, boxed, fill, font, Studio
 use crate::ui::core::widgets::animated::{animated, animated_container, Decoration};
 use crate::ui::core::widgets::fading_scrollbar::Fading;
 use crate::ui::core::widgets::holds_keyboard::holds_keyboard;
+use crate::ui::core::widgets::pan_zoom::{self, Held, Scroll};
 use crate::ui::core::widgets::slide::inert;
 use crate::ui::core::widgets::studio_button::studio_button;
 use crate::ui::core::widgets::studio_controls::{fader_db_readout, studio_fader};
@@ -1463,10 +1464,12 @@ fn envelope_lane<'a>(
 
 // ------------------------------------------------------------- panning
 
-/// The pan wrapper's memory: whether Shift is held.
+/// The pan wrapper's memory: whether Shift is held, and the trackpad
+/// gesture that started over it.
 #[derive(Debug, Default)]
 struct PanState {
     shift: bool,
+    held: Held,
 }
 
 /// The pan for a scroll of `(x, y)` px (iced's sign: positive scrolls the
@@ -1487,9 +1490,12 @@ pub(super) fn wheel_pan_ms(x: f32, y: f32, shift: bool, width: f32, span: i64) -
     ))
 }
 
-/// The `Listener` over the lane list: pans the viewport on a two-finger
-/// horizontal swipe (iced delivers it as a wheel scroll's x) or Shift+wheel;
-/// plain vertical scroll falls through to the list.
+/// The `Listener` over the lane list: pans the viewport by a two-finger
+/// swipe's horizontal pan (`onPointerPanZoomUpdate`, a trackpad's
+/// pan-zoom gesture that started over it; not its momentum, which
+/// reached no widget) or a scroll signal's horizontal delta, the vertical
+/// one with Shift (`onPointerSignal`); the vertical scroll goes on to the
+/// list as well.
 fn pan_area(content: Element<'_, Message>, span: i64) -> Element<'_, Message> {
     Wrap::<Message, PanState>::new(
         content,
@@ -1498,17 +1504,35 @@ fn pan_area(content: Element<'_, Message>, span: i64) -> Element<'_, Message> {
                 state.shift = modifiers.shift();
             }
             Event::Mouse(mouse::Event::WheelScrolled { delta }) => {
-                if cursor.position_over(bounds).is_none() {
-                    return;
-                }
-                let (x, y) = match *delta {
-                    mouse::ScrollDelta::Lines { x, y } => (x * LINE_PX, y * LINE_PX),
-                    mouse::ScrollDelta::Pixels { x, y } => (x, y),
-                };
                 // The timeline area starts after the fixed track-header
                 // column and the insets.
                 let width = bounds.width - TRACK_HEADER_W - 2.0 * TIMELINE_H_MARGIN;
-                if let Some(ms) = wheel_pan_ms(x, y, state.shift, width, span) {
+                let over = cursor.position_over(bounds).is_some();
+                let ms = match pan_zoom::current() {
+                    Scroll::Signal if over => {
+                        let (x, y) = match *delta {
+                            mouse::ScrollDelta::Lines { x, y } => (x * LINE_PX, y * LINE_PX),
+                            mouse::ScrollDelta::Pixels { x, y } => (x, y),
+                        };
+                        // macOS turns a wheel sideways under Shift; Flutter's
+                        // embedder turned it back.
+                        let (x, y) = if cfg!(target_os = "macos") && state.shift {
+                            (y, x)
+                        } else {
+                            (x, y)
+                        };
+                        wheel_pan_ms(x, y, state.shift, width, span)
+                    }
+                    Scroll::Start { gesture, .. } if over => {
+                        state.held.take(gesture);
+                        None
+                    }
+                    Scroll::Update { gesture, delta, .. } if state.held.holds(gesture) => {
+                        wheel_pan_ms(delta.x, delta.y, false, width, span)
+                    }
+                    _ => None,
+                };
+                if let Some(ms) = ms {
                     shell.publish(Message::PanView(ms));
                 }
             }
@@ -1924,5 +1948,56 @@ mod animations {
         assert!(filled(&window, 130.0) && !filled(&window, 145.0), "middle");
         assert!(!window.frame(separation_fill(1.0), &[], t0 + 280 * MS));
         assert!(filled(&window, 195.0), "end");
+    }
+
+    // The lane list's `Listener`: `onPointerPanZoomUpdate`'s `panDelta.dx`
+    // and `onPointerSignal`'s scroll delta pan the view; the momentum
+    // after a swipe reaches no `Listener`.
+    #[test]
+    fn a_two_finger_swipe_pans_the_timeline_by_its_pan_and_its_momentum_not() {
+        use crate::ui::core::widgets::pan_zoom::testing::Trackpad;
+        use iced_winit::gesture::Phase;
+
+        // 600 px of timeline (the header column and insets aside) over a
+        // minute: a pixel is 100 ms.
+        let width = 600.0 + TRACK_HEADER_W + 2.0 * TIMELINE_H_MARGIN;
+        let view = || {
+            pan_area(
+                Space::new().width(Length::Fill).height(Length::Fill).into(),
+                60_000,
+            )
+        };
+        let mut window = Frames::new(Size::new(width, 100.0));
+        window.point_at(Point::new(400.0, 50.0));
+        let t0 = Instant::now();
+        let mut pad = Trackpad::new();
+        let swipe = [
+            pad.began(t0),
+            pad.changed(-6.0, 2.0, t0),
+            pad.changed(-4.0, 0.0, t0),
+            pad.ended(t0),
+            pad.momentum(Phase::Began, -30.0, 0.0, t0),
+            pad.momentum(Phase::Changed, -20.0, 0.0, t0),
+        ];
+        let pans = |messages: Vec<Message>| -> Vec<i64> {
+            messages
+                .into_iter()
+                .map(|m| match m {
+                    Message::PanView(ms) => ms,
+                    other => panic!("{other:?}"),
+                })
+                .collect()
+        };
+        let (_, panned) = window.frame_sent(view(), &swipe, t0);
+        assert_eq!(pans(panned), [600, 400], "the pans' -dx, not the momentum");
+        // A wheel's sideways scroll signal: its delta.
+        let (_, panned) = window.frame_sent(view(), &[pad.pixels(-3.0, 0.0, t0)], t0 + MS);
+        assert_eq!(pans(panned), [300]);
+        // A swipe that started off it pans nothing.
+        window.point_at(Point::new(-10.0, 50.0));
+        window.frame_sent(view(), &[pad.began(t0)], t0 + 2 * MS);
+        window.point_at(Point::new(400.0, 50.0));
+        let (_, panned) = window.frame_sent(view(), &[pad.changed(-6.0, 0.0, t0)], t0 + 3 * MS);
+        assert!(panned.is_empty(), "{panned:?}");
     }
 }

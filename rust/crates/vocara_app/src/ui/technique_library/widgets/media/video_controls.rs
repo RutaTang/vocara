@@ -104,12 +104,6 @@
 //! - Times come from the frames: a hover restarts the 3 s timer, and a tap
 //!   is timed for the double press, at the frame that follows it (iced
 //!   draws one at once), not at the event.
-//! - The wheel: only a line-based scroll (a mouse wheel) steps the volume.
-//!   Flutter took a trackpad's scroll (and a Magic Mouse's) as a pan
-//!   gesture, which the volume button's `onPointerSignal` never saw; winit
-//!   gives those as pixel deltas. A mouse with precise deltas and no
-//!   gesture phases, which Flutter would have taken as a scroll signal, is
-//!   a pixel delta here too, and is ignored.
 //! - The volume strip was a horizontal `SingleChildScrollView`; a sideways
 //!   scroll over the 12 px closed strip could scroll it. Not ported.
 //! - A completed clip's played span resets to the start (`:931-935`) and
@@ -142,6 +136,7 @@ use iced::{
 use crate::ui::core::material_icons::{self, MaterialIcon};
 use crate::ui::core::motion::{Controller, Curve, Implicit};
 use crate::ui::core::theme::{faded, font, Zinc};
+use crate::ui::core::widgets::pan_zoom::{self, Scroll};
 use crate::ui::core::widgets::studio_hint::arc_at;
 
 // ------------------------------------------------------------- the theme
@@ -1367,16 +1362,16 @@ impl<M> Widget<M, Theme, Renderer> for VideoControls<'_, M> {
                     volume.press = None;
                 }
             }
-            mouse::Event::WheelScrolled {
-                delta: mouse::ScrollDelta::Lines { x, y },
-            } => {
-                // The volume button's own wheel handler (a mouse wheel's
-                // scroll signal; a trackpad's pan is not one). Shift turns
-                // a wheel horizontal on macOS; Flutter turned it back.
+            mouse::Event::WheelScrolled { delta } => {
+                // The volume button's own `onPointerSignal`: a scroll
+                // signal's `scrollDelta.dy` (a mouse wheel's, or a precise
+                // device's without gesture phases; Shift's axis swap on
+                // macOS put back). A trackpad's swipe was a pan-zoom
+                // gesture it never saw, nor the momentum after it.
                 let over = state.bars.as_ref().is_some_and(|b| b.volume.hover);
-                let dy = if state.shift { *x } else { *y };
-                if over && dy != 0.0 {
-                    let step = if dy > 0.0 { VOLUME_STEP } else { -VOLUME_STEP };
+                let dy = pan_zoom::scroll_delta(*delta, state.shift).y;
+                if over && dy != 0.0 && pan_zoom::current() == Scroll::Signal {
+                    let step = if dy < 0.0 { VOLUME_STEP } else { -VOLUME_STEP };
                     let volume = (self.playback.volume + step).clamp(0.0, FULL_VOLUME);
                     self.publish(shell, Command::SetVolume(volume));
                 }

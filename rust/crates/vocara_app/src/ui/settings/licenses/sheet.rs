@@ -5,37 +5,46 @@
 //!   (and never under) `(screenHeight - kToolbarHeight) / screenHeight` of
 //!   the *window's* height (`MediaQuery`), while the page it sits in is the
 //!   window less the drag bar above it: so its top is `56 · h / (h + 28)`
-//!   down the page, about 54 px. A trackpad's (or a Magic Mouse's) scroll —
-//!   pixel deltas, which Flutter took as a drag — goes through
-//!   `_DraggableScrollableSheetScrollPosition.applyUserOffset`: while the
-//!   list is at its top, it first grows the sheet to the page's full
-//!   height (and back down to its least), and only then scrolls the list.
-//!   A mouse wheel's (line deltas, Flutter's `pointerScroll`) only ever
-//!   scrolls the list. The pinned `SliverAppBar` over the list takes the
-//!   scheme's surface tint at elevation 3 (8 % of `primary`) once the list
-//!   is scrolled under it.
+//!   down the page, about 54 px. A trackpad's (or a Magic Mouse's)
+//!   two-finger swipe that starts over the card is a pan-zoom gesture,
+//!   which the detail's scroll view took as a drag, alone in its arena
+//!   (`pan_zoom`): each move goes through
+//!   `_DraggableScrollableSheetScrollPosition.applyUserOffset`, which,
+//!   while the list is at its top, first grows the sheet to the page's
+//!   full height (and back down to its least), and only then scrolls the
+//!   list, within its range (clamping physics). When the fingers lift, the
+//!   drag's velocity (`MacOSScrollViewFlingVelocityTracker`, a fling past
+//!   18 px and 50 px/s) flings the sheet on a `ClampingScrollSimulation`
+//!   in its pixels and, once it is full (or least) with velocity left, the
+//!   list on its own (`goBallistic`, `scroll_fling`); a new swipe on it, or
+//!   a wheel that scrolls the list, stops that. The momentum macOS sends
+//!   once the fingers lift moves nothing. A scroll signal (a mouse wheel's,
+//!   Flutter's `pointerScroll`) only ever scrolls the list. The pinned
+//!   `SliverAppBar` over the list takes the scheme's surface tint at
+//!   elevation 3 (8 % of `primary`) once the list is scrolled under it.
 //! - [`KeyedStack`]: the `AnimatedSwitcher`'s stack, whose children keep
 //!   their state by key: a detail going away keeps its scroll and its
 //!   sheet's size while it fades out, as the switcher's outgoing child did.
 //! - [`ScrollWatch`]: the app bar's `ScrollNotificationObserver`: reports
 //!   whether the list under it is scrolled (`scrolledUnder`).
-//!
-//! Flutter flung the sheet and the list with its own ballistic simulation
-//! when a trackpad's fingers lifted; iced sees the momentum macOS sends
-//! after them as more pixel deltas, so those move the sheet and the list
-//! as the fingers did.
 
 use iced::advanced::layout::{self, Layout};
 use iced::advanced::widget::operation::Scrollable as ScrollableState;
 use iced::advanced::widget::{tree, Id, Operation, Tree};
 use iced::advanced::{overlay, renderer, Clipboard, Renderer as _, Shell, Widget};
 use iced::border::Radius;
+use iced::time::Instant;
+use iced::widget::scrollable::AbsoluteOffset;
 use iced::{
-    mouse, Background, Border, Color, Element, Event, Length, Point, Rectangle, Renderer, Shadow,
-    Size, Theme, Vector,
+    mouse, window, Background, Border, Color, Element, Event, Length, Point, Rectangle, Renderer,
+    Shadow, Size, Theme, Vector,
 };
 
 use crate::ui::core::theme::Zinc;
+use crate::ui::core::widgets::pan_zoom::{self, Held, Scroll};
+use crate::ui::core::widgets::scroll_fling::{
+    self, Ballistic, ClampingScrollSimulation, MacOsVelocityTracker, Tolerance,
+};
 use crate::ui::core::widgets::window_drag_bar;
 
 /// `kToolbarHeight`: the sheet's least size leaves this much of the window
@@ -126,6 +135,101 @@ fn scrolled<M>(
     offset.0.map_or(0.0, |o| o.y)
 }
 
+/// Reads where the first scrollable in a widget tree is scrolled down to
+/// and how far down it can go.
+#[derive(Default)]
+struct Metrics(Option<(f32, f32)>);
+
+impl Operation for Metrics {
+    fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+        if self.0.is_none() {
+            operate(self);
+        }
+    }
+
+    fn scrollable(
+        &mut self,
+        _id: Option<&Id>,
+        bounds: Rectangle,
+        content_bounds: Rectangle,
+        translation: Vector,
+        _state: &mut dyn ScrollableState,
+    ) {
+        self.0.get_or_insert((
+            translation.y,
+            (content_bounds.height - bounds.height).max(0.0),
+        ));
+    }
+}
+
+/// Scrolls the first scrollable in a widget tree to an offset down.
+struct ScrollListTo(Option<f32>);
+
+impl Operation for ScrollListTo {
+    fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+        if self.0.is_some() {
+            operate(self);
+        }
+    }
+
+    fn scrollable(
+        &mut self,
+        _id: Option<&Id>,
+        _bounds: Rectangle,
+        _content_bounds: Rectangle,
+        _translation: Vector,
+        state: &mut dyn ScrollableState,
+    ) {
+        if let Some(y) = self.0.take() {
+            state.scroll_to(AbsoluteOffset {
+                x: None,
+                y: Some(y),
+            });
+        }
+    }
+}
+
+/// The list in the card: its offset down and its range, read and set.
+struct List<'a, 'b, M> {
+    card: &'a mut Element<'b, M>,
+    tree: &'a mut Tree,
+    layout: Layout<'a>,
+    renderer: &'a Renderer,
+}
+
+impl<M> List<'_, '_, M> {
+    /// Where it is scrolled down to, and how far down it can go
+    /// (`pixels`, `maxScrollExtent`).
+    fn metrics(&mut self) -> (f32, f32) {
+        let mut metrics = Metrics::default();
+        self.card
+            .as_widget_mut()
+            .operate(self.tree, self.layout, self.renderer, &mut metrics);
+        metrics.0.unwrap_or((0.0, 0.0))
+    }
+
+    /// Scrolls it to `y` down.
+    fn scroll_to(&mut self, y: f32) {
+        self.card.as_widget_mut().operate(
+            self.tree,
+            self.layout,
+            self.renderer,
+            &mut ScrollListTo(Some(y)),
+        );
+    }
+}
+
+/// `double.sign`: 0 for 0.
+fn sign(x: f64) -> f64 {
+    if x > 0.0 {
+        1.0
+    } else if x < 0.0 {
+        -1.0
+    } else {
+        0.0
+    }
+}
+
 // -------------------------------------------------------------------- Sheet
 
 /// See the module docs: `card` on the sheet, at `opacity` (the header's
@@ -136,13 +240,44 @@ pub struct Sheet<'a, M> {
 }
 
 /// The sheet's state.
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone)]
 struct SheetState {
     /// Its size once a drag has changed it (`hasChanged`); until then it
     /// follows the least, as `initialChildSize` does.
     size: Option<f32>,
     /// The list is scrolled under the header.
     scrolled: bool,
+    /// The trackpad gesture the scroll view took last.
+    held: Held,
+    /// That gesture's drag, while the fingers are down.
+    drag: Option<Drag>,
+    /// A fling under way.
+    run: Option<Run>,
+}
+
+/// A trackpad's drag of the scroll view: its gesture, its pan down so far
+/// and the pan's velocity tracker.
+#[derive(Debug, Clone)]
+struct Drag {
+    gesture: u64,
+    pan: f32,
+    tracker: MacOsVelocityTracker,
+}
+
+/// A fling (`goBallistic`).
+#[derive(Debug, Clone, Copy)]
+enum Run {
+    /// The sheet's own, in its pixels (`_DraggableScrollableSheet
+    /// ScrollPosition.goBallistic`'s controller): `velocity` is the
+    /// fling's, `last` the simulation's place at the last frame.
+    Sheet {
+        simulation: ClampingScrollSimulation,
+        velocity: f64,
+        start: Option<Instant>,
+        last: f64,
+    },
+    /// The list's (`ScrollPositionWithSingleContext.goBallistic`).
+    List(Ballistic),
 }
 
 /// See [`Sheet`].
@@ -215,37 +350,97 @@ impl<M> Widget<M, Theme, Renderer> for Sheet<'_, M> {
         viewport: &Rectangle,
     ) {
         let card = layout.children().next().expect("the card's layout");
-        if let Event::Mouse(mouse::Event::WheelScrolled {
-            delta: mouse::ScrollDelta::Pixels { y, .. },
-        }) = event
-        {
-            if *y != 0.0 && cursor.is_over(card.bounds()) {
-                let pixels = scrolled(&mut self.card, &mut tree.children[0], card, renderer);
-                let page = layout.bounds().height;
-                let least = least_size(page);
-                let state = tree.state.downcast_mut::<SheetState>();
-                let size = state.size.unwrap_or(least);
-                if let Some(to) = sheet_takes(size, least, pixels, *y, page) {
-                    state.size = Some(to);
+        let page = layout.bounds().height;
+        let least = least_size(page);
+        let Tree {
+            state, children, ..
+        } = tree;
+        let state = state.downcast_mut::<SheetState>();
+        let child = &mut children[0];
+        let mut list = List {
+            card: &mut self.card,
+            tree: child,
+            layout: card,
+            renderer,
+        };
+        let mut pass = true;
+        // A scroll signal the list takes stops a fling (`pointerScroll`'s
+        // `goIdle`).
+        let mut signal = None;
+        match event {
+            Event::Window(window::Event::RedrawRequested(now)) => {
+                state.frame(&mut list, *now, page, least, shell);
+            }
+            Event::Mouse(mouse::Event::WheelScrolled { .. }) => {
+                let over = cursor.is_over(card.bounds());
+                let scroll = pan_zoom::current();
+                match scroll {
+                    Scroll::Signal => {
+                        if over {
+                            signal = Some(list.metrics().0);
+                        }
+                    }
+                    // The scroll view's drag recognizer, alone in its
+                    // arena: it holds the position (a fling stops) and
+                    // drags from the start.
+                    Scroll::Start { gesture, time } if over => {
+                        state.held.take(gesture);
+                        state.run = None;
+                        let mut tracker = MacOsVelocityTracker::default();
+                        tracker.add(time, 0.0, pan_zoom::event_time());
+                        state.drag = Some(Drag {
+                            gesture,
+                            pan: 0.0,
+                            tracker,
+                        });
+                        pass = false;
+                    }
+                    Scroll::Update {
+                        gesture,
+                        delta,
+                        time,
+                    } if state.held.holds(gesture) => {
+                        if let Some(drag) = state.drag.as_mut().filter(|d| d.gesture == gesture) {
+                            drag.pan += delta.y;
+                            drag.tracker.add(time, drag.pan, pan_zoom::event_time());
+                            state.apply_user_offset(&mut list, delta.y, page, least, shell);
+                        }
+                        pass = false;
+                    }
+                    Scroll::End { gesture } if state.held.holds(gesture) => {
+                        if let Some(drag) = state.drag.take_if(|d| d.gesture == gesture) {
+                            let estimate = drag.tracker.estimate(pan_zoom::event_time());
+                            let velocity = scroll_fling::drag_end(estimate);
+                            state.go_ballistic(&mut list, velocity, page, least, shell);
+                        }
+                        pass = false;
+                    }
+                    // Its momentum reached nothing.
+                    Scroll::Nothing { .. } if state.held.owns(&scroll) => pass = false,
+                    _ => {}
+                }
+                if !pass {
                     shell.capture_event();
-                    shell.invalidate_layout();
-                    shell.request_redraw();
-                    return;
                 }
             }
+            _ => {}
         }
-        self.card.as_widget_mut().update(
-            &mut tree.children[0],
-            event,
-            card,
-            cursor,
+        if pass {
+            self.card.as_widget_mut().update(
+                child, event, card, cursor, renderer, clipboard, shell, viewport,
+            );
+        }
+        let mut list = List {
+            card: &mut self.card,
+            tree: child,
+            layout: card,
             renderer,
-            clipboard,
-            shell,
-            viewport,
-        );
-        let under = scrolled(&mut self.card, &mut tree.children[0], card, renderer) > 0.0;
-        let state = tree.state.downcast_mut::<SheetState>();
+        };
+        let pixels = list.metrics().0;
+        if signal.is_some_and(|before| before != pixels) {
+            state.run = None;
+        }
+        let under = pixels > 0.0;
         if under != state.scrolled {
             state.scrolled = under;
             shell.request_redraw();
@@ -355,6 +550,128 @@ impl<M> Widget<M, Theme, Renderer> for Sheet<'_, M> {
 impl<'a, M: 'a> From<Sheet<'a, M>> for Element<'a, M> {
     fn from(sheet: Sheet<'a, M>) -> Self {
         Element::new(sheet)
+    }
+}
+
+impl SheetState {
+    /// `applyUserOffset(delta)` of a drag `delta` down: the sheet's, or
+    /// the list's within its range.
+    fn apply_user_offset<M>(
+        &mut self,
+        list: &mut List<'_, '_, M>,
+        delta: f32,
+        page: f32,
+        least: f32,
+        shell: &mut Shell<'_, M>,
+    ) {
+        let (pixels, max) = list.metrics();
+        let size = self.size.unwrap_or(least);
+        if let Some(to) = sheet_takes(size, least, pixels, delta, page) {
+            self.size = Some(to);
+            shell.invalidate_layout();
+        } else {
+            // `super.applyUserOffset`, clamped at the list's ends.
+            let to = (pixels - delta).clamp(0.0, max);
+            if to != pixels {
+                list.scroll_to(to);
+            }
+        }
+        shell.request_redraw();
+    }
+
+    /// `goBallistic(velocity)`: the scroll's velocity, positive toward the
+    /// list's end (the sheet growing).
+    fn go_ballistic<M>(
+        &mut self,
+        list: &mut List<'_, '_, M>,
+        velocity: f64,
+        page: f32,
+        least: f32,
+        shell: &mut Shell<'_, M>,
+    ) {
+        let (pixels, max) = list.metrics();
+        let size = self.size.unwrap_or(least);
+        let at_max = 1.0 <= size;
+        self.run =
+            if velocity == 0.0 || (velocity < 0.0 && pixels > 0.0) || (velocity > 0.0 && at_max) {
+                Ballistic::new(f64::from(pixels), f64::from(max), velocity).map(Run::List)
+            } else {
+                // The sheet's own fling, in its pixels (`currentPixels`).
+                let position = f64::from(size * page);
+                Some(Run::Sheet {
+                    simulation: ClampingScrollSimulation::new(position, velocity),
+                    velocity,
+                    start: None,
+                    last: position,
+                })
+            };
+        if self.run.is_some() {
+            shell.request_redraw();
+        }
+    }
+
+    /// A frame at `now`: the fling's step.
+    fn frame<M>(
+        &mut self,
+        list: &mut List<'_, '_, M>,
+        now: Instant,
+        page: f32,
+        least: f32,
+        shell: &mut Shell<'_, M>,
+    ) {
+        match &mut self.run {
+            Some(Run::Sheet {
+                simulation,
+                velocity,
+                start,
+                last,
+            }) => {
+                let t = now
+                    .saturating_duration_since(*start.get_or_insert(now))
+                    .as_secs_f64();
+                let value = simulation.x(t);
+                let delta = value - *last;
+                *last = value;
+                // `extent.addPixelDelta(delta)`.
+                let size = self.size.unwrap_or(least);
+                if page > 0.0 {
+                    let to = (size + (delta / f64::from(page)) as f32).clamp(least, 1.0);
+                    self.size = Some(to);
+                    if to != size {
+                        shell.invalidate_layout();
+                    }
+                }
+                let size = self.size.unwrap_or(least);
+                let (velocity, simulation) = (*velocity, *simulation);
+                if (velocity > 0.0 && 1.0 <= size) || (velocity < 0.0 && least >= size) {
+                    // The list takes the velocity left, and enough more to
+                    // go on (`toleranceFor(this).velocity`).
+                    let dx = simulation.dx(t);
+                    let velocity = dx + Tolerance::of_window().velocity * sign(dx);
+                    let (pixels, max) = list.metrics();
+                    self.run =
+                        Ballistic::new(f64::from(pixels), f64::from(max), velocity).map(Run::List);
+                } else if simulation.is_done(t) {
+                    // `super.goBallistic(0)`: the list is still.
+                    self.run = None;
+                }
+            }
+            Some(Run::List(ballistic)) => {
+                let (pixels, max) = list.metrics();
+                let (to, more) = ballistic.frame(now, f64::from(max));
+                let to = to as f32;
+                if to != pixels {
+                    list.scroll_to(to);
+                }
+                if !more {
+                    self.run = None;
+                }
+            }
+            None => {}
+        }
+        if self.run.is_some() {
+            shell.request_redraw();
+        }
     }
 }
 

@@ -13,6 +13,7 @@ use vocara_model::models::fx_bus::FxBus;
 use vocara_model::util::dart_date_time::DateTime;
 
 use super::*;
+use crate::ui::core::widgets::pan_zoom::testing as pan_zoom;
 use crate::ui::song_practice_detail::widgets::mixer_shared::testing::*;
 
 fn take(n: usize) -> Arc<AudioTrack> {
@@ -276,7 +277,8 @@ fn a_two_finger_trackpad_swipe_over_a_strip_moves_nothing() {
     let knob = Point::new(knob.center_x(), knob.y - 15.0);
     for at in [fader, knob] {
         ui.point_at(at);
-        let _ = ui.simulate([swipe(30.0, -40.0), swipe(60.0, -80.0)]);
+        let swipe = pan_zoom::swipe(&[(30.0, -40.0), (60.0, -80.0)], iced::time::Instant::now());
+        pan_zoom::simulate(&mut ui, swipe);
     }
     let messages: Vec<_> = ui.into_messages().collect();
     assert!(messages.is_empty(), "{messages:?}");

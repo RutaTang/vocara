@@ -15,6 +15,7 @@ use iced::time::Instant;
 use iced::{mouse, window, Color, Event, Point, Rectangle, Renderer, Size};
 use iced_test::runtime::user_interface::{self, UserInterface};
 use iced_test::selector::{Candidate, Selector, Target};
+use iced_winit::gesture::{self, Phase, Wheel};
 
 use super::back_button::{HOVERED, PRESSED};
 use super::list_tile::{two_line, SUBTITLE_SIZE, TITLE_SIZE};
@@ -23,6 +24,7 @@ use super::*;
 use crate::ui::core::icons;
 use crate::ui::core::theme::{app_theme, font, DEFAULT_TEXT_SIZE};
 use crate::ui::core::widgets::animated::testing::{near, over};
+use crate::ui::core::widgets::pan_zoom::testing::{set_event_time, Sent, Trackpad};
 use crate::ui::home::testing::run_task;
 
 /// A millisecond.
@@ -69,12 +71,6 @@ fn data() -> &'static LicenseData {
         entries.push(entry(&format!("z-{i:02}"), "MIT"));
     }
     Box::leak(Box::new(LicenseData::collect(entries)))
-}
-
-fn pixels(y: f32) -> Event {
-    Event::Mouse(mouse::Event::WheelScrolled {
-        delta: mouse::ScrollDelta::Pixels { x: 0.0, y },
-    })
 }
 
 fn lines(y: f32) -> Event {
@@ -147,6 +143,31 @@ impl Window {
     /// and `events` and the frame, and is drawn; then the page handles
     /// what the view reported (which it hands back).
     fn frame(&mut self, page: &mut LicensesPage, events: &[Event], at: Instant) -> Vec<Message> {
+        self.frame_with(page, events, &[], at)
+    }
+
+    /// [`Window::frame`] for `sent`, wheel events with the gestures the run
+    /// loop hands along, handled at `at`.
+    fn frame_sent(&mut self, page: &mut LicensesPage, sent: &[Sent], at: Instant) -> Vec<Message> {
+        let events: Vec<Event> = sent.iter().map(|(event, _)| event.clone()).collect();
+        let wheels: Vec<Option<Wheel>> = sent
+            .iter()
+            .filter(|(event, _)| matches!(event, Event::Mouse(mouse::Event::WheelScrolled { .. })))
+            .map(|(_, wheel)| *wheel)
+            .collect();
+        set_event_time(Some(at));
+        let messages = self.frame_with(page, &events, &wheels, at);
+        set_event_time(None);
+        messages
+    }
+
+    fn frame_with(
+        &mut self,
+        page: &mut LicensesPage,
+        events: &[Event],
+        wheels: &[Option<Wheel>],
+        at: Instant,
+    ) -> Vec<Message> {
         page.frame(at);
         let cursor = mouse::Cursor::Available(self.cursor);
         let mut ui = UserInterface::build(
@@ -160,13 +181,16 @@ impl Window {
             position: self.cursor,
         })];
         all.extend_from_slice(events);
-        let _ = ui.update(
-            &all,
-            cursor,
-            &mut self.renderer,
-            &mut clipboard::Null,
-            &mut messages,
-        );
+        let renderer = &mut self.renderer;
+        let _ = gesture::update_each(&all, wheels, |events| {
+            ui.update(
+                events,
+                cursor,
+                renderer,
+                &mut clipboard::Null,
+                &mut messages,
+            )
+        });
         let _ = ui.update(
             &[Event::Window(window::Event::RedrawRequested(at))],
             cursor,
@@ -542,49 +566,176 @@ fn a_registry_that_fails_shows_why() {
 
 // --------------------------------------------------------------- the sheet
 
+fn header(window: &mut Window, page: &LicensesPage) -> f32 {
+    window.find(page, "first", 1).y
+}
+
+fn paragraph(window: &mut Window, page: &LicensesPage) -> f32 {
+    window.find(page, "Paragraph 20 of a long license.", 0).y
+}
+
 // `_DraggableScrollableSheetScrollPosition.applyUserOffset`: a trackpad's
-// scroll grows the sheet before it scrolls the list, and shrinks it after;
-// a mouse wheel's (`pointerScroll`) only scrolls the list.
+// drag grows the sheet before it scrolls the list, and shrinks it after;
+// a wheel's scroll signal (`pointerScroll`) only scrolls the list.
 #[test]
 fn a_trackpad_grows_the_sheet_first_and_a_wheel_only_scrolls() {
     let mut window = Window::new();
     let (mut page, t) = settled(&mut window);
     window.point_at(Point::new(800.0, 500.0));
-    let header = |window: &mut Window, page: &LicensesPage| window.find(page, "first", 1).y;
-    let text = |window: &mut Window, page: &LicensesPage| {
-        window.find(page, "Paragraph 20 of a long license.", 0).y
-    };
     let rest = card_top() + 12.0;
     assert!(close(header(&mut window, &page), rest));
-    window.frame(&mut page, &[pixels(-20.0)], t);
+    // Slow moves (no fling at the end) 20 ms apart.
+    let mut pad = Trackpad::new();
+    let mut at = t;
+    let mut step = |window: &mut Window, page: &mut LicensesPage, sent: Sent| {
+        at += 20 * MS;
+        window.frame_sent(page, &[sent], at);
+    };
+    step(&mut window, &mut page, pad.began(t));
+    step(&mut window, &mut page, pad.changed(0.0, -20.0, t + 20 * MS));
     assert!(close(header(&mut window, &page), rest - 20.0), "grows");
-    window.frame(&mut page, &[pixels(-100.0)], t);
+    step(
+        &mut window,
+        &mut page,
+        pad.changed(0.0, -100.0, t + 40 * MS),
+    );
     assert!(
         close(header(&mut window, &page), 12.0),
         "to the page's height"
     );
-    let p0 = text(&mut window, &page);
-    window.frame(&mut page, &[pixels(-30.0)], t);
+    let p0 = paragraph(&mut window, &page);
+    step(&mut window, &mut page, pad.changed(0.0, -30.0, t + 60 * MS));
     assert!(close(header(&mut window, &page), 12.0));
     assert!(
-        close(text(&mut window, &page), p0 - 30.0),
+        close(paragraph(&mut window, &page), p0 - 30.0),
         "then the list scrolls"
     );
-    // Back: the list first, to its top (the rest of that scroll is lost),
+    // Back: the list first, to its top (the rest of that move is lost),
     // then the sheet.
-    window.frame(&mut page, &[pixels(40.0)], t);
-    assert!(close(text(&mut window, &page), p0));
+    step(&mut window, &mut page, pad.changed(0.0, 40.0, t + 80 * MS));
+    assert!(close(paragraph(&mut window, &page), p0));
     assert!(close(header(&mut window, &page), 12.0));
-    window.frame(&mut page, &[pixels(10.0)], t);
+    step(&mut window, &mut page, pad.changed(0.0, 10.0, t + 100 * MS));
     assert!(close(header(&mut window, &page), 22.0), "shrinks");
-    // A wheel scrolls the list, the sheet stays.
-    window.frame(&mut page, &[lines(-1.0)], t);
+    // Still a while, then the fingers lift: no fling.
+    at += 100 * MS;
+    window.frame_sent(&mut page, &[pad.ended(at)], at);
+    window.frame(&mut page, &[], at + 16 * MS);
     assert!(close(header(&mut window, &page), 22.0));
-    assert!(text(&mut window, &page) < p0 + 10.0 - 1.0, "the list moved");
+    // A wheel's lines, and a precise device's points without phases, are
+    // scroll signals: they scroll the list, the sheet stays.
+    window.frame_sent(&mut page, &[pad.lines(0.0, -1.0, at)], at + 32 * MS);
+    assert!(close(header(&mut window, &page), 22.0));
+    let p1 = paragraph(&mut window, &page);
+    assert!(p1 < p0 + 10.0 - 1.0, "the list moved");
+    window.frame_sent(&mut page, &[pad.pixels(0.0, -25.0, at)], at + 48 * MS);
+    assert!(close(header(&mut window, &page), 22.0));
+    assert!(close(paragraph(&mut window, &page), p1 - 25.0));
     // Not over the card: nothing.
     window.point_at(Point::new(CARD_LEFT - 30.0, 30.0));
-    window.frame(&mut page, &[pixels(5.0)], t);
+    let off = at + 64 * MS;
+    window.frame_sent(&mut page, &[pad.began(off)], off);
+    window.frame_sent(&mut page, &[pad.changed(0.0, 5.0, off)], off);
+    window.frame_sent(&mut page, &[pad.ended(off)], off);
     assert!(close(header(&mut window, &page), 22.0));
+}
+
+// Flutter's own fling, not macOS's momentum: the fingers lift fast, the
+// sheet flies on (`ClampingScrollSimulation`) to its full height and the
+// list takes the velocity left; the momentum events move nothing.
+#[test]
+fn a_trackpad_flick_flings_the_sheet_then_the_list_and_its_momentum_moves_nothing() {
+    let mut window = Window::new();
+    let (mut page, t) = settled(&mut window);
+    window.point_at(Point::new(800.0, 500.0));
+    let rest = card_top() + 12.0;
+    let mut pad = Trackpad::new();
+    // Up 6 px each 8 ms (750 px/s), 30 px in all.
+    window.frame_sent(&mut page, &[pad.began(t)], t);
+    let mut at = t;
+    for _ in 0..5 {
+        at += 8 * MS;
+        window.frame_sent(&mut page, &[pad.changed(0.0, -6.0, at)], at);
+    }
+    assert!(close(header(&mut window, &page), rest - 30.0));
+    // The list's scroll: how far the text has come up its card.
+    let gap =
+        |window: &mut Window, page: &LicensesPage| paragraph(window, page) - header(window, page);
+    let g0 = gap(&mut window, &page);
+    let up = at + 2 * MS;
+    window.frame_sent(&mut page, &[pad.ended(up)], up);
+    // The momentum macOS sends then, which would undo it all: nothing.
+    window.frame_sent(
+        &mut page,
+        &[pad.momentum(Phase::Began, 0.0, 300.0, up)],
+        up + MS,
+    );
+    // The fling's first frame starts it; it then grows the sheet.
+    window.frame(&mut page, &[], up + 16 * MS);
+    window.frame(&mut page, &[], up + 32 * MS);
+    let grown = header(&mut window, &page);
+    assert!(grown < rest - 30.0 - 1.0, "flung on: {grown}");
+    window.frame_sent(
+        &mut page,
+        &[pad.momentum(Phase::Changed, 0.0, 300.0, up)],
+        up + 40 * MS,
+    );
+    // A 750 px/s fling would travel 118 px: the sheet's 24 px of room,
+    // then the list flung afresh with the velocity left (some 640 px/s,
+    // about 90 px).
+    let mut now = up + 48 * MS;
+    for _ in 0..30 {
+        window.frame(&mut page, &[], now);
+        now += 32 * MS;
+    }
+    assert!(close(header(&mut window, &page), 12.0), "full height");
+    let scrolled = g0 - gap(&mut window, &page);
+    assert!(
+        scrolled > 70.0 && scrolled < 110.0,
+        "the list took the rest: {scrolled}"
+    );
+    window.frame_sent(&mut page, &[pad.momentum(Phase::Ended, 0.0, 0.0, now)], now);
+    window.frame(&mut page, &[], now + 32 * MS);
+    assert!(close(g0 - gap(&mut window, &page), scrolled), "settled");
+}
+
+// A swipe on the card holds the position: a fling under way stops.
+#[test]
+fn a_new_swipe_stops_a_fling() {
+    let mut window = Window::new();
+    let (mut page, t) = settled(&mut window);
+    window.point_at(Point::new(800.0, 500.0));
+    let mut pad = Trackpad::new();
+    // The sheet drawn up whole, the fingers still before they lift: no
+    // fling.
+    window.frame_sent(
+        &mut page,
+        &[pad.began(t), pad.changed(0.0, -100.0, t), pad.ended(t)],
+        t,
+    );
+    assert!(close(header(&mut window, &page), 12.0));
+    // A flick of the list: 1000 px/s.
+    let t1 = t + 100 * MS;
+    window.frame_sent(&mut page, &[pad.began(t1)], t1);
+    let mut at = t1;
+    for _ in 0..3 {
+        at += 8 * MS;
+        window.frame_sent(&mut page, &[pad.changed(0.0, -8.0, at)], at);
+    }
+    let up = at + 2 * MS;
+    window.frame_sent(&mut page, &[pad.ended(up)], up);
+    let p0 = paragraph(&mut window, &page);
+    window.frame(&mut page, &[], up + 16 * MS);
+    window.frame(&mut page, &[], up + 32 * MS);
+    let flung = paragraph(&mut window, &page);
+    assert!(flung < p0 - 5.0, "the list flies on: {p0} to {flung}");
+    // Two fingers touch it: it stops where it is.
+    window.frame_sent(&mut page, &[pad.began(up + 40 * MS)], up + 40 * MS);
+    let held = paragraph(&mut window, &page);
+    for i in 0..5 {
+        window.frame(&mut page, &[], up + (56 + 32 * i) * MS);
+    }
+    assert!(close(paragraph(&mut window, &page), held), "it stopped");
 }
 
 // The pinned `SliverAppBar` takes the surface tint once the list is
@@ -662,7 +813,13 @@ fn a_detail_going_keeps_its_sheet_and_the_next_comes_up_a_quarter_page() {
     let mut window = Window::new();
     let (mut page, t) = settled(&mut window);
     window.point_at(Point::new(800.0, 500.0));
-    window.frame(&mut page, &[pixels(-200.0)], t);
+    // A trackpad drag up grows its sheet to the page's height.
+    let mut pad = Trackpad::new();
+    window.frame_sent(
+        &mut page,
+        &[pad.began(t), pad.changed(0.0, -200.0, t), pad.ended(t)],
+        t,
+    );
     let centre = (CARD_LEFT + CARD_RIGHT) / 2.0;
     let grown_header = |window: &Window| {
         window.ink(

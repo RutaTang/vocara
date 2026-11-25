@@ -20,6 +20,12 @@
 //! the next lane's strip, and the master's drag stopped following the
 //! pointer as a take came or went.
 //!
+//! A trackpad's two-finger swipe reached Flutter as a pan-zoom gesture,
+//! which the faders' and knobs' drags (`kPointerDragDevices`) left to the
+//! desk's scroll; iced hands it over as wheel events (with their phases,
+//! `widgets::pan_zoom`), which the faders and knobs take none of, and the
+//! desk scrolls.
+//!
 //! # Differences from Flutter
 //!
 //! - `StableSubtree` kept unchanged strips from rebuilding at pointer rate;
@@ -32,8 +38,7 @@
 //!   drag reaches it wherever the pointer is. A strip the screen stops
 //!   showing mid-drag owes its commit to the screen.
 //! - No pointer cancel or second finger reaches a desktop mouse control, so
-//!   those Dart cases have no counterpart; a trackpad's two-finger swipe is
-//!   a wheel event the faders and knobs ignore, and the desk scrolls.
+//!   those Dart cases have no counterpart.
 //! - The rename and delete-bus prompts are the host's: the desk reports
 //!   [`Message::RenameBus`] / [`Message::DeleteBus`] where the Dart desk
 //!   opened `showRenameDialog` / `confirmDeleteBus` and then called the

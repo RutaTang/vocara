@@ -50,9 +50,11 @@
 //!   over 100 ms on `Curves.fastOutSlowIn` after an edit, a click or the
 //!   focus coming, at once for a keyboard move or a drag of the selection;
 //!   it stays put while the field is unfocused, Home and End only scroll
-//!   on macOS, and a wheel or trackpad scrolls it. iced kept the caret
-//!   5 px in from the right edge as it moved, and an unfocused field at
-//!   its start.
+//!   on macOS, a scroll signal across scrolls it, and a trackpad's
+//!   two-finger swipe drags and flings it as its `Scrollable`'s horizontal
+//!   drag did, against a scroll view's vertical one around it. iced kept
+//!   the caret 5 px in from the right edge as it moved, and an unfocused
+//!   field at its start.
 //! - **Cut** (Cmd+X) cuts nothing without a selection, where iced's
 //!   deleted the character after the caret.
 //! - **Tab** moves the focus to the next field of its focus scope

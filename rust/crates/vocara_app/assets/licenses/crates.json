@@ -1277,7 +1277,9 @@
       "version": "0.14.1",
       "license": "MIT",
       "repository": "https://github.com/iced-rs/iced",
-      "texts": []
+      "texts": [
+        107
+      ]
     },
     {
       "name": "image",

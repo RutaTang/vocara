@@ -42,9 +42,7 @@ use vocara_services::audio_dsp::{compute_spectrogram, compute_voice_metrics, Ana
 use super::*;
 use crate::ui::core::theme::app_theme;
 use crate::ui::song_practice_detail::widgets::live_spectrogram::tests::{raster, sine, Raster};
-use crate::ui::song_practice_detail::widgets::live_ui::{
-    move_to, press, redraw, release, scroll, LiveUi,
-};
+use crate::ui::song_practice_detail::widgets::live_ui::{move_to, press, redraw, release, LiveUi};
 
 const SR: i64 = 48000;
 const HOP: i64 = 512;
@@ -496,17 +494,17 @@ fn a_page_flip_while_the_drag_is_held_commits_the_range_that_was_dragged_over() 
 fn a_two_finger_trackpad_swipe_adds_nothing() {
     // It reaches iced as a wheel scroll, and pans the timeline; over a
     // marker lane it once opened the editor for a range nobody drew.
+    use crate::ui::core::widgets::pan_zoom::testing as pan_zoom;
+
     let t = track(0, 60000);
     let mut ui = LiveUi::new(Size::new(LANE_W, 56.0));
-    let messages = ui.run(
-        notes_view(&t, 0),
-        [
-            move_to(800.0, LANE_CY),
-            scroll(-60.0, 0.0),
-            scroll(-240.0, 0.0),
-            redraw(),
-        ],
-    );
+    let mut sent = vec![(move_to(800.0, LANE_CY), None)];
+    sent.extend(pan_zoom::swipe(
+        &[(-60.0, 0.0), (-240.0, 0.0)],
+        iced::time::Instant::now(),
+    ));
+    sent.push((redraw(), None));
+    let messages = ui.run_sent(notes_view(&t, 0), sent);
     assert!(added(messages).is_empty());
 }
 

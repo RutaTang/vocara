@@ -482,3 +482,73 @@ fn a_new_snack_bar_in_a_swiped_ones_place_starts_at_rest() {
     ));
     crate::ui::core::widgets::dismissible::testing::set_event_time(None);
 }
+
+#[test]
+fn a_two_finger_swipe_down_on_it_swipes_it_away_and_its_momentum_moves_nothing() {
+    use crate::ui::core::widgets::pan_zoom::testing::Trackpad;
+    use iced_winit::gesture::Phase;
+
+    // The fixed 40 px bar at the window's bottom (y 60 to 100), the
+    // pointer resting on it.
+    let mut window = Frames::new(Size::new(200.0, 100.0));
+    let t0 = Instant::now();
+    let q = shown(SnackStyle::Fixed, t0);
+    let seq = q.current_seq().expect("its seq");
+    let white = |w: &Frames, y: f32| near(w.pixel(Point::new(5.0, y)), iced::Color::WHITE);
+    window.point_at(Point::new(5.0, 70.0));
+    let mut pad = Trackpad::new();
+    events_at(t0);
+    let (_, messages) = window.frame_sent(q.view().expect("drawn"), &[pad.began(t0)], t0);
+    assert!(messages.is_empty());
+    // Down 6 px each 10 ms, 24 px in all: past 40 % of its height, the
+    // content following the fingers.
+    let mut t = t0;
+    for _ in 0..4 {
+        t += 10 * MS;
+        events_at(t);
+        window.frame_sent(q.view().expect("drawn"), &[pad.changed(0.0, 6.0, t)], t);
+    }
+    assert!(!white(&window, 82.0) && white(&window, 86.0), "24 px down");
+    // The fingers lift: 600 px/s over 24 px is no fling (under 700), but
+    // past 40 % it slides out over the rest of 200 ms (80 ms).
+    let up = t + 5 * MS;
+    events_at(up);
+    let (more, messages) = window.frame_sent(q.view().expect("drawn"), &[pad.ended(up)], up);
+    assert!(more && messages.is_empty());
+    // The momentum macOS sends after it reaches nothing: it slides on.
+    let m = up + 10 * MS;
+    events_at(m);
+    let (_, messages) = window.frame_sent(
+        q.view().expect("drawn"),
+        &[pad.momentum(Phase::Began, 0.0, -30.0, m)],
+        m,
+    );
+    assert!(messages.is_empty());
+    assert!(!white(&window, 84.0), "further out, not back");
+    let (more, messages) = window.frame_messages(q.view().expect("drawn"), &[], up + 81 * MS);
+    assert!(!more);
+    assert_eq!(messages, vec![SnackEvent::Swiped(seq)]);
+    crate::ui::core::widgets::dismissible::testing::set_event_time(None);
+}
+
+#[test]
+fn a_two_finger_swipe_that_started_off_it_leaves_it_at_rest() {
+    use crate::ui::core::widgets::pan_zoom::testing::Trackpad;
+
+    let mut window = Frames::new(Size::new(200.0, 100.0));
+    let t0 = Instant::now();
+    let q = shown(SnackStyle::Fixed, t0);
+    let white = |w: &Frames, y: f32| near(w.pixel(Point::new(5.0, y)), iced::Color::WHITE);
+    let mut pad = Trackpad::new();
+    // It starts over the page above the bar; the pointer is then on it.
+    window.point_at(Point::new(5.0, 20.0));
+    events_at(t0);
+    window.frame_sent(q.view().expect("drawn"), &[pad.began(t0)], t0);
+    window.point_at(Point::new(5.0, 70.0));
+    let t1 = t0 + 10 * MS;
+    events_at(t1);
+    window.frame_sent(q.view().expect("drawn"), &[pad.changed(0.0, 30.0, t1)], t1);
+    window.frame_sent(q.view().expect("drawn"), &[pad.ended(t1)], t1);
+    assert!(white(&window, 62.0), "at rest");
+    crate::ui::core::widgets::dismissible::testing::set_event_time(None);
+}
