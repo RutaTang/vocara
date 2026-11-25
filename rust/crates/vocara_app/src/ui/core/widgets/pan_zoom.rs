@@ -22,6 +22,18 @@
 //! - **Nothing**: the momentum macOS sends once the fingers lift. Flutter
 //!   ran its own ballistic simulation where a drag ended in a fling
 //!   ([`scroll_fling`](super::scroll_fling)).
+//! - **An inertia cancel** (`PointerScrollInertiaCancelEvent`): not a
+//!   scroll but a finger touching the trackpad less than 50 ms after
+//!   macOS's momentum last moved (`touchesBeganWithEvent:`), once per
+//!   momentum, a new swipe's start ending the chance. Its hit test, where
+//!   the pointer was, reached every scrollable under it, and each stopped
+//!   whatever moved it (`Scrollable._receivedPointerSignal`'s
+//!   `pointerScroll(0)`, a shown scrollbar's track `jumpTo(pixels)`): a
+//!   fling, a page or a caret's run stopped where its last frame left it;
+//!   no `pointerSignalResolver`, so nested views all stopped. The run loop
+//!   reads the touches winit does not (`iced_winit::gesture::Touch`) and
+//!   hands each cancel over as a `WheelScrolled` of no delta, hit tested
+//!   where its touch was.
 //!
 //! iced hands every one of them to the widgets as `WheelScrolled`; a
 //! widget asks [`current`] which one it is handling. A wheel event the run
@@ -185,14 +197,17 @@ pub enum Scroll {
     /// No pointer event at all: `gesture`'s momentum (or a phase the
     /// embedder dropped).
     Nothing { gesture: u64 },
+    /// A `PointerScrollInertiaCancelEvent` (see the module docs): a
+    /// scrollable it reaches stops what moves it; nothing scrolls.
+    InertiaCancel,
 }
 
 impl Scroll {
     /// The pan-zoom gesture it is part of (its momentum included); none for
-    /// a scroll signal.
+    /// a scroll signal or an inertia cancel.
     pub fn gesture(&self) -> Option<u64> {
         match *self {
-            Scroll::Signal => None,
+            Scroll::Signal | Scroll::InertiaCancel => None,
             Scroll::Start { gesture, .. }
             | Scroll::Update { gesture, .. }
             | Scroll::End { gesture }
@@ -219,6 +234,7 @@ pub fn current() -> Scroll {
             time: wheel.platform.time,
         },
         Pointer::PanZoomEnd => Scroll::End { gesture },
+        Pointer::ScrollInertiaCancel => Scroll::InertiaCancel,
         Pointer::None => Scroll::Nothing { gesture },
     }
 }
@@ -252,8 +268,8 @@ impl Held {
 #[cfg(test)]
 pub mod testing {
     use iced::time::Instant;
-    use iced::{mouse, Event, Vector};
-    use iced_winit::gesture::{Embedder, Phase, Platform, Wheel};
+    use iced::{mouse, Event, Point, Vector};
+    use iced_winit::gesture::{self, Embedder, Phase, Platform, Wheel};
 
     /// Pointer events are handled at `at` (or at the time they are, with
     /// `None`) on this thread.
@@ -363,6 +379,28 @@ pub mod testing {
         pub fn pixels(&mut self, x: f32, y: f32, at: Instant) -> Sent {
             self.send(Phase::None, Phase::None, (x, y), at)
         }
+
+        /// A finger lands on it at `at`: the inertia cancel the embedder
+        /// sends, if it sends one, as the run loop hands it over, hit
+        /// tested where the pointer is.
+        pub fn touch(&mut self, at: Instant) -> Option<Sent> {
+            let wheel = self.embedder.touch(at)?;
+            Some((gesture::inertia_cancel_event(), Some(wheel)))
+        }
+
+        /// [`Trackpad::touch`] with the pointer at `position` in the
+        /// window, wherever the harness's is (AppKit's `locationInWindow`
+        /// for the touch, which the run loop hit tests the cancel at).
+        pub fn touch_at(&mut self, at: Instant, position: Point) -> Option<Sent> {
+            let (event, wheel) = self.touch(at)?;
+            Some((
+                event,
+                wheel.map(|wheel| Wheel {
+                    position: Some(position),
+                    ..wheel
+                }),
+            ))
+        }
     }
 }
 
@@ -370,6 +408,7 @@ pub mod testing {
 mod tests {
     use super::testing::Trackpad;
     use super::*;
+    use iced::Point;
     use iced_winit::gesture::Phase;
 
     fn read((_, wheel): super::testing::Sent) -> Scroll {
@@ -467,6 +506,139 @@ mod tests {
         let later = enter(2, t + std::time::Duration::from_millis(1));
         assert_eq!(later.standing(), Some(true));
         assert_eq!(outer.standing(), Some(false));
+    }
+
+    /// A swipe's start, moves and lift, then macOS's momentum: its start,
+    /// a change at `changed`, and its end 5 ms later.
+    fn flung(pad: &mut Trackpad, t: Instant, changed: Instant) {
+        let _ = pad.began(t);
+        let _ = pad.changed(0.0, -20.0, t);
+        let _ = pad.ended(t);
+        let _ = pad.momentum(Phase::Began, 0.0, -10.0, t);
+        let _ = pad.momentum(Phase::Changed, 0.0, -8.0, changed);
+        let _ = pad.momentum(Phase::Ended, 0.0, 0.0, changed + 5 * MS);
+    }
+
+    const MS: std::time::Duration = std::time::Duration::from_millis(1);
+
+    fn touch(pad: &mut Trackpad, at: Instant) -> Option<Scroll> {
+        pad.touch(at).map(read)
+    }
+
+    #[test]
+    fn a_touch_within_50_ms_of_the_momentums_last_change_cancels_it_once() {
+        let t = Instant::now();
+        let mut pad = Trackpad::new();
+        // No momentum yet: a touch is nothing.
+        assert_eq!(touch(&mut pad, t), None);
+        let changed = t + 100 * MS;
+        flung(&mut pad, t, changed);
+        // 49 ms after its last change (its end changes nothing): a
+        // cancel, a wheel event of no delta, of the last gesture.
+        let (event, wheel) = pad.touch(changed + 49 * MS).expect("a cancel");
+        assert_eq!(event, gesture::inertia_cancel_event());
+        let wheel = wheel.expect("its gesture");
+        assert_eq!(wheel.pointer, Pointer::ScrollInertiaCancel);
+        assert_eq!(wheel.gesture, 1);
+        assert_eq!(wheel.platform.delta, Vector::ZERO);
+        assert_eq!(wheel.position, None);
+        assert_eq!(gesture::with(Some(wheel), current), Scroll::InertiaCancel);
+        assert_eq!(Scroll::InertiaCancel.gesture(), None);
+        // Once: the next touch, however soon, is nothing.
+        assert_eq!(touch(&mut pad, changed + 50 * MS), None);
+        // A new change opens the window again; at 50 ms it is shut.
+        let again = changed + 200 * MS;
+        let _ = pad.momentum(Phase::Changed, 0.0, -1.0, again);
+        assert_eq!(touch(&mut pad, again + 50 * MS), None);
+        assert_eq!(
+            touch(&mut pad, again + 10 * MS),
+            Some(Scroll::InertiaCancel)
+        );
+    }
+
+    #[test]
+    fn a_touch_stamped_before_the_momentums_change_cancels_it_too() {
+        let t = Instant::now();
+        let mut pad = Trackpad::new();
+        flung(&mut pad, t, t + 100 * MS);
+        assert_eq!(touch(&mut pad, t + 60 * MS), Some(Scroll::InertiaCancel));
+    }
+
+    #[test]
+    fn only_a_change_of_the_momentum_opens_the_window() {
+        let t = Instant::now();
+        let mut pad = Trackpad::new();
+        let _ = pad.began(t);
+        let _ = pad.ended(t);
+        // Its start alone (the low power mode workaround), and its end.
+        let _ = pad.momentum(Phase::Began, 0.0, -10.0, t + 5 * MS);
+        assert_eq!(touch(&mut pad, t + 10 * MS), None);
+        let _ = pad.momentum(Phase::Ended, 0.0, 0.0, t + 15 * MS);
+        assert_eq!(touch(&mut pad, t + 20 * MS), None);
+        // A wheel's signal or a swipe's own moves neither.
+        let _ = pad.lines(0.0, 1.0, t + 25 * MS);
+        assert_eq!(touch(&mut pad, t + 30 * MS), None);
+    }
+
+    #[test]
+    fn a_new_swipes_start_ends_the_chance_to_cancel() {
+        let t = Instant::now();
+        let mut pad = Trackpad::new();
+        let changed = t + 100 * MS;
+        flung(&mut pad, t, changed);
+        // Two fingers land (`MayBegin`): a pan-zoom start, which clears
+        // the momentum's time.
+        let _ = pad.send(Phase::MayBegin, Phase::None, (0.0, 0.0), changed + 5 * MS);
+        assert_eq!(touch(&mut pad, changed + 10 * MS), None);
+        // A start the embedder drops (one under way) clears it too.
+        let _ = pad.momentum(Phase::Changed, 0.0, -2.0, changed + 20 * MS);
+        let _ = pad.began(changed + 25 * MS);
+        assert_eq!(touch(&mut pad, changed + 30 * MS), None);
+    }
+
+    #[test]
+    fn a_cancel_is_hit_tested_where_its_touch_was() {
+        let t = Instant::now();
+        let mut pad = Trackpad::new();
+        flung(&mut pad, t, t);
+        let at = Point::new(12.0, 34.0);
+        let (_, wheel) = pad.touch_at(t, at).expect("a cancel");
+        let elsewhere = mouse::Cursor::Available(Point::new(90.0, 90.0));
+        assert_eq!(
+            gesture::with(wheel, || gesture::cursor(elsewhere)),
+            mouse::Cursor::Available(at)
+        );
+        // A scroll's is the window's.
+        let (_, wheel) = pad.pixels(0.0, 1.0, t);
+        assert_eq!(
+            gesture::with(wheel, || gesture::cursor(elsewhere)),
+            elsewhere
+        );
+    }
+
+    #[test]
+    fn the_run_loop_places_a_touch_in_the_interfaces_coordinates() {
+        let t = Instant::now();
+        let mut embedder = gesture::Embedder::default();
+        let _ = embedder.dispatch(gesture::Platform {
+            phase: Phase::None,
+            momentum_phase: Phase::Changed,
+            precise: true,
+            delta: Vector::new(0.0, -3.0),
+            time: t,
+        });
+        // A point 30 × 40 into a Retina window's view, under an interface
+        // scaled 1.25: 24 × 32 of the interface's.
+        let touch = gesture::Touch {
+            view: 1,
+            time: t + 20 * MS,
+            position: iced_winit::winit::dpi::LogicalPosition::new(30.0, 40.0),
+        };
+        let (event, wheel) = embedder.touched(&touch, 2.0, 2.5).expect("a cancel");
+        assert_eq!(event, gesture::inertia_cancel_event());
+        assert_eq!(wheel.position, Some(Point::new(24.0, 32.0)));
+        assert_eq!(wheel.platform.time, touch.time);
+        assert!(embedder.touched(&touch, 2.0, 2.5).is_none(), "once");
     }
 
     #[test]

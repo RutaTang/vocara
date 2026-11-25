@@ -1105,3 +1105,261 @@ fn a_horizontal_view_drags_flings_and_takes_the_wheel_across() {
     let (_, scrolled) = window.frame_messages(strip(), &[shift, turned], at + 16 * MS);
     assert_eq!(offset(&scrolled).map(f32::round), Some(before + 50.0));
 }
+
+// ------------------------------------------------- inertia cancels
+
+/// [`send`] for a view publishing [`Scrolled`]: what it published.
+fn send_scrolled(
+    window: &mut Frames,
+    view: Element<'_, Scrolled>,
+    sent: &[Sent],
+    at: Instant,
+) -> Vec<Scrolled> {
+    set_event_time(Some(at));
+    let (_, scrolled) = window.frame_sent(view, sent, at);
+    set_event_time(None);
+    scrolled
+}
+
+#[test]
+fn a_finger_on_the_trackpad_during_the_momentum_stops_a_fling_where_its_last_frame_left_it() {
+    let mut window = window();
+    let t0 = Instant::now();
+    window.point_at(Point::new(40.0, 50.0));
+    window.frame(list(), &[], t0);
+    let mut pad = Trackpad::new();
+    let up = swipe_up(&mut window, &mut pad, list, t0) + 5 * MS;
+    send(&mut window, list(), &[pad.ended(up)], up);
+    let simulation = ClampingScrollSimulation::new(40.0, 1000.0);
+    // Two frames of the fling, macOS's momentum alongside.
+    let at = up + 16 * MS;
+    send(
+        &mut window,
+        list(),
+        &[pad.momentum(Phase::Began, 0.0, -30.0, at)],
+        at,
+    );
+    let changed = up + 32 * MS;
+    let flown = send(
+        &mut window,
+        list(),
+        &[pad.momentum(Phase::Changed, 0.0, -30.0, changed)],
+        changed,
+    );
+    let there = simulation.x(0.032) as f32;
+    assert!(flown.is_some_and(|y| (y - there).abs() < 1e-3), "{flown:?}");
+    // A finger lands 49 ms after the momentum last changed, the pointer
+    // over the view: an inertia cancel, and the view stays where that
+    // frame left it, asking for no more frames.
+    let touched = changed + 49 * MS;
+    let cancel = pad.touch(touched).expect("within 50 ms of the change");
+    set_event_time(Some(touched));
+    let (more, scrolled) = window.frame_sent(list(), &[cancel], touched);
+    set_event_time(None);
+    assert!(!more && scrolled.is_empty(), "stopped: {scrolled:?}");
+    let (more, scrolled) = window.frame_messages(list(), &[], touched + 16 * MS);
+    assert!(!more && scrolled.is_empty(), "at rest");
+    // Drawn there: the second stripe's blue ends 100 - y down, the third's
+    // red then.
+    let edge = 100.0 - there;
+    assert!(near(window.pixel(Point::new(40.0, edge - 3.0)), BLUE));
+    assert!(near(window.pixel(Point::new(40.0, edge + 3.0)), RED));
+    // One cancel per momentum: the next finger is nothing.
+    assert!(pad.touch(touched + MS).is_none());
+}
+
+#[test]
+fn a_finger_on_the_trackpad_elsewhere_or_50_ms_after_the_momentum_leaves_a_fling_alone() {
+    let mut window = window();
+    let t0 = Instant::now();
+    window.point_at(Point::new(40.0, 50.0));
+    window.frame(list(), &[], t0);
+    let mut pad = Trackpad::new();
+    let up = swipe_up(&mut window, &mut pad, list, t0) + 5 * MS;
+    send(&mut window, list(), &[pad.ended(up)], up);
+    let simulation = ClampingScrollSimulation::new(40.0, 1000.0);
+    let flies = |y: Option<f32>, t: f64| {
+        let expected = simulation.x(t) as f32;
+        y.is_some_and(|y| (y - expected).abs() < 1e-3)
+    };
+    let changed = up + 16 * MS;
+    let flown = send(
+        &mut window,
+        list(),
+        &[pad.momentum(Phase::Changed, 0.0, -30.0, changed)],
+        changed,
+    );
+    assert!(flies(flown, 0.016));
+    // A finger lands 10 ms on with the pointer off the view (where AppKit
+    // saw it, the cancel's hit test, though the window's last move left
+    // the pointer over the view): the cancel reaches no view.
+    let touched = changed + 10 * MS;
+    let cancel = pad
+        .touch_at(touched, Point::new(110.0, 110.0))
+        .expect("within 50 ms of the change");
+    assert!(flies(send(&mut window, list(), &[cancel], touched), 0.026));
+    // The momentum changes again; a finger 50 ms after: no cancel at all.
+    let changed = up + 32 * MS;
+    let flown = send(
+        &mut window,
+        list(),
+        &[pad.momentum(Phase::Changed, 0.0, -30.0, changed)],
+        changed,
+    );
+    assert!(flies(flown, 0.032));
+    assert!(pad.touch(changed + 50 * MS).is_none(), "the window is shut");
+    let flown = send(&mut window, list(), &[], changed + 50 * MS);
+    assert!(flies(flown, 0.082), "it flies on");
+}
+
+#[test]
+fn a_finger_over_a_nested_view_stops_the_view_around_it_too() {
+    let view = || nested(400.0);
+    let mut window = window();
+    let t0 = Instant::now();
+    // The outer view flung from below the inner one, 20 px at 500 px/s.
+    window.point_at(Point::new(40.0, 80.0));
+    window.frame(view(), &[], t0);
+    let mut pad = Trackpad::new();
+    send_scrolled(&mut window, view(), &[pad.began(t0)], t0);
+    let mut at = t0;
+    for _ in 0..4 {
+        at += 10 * MS;
+        send_scrolled(&mut window, view(), &[pad.changed(0.0, -5.0, at)], at);
+    }
+    let up = at + 5 * MS;
+    send_scrolled(&mut window, view(), &[pad.ended(up)], up);
+    let changed = up + 16 * MS;
+    let scrolled = send_scrolled(
+        &mut window,
+        view(),
+        &[pad.momentum(Phase::Changed, 0.0, -10.0, changed)],
+        changed,
+    );
+    let Some(&Scrolled::Outer(y)) = scrolled.last() else {
+        panic!("the outer view flies on: {scrolled:?}");
+    };
+    assert!(y > 20.0, "{y}");
+    // A finger lands with the pointer over the inner view, which the
+    // fling has brought up under it: both views are under the pointer,
+    // the inner one first, and the outer stops though the inner had it.
+    let touched = changed + 20 * MS;
+    let cancel = pad
+        .touch_at(touched, Point::new(40.0, 5.0))
+        .expect("a cancel");
+    assert_eq!(send_scrolled(&mut window, view(), &[cancel], touched), []);
+    for k in 1..=3 {
+        let (_, scrolled) = window.frame_messages(view(), &[], touched + 16 * k * MS);
+        assert_eq!(scrolled, [], "stopped");
+    }
+}
+
+#[test]
+fn on_the_shown_track_a_finger_stops_the_view_but_not_the_content_under_it() {
+    // A view whose content is, at the top, a scroll view of its own across
+    // its whole width, under the track too.
+    let view = || -> Element<'_, Scrolled> {
+        fading_scrollbar(
+            scrollable(column![
+                scrollable(column![Space::new().width(100).height(400)])
+                    .width(Length::Fill)
+                    .height(150)
+                    .on_scroll(|v| Scrolled::Inner(v.absolute_offset().y)),
+                Space::new().height(300),
+            ])
+            .width(100)
+            .height(100)
+            .on_scroll(|v| Scrolled::Outer(v.absolute_offset().y)),
+        )
+    };
+    let mut window = window();
+    let t0 = Instant::now();
+    window.point_at(Point::new(50.0, 70.0));
+    window.frame(view(), &[], t0);
+    let mut pad = Trackpad::new();
+    // A swipe on the inner view (both drags in its arena, the inner's
+    // first past the slop), lifted at 1000 px/s: it flies on.
+    send_scrolled(&mut window, view(), &[pad.began(t0)], t0);
+    let mut at = t0;
+    for dy in [-12.0, -12.0, -10.0, -10.0, -10.0] {
+        at += 10 * MS;
+        send_scrolled(&mut window, view(), &[pad.changed(0.0, dy, at)], at);
+    }
+    let up = at + 2 * MS;
+    send_scrolled(&mut window, view(), &[pad.ended(up)], up);
+    // The pointer goes over the track, which brings the bar in.
+    window.point_at(Point::new(95.0, 70.0));
+    send_scrolled(
+        &mut window,
+        view(),
+        &[pad.momentum(Phase::Began, 0.0, -30.0, up + 16 * MS)],
+        up + 16 * MS,
+    );
+    let changed = up + 32 * MS;
+    let scrolled = send_scrolled(
+        &mut window,
+        view(),
+        &[pad.momentum(Phase::Changed, 0.0, -30.0, changed)],
+        changed,
+    );
+    let Some(&Scrolled::Inner(y)) = scrolled.last() else {
+        panic!("the inner view flies on: {scrolled:?}");
+    };
+    // A finger lands there: the shown bar's (`jumpTo` on the outer view,
+    // still), and the content under the track never sees it.
+    let touched = changed + 8 * MS;
+    let cancel = pad.touch(touched).expect("a cancel");
+    let scrolled = send_scrolled(&mut window, view(), &[cancel], touched);
+    assert!(
+        matches!(scrolled.last(), Some(&Scrolled::Inner(on)) if on > y),
+        "flies on: {scrolled:?}"
+    );
+    // The momentum changes again; a finger with the pointer back over the
+    // inner view stops it.
+    let changed = touched + 8 * MS;
+    send_scrolled(
+        &mut window,
+        view(),
+        &[pad.momentum(Phase::Changed, 0.0, -30.0, changed)],
+        changed,
+    );
+    let touched = changed + 8 * MS;
+    let cancel = pad
+        .touch_at(touched, Point::new(50.0, 70.0))
+        .expect("a cancel");
+    assert_eq!(send_scrolled(&mut window, view(), &[cancel], touched), []);
+    let (_, scrolled) = window.frame_messages(view(), &[], touched + 16 * MS);
+    assert_eq!(scrolled, [], "stopped");
+}
+
+#[test]
+fn on_the_shown_track_a_finger_stops_the_views_own_fling() {
+    fn barred() -> Element<'static, f32> {
+        view(300.0)
+    }
+    let mut window = window();
+    let t0 = Instant::now();
+    window.point_at(Point::new(40.0, 50.0));
+    window.frame(barred(), &[], t0);
+    let mut pad = Trackpad::new();
+    let up = swipe_up(&mut window, &mut pad, barred, t0) + 5 * MS;
+    send(&mut window, barred(), &[pad.ended(up)], up);
+    let changed = up + 16 * MS;
+    let flown = send(
+        &mut window,
+        barred(),
+        &[pad.momentum(Phase::Changed, 0.0, -30.0, changed)],
+        changed,
+    );
+    let y = flown.expect("it flies on");
+    assert!(y > 40.0, "{y}");
+    // A finger lands with the pointer on the shown track: the bar's
+    // `jumpTo` where it is stops it there.
+    let touched = changed + 20 * MS;
+    let cancel = pad
+        .touch_at(touched, Point::new(95.0, 50.0))
+        .expect("a cancel");
+    assert_eq!(send(&mut window, barred(), &[cancel], touched), None);
+    let (_, scrolled) = window.frame_messages(barred(), &[], touched + 16 * MS);
+    assert!(scrolled.is_empty(), "stopped");
+}

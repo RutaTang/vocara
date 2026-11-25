@@ -174,6 +174,16 @@ wrong. Port the behavior, not the shape:
     `REPEAT_WINDOW` (it waits the 65 s out, in the run without `device`)
     reaches AppKit's own `terminate:`, which asks the application
     delegate;
+  - the trackpad's touches (`crates/vocara_app/tests/macos_touches.rs`):
+    a winit window set up as the run loop sets one up takes indirect and
+    resting touches and its view's class has the added
+    `touchesBeganWithEvent:`; macOS's momentum (CGEvent scrolls handed to
+    the view as AppKit hands them) reaches the run loop's embedder, and a
+    touch sent to the view as AppKit sends one (an event answering
+    `allTouches`, `timestamp` and `locationInWindow`: AppKit makes no
+    touch event a program can) is recorded once, on the scrolls' clock and
+    at its place, and is an inertia cancel 20 ms after the momentum's
+    change but not again, not 60 ms after one, nor after a pan-zoom start;
   - the example players' AVFoundation backend, with `device`
     (`crates/vocara_services/tests/macos_media_player.rs`), on clips
     written at test time (a WAV tone by `audio_dsp::write_wav_mono`, a
@@ -280,7 +290,15 @@ structure every screen follows, so screens ported by different hands fit:
   embedder's state machine over them, and hands each wheel event to the
   widgets on its own with its gesture (`iced_winit::gesture::current`); it
   also hands precise deltas over in logical pixels (winit's are physical:
-  iced scrolled twice the fingers' travel on a Retina screen). The
+  iced scrolled twice the fingers' travel on a Retina screen). winit reads
+  no trackpad touches either, from which the embedder made an inertia
+  cancel (`PointerScrollInertiaCancelEvent`: a finger touching the
+  trackpad within 50 ms of the momentum's last change, once per momentum,
+  none after a pan-zoom start): the run loop gives each window's view the
+  indirect and resting touches Flutter's view took and its class a
+  `touchesBeganWithEvent:` that records them (`gesture::accept_touches`),
+  runs the embedder's rule over each, and hands a cancel to the widgets
+  as a `WheelScrolled` of no delta hit tested where the touch was. The
   widgets that Flutter's gestures told apart follow them: a snack bar's
   swipe, the license sheet's drag and fling, a single-line field's
   horizontal drag and fling, the timeline's pan, the scrollbar's track,
@@ -292,11 +310,15 @@ structure every screen follows, so screens ported by different hands fit:
   `pan_zoom::enter`), the fingers lifting fling it on
   `ClampingScrollSimulation`, the momentum reaches nothing, a scroll
   signal scrolls the innermost view it would move by its delta (40 px a
-  line, as the embedder sent it) at once, and a new swipe on the view or
-  a signal that moves it stops a fling. iced's own scrollable inside
-  never scrolls by a wheel event: its content is a probe that keeps the
-  event from it once the content has seen it. Off macOS no phases are
-  known: every wheel event is a signal.
+  line, as the embedder sent it) at once, and a new swipe on the view, a
+  signal that moves it or an inertia cancel over it stops a fling (a
+  cancel stops every view under the pointer, nested ones too, the
+  license sheet's own fling and a single-line field's, where their last
+  frame left them; one over a snack bar reaches nothing beneath). iced's
+  own scrollable inside never scrolls by a wheel event: its content is a
+  probe that keeps the event from it once the content has seen it. Off
+  macOS no phases are known: every wheel event is a signal, and there are
+  no touches.
 - **Text**: every text is shaped fully and kerned, as Flutter set it: the
   workspace enables iced's `advanced-shaping` feature, which makes
   `Shaping::Advanced` every text's default (iced's own default shapes ASCII
@@ -466,11 +488,6 @@ small and written down in the module that has it:
   waited out the gesture arena (to the release, or 100 ms) when a
   recognizer above the view wanted the press too: iced has no arena
   (`fading_scrollbar`).
-- A finger touching the trackpad within 50 ms of macOS's momentum does
-  not stop a scroll view's fling, where the embedder sent a
-  `PointerScrollInertiaCancelEvent` from `touchesBeganWithEvent:`: winit
-  reads no touches. Two fingers landing (a pan-zoom start) stop it, as
-  in Flutter (`fading_scrollbar`).
 - A text field's right-click toolbar (`text_field::toolbar`, its
   superellipse corners, its shadow's spread and its blurred and saturated
   backdrop Flutter's) fills and strokes its box antialiased, where

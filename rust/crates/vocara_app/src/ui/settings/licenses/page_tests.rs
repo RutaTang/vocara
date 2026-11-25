@@ -185,7 +185,7 @@ impl Window {
         let _ = gesture::update_each(&all, wheels, |events| {
             ui.update(
                 events,
-                cursor,
+                gesture::cursor(cursor),
                 renderer,
                 &mut clipboard::Null,
                 &mut messages,
@@ -734,6 +734,102 @@ fn a_new_swipe_stops_a_fling() {
     let held = paragraph(&mut window, &page);
     for i in 0..5 {
         window.frame(&mut page, &[], up + (56 + 32 * i) * MS);
+    }
+    assert!(close(paragraph(&mut window, &page), held), "it stopped");
+}
+
+// A finger touching the trackpad while macOS's momentum runs (an inertia
+// cancel): the list's `pointerScroll(0)` goes idle, and its
+// `beginActivity` stops the sheet's own simulation as well as the list's.
+#[test]
+fn a_finger_on_the_trackpad_stops_the_sheets_fling_over_the_card_alone() {
+    let mut window = Window::new();
+    let (mut page, t) = settled(&mut window);
+    window.point_at(Point::new(800.0, 500.0));
+    let rest = card_top() + 12.0;
+    let mut pad = Trackpad::new();
+    // The flick that flings the sheet (750 px/s, 30 px), lifted.
+    window.frame_sent(&mut page, &[pad.began(t)], t);
+    let mut at = t;
+    for _ in 0..5 {
+        at += 8 * MS;
+        window.frame_sent(&mut page, &[pad.changed(0.0, -6.0, at)], at);
+    }
+    let up = at + 2 * MS;
+    window.frame_sent(&mut page, &[pad.ended(up)], up);
+    window.frame_sent(
+        &mut page,
+        &[pad.momentum(Phase::Began, 0.0, 300.0, up)],
+        up + 16 * MS,
+    );
+    let changed = up + 32 * MS;
+    window.frame_sent(
+        &mut page,
+        &[pad.momentum(Phase::Changed, 0.0, 300.0, changed)],
+        changed,
+    );
+    let grown = header(&mut window, &page);
+    assert!(
+        grown < rest - 30.0 - 1.0 && grown > 12.0 + 1.0,
+        "the sheet's own fling: {grown}"
+    );
+    // A finger lands, the pointer over the card: the sheet stays where
+    // that frame left it, short of the page's height.
+    let touched = changed + 20 * MS;
+    let cancel = pad.touch(touched).expect("within 50 ms of the change");
+    window.frame_sent(&mut page, &[cancel], touched);
+    for i in 1..=5 {
+        window.frame(&mut page, &[], touched + 32 * i * MS);
+    }
+    assert!(close(header(&mut window, &page), grown), "it stopped");
+
+    // The sheet drawn up whole, the list flicked (1000 px/s).
+    let t1 = touched + 500 * MS;
+    window.frame_sent(
+        &mut page,
+        &[pad.began(t1), pad.changed(0.0, -100.0, t1), pad.ended(t1)],
+        t1,
+    );
+    assert!(close(header(&mut window, &page), 12.0));
+    let t2 = t1 + 100 * MS;
+    window.frame_sent(&mut page, &[pad.began(t2)], t2);
+    let mut at = t2;
+    for _ in 0..3 {
+        at += 8 * MS;
+        window.frame_sent(&mut page, &[pad.changed(0.0, -8.0, at)], at);
+    }
+    let up = at + 2 * MS;
+    window.frame_sent(&mut page, &[pad.ended(up)], up);
+    let changed = up + 16 * MS;
+    window.frame_sent(
+        &mut page,
+        &[pad.momentum(Phase::Changed, 0.0, 300.0, changed)],
+        changed,
+    );
+    // A finger with the pointer over the master list (where AppKit saw
+    // it): the list flies on.
+    let flying = paragraph(&mut window, &page);
+    let touched = changed + 10 * MS;
+    let cancel = pad
+        .touch_at(touched, Point::new(CARD_LEFT - 100.0, 500.0))
+        .expect("within 50 ms of the change");
+    window.frame_sent(&mut page, &[cancel], touched);
+    window.frame(&mut page, &[], touched + 16 * MS);
+    let on = paragraph(&mut window, &page);
+    assert!(on < flying - 1.0, "flies on: {flying} to {on}");
+    // The momentum changes again; a finger over the card stops it.
+    let changed = touched + 20 * MS;
+    window.frame_sent(
+        &mut page,
+        &[pad.momentum(Phase::Changed, 0.0, 300.0, changed)],
+        changed,
+    );
+    let touched = changed + 10 * MS;
+    let cancel = pad.touch(touched).expect("a cancel");
+    window.frame_sent(&mut page, &[cancel], touched);
+    let held = paragraph(&mut window, &page);
+    for i in 1..=5 {
+        window.frame(&mut page, &[], touched + 32 * i * MS);
     }
     assert!(close(paragraph(&mut window, &page), held), "it stopped");
 }

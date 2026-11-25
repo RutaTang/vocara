@@ -52,7 +52,9 @@
 //!   it stays put while the field is unfocused, Home and End only scroll
 //!   on macOS, a scroll signal across scrolls it, and a trackpad's
 //!   two-finger swipe drags and flings it as its `Scrollable`'s horizontal
-//!   drag did, against a scroll view's vertical one around it. iced kept
+//!   drag did, against a scroll view's vertical one around it, a finger
+//!   touching the trackpad during macOS's momentum stopping the fling (an
+//!   inertia cancel, `pan_zoom`). iced kept
 //!   the caret 5 px in from the right edge as it moved, and an unfocused
 //!   field at its start.
 //! - **Cut** (Cmd+X) cuts nothing without a selection, where iced's

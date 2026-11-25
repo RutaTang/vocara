@@ -131,6 +131,7 @@ impl Window {
         all.extend_from_slice(events);
         let (renderer, board) = (&mut self.renderer, &mut self.board);
         let (_, statuses) = iced_winit::gesture::update_each(&all, wheels, |events| {
+            let cursor = iced_winit::gesture::cursor(cursor);
             ui.update(events, cursor, renderer, board, &mut messages)
         });
         let _ = ui.update(
@@ -977,6 +978,76 @@ fn a_two_finger_swipe_alone_on_the_field_drags_it_and_flings_it() {
     assert!(done > early && done <= max, "{early} {done} {max}");
     window.run(field(&text), at, &[], now + 16 * MS);
     assert_eq!(window.scroll(field(&text)), done, "stopped");
+}
+
+/// A swipe across `text` in [`field`] from `t0`, the pointer at `at`:
+/// four moves of 10 px 10 ms apart, lifted 2 ms after (a fling at 1000
+/// px/s), then macOS's momentum changing with the fling's frame 16 ms
+/// on. When the momentum changed.
+fn fling_field(
+    window: &mut Window,
+    pad: &mut Trackpad,
+    text: &str,
+    at: Point,
+    t0: Instant,
+) -> Instant {
+    window.run_sent(field(text), at, &[pad.began(t0)], t0);
+    let mut t = t0;
+    for _ in 0..4 {
+        t += 10 * MS;
+        window.run_sent(field(text), at, &[pad.changed(-10.0, 0.0, t)], t);
+    }
+    let up = t + 2 * MS;
+    window.run_sent(field(text), at, &[pad.ended(up)], up);
+    let changed = up + 16 * MS;
+    let momentum = pad.momentum(Phase::Changed, -400.0, 0.0, changed);
+    window.run_sent(field(text), at, &[momentum], changed);
+    changed
+}
+
+#[test]
+fn a_finger_on_the_trackpad_during_the_momentum_stops_the_fields_fling_under_it_alone() {
+    caret::set_scale_factor(1.0);
+    let mut window = window();
+    let text = format!("{}{}", filler(), "W".repeat(60));
+    let at = Point::new(150.0, MIDDLE);
+    let mut pad = Trackpad::new();
+    let t0 = Instant::now();
+    let changed = fling_field(&mut window, &mut pad, &text, at, t0);
+    let flown = window.scroll(field(&text));
+    assert!(flown > 40.0, "{flown}");
+    // A finger lands 40 ms after the momentum's change, the pointer over
+    // the field: an inertia cancel, and the text stays where the last
+    // frame left it.
+    let touched = changed + 40 * MS;
+    let cancel = pad.touch(touched).expect("within 50 ms of the change");
+    let (_, statuses) = window.run_sent(field(&text), at, &[cancel], touched);
+    assert_eq!(statuses, vec![event::Status::Ignored], "every view's");
+    assert_eq!(window.scroll(field(&text)), flown);
+    window.run(field(&text), at, &[], touched + 16 * MS);
+    assert_eq!(window.scroll(field(&text)), flown, "stopped");
+
+    // Flung again: a finger with the pointer off the field (where AppKit
+    // saw it) leaves it flying, and one 50 ms after the momentum's next
+    // change is no cancel at all.
+    let t1 = touched + 500 * MS;
+    let changed = fling_field(&mut window, &mut pad, &text, at, t1);
+    let from = window.scroll(field(&text));
+    let touched = changed + 10 * MS;
+    let cancel = pad
+        .touch_at(touched, Point::new(150.0, 150.0))
+        .expect("within 50 ms of the change");
+    window.run_sent(field(&text), at, &[cancel], touched);
+    let on = window.scroll(field(&text));
+    assert!(on > from, "flies on: {from} {on}");
+    let changed = touched + 6 * MS;
+    let momentum = pad.momentum(Phase::Changed, -300.0, 0.0, changed);
+    window.run_sent(field(&text), at, &[momentum], changed);
+    let there = window.scroll(field(&text));
+    let late = changed + 50 * MS;
+    assert!(pad.touch(late).is_none(), "the window is shut");
+    window.run(field(&text), at, &[], late);
+    assert!(window.scroll(field(&text)) > there, "flies on");
 }
 
 #[test]

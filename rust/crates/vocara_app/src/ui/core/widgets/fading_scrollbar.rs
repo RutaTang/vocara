@@ -48,17 +48,23 @@
 //!   the range (`pointerScroll`: a line 40 px, as the embedder sent it, a
 //!   precise device's point a pixel); one that would not move the view
 //!   goes on to what lies around it.
-//! - A new swipe that reaches the view, a signal that scrolls it, a press
-//!   of the thumb or the track, a caret shown or the app scrolling it stop
-//!   a fling (`beginActivity`); a swipe that starts elsewhere, a press of
-//!   the content or a signal that does not move it do not. A fling after a
-//!   trackpad's drag leaves the content its pointer, as Flutter's did.
-//!
-//! Left as it is: `PointerScrollInertiaCancelEvent`, which the embedder
-//! sent when a finger touched the trackpad within 50 ms of macOS's
-//! momentum and which stopped every fling under the pointer, needs the
-//! touches AppKit reports apart from scrolls, which winit does not read
-//! (two fingers landing, a pan-zoom start, still stop it).
+//! - **An inertia cancel** (a finger touching the trackpad less than 50 ms
+//!   after macOS's momentum last moved, once per momentum: `pan_zoom`)
+//!   where the pointer is over the view stops what moves it where its last
+//!   frame left it, a fling, a page or a caret's run, its scroll ending
+//!   (`Scrollable._receivedPointerSignal`'s `pointerScroll(0)`:
+//!   `goBallistic(0)`, idle within the range). It goes to the content
+//!   first, and every view it reaches stops, nested ones included (no
+//!   `pointerSignalResolver`); a view the pointer is not over flings on.
+//!   Over the shown track it is the bar's alone (`jumpTo(pixels)`, the
+//!   same stop), which leaves the position to the thumb's drag while one
+//!   drives it.
+//! - A new swipe that reaches the view, a signal that scrolls it, an
+//!   inertia cancel over it, a press of the thumb or the track, a caret
+//!   shown or the app scrolling it stop a fling (`beginActivity`); a swipe
+//!   that starts elsewhere, a press of the content or a signal that does
+//!   not move it do not. A fling after a trackpad's drag leaves the content
+//!   its pointer, as Flutter's did.
 //!
 //! # The scrollbar
 //!
@@ -121,7 +127,10 @@
 //!   hit test): a scroll signal scrolls the view by its vertical delta
 //!   (`pointerScroll`: the bar flipped no axis for Shift), within its
 //!   range, and the content under the track never sees it; during a drag
-//!   of the thumb nothing scrolls. A trackpad's (or a Magic Mouse's) swipe
+//!   of the thumb nothing scrolls. An inertia cancel there stops the view
+//!   as one over the content does (`jumpTo(pixels)`), unless the thumb's
+//!   drag drives it, and the content under the track never sees it
+//!   either. A trackpad's (or a Magic Mouse's) swipe
 //!   that starts on the shown track scrolls nothing to its end, nor does
 //!   its momentum, and a fling goes on: only the recognizers its start hit
 //!   saw it, the view's own drag not among them. One that starts elsewhere
@@ -1091,6 +1100,16 @@ impl State {
         Some(to)
     }
 
+    /// `goIdle`, as an inertia cancel's `pointerScroll(0)` (`goBallistic(0)`
+    /// within the range) and the bar's `jumpTo(pixels)` went: what drove
+    /// the position stops where its last frame left it, a run that was
+    /// scrolling ending its scroll.
+    fn go_idle(&mut self) {
+        if self.stop_runs() {
+            self.scroll_ended();
+        }
+    }
+
     /// The view's drag recognizer on `gesture`, if it holds it.
     fn pan_drag(&mut self, gesture: u64) -> Option<&mut PanDrag> {
         self.pan
@@ -1651,6 +1670,16 @@ impl<M> Widget<M, Theme, Renderer> for FadingScrollbar<'_, M> {
                             shell.capture_event();
                         }
                     }
+                    (Scroll::InertiaCancel, Some(_)) => {
+                        // The shown track's: the bar jumps the position to
+                        // where it is (`jumpTo(pixels)`), unless the
+                        // thumb's drag has it; the content under the track
+                        // never sees the cancel.
+                        pass = false;
+                        if !state.drag.is_some_and(|drag| drag.live) {
+                            state.go_idle();
+                        }
+                    }
                     (Scroll::Nothing { .. }, _) => {
                         // Momentum: it reaches nothing at all.
                         pass = false;
@@ -1739,6 +1768,10 @@ impl<M> Widget<M, Theme, Renderer> for FadingScrollbar<'_, M> {
                         }
                     }
                     Scroll::End { gesture } => held = state.pan_end(gesture, range),
+                    // `pointerScroll(0)`, whatever the content did with it:
+                    // every scrollable the hit test reached stops, no
+                    // resolver choosing one.
+                    Scroll::InertiaCancel if over => state.go_idle(),
                     _ => {}
                 }
                 if taken || held {

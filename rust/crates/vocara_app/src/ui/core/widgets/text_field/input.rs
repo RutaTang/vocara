@@ -1324,6 +1324,15 @@ impl<'a, Message: Clone + 'a> Widget<Message, Theme, Renderer> for TextInput<'a,
                             }
                         }
                     }
+                    // A finger on the trackpad during macOS's momentum, the
+                    // pointer over the field: its `Scrollable`'s
+                    // `pointerScroll(0)` (see `input::scroll`). A view
+                    // around it stops too.
+                    Wheel::InertiaCancel => {
+                        if over && state.scroll.stop(&geometry) {
+                            shell.request_redraw();
+                        }
+                    }
                     // The momentum after a swipe no other drag won reached
                     // nothing (in a scroll view, the view keeps it from
                     // the field).

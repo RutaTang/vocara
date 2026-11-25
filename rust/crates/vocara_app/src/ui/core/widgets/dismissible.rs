@@ -45,8 +45,9 @@
 //! is handled.
 //!
 //! Where it takes hits it takes the wheel too: the page beneath does not
-//! scroll under it (Flutter's hit test stopped at the snack bar, so no
-//! scrollable beneath saw the pointer signal).
+//! scroll under it, nor does a finger on the trackpad stop its fling there
+//! (Flutter's hit test stopped at the snack bar, so no scrollable beneath
+//! saw the pointer signal, nor the inertia cancel).
 
 use std::time::Duration;
 
@@ -952,8 +953,9 @@ impl<M: Clone> Widget<M, Theme, Renderer> for Dismissible<'_, M> {
                     .is_some_and(|at| self.hits(bounds, shift, viewport, at));
                 let scroll = pan_zoom::current();
                 match scroll {
-                    // A wheel's signal over it: its hit test's, unheard.
-                    Scroll::Signal => {
+                    // A wheel's signal or an inertia cancel over it: its
+                    // hit test's, unheard.
+                    Scroll::Signal | Scroll::InertiaCancel => {
                         if over {
                             shell.capture_event();
                         }

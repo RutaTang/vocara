@@ -149,7 +149,7 @@ impl Frames {
         let _ = gesture::update_each(&events, wheels, |events| {
             ui.update(
                 events,
-                cursor,
+                gesture::cursor(cursor),
                 renderer,
                 &mut clipboard::Null,
                 &mut messages,

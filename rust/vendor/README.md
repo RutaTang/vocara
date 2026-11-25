@@ -45,13 +45,27 @@ comments) and the files named below; `LICENSE` is the upstream project's
   (`dispatchGestureEvent:`: pan-zoom start, update and end; momentum
   dropped; a scroll without phases a signal); `src/lib.rs` then hands each
   wheel event to the interface in an update of its own with its gesture
-  set (`gesture::update_each`, `gesture::current`). `src/conversion.rs`
-  hands a precise (pixel) delta over in logical pixels, as every other
-  position: winit's are physical, so iced scrolled twice a trackpad's
-  travel on a Retina screen. `Cargo.toml` adds the objc2 0.6 AppKit and
-  Foundation bindings (macOS only) the reading uses. `src/lib.rs` also
-  allows futures' `try_next`, deprecated since the release, whose warning
-  a path dependency shows.
+  set (`gesture::update_each`, `gesture::current`). winit reads no
+  trackpad touches, which Flutter's embedder turned into an inertia
+  cancel (`touchesBeganWithEvent:` within 50 ms of the momentum's last
+  `Changed`, once per momentum, none after a pan-zoom start): `src/lib.rs`
+  has each window it makes set up by `gesture::accept_touches`, which
+  gives the window's view (winit's `WinitView`) indirect and resting
+  touches, as Flutter's view had them, and adds to its class at runtime
+  (`class_addMethod`, once per class; a method the class had of its own
+  would be replaced) a `touchesBeganWithEvent:` that records the touch
+  (its view, time and place) and calls through to the implementation the
+  class had (`NSResponder`'s). Before each event it handles, the run loop
+  takes the touches recorded (`gesture::take_touches`), runs the
+  embedder's rule over each (`Embedder::touched`) and hands each cancel to
+  its window's interface as a `WheelScrolled` of no delta, with its
+  gesture, hit tested where the touch was (`gesture::cursor`).
+  `src/conversion.rs` hands a precise (pixel) delta over in logical
+  pixels, as every other position: winit's are physical, so iced scrolled
+  twice a trackpad's travel on a Retina screen. `Cargo.toml` adds the
+  objc2 0.6 AppKit and Foundation bindings (macOS only) the reading and
+  the touches use. `src/lib.rs` also allows futures' `try_next`,
+  deprecated since the release, whose warning a path dependency shows.
 The effects' layers are compositing iced has no primitive for, which
 Flutter did:
 
@@ -86,4 +100,7 @@ loops as upstream's with the effects' branches added.
 
 Moving iced_winit to a new release: carry `src/gesture.rs` and the marked
 lines over; drop the logical pixel delta if upstream scales it, and the
-whole patch if winit and iced come to pass the momentum phase on.
+whole patch if winit and iced come to pass the momentum phase and the
+trackpad's touches on. Moving winit to a new release: check that its view
+still lets touches through to the method added to its class (CI's
+`macos_touches` test does).
