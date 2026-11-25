@@ -23,13 +23,13 @@ use iced::advanced::graphics::text::cosmic_text::Buffer;
 use iced::advanced::layout::{self, Layout};
 use iced::advanced::text::LineHeight;
 use iced::advanced::widget::{tree, Operation, Tree};
-use iced::advanced::{renderer, Widget};
+use iced::advanced::{renderer, Renderer as _, Widget};
 use iced::alignment::Horizontal;
 use iced::widget::canvas::{self, Frame, Geometry, LineCap, Path, Stroke};
 use iced::widget::{button, canvas as canvas_widget, column, container};
 use iced::{
     mouse, Background, Border, Color, Element, Event, Font, Length, Point, Rectangle, Renderer,
-    Shadow, Size, Theme, Vector,
+    Shadow, Size, Theme, Transformation, Vector,
 };
 
 use super::animated::{animated_container, Decoration};
@@ -382,7 +382,11 @@ impl<M: Clone> canvas::Program<M> for Fader<'_, M> {
 /// fixed width beside its control, right-aligned, so the control keeps its
 /// length as the value moves. One line always: a reading the font sets wider
 /// than the box is scaled down (`FittedBox(fit: scaleDown)`), not wrapped
-/// onto a second line ("1444" over "ms").
+/// onto a second line ("1444" over "ms"). As the `FittedBox` did, it is laid
+/// out at its size, unconstrained, and painted scaled by the box's width
+/// over its own; the box is as tall as that scales its line
+/// (`constrainSizeAndAttemptToPreserveAspectRatio`), right-aligned
+/// (`Align(alignment: Alignment.centerRight, heightFactor: 1)`).
 pub struct FixedWidthReadout {
     text: String,
     width: f32,
@@ -435,11 +439,36 @@ impl FixedWidthReadout {
     }
 }
 
-/// The laid-out reading: its buffer, and its extent.
+/// The laid-out reading: its buffer, its extent as laid out, and the scale
+/// it is painted at (1 unless it is wider than the box).
 #[derive(Debug, Default, Clone)]
 pub struct ReadoutState {
     buffer: Option<Arc<Buffer>>,
     extent: Size,
+    scale: f32,
+}
+
+impl ReadoutState {
+    /// The extent the reading is painted at: its own, scaled.
+    fn drawn(&self) -> Size {
+        Size::new(
+            self.extent.width * self.scale,
+            self.extent.height * self.scale,
+        )
+    }
+}
+
+/// `FittedBox(fit: BoxFit.scaleDown)` over a child of `child` size in a box
+/// at most `width` wide: the scale it paints the child at, and its height
+/// (`BoxConstraints.constrainSizeAndAttemptToPreserveAspectRatio`, in
+/// `double`s: the width over the child's aspect ratio).
+fn scale_down(child: Size, width: f32) -> (f32, f32) {
+    if child.width <= width || child.width <= 0.0 {
+        return (1.0, child.height);
+    }
+    let aspect = f64::from(child.width) / f64::from(child.height);
+    let height = (f64::from(width) / aspect) as f32;
+    (width / child.width, height)
 }
 
 impl<M> Widget<M, Theme, Renderer> for FixedWidthReadout {
@@ -456,18 +485,17 @@ impl<M> Widget<M, Theme, Renderer> for FixedWidthReadout {
     }
 
     fn layout(&mut self, tree: &mut Tree, _: &Renderer, limits: &layout::Limits) -> layout::Node {
-        let (mut buffer, mut extent) = self.line_at(self.size);
-        if extent.width > self.width && extent.width > 0.0 {
-            (buffer, extent) = self.line_at(self.size * self.width / extent.width);
-        }
+        let (buffer, extent) = self.line_at(self.size);
+        let (scale, height) = scale_down(extent, self.width);
         *tree.state.downcast_mut::<ReadoutState>() = ReadoutState {
             buffer: Some(buffer),
             extent,
+            scale,
         };
         layout::Node::new(limits.resolve(
             Length::Fixed(self.width),
             Length::Shrink,
-            Size::new(self.width, extent.height),
+            Size::new(self.width, height),
         ))
     }
 
@@ -486,13 +514,27 @@ impl<M> Widget<M, Theme, Renderer> for FixedWidthReadout {
             return;
         };
         let bounds = layout.bounds();
-        studio_text::draw_line(
-            renderer,
-            buffer,
-            Point::new(bounds.x + bounds.width - state.extent.width, bounds.y),
-            self.color,
-            *viewport,
+        let origin = Point::new(bounds.x + bounds.width - state.drawn().width, bounds.y);
+        let scale = state.scale;
+        if scale == 1.0 {
+            studio_text::draw_line(renderer, buffer, origin, self.color, *viewport);
+            return;
+        }
+        // Painted as the `FittedBox` painted its child: the line as laid
+        // out, under a scale about its top-left (each renderer rasterizes
+        // its glyphs at the scaled size, as Skia did).
+        let transformation =
+            Transformation::translate(origin.x, origin.y) * Transformation::scale(scale);
+        let viewport = Rectangle::new(
+            Point::new(
+                (viewport.x - origin.x) / scale,
+                (viewport.y - origin.y) / scale,
+            ),
+            Size::new(viewport.width / scale, viewport.height / scale),
         );
+        renderer.with_transformation(transformation, |renderer| {
+            studio_text::draw_line(renderer, buffer, Point::ORIGIN, self.color, viewport);
+        });
     }
 
     fn operate(
@@ -504,9 +546,10 @@ impl<M> Widget<M, Theme, Renderer> for FixedWidthReadout {
     ) {
         let state = tree.state.downcast_ref::<ReadoutState>();
         let bounds = layout.bounds();
+        let size = state.drawn();
         let drawn = Rectangle::new(
-            Point::new(bounds.x + bounds.width - state.extent.width, bounds.y),
-            state.extent,
+            Point::new(bounds.x + bounds.width - size.width, bounds.y),
+            size,
         );
         operation.text(None, drawn, &self.text);
     }
@@ -929,6 +972,105 @@ mod tests {
         assert!(drawn.x >= -0.01);
         assert!(((drawn.x + drawn.width) - 42.0).abs() < 0.05);
         assert!(drawn.height < 10.5, "scaled down, not wrapped");
+    }
+
+    #[test]
+    fn a_scaled_down_box_keeps_its_child_s_aspect_ratio() {
+        // Narrow enough: unscaled, its own height.
+        assert_eq!(scale_down(Size::new(30.0, 11.0), 42.0), (1.0, 11.0));
+        assert_eq!(scale_down(Size::new(42.0, 11.0), 42.0), (1.0, 11.0));
+        // Too wide: scaled by the box's width over its own, as tall as
+        // that makes it.
+        let (scale, height) = scale_down(Size::new(84.0, 11.0), 42.0);
+        assert_eq!(scale, 0.5);
+        assert_eq!(height, 5.5);
+        let (scale, height) = scale_down(Size::new(50.0, 11.0), 42.0);
+        assert!((scale - 0.84).abs() < 1e-6, "{scale}");
+        assert!((height - 9.24).abs() < 1e-5, "{height}");
+    }
+
+    /// The columns and rows `frames` drew ink in, in `size`: the first and
+    /// last of each.
+    fn inked(
+        frames: &crate::ui::core::widgets::animated::testing::Frames,
+        size: Size,
+    ) -> Rectangle {
+        let (mut left, mut top, mut right, mut bottom) = (f32::MAX, f32::MAX, 0.0_f32, 0.0_f32);
+        for y in 0..size.height as usize {
+            for x in 0..size.width as usize {
+                let at = Point::new(x as f32, y as f32);
+                let [r, g, b, _] = frames.pixel(at).into_rgba8();
+                if r.max(g).max(b) > 40 {
+                    left = left.min(at.x);
+                    top = top.min(at.y);
+                    right = right.max(at.x);
+                    bottom = bottom.max(at.y);
+                }
+            }
+        }
+        Rectangle::new(
+            Point::new(left, top),
+            Size::new(right - left + 1.0, bottom - top + 1.0),
+        )
+    }
+
+    // Flutter's `FittedBox` laid the reading out at its size and painted it
+    // scaled, glyphs and all; it did not set it again in a smaller font.
+    #[test]
+    fn a_reading_wider_than_its_box_is_painted_scaled_as_laid_out() {
+        use crate::ui::core::widgets::animated::testing::Frames;
+
+        let text = "1444 ms 1444 ms";
+        let (size, width) = (21.0, 84.0);
+        // The app's fonts installed (as `Frames` does) before measuring.
+        let window = Size::new(width + 16.0, 40.0);
+        let mut scaled = Frames::new(window);
+        let reading = fixed_width_readout(text, width, size).color(Color::WHITE);
+        let (buffer, extent) = reading.line_at(size);
+        let (scale, height) = scale_down(extent, width);
+        assert!(scale < 0.75, "wider than its box: {extent:?}");
+        let baseline = buffer.layout_runs().next().expect("a line").line_y;
+
+        let t0 = Instant::now();
+        let view = |width: f32| -> Element<'static, Msg> {
+            container(row![
+                fixed_width_readout(text, width, size).color(Color::WHITE)
+            ])
+            .padding(iced::Padding::ZERO.left(8.0).top(4.0))
+            .into()
+        };
+        scaled.frame(view(width), &[], t0);
+        let mut natural = Frames::new(Size::new(extent.width + 16.0, 40.0));
+        natural.frame(view(extent.width.ceil() + 1.0), &[], t0);
+        let scaled_ink = inked(&scaled, window);
+        let natural_ink = inked(&natural, Size::new(extent.width + 16.0, 40.0));
+
+        // As wide as the natural line's ink, scaled (to a pixel's AA).
+        assert!(
+            (scaled_ink.width - natural_ink.width * scale).abs() <= 1.5,
+            "{scaled_ink:?} vs {natural_ink:?} × {scale}"
+        );
+        // Right-aligned in its box: its ink ends inside the box's right edge.
+        assert!(
+            scaled_ink.x + scaled_ink.width <= 8.0 + width + 0.5,
+            "{scaled_ink:?}"
+        );
+        // The figures stand on the laid-out baseline, scaled, on its pixel
+        // (the glyphs' origins rounded half up): their ink ends the row
+        // above it.
+        let baseline_row = (4.0 + baseline * scale + 0.5).floor();
+        assert_eq!(
+            scaled_ink.y + scaled_ink.height,
+            baseline_row,
+            "baseline {baseline} × {scale}: {scaled_ink:?}"
+        );
+        // The box is as tall as the scaled line.
+        let drawn = readout_text_bounds(fixed_width_readout(text, width, size).into(), text);
+        assert!(
+            (drawn.height - height).abs() < 1e-4,
+            "{drawn:?} vs {height}"
+        );
+        assert!((drawn.width - width).abs() < 1e-3, "{drawn:?}");
     }
 
     #[test]
