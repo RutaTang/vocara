@@ -652,15 +652,51 @@ fn the_wheel_over_the_volume_button_steps_it_by_5() {
     let loud = Playback { volume: 98.0, ..p };
     let (_, sent) = window.frame_messages(view(loud), &[lines(1.0)], t + 50 * MS);
     assert_eq!(sent, vec![Command::SetVolume(100.0)], "clamped");
-    // A trackpad's pixel scroll was a pan, not a scroll signal.
-    let pan = wheel(mouse::ScrollDelta::Pixels { x: 0.0, y: 10.0 });
-    let (_, sent) = window.frame_messages(view(p), &[pan], t + 60 * MS);
-    assert!(sent.is_empty());
-    // Shift turns the wheel sideways; Flutter turned it back.
+    // Shift: macOS turns the wheel sideways, and Flutter's embedder turned
+    // it back.
     let shift = Event::Keyboard(keyboard::Event::ModifiersChanged(Modifiers::SHIFT));
     let sideways = wheel(mouse::ScrollDelta::Lines { x: 1.0, y: 0.0 });
     let (_, sent) = window.frame_messages(view(p), &[shift, sideways], t + 70 * MS);
+    if cfg!(target_os = "macos") {
+        assert_eq!(sent, vec![Command::SetVolume(85.0)]);
+    } else {
+        assert!(sent.is_empty(), "sideways is no step elsewhere");
+    }
+}
+
+#[test]
+fn a_trackpad_swipe_over_the_volume_button_leaves_it_and_a_precise_wheel_steps_it() {
+    use crate::ui::core::widgets::pan_zoom::testing::Trackpad;
+    use iced_winit::gesture::Phase;
+
+    let t0 = Instant::now();
+    let p = halfway();
+    let (mut window, t) = shown(p, t0);
+    window.point_at(VOLUME);
+    window.frame(view(p), &[], t + 10 * MS);
+    // A two-finger swipe was a pan-zoom gesture: the button's
+    // `onPointerSignal` never saw it, nor the momentum after it.
+    let mut pad = Trackpad::new();
+    let at = t + 20 * MS;
+    let swipe = [
+        pad.began(at),
+        pad.changed(0.0, 8.0, at),
+        pad.changed(0.0, 12.0, at),
+        pad.ended(at),
+        pad.momentum(Phase::Began, 0.0, 10.0, at),
+        pad.momentum(Phase::Changed, 0.0, 6.0, at),
+        pad.momentum(Phase::Ended, 0.0, 0.0, at),
+    ];
+    let (_, sent) = window.frame_sent(view(p), &swipe, at);
+    assert!(sent.is_empty(), "{sent:?}");
+    // A mouse wheel's notch, and a precise device's points without
+    // phases: scroll signals, a step each.
+    let notch = pad.lines(0.0, 1.0, at);
+    let (_, sent) = window.frame_sent(view(p), &[notch], t + 30 * MS);
     assert_eq!(sent, vec![Command::SetVolume(85.0)]);
+    let points = pad.pixels(0.0, -3.0, at);
+    let (_, sent) = window.frame_sent(view(p), &[points], t + 40 * MS);
+    assert_eq!(sent, vec![Command::SetVolume(75.0)]);
 }
 
 // ------------------------------------------------------------ double press

@@ -52,14 +52,18 @@
 //! those take `Scrollbar::hidden()` without this widget.
 //!
 //! - The wheel over the shown track is the bar's (`_receivedPointerSignal`,
-//!   the content under the track out of the hit test): a mouse wheel's
-//!   lines scroll the view by its vertical delta (`pointerScroll`, the
-//!   app's 60 px a line; Shift's axis swap macOS makes undone, as
-//!   Flutter's embedder undid it), within its range, and the content under
-//!   the track never sees it; during a drag of the thumb nothing scrolls.
-//!   A trackpad's (or a Magic Mouse's) pixels over the shown track scroll
-//!   nothing: Flutter took them as pan-zoom gestures, which only the
-//!   recognizers in the hit test saw, the view's own drag not among them.
+//!   the content under the track out of the hit test): a scroll signal (a
+//!   mouse wheel's lines, the app's 60 px a line, or a precise device's
+//!   points when it sends no gesture phases) scrolls the view by its
+//!   vertical delta (`pointerScroll`; Shift's axis swap macOS makes
+//!   undone, as Flutter's embedder undid it), within its range, and the
+//!   content under the track never sees it; during a drag of the thumb
+//!   nothing scrolls. A trackpad's (or a Magic Mouse's) swipe that starts
+//!   on the shown track scrolls nothing to its end, nor does its momentum:
+//!   Flutter took it as a pan-zoom gesture, which only the recognizers its
+//!   start hit saw, the view's own drag not among them. One that starts
+//!   elsewhere is the content's to its end, should the bar come in under
+//!   the pointer meanwhile ([`pan_zoom`](super::pan_zoom)).
 //! - The pointer leaving the view is noticed after each frame too, not
 //!   only when it moves (Flutter's mouse tracker re-tested a still pointer
 //!   after each frame and sent the bar's region its exit when the view no
@@ -97,6 +101,7 @@ use iced::{
     Renderer, Size, Theme, Vector,
 };
 
+use super::pan_zoom::{self, Scroll};
 use crate::ui::core::motion::{self, Controller, Curve, Lerp};
 use crate::ui::core::scale_factor::{scale_factor, set_scale_factor};
 use crate::ui::core::theme;
@@ -153,24 +158,23 @@ fn near() -> f32 {
     1.0 / scale_factor()
 }
 
-/// How far a mouse wheel's `delta` over the shown track scrolls the view
+/// How far a scroll signal's `delta` over the shown track scrolls the view
 /// down (`_pointerSignalEventDelta`, the vertical delta: Flutter's bar
-/// flipped no axis for Shift), none for a trackpad's pixels (see the
-/// module docs).
-fn wheel_on_track(delta: mouse::ScrollDelta, modifiers: keyboard::Modifiers) -> Option<f32> {
-    match delta {
-        mouse::ScrollDelta::Lines { x, y } => {
-            // macOS hands Shift's lines over across; Flutter's embedder
-            // put them back down.
-            let down = if cfg!(target_os = "macos") && modifiers.shift() {
-                x
-            } else {
-                y
-            };
-            Some(-down * 60.0)
-        }
-        mouse::ScrollDelta::Pixels { .. } => None,
-    }
+/// flipped no axis for Shift): a line the app's 60 px, a precise device's
+/// point a pixel.
+fn wheel_on_track(delta: mouse::ScrollDelta, modifiers: keyboard::Modifiers) -> f32 {
+    let (x, y, per_line) = match delta {
+        mouse::ScrollDelta::Lines { x, y } => (x, y, 60.0),
+        mouse::ScrollDelta::Pixels { x, y } => (x, y, 1.0),
+    };
+    // macOS hands Shift's scroll over across; Flutter's embedder put it
+    // back down.
+    let down = if cfg!(target_os = "macos") && modifiers.shift() {
+        x
+    } else {
+        y
+    };
+    -down * per_line
 }
 
 /// The style's statuses the thumb's colors are read at.
@@ -491,6 +495,9 @@ struct State {
     /// The text fields' request count it last looked at
     /// (`text_field::show_on_screen`).
     asked: u64,
+    /// The trackpad gesture last started over the view, and whether the
+    /// shown track took it (or the content did).
+    pan: Option<(u64, bool)>,
 }
 
 /// `controller` is heading in or in (`isForwardOrCompleted`).
@@ -532,6 +539,7 @@ impl State {
             now: None,
             modifiers: keyboard::Modifiers::default(),
             asked: show_on_screen::asked(),
+            pan: None,
         }
     }
 
@@ -1002,25 +1010,45 @@ impl<M> Widget<M, Theme, Renderer> for FadingScrollbar<'_, M> {
                     .zip(bar)
                     .filter(|(at, bar)| bar.takes(*at, shown))
                     .map(|(_, bar)| bar);
-                if let Some(bar) = track {
-                    // The shown track's: the content under it never sees
-                    // the wheel. Held by a drag, the bar's own wheel waits.
-                    pass = false;
-                    let to = wheel_on_track(*delta, state.modifiers)
-                        .filter(|_| state.drag.is_none())
-                        .map(|dy| (dy, (pixels + dy).clamp(0.0, bar.range)))
-                        .filter(|(dy, to)| *dy != 0.0 && *to != pixels);
-                    if let Some((_, to)) = to {
-                        // `pointerScroll`: a scroll that ends at once, any
-                        // page stopped.
-                        state.page = None;
-                        scroll(scrollable, child, to);
-                        state.moved(to, true);
-                        shell.capture_event();
+                let wheel = pan_zoom::current();
+                // A trackpad's gesture is where its start was hit: the
+                // shown track's (nothing scrolls) or the content's, to its
+                // end and through its momentum.
+                let track_owns = match wheel {
+                    Scroll::Signal => None,
+                    Scroll::Start { gesture, .. } => {
+                        state.pan = Some((gesture, track.is_some()));
+                        Some(track.is_some())
                     }
-                } else {
+                    _ => state
+                        .pan
+                        .filter(|(held, _)| Some(*held) == wheel.gesture())
+                        .map(|(_, on_track)| on_track),
+                };
+                match (wheel, track) {
+                    (Scroll::Signal, Some(bar)) => {
+                        // The shown track's: the content under it never
+                        // sees the wheel. Held by a drag, the bar's own
+                        // wheel waits.
+                        pass = false;
+                        let dy = wheel_on_track(*delta, state.modifiers);
+                        let to = (pixels + dy).clamp(0.0, bar.range);
+                        if state.drag.is_none() && dy != 0.0 && to != pixels {
+                            // `pointerScroll`: a scroll that ends at once,
+                            // any page stopped.
+                            state.page = None;
+                            scroll(scrollable, child, to);
+                            state.moved(to, true);
+                            shell.capture_event();
+                        }
+                    }
+                    _ if track_owns.unwrap_or(track.is_some()) => {
+                        // The track's gesture: nothing scrolls, and the
+                        // content never sees it.
+                        pass = false;
+                    }
                     // Elsewhere the scrollable has it.
-                    content_cursor = cursor;
+                    _ => content_cursor = cursor,
                 }
             }
             Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers)) => {
@@ -1033,16 +1061,20 @@ impl<M> Widget<M, Theme, Renderer> for FadingScrollbar<'_, M> {
         }
 
         if pass {
-            scrollable.as_widget_mut().update(
-                child,
-                event,
-                layout,
-                content_cursor,
-                renderer,
-                clipboard,
-                shell,
-                viewport,
-            );
+            // The content's drags share a trackpad gesture's arena with
+            // the view's (a text field's horizontal scroll).
+            pan_zoom::within_scroll_view(|| {
+                scrollable.as_widget_mut().update(
+                    child,
+                    event,
+                    layout,
+                    content_cursor,
+                    renderer,
+                    clipboard,
+                    shell,
+                    viewport,
+                );
+            });
             // What the event scrolled.
             state.observe(read(scrollable, child, layout, renderer), range);
             // A text field inside asked to have its caret shown.
@@ -1194,7 +1226,9 @@ impl<M> Widget<M, Theme, Renderer> for FadingScrollbar<'_, M> {
 #[cfg(test)]
 mod tests {
     use iced::widget::{button, column, mouse_area, scrollable, Space};
+    use iced_winit::gesture::Phase;
 
+    use super::pan_zoom::testing::Trackpad;
     use super::*;
     use crate::ui::core::theme::Zinc;
     use crate::ui::core::widgets::animated::testing::{near, over, Frames, BACKGROUND, MS};
@@ -1581,13 +1615,62 @@ mod tests {
         // under the track does not.
         let (_, scrolled) = window.frame_messages(view(), &[lines(1.0)], t0 + 316 * MS);
         assert_eq!(scrolled, [Scrolled::Outer(60.0)]);
-        // A trackpad's pixels there: nothing.
-        let (_, scrolled) = window.frame_messages(view(), &[wheel(30.0)], t0 + 332 * MS);
+        // A trackpad's swipe there, and its momentum: nothing.
+        let mut pad = Trackpad::new();
+        let at = t0 + 332 * MS;
+        let swipe = [
+            pad.began(at),
+            pad.changed(0.0, -30.0, at),
+            pad.ended(at),
+            pad.momentum(Phase::Began, 0.0, -20.0, at),
+        ];
+        let (_, scrolled) = window.frame_sent(view(), &swipe, at);
         assert_eq!(scrolled, []);
+        // A precise device's points without phases: a scroll signal, the
+        // view's.
+        let (_, scrolled) = window.frame_sent(view(), &[pad.pixels(0.0, -10.0, at)], t0 + 340 * MS);
+        assert_eq!(scrolled, [Scrolled::Outer(70.0)]);
         // Off the track the content has the wheel first.
         window.point_at(Point::new(50.0, 70.0));
         let (_, scrolled) = window.frame_messages(view(), &[lines(1.0)], t0 + 348 * MS);
         assert_eq!(scrolled, [Scrolled::Inner(60.0)]);
+    }
+
+    #[test]
+    fn a_swipe_begun_on_the_content_stays_the_contents_when_the_bar_comes_in() {
+        let mut window = window();
+        let t0 = Instant::now();
+        // On the track's place while the bar is hidden: the content's.
+        window.point_at(Point::new(95.0, 50.0));
+        window.frame(view(1000.0), &[], t0);
+        let mut pad = Trackpad::new();
+        let (_, scrolled) = window.frame_sent(view(1000.0), &[pad.began(t0)], t0);
+        assert_eq!(offset(&scrolled), None);
+        let mut at = t0;
+        let mut last = 0.0;
+        // The bar fades in under the still pointer; the swipe goes on
+        // scrolling the content, and its momentum too (iced's scroll view
+        // takes it as its inertia).
+        for _ in 0..30 {
+            at += 16 * MS;
+            let (_, scrolled) = window.frame_sent(view(1000.0), &[pad.changed(0.0, -10.0, at)], at);
+            let y = offset(&scrolled).expect("it scrolled");
+            assert!(y > last, "{y} after {last}");
+            last = y;
+        }
+        assert!(window.pixel(Point::new(94.0, 50.0)) != BACKGROUND, "shown");
+        window.frame_sent(view(1000.0), &[pad.ended(at)], at);
+        let (_, scrolled) = window.frame_sent(
+            view(1000.0),
+            &[pad.momentum(Phase::Began, 0.0, -10.0, at)],
+            at + 16 * MS,
+        );
+        assert_eq!(offset(&scrolled), Some(last + 10.0));
+        // A new swipe there now is the track's.
+        let next = at + 400 * MS;
+        let swipe = [pad.began(next), pad.changed(0.0, -10.0, next)];
+        let (_, scrolled) = window.frame_sent(view(1000.0), &swipe, next);
+        assert_eq!(offset(&scrolled), None);
     }
 
     #[test]

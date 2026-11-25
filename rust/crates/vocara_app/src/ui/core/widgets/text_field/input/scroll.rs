@@ -29,8 +29,20 @@
 //!   under an idle offset leaves it out of range for a frame, and it then
 //!   snaps into range (the clamping physics' ballistic settle, which starts
 //!   at its end); a run that would cross an end stops there.
-//! - **A wheel or a trackpad** scrolls it by the horizontal delta
-//!   (`pointerScroll`), within the range.
+//! - **A scroll signal** (a mouse wheel's, or a precise device's without
+//!   gesture phases) scrolls it by the horizontal delta (`pointerScroll`),
+//!   within the range.
+//! - **A trackpad's two-finger swipe** (a pan-zoom gesture, `pan_zoom`)
+//!   starting on it reaches the `Scrollable`'s horizontal drag recognizer,
+//!   which holds the offset where it is (a run stops). Alone in the
+//!   gesture's arena it drags at once; in a scroll view, whose vertical
+//!   drag is in the arena too, the first of the two to be moved past
+//!   `kTouchSlop` (18 px) along its axis wins, the field first on a tie,
+//!   and neither moves before (`DragStartBehavior.start`). Won, the
+//!   offset follows the pan across within the range, and the fingers
+//!   lifting fling it (`MacOSScrollViewFlingVelocityTracker`,
+//!   `ClampingScrollSimulation`, `scroll_fling`) until it stops or meets
+//!   an end. The momentum macOS sends after moves nothing.
 //!
 //! Each reveal also asks the scroll view around the field to show the
 //! caret, as `RenderEditable.showOnScreen` did (see
@@ -41,6 +53,7 @@ use iced::Rectangle;
 
 use super::super::caret;
 use crate::ui::core::motion::Curve;
+use crate::ui::core::widgets::scroll_fling::Ballistic;
 
 /// How long an animated reveal takes (`_caretAnimationDuration`).
 pub const CARET_ANIMATION: Duration = Duration::from_millis(100);
@@ -120,6 +133,8 @@ pub struct Scroll {
     /// An idle offset was out of range at the last frame: it snaps in at
     /// the next.
     out_of_range: bool,
+    /// A fling under way (`BallisticScrollActivity`).
+    ballistic: Option<Ballistic>,
 }
 
 /// `clampDouble(x, min, max)`, `min` winning should they cross.
@@ -156,7 +171,10 @@ impl Scroll {
 
     /// Whether it is running or due to move at a coming frame.
     pub fn is_moving(&self) -> bool {
-        self.drive.is_some() || self.post_frame.is_some() || self.out_of_range
+        self.drive.is_some()
+            || self.ballistic.is_some()
+            || self.post_frame.is_some()
+            || self.out_of_range
     }
 
     /// The offset that reveals the caret at the glyph edge `x`
@@ -181,8 +199,24 @@ impl Scroll {
     /// `jumpTo(to)`: there at once, any run stopped.
     fn jump_to(&mut self, to: f32) {
         self.drive = None;
+        self.ballistic = None;
         self.pixels = to;
         self.out_of_range = false;
+    }
+
+    /// `hold()`: a drag's pointer came down on it; any run stops where it
+    /// is.
+    pub fn hold(&mut self) {
+        self.drive = None;
+        self.ballistic = None;
+    }
+
+    /// `goBallistic(velocity)` at the end of a drag (px/s, positive toward
+    /// the text's end): the fling, if it moves.
+    pub fn fling(&mut self, geometry: &Geometry, velocity: f64) {
+        self.hold();
+        self.ballistic =
+            Ballistic::new(f64::from(self.pixels), f64::from(geometry.max()), velocity);
     }
 
     /// `animateTo(to, 100 ms, fastOutSlowIn)`: from where it is; within a
@@ -192,6 +226,7 @@ impl Scroll {
         if (to - self.pixels).abs() < 1.0 / caret::scale_factor() {
             self.jump_to(to);
         } else {
+            self.ballistic = None;
             self.drive = Some(Drive {
                 from: self.pixels,
                 to,
@@ -261,6 +296,15 @@ impl Scroll {
             self.out_of_range = false;
         }
         let mut more = false;
+        if let Some(ballistic) = &mut self.ballistic {
+            let (to, going) = ballistic.frame(now, f64::from(max));
+            self.pixels = to as f32;
+            if going {
+                more = true;
+            } else {
+                self.ballistic = None;
+            }
+        }
         if let Some(drive) = &mut self.drive {
             let start = *drive.start.get_or_insert(now);
             let t = (now.saturating_duration_since(start).as_secs_f32()
@@ -281,7 +325,8 @@ impl Scroll {
             }
         }
         // Out of range and idle: the settle runs at the next frame.
-        self.out_of_range = self.drive.is_none() && !(0.0..=max).contains(&self.pixels);
+        self.out_of_range =
+            self.drive.is_none() && self.ballistic.is_none() && !(0.0..=max).contains(&self.pixels);
         more |= self.out_of_range;
         if let Some(post_frame) = &mut self.post_frame {
             post_frame.drawn = true;

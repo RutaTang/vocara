@@ -30,6 +30,13 @@
 //! state (the analyzer's smoothed spectrum, a held slider), as Dart's
 //! `FxPanel(key: ValueKey(id))` did.
 //!
+//! A trackpad's two-finger swipe reached Flutter as a pan-zoom gesture,
+//! which the sliders' and the EQ's drags (`kPointerDragDevices`) left to
+//! the panel's scroll; iced hands it over as wheel events with its phases
+//! (`widgets::pan_zoom`): the sliders take no wheel event, and the EQ sets
+//! a band's Q on a scroll signal only (a mouse wheel's, or a precise
+//! device's without phases), never on a swipe or the momentum after it.
+//!
 //! # Differences from Flutter
 //!
 //! - Unmounting mid-gesture: Dart committed a slider or EQ drag in flight,
@@ -41,10 +48,7 @@
 //!   commit when it changes the selection: the live edit is already in the
 //!   model).
 //! - The pointer: no pointer cancel or second finger reaches a desktop
-//!   mouse control, so those Dart cases have no counterpart; a trackpad's
-//!   two-finger swipe is a pixel-delta wheel event the sliders ignore and
-//!   the EQ leaves to the panel's scroll (only a line-delta mouse wheel sets
-//!   a band's Q).
+//!   mouse control, so those Dart cases have no counterpart.
 //! - The gain-reduction meter's reading is the one the host passed at its
 //!   last view (Dart polled the engine itself); the meter keeps Dart's 50 ms
 //!   poll cadence, peak falloff and idle stop over it.

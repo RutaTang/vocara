@@ -20,6 +20,7 @@ vocara_model.workspace = true
 vocara_store.workspace = true
 vocara_services.workspace = true
 iced.workspace = true
+iced_winit.workspace = true
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -36,8 +37,9 @@ iced_test.workspace = true
 tempfile.workspace = true
 
 # The app's AppKit paths on a real Mac (the open and save panels, Cmd+Q
-# while a take is armed): AppKit wants the main thread, so `main` is each
-# test's own (see the files).
+# while a take is armed, the scroll phases the run loop reads off AppKit):
+# AppKit wants the main thread, so `main` is each test's own (see the
+# files).
 [[test]]
 name = "macos_file_panels"
 harness = false
@@ -46,7 +48,12 @@ harness = false
 name = "macos_quit"
 harness = false
 
-# What those tests drive AppKit with (the versions vocara_services uses).
+[[test]]
+name = "macos_scroll_phases"
+harness = false
+
+# What those tests drive AppKit with and make their events with (objc2
+# 0.6's bindings, the versions vocara_services and the run loop use).
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 objc2 = "0.6"
 block2 = "0.6"
@@ -66,12 +73,15 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
     "NSSavePanel",
     "NSView",
     "NSWindow",
+    "objc2-core-foundation",
+    "objc2-core-graphics",
 ] }
 objc2-foundation = { version = "0.3", default-features = false, features = [
     "std",
     "NSArray",
     "NSDate",
     "NSDictionary",
+    "NSObjCRuntime",
     "NSObject",
     "NSProcessInfo",
     "NSRunLoop",
@@ -86,6 +96,13 @@ objc2-core-foundation = { version = "0.3", default-features = false, features = 
     "CFRunLoop",
     "CFString",
 ] }
+# The scroll-phases test makes its scroll events with Core Graphics.
+objc2-core-graphics = { version = "0.3", default-features = false, features = [
+    "std",
+    "CGEvent",
+    "CGEventTypes",
+] }
+dispatch2 = { version = "0.3", default-features = false, features = ["std"] }
 # The panels test reads a filter back as AppKit may report it (macOS 11+
 # may give `allowedFileTypes` as type identifiers). Test-only: the app never
 # links UniformTypeIdentifiers, which macOS 10.15 lacks.

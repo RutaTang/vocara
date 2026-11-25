@@ -11,6 +11,7 @@ use iced::advanced::renderer::{self as core_renderer, Headless};
 use iced::time::Instant;
 use iced::{mouse, window, Color, Element, Event, Point, Renderer, Size};
 use iced_test::runtime::user_interface::{self, UserInterface};
+use iced_winit::gesture::{self, Wheel};
 
 use crate::ui::core::icons;
 use crate::ui::core::theme::{app_theme, font, DEFAULT_TEXT_SIZE};
@@ -92,7 +93,25 @@ impl Frames {
         events: &[Event],
         at: Instant,
     ) -> (bool, Vec<M>) {
-        self.run(view, events, at, true)
+        self.run(view, events, &[], at, true)
+    }
+
+    /// [`Frames::frame_messages`] for `sent`: events, each wheel event's
+    /// with the gesture the run loop hands along with it
+    /// (`pan_zoom::testing`), dispatched as the run loop does.
+    pub fn frame_sent<'a, M>(
+        &mut self,
+        view: impl Into<Element<'a, M>>,
+        sent: &[(Event, Option<Wheel>)],
+        at: Instant,
+    ) -> (bool, Vec<M>) {
+        let events: Vec<Event> = sent.iter().map(|(event, _)| event.clone()).collect();
+        let wheels: Vec<Option<Wheel>> = sent
+            .iter()
+            .filter(|(event, _)| matches!(event, Event::Mouse(mouse::Event::WheelScrolled { .. })))
+            .map(|(_, wheel)| *wheel)
+            .collect();
+        self.run(view, &events, &wheels, at, true)
     }
 
     /// [`Frames::frame`] with the pointer held still: no move is sent,
@@ -103,13 +122,14 @@ impl Frames {
         events: &[Event],
         at: Instant,
     ) -> bool {
-        self.run(view, events, at, false).0
+        self.run(view, events, &[], at, false).0
     }
 
     fn run<'a, M>(
         &mut self,
         view: impl Into<Element<'a, M>>,
         events: &[Event],
+        wheels: &[Option<Wheel>],
         at: Instant,
         moved: bool,
     ) -> (bool, Vec<M>) {
@@ -125,13 +145,16 @@ impl Frames {
         if moved {
             events.insert(0, move_to(self.cursor));
         }
-        let _ = ui.update(
-            &events,
-            cursor,
-            &mut self.renderer,
-            &mut clipboard::Null,
-            &mut messages,
-        );
+        let renderer = &mut self.renderer;
+        let _ = gesture::update_each(&events, wheels, |events| {
+            ui.update(
+                events,
+                cursor,
+                renderer,
+                &mut clipboard::Null,
+                &mut messages,
+            )
+        });
         let (state, _) = ui.update(
             &[redraw(at)],
             cursor,

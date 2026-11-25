@@ -46,6 +46,8 @@ pub use cursor::Cursor;
 use editor::Editor;
 use scroll::{Geometry, Reveal, Scroll};
 
+use super::super::pan_zoom::{self, Scroll as Wheel, TOUCH_SLOP};
+use super::super::scroll_fling::{self, MacOsVelocityTracker};
 use super::show_on_screen::{self, Request};
 use super::toolbar::{self, Item};
 use super::{caret, DEFAULT_CARET};
@@ -1234,16 +1236,95 @@ impl<'a, Message: Clone + 'a> Widget<Message, Theme, Renderer> for TextInput<'a,
                     }
                 }
             },
-            Event::Mouse(mouse::Event::WheelScrolled { delta })
-                if cursor.is_over(layout.bounds()) =>
-            {
+            Event::Mouse(mouse::Event::WheelScrolled { delta }) => {
+                let over = cursor.is_over(layout.bounds());
+                let wheel = pan_zoom::current();
                 let state = state(tree);
                 let geometry = geometry(state, layout);
-                if let Some(dx) = horizontal_scroll(*delta, state.keyboard_modifiers) {
-                    if state.scroll.scroll_by(&geometry, dx) {
+                match wheel {
+                    Wheel::Signal => {
+                        let dx =
+                            horizontal_scroll(*delta, state.keyboard_modifiers).filter(|_| over);
+                        if dx.is_some_and(|dx| state.scroll.scroll_by(&geometry, dx)) {
+                            shell.capture_event();
+                            shell.request_redraw();
+                        }
+                    }
+                    // Its `Scrollable`'s horizontal drag: it holds the
+                    // offset, and takes the gesture at once when alone in
+                    // its arena (see `input::scroll`).
+                    Wheel::Start { gesture, time } if over => {
+                        state.scroll.hold();
+                        let mut tracker = MacOsVelocityTracker::default();
+                        tracker.add(time, 0.0, pan_zoom::event_time());
+                        state.pan = Some(Pan {
+                            gesture,
+                            pan: Vector::ZERO,
+                            won: (!pan_zoom::in_scroll_view()).then_some(true),
+                            tracker,
+                        });
                         shell.capture_event();
                         shell.request_redraw();
                     }
+                    Wheel::Update {
+                        gesture,
+                        delta,
+                        time,
+                    } => {
+                        if let Some(pan) = state.pan.as_mut().filter(|p| p.gesture == gesture) {
+                            pan.pan += delta;
+                            pan.tracker.add(time, pan.pan.x, pan_zoom::event_time());
+                            match pan.won {
+                                None => {
+                                    // The arena: neither drag moves until
+                                    // one is past its slop, the field's
+                                    // first.
+                                    let slop = TOUCH_SLOP as f32;
+                                    if pan.pan.x.abs() > slop {
+                                        pan.won = Some(true);
+                                    } else if pan.pan.y.abs() > slop {
+                                        pan.won = Some(false);
+                                    }
+                                    shell.capture_event();
+                                }
+                                Some(true) => {
+                                    // `applyUserOffset(dx)`.
+                                    state.scroll.scroll_by(&geometry, -delta.x);
+                                    shell.capture_event();
+                                    shell.request_redraw();
+                                }
+                                Some(false) => {}
+                            }
+                        }
+                    }
+                    Wheel::End { gesture } => {
+                        if let Some(pan) = state.pan.as_mut().filter(|p| p.gesture == gesture) {
+                            match pan.won {
+                                Some(true) => {
+                                    let estimate = pan.tracker.estimate(pan_zoom::event_time());
+                                    let velocity = scroll_fling::drag_end(estimate);
+                                    state.scroll.fling(&geometry, velocity);
+                                    shell.capture_event();
+                                    shell.request_redraw();
+                                }
+                                // Neither won: nothing moved.
+                                None => shell.capture_event(),
+                                Some(false) => {}
+                            }
+                        }
+                    }
+                    // The momentum after a swipe the page's view did not
+                    // win reached nothing.
+                    Wheel::Nothing { gesture } => {
+                        if state
+                            .pan
+                            .as_ref()
+                            .is_some_and(|p| p.gesture == gesture && p.won != Some(false))
+                        {
+                            shell.capture_event();
+                        }
+                    }
+                    Wheel::Start { .. } => {}
                 }
             }
             Event::Window(window::Event::Unfocused) => {
@@ -1411,10 +1492,23 @@ pub struct State {
     /// It cannot be edited (`enabled: false`): it takes no focus from the
     /// keyboard's traversal.
     disabled: bool,
+    /// The trackpad gesture that started on it last.
+    pan: Option<Pan>,
 }
 
 fn state(tree: &mut Tree) -> &mut State {
     tree.state.downcast_mut::<State>()
+}
+
+/// A trackpad gesture that started on the field: its pan so far, whether
+/// its horizontal drag won the gesture's arena (`None` while undecided),
+/// and the pan's velocity tracker.
+#[derive(Debug, Clone)]
+struct Pan {
+    gesture: u64,
+    pan: Vector,
+    won: Option<bool>,
+    tracker: MacOsVelocityTracker,
 }
 
 #[derive(Debug, Clone)]
@@ -1690,27 +1784,25 @@ const CURSOR_BLINK_INTERVAL_MILLIS: u128 = 500;
 /// end). Elsewhere Flutter moved the caret, as iced's field does.
 const SCROLL_KEYS_ONLY_SCROLL: bool = cfg!(target_os = "macos");
 
-/// What a wheel or trackpad `delta` scrolls the text by, if it is the
-/// field's: a mouse wheel's horizontal lines, the vertical ones with Shift
-/// (`pointerAxisModifiers`; macOS hands them over swapped already), 60 px a
-/// line as the app's scrollables take them; a trackpad's pixels when they
-/// run more across than down (its horizontal drag beating the page's
-/// vertical one to the gesture).
+/// What a scroll signal's `delta` scrolls the text by, if it is the
+/// field's (`_pointerSignalEventDelta`): its horizontal delta, the
+/// vertical one with Shift (`pointerAxisModifiers`; macOS hands them over
+/// swapped already), 60 px a line as the app's scrollables take them, a
+/// precise device's point a pixel.
 fn horizontal_scroll(delta: mouse::ScrollDelta, modifiers: keyboard::Modifiers) -> Option<f32> {
-    match delta {
-        mouse::ScrollDelta::Lines { x, y } => {
-            let shift = modifiers.shift();
-            // iced's scrollable: macOS swaps the axes under Shift itself.
-            let (x, y) = if cfg!(target_os = "macos") && shift {
-                (y, x)
-            } else {
-                (x, y)
-            };
-            let across = if shift { y } else { x };
-            (across != 0.0).then_some(-across * 60.0)
-        }
-        mouse::ScrollDelta::Pixels { x, y } => (x.abs() > y.abs()).then_some(-x),
-    }
+    let (x, y, per_line) = match delta {
+        mouse::ScrollDelta::Lines { x, y } => (x, y, 60.0),
+        mouse::ScrollDelta::Pixels { x, y } => (x, y, 1.0),
+    };
+    let shift = modifiers.shift();
+    // iced's scrollable: macOS swaps the axes under Shift itself.
+    let (x, y) = if cfg!(target_os = "macos") && shift {
+        (y, x)
+    } else {
+        (x, y)
+    };
+    let across = if shift { y } else { x };
+    (across != 0.0).then_some(-across * per_line)
 }
 
 /// iced's `text_editor::convert_macos_shortcut` (crate-private there):

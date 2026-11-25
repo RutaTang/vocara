@@ -216,9 +216,10 @@ structure every screen follows, so screens ported by different hands fit:
   (`Screen::take_snack_bars`), which keeps them up over the page on top for
   the time they have left, as Dart's `ScaffoldMessenger` above the pages
   did (`app::messenger`). A snack bar can be dragged down and away with the
-  mouse, as `SnackBar`'s `Dismissible` let it be (`widgets::dismissible`):
-  once it has slid out it reports so, and its queue takes it down at once
-  and lets the next one enter (`SnackQueue::swiped`).
+  mouse or a trackpad's two-finger swipe, as `SnackBar`'s `Dismissible`
+  let it be (`widgets::dismissible`): once it has slid out it reports so,
+  and its queue takes it down at once and lets the next one enter
+  (`SnackQueue::swiped`).
 - **Widgets**: `vocara_app::ui::core` holds the theme (`studio.dart` colors,
   `theme.dart`) and the shared widgets (`studio_button`, `studio_controls`,
   `confirm_dialog`, `fatal_open_screen`, `waveform_painter`,
@@ -247,6 +248,27 @@ structure every screen follows, so screens ported by different hands fit:
   Inter (`theme::font::install`), never a copy installed on the machine;
   only the text toolbar's labels, which Flutter set in the system UI font,
   may take that face (`text_field::toolbar_face`).
+- **Wheel and trackpad** (`widgets::pan_zoom`): Flutter's macOS embedder
+  delivered a scroll with gesture phases (a trackpad's two fingers, a Magic
+  Mouse's) as a pan-zoom gesture, hit-tested at its start, which drag
+  recognizers took as a drag and flung on their own simulation when the
+  fingers lifted; it dropped the momentum macOS sends after; and it
+  delivered a scroll without phases (a mouse wheel, a precise device that
+  sends none) as a scroll signal. winit merges the momentum phase into the
+  touch phase and iced drops both, so the app's run loop is iced_winit
+  patched (`rust/vendor/iced_winit`): it reads each wheel event's phases
+  off the event AppKit is dispatching as it converts it, runs the
+  embedder's state machine over them, and hands each wheel event to the
+  widgets on its own with its gesture (`iced_winit::gesture::current`); it
+  also hands precise deltas over in logical pixels (winit's are physical:
+  iced scrolled twice the fingers' travel on a Retina screen). The
+  widgets that Flutter's gestures told apart follow them: a snack bar's
+  swipe, the license sheet's drag and fling, a single-line field's
+  horizontal drag and fling, the timeline's pan, the scrollbar's track,
+  the video's volume wheel and the EQ's Q wheel. iced's own scroll views
+  still take every wheel event, the momentum too, as their inertia, where
+  Flutter's scroll views flung on `ClampingScrollSimulation` and got no
+  momentum. Off macOS no phases are known: every wheel event is a signal.
 - **Text**: every text is shaped fully and kerned, as Flutter set it: the
   workspace enables iced's `advanced-shaping` feature, which makes
   `Shaping::Advanced` every text's default (iced's own default shapes ASCII
@@ -278,8 +300,10 @@ structure every screen follows, so screens ported by different hands fit:
   100 ms (`Curves.fastOutSlowIn`) after an edit, a click or the focus
   coming, at once for a keyboard move or a drag of the selection; it stays
   where it is while the field is unfocused, Home and End only scroll on
-  macOS (`scrollToBeginningOfDocument:`), and a wheel's or trackpad's
-  horizontal delta scrolls it. As a field reveals its caret, the scroll
+  macOS (`scrollToBeginningOfDocument:`), a scroll signal's horizontal
+  delta scrolls it, and a trackpad's two-finger swipe across drags and
+  flings it (past 18 px, before a scroll view's vertical drag around it
+  takes the swipe down). As a field reveals its caret, the scroll
   view around it (a `.fading()` one) shows the caret too
   (`text_field::show_on_screen`, `RenderObject.showOnScreen`): with the
   field's 20 px `scrollPadding` (24 below) over the same 100 ms after an
@@ -335,8 +359,9 @@ structure every screen follows, so screens ported by different hands fit:
   track pages 0.8 of the view in 100 ms; it fades in on a scroll or under
   the pointer and out 600 ms after, and while it shows its 12 px track is
   its own, not the content's: a mouse wheel there scrolls the view and
-  never the content under it, a trackpad's swipe there scrolls nothing
-  (Flutter's pan-zoom never reached the view's drag), and the bar notices
+  never the content under it, a trackpad's swipe that starts there
+  scrolls nothing (Flutter's pan-zoom never reached the view's drag; one
+  that starts on the content stays the content's), and the bar notices
   after each frame, not only on a move, that the view left a still
   pointer. A horizontal scrollable (Material gave none)
   and a `ScrollConfiguration(scrollbars: false)` one have no scrollbar
@@ -511,7 +536,7 @@ behavior and its tests are ported and the gates pass.
 | `ui/home/widgets/new_practice_dialog.dart` | 16 | `vocara_app::ui::home::widgets::new_practice_dialog` | done |
 | `ui/home/widgets/practice_project_card.dart` | 126 | `vocara_app::ui::home::widgets::practice_project_card` | done |
 | `ui/home/widgets/update_notice.dart` | 219 | `vocara_app::ui::home::widgets::update_notice` | done (the 5 s auto-check timer is the home screen's) |
-| `ui/settings/licenses.dart` | 213 | `vocara_app::ui::settings::licenses` (the page too, as `LicensePage` laid it out on macOS under forui's Material theme, its registry gathered off the UI thread under a spinner and its detail on a `DraggableScrollableSheet` a trackpad grows; what still differs is in the module docs; the crate list is the generated `assets/licenses/crates.json`: after a dependency change, run `VOCARA_UPDATE_LICENSES=1 cargo test -p vocara_app the_crate_license_list_is_current` and commit it) | done |
+| `ui/settings/licenses.dart` | 213 | `vocara_app::ui::settings::licenses` (the page too, as `LicensePage` laid it out on macOS under forui's Material theme, its registry gathered off the UI thread under a spinner and its detail on a `DraggableScrollableSheet` a trackpad grows and flings; what still differs is in the module docs; the crate list is the generated `assets/licenses/crates.json`: after a dependency change, run `VOCARA_UPDATE_LICENSES=1 cargo test -p vocara_app the_crate_license_list_is_current` and commit it) | done |
 | `ui/settings/settings_screen.dart` | 1135 | `vocara_app::ui::settings::settings_screen` (no view model: the screen holds `_SettingsScreenState`'s state; the settings choices block on their persist, so they run off the UI thread one at a time, in order, and those still waiting when the page leaves are applied after it; the save panel, the bundle and the storage root are `SettingsHooks`; the license page and the toasts draw inside the page, a toast up as the page leaves going to the app's `messenger`) | done |
 | `ui/song_practice_detail/view_model/analysis_cache.dart` | 1717 | `vocara_app::ui::song_practice_detail::view_model::analysis_cache` (the Dart awaits are a state machine: worker jobs come back through `job_done`, the joins and `Future.wait`s are continuations drained as microtasks; selection and transport come from an `AnalysisHost`; the capture pump is the screen's 30 ms tick) | done |
 | `ui/song_practice_detail/view_model/analysis_source.dart` | 64 | `vocara_app::ui::song_practice_detail::view_model::analysis_source` (the listener is a `revision`; a seek is the view's message) | done |
@@ -542,7 +567,7 @@ behavior and its tests are ported and the gates pass.
 | `ui/technique_library/view_model/technique_library_view_model.dart` | 280 | `vocara_app::ui::technique_library::view_model::technique_library_view_model` | done |
 | `ui/technique_library/widgets/media/technique_audio_player.dart` | 417 | `vocara_app::ui::technique_library::widgets::media::technique_audio_player` (media_kit's `Player` → `vocara_services::media_player`, polled: AVFoundation on macOS with `device`, the null player elsewhere, a fake in tests; the keyed players a technique page keeps → `media::example_players`) | done (the AVFoundation backend played on CI's Mac with `device`, `vocara_services`' `tests/macos_media_player.rs`; its pure parts tested everywhere) |
 | `ui/technique_library/widgets/media/technique_media_section.dart` | 898 | `vocara_app::ui::technique_library::widgets::media::technique_media_section` (plain data in — `TechniqueMediaSection`, the constructor's parameters — and `Message`s out, which `MediaSectionState::update` turns into the callbacks' `Event`s; the page keeps that state (hover, drag) and the `ExamplePlayers`; the picker is `vocara_services::file_panels`' (`browse`), the rename dialog goes through the app's dialog stack (`Dialog::RenameExample`)) | done |
-| `ui/technique_library/widgets/media/technique_video_player.dart` | 190 | `vocara_app::ui::technique_library::widgets::media::technique_video_player` (the controls `AdaptiveVideoControls` gave it on macOS, media_kit_video 2.0.1's `MaterialDesktopVideoControls` with `modifyVolumeOnScroll: false` → `media::video_controls`, one widget drawing and handling them all; its fullscreen route → the page's `Screen::overlay` plus the window's native fullscreen; the controls' keyboard → the first video started, through `ExamplePlayers::shortcuts`) | done (what iced cannot do the same — group opacity, focus scopes, rounded clips, scroll phases — is listed in `video_controls`' and the player's module docs) |
+| `ui/technique_library/widgets/media/technique_video_player.dart` | 190 | `vocara_app::ui::technique_library::widgets::media::technique_video_player` (the controls `AdaptiveVideoControls` gave it on macOS, media_kit_video 2.0.1's `MaterialDesktopVideoControls` with `modifyVolumeOnScroll: false` → `media::video_controls`, one widget drawing and handling them all; its fullscreen route → the page's `Screen::overlay` plus the window's native fullscreen; the controls' keyboard → the first video started, through `ExamplePlayers::shortcuts`) | done (what iced cannot do the same — group opacity, focus scopes, rounded clips — is listed in `video_controls`' and the player's module docs) |
 | `ui/technique_library/widgets/studio_field.dart` | 96 | `vocara_app::ui::technique_library::widgets::studio_field` | done |
 | `ui/technique_library/widgets/technique_analysis_section.dart` | 690 | `vocara_app::ui::technique_library::widgets::technique_analysis_section` (`view` reads the view model, `update` makes the call the Dart tap made where the control was live; the page keeps the Spectrogram tab's `VoiceprintState` and asks `ensureReferenceAnalysis` while the panel is built; the Dart level meter's fill had no height, here it shows) | done (the Range and Dynamics tabs are placeholders until `voice_profile_view` lands) |
 | `ui/technique_library/widgets/technique_detail_screen.dart` | 825 | `vocara_app::ui::technique_library::widgets::technique_detail_screen` (the router's `technique_library::detail`; the screen owns the view model, the `ExamplePlayers`, the `MediaSectionState` and the analysis card's `VoiceprintState`; each `Job` runs off the UI thread and lands as `Message::Landed`, each `Answer` is a Dart `await` resuming; the recorder's ticks — and a quit's `quitFinalize` — and the players' poll are subscriptions; the dialogs go through `Update::dialog`; the header's double-tap settle drops its buttons' messages; the snack bars are the page's while it is on top (queued, timed by a subscription), the app's `messenger`'s once it leaves; exports use `file_panels`' save panel, the players `SystemMediaPlayers` — `with_deps` takes a test's) | done |

@@ -99,7 +99,9 @@ pub fn move_to(p: Point) -> Event {
     Event::Mouse(mouse::Event::CursorMoved { position: p })
 }
 
-/// A trackpad's two-finger swipe step (precise: pixel deltas).
+/// A precise scroll step of `(x, y)` points the run loop knew no gesture
+/// of (a scroll signal to the app's widgets; `pan_zoom::testing` makes a
+/// trackpad's swipe): what iced's scroll views scroll by.
 pub fn swipe(x: f32, y: f32) -> Event {
     Event::Mouse(mouse::Event::WheelScrolled {
         delta: mouse::ScrollDelta::Pixels { x, y },

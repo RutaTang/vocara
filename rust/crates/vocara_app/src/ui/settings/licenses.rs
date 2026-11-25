@@ -76,9 +76,11 @@
 //! - **The detail** sits on a `DraggableScrollableSheet`
 //!   (`licenses/sheet.rs`): its card starts `56 · h / (h + 28)` down the
 //!   page (the sheet's size is a share of the window's height, the page the
-//!   window less the drag bar), and a trackpad's scroll grows it to the
-//!   page's full height before the list scrolls (shrinking it back after
-//!   the list is at its top), where a mouse wheel only scrolls the list.
+//!   window less the drag bar), and a trackpad's two-finger drag grows it
+//!   to the page's full height before the list scrolls (shrinking it back
+//!   after the list is at its top), its flick flinging the sheet and then
+//!   the list as Flutter's simulation did, where a mouse wheel only
+//!   scrolls the list.
 //!   The header (the pinned `SliverAppBar`) centres the package over its
 //!   license count, no gap between, and takes the surface tint once the
 //!   list scrolls under it; each license follows a `Divider` in forui's
@@ -98,13 +100,6 @@
 //!
 //! Where it still differs:
 //!
-//! - A trackpad's flick: Flutter flung the sheet and the list with its own
-//!   ballistic simulation as the fingers lifted; iced gets the momentum
-//!   macOS sends after them as more scroll deltas, so those move the sheet
-//!   and the list as the fingers did (as in every scrollable of the app).
-//!   iced tells a trackpad (and a Magic Mouse) from a wheel by its pixel
-//!   deltas, where Flutter went by the scroll's gesture phases: a mouse
-//!   whose driver sends pixel deltas without phases grows the sheet here.
 //! - Flutter's scrollbar on the detail spanned the whole scroll view, the
 //!   pinned header's 56 px included; here the list under the header is
 //!   the scrollable, so the bar starts under the header.

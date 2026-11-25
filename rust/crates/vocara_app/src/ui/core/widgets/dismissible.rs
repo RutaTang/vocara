@@ -1,7 +1,8 @@
 //! Port of Flutter's `Dismissible` as a `SnackBar` wraps itself in one
 //! (`material_snack_bar.dart`: `direction: DismissDirection.down`,
 //! `resizeDuration: null`), with the vertical drag recognizer, velocity
-//! tracker and `AnimationController` it runs on, for a mouse.
+//! tracker and `AnimationController` it runs on, for a mouse and a
+//! trackpad.
 //!
 //! - A primary press where the widget takes hits starts a drag at once: its
 //!   `VerticalDragGestureRecognizer` is alone in the gesture arena (nothing
@@ -25,6 +26,16 @@
 //! - All the way out (and not held by a drag) it reports `on_dismissed`, once
 //!   (no `resizeDuration`: no collapse first). A press while it slides
 //!   catches it where it is, and the drag goes on from there.
+//! - A trackpad's two-finger swipe that starts over it drags it too: macOS
+//!   gave Flutter such a scroll as a pan-zoom gesture
+//!   ([`pan_zoom`](super::pan_zoom)), which the drag recognizer takes as
+//!   it takes a press (it accepts every device), alone in the arena at the
+//!   gesture's start. The content follows the pan down; the fingers
+//!   lifting end the drag as a release does, its fling judged on the pan's
+//!   samples at their events' times, past `kTouchSlop` (18 px, a
+//!   trackpad's hit slop, where a mouse's is 1). The momentum macOS sends
+//!   after it moves nothing (Flutter got none), and nothing beneath sees
+//!   it. A gesture that started elsewhere stays the page's.
 //!
 //! The slide is the widget's own: it keeps it in the widget tree, takes its
 //! time from `RedrawRequested` and asks for frames only while it moves. Its
@@ -36,14 +47,6 @@
 //! Where it takes hits it takes the wheel too: the page beneath does not
 //! scroll under it (Flutter's hit test stopped at the snack bar, so no
 //! scrollable beneath saw the pointer signal).
-//!
-//! # Differences from Flutter
-//!
-//! On macOS Flutter delivered a two-finger trackpad swipe as a pan-zoom,
-//! which the drag recognizer took as well, so such a swipe dragged a snack
-//! bar too. iced reports a trackpad's scroll as wheel deltas with no phase,
-//! so it never says when the fingers lift and such a drag could never end:
-//! a trackpad swipe over it moves nothing.
 
 use std::time::Duration;
 
@@ -54,6 +57,8 @@ use iced::time::Instant;
 use iced::{
     mouse, window, Element, Event, Length, Padding, Point, Rectangle, Renderer, Size, Theme, Vector,
 };
+
+use super::pan_zoom::{self, Held, Scroll, TOUCH_SLOP};
 
 // ----------------------------------------------------------------- constants
 
@@ -125,11 +130,20 @@ pub struct VelocityEstimate {
 pub struct VelocityTracker {
     samples: [Option<(Instant, f64)>; HISTORY],
     index: usize,
+    /// When the last sample was added (`_sinceLastSample`'s start).
+    added: Option<Instant>,
 }
 
 impl VelocityTracker {
-    /// The pointer was at `y` at `at`.
+    /// The pointer was at `y` at `at`, handled then.
     pub fn add(&mut self, at: Instant, y: f32) {
+        self.add_at(at, y, at);
+    }
+
+    /// The pointer was at `y` at `at` (its event's time), the sample added
+    /// at `now`.
+    pub fn add_at(&mut self, at: Instant, y: f32, now: Instant) {
+        self.added = Some(now);
         self.index = (self.index + 1) % HISTORY;
         self.samples[self.index] = Some((at, f64::from(y)));
     }
@@ -137,9 +151,9 @@ impl VelocityTracker {
     /// The estimate at `now`; `None` with no sample at all.
     pub fn estimate(&self, now: Instant) -> Option<VelocityEstimate> {
         let (newest_at, newest_y) = self.samples[self.index]?;
-        // Has the pointer been still since its last sample? The stopwatch
-        // counts whole milliseconds.
-        if ms_between(now, newest_at).floor() > STOPPED_MS {
+        // Has the pointer been still since its last sample was added? The
+        // stopwatch counts whole milliseconds.
+        if ms_between(now, self.added.unwrap_or(newest_at)).floor() > STOPPED_MS {
             return Some(VelocityEstimate {
                 velocity_y: 0.0,
                 offset_y: 0.0,
@@ -238,15 +252,14 @@ fn least_squares_slope(x: &[f64], y: &[f64]) -> Option<f64> {
     Some(b[1])
 }
 
-/// `VerticalDragGestureRecognizer.considerFling` for a mouse: the
-/// estimate's velocity if it is a fling (faster than `kMinFlingVelocity`,
-/// over more than the mouse's hit slop), clamped to `kMaxFlingVelocity`;
-/// none otherwise.
-fn fling_velocity(estimate: Option<VelocityEstimate>) -> f64 {
+/// `VerticalDragGestureRecognizer.considerFling` for a device whose hit
+/// slop is `slop` (a mouse's, [`PRECISE_HIT_SLOP`], or a trackpad's,
+/// `kTouchSlop`): the estimate's velocity if it is a fling (faster than
+/// `kMinFlingVelocity`, over more than the slop), clamped to
+/// `kMaxFlingVelocity`; none otherwise.
+fn fling_velocity(estimate: Option<VelocityEstimate>, slop: f64) -> f64 {
     match estimate {
-        Some(e)
-            if e.velocity_y.abs() > MIN_FLING_VELOCITY && e.offset_y.abs() > PRECISE_HIT_SLOP =>
-        {
+        Some(e) if e.velocity_y.abs() > MIN_FLING_VELOCITY && e.offset_y.abs() > slop => {
             e.velocity_y.clamp(-MAX_FLING_VELOCITY, MAX_FLING_VELOCITY)
         }
         _ => 0.0,
@@ -494,9 +507,20 @@ enum Fling {
     Reverse,
 }
 
-/// The pointer a drag follows.
-#[derive(Debug, Clone, Default)]
+/// What a drag follows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Device {
+    /// The mouse, pressed on it.
+    Mouse,
+    /// A trackpad's pan-zoom gesture (its number), started over it.
+    PanZoom(u64),
+}
+
+/// The pointer a drag follows: where it was last (a trackpad's: its pan so
+/// far, from 0 at its start).
+#[derive(Debug, Clone)]
 struct Pointer {
+    device: Device,
     last_y: f32,
     tracker: VelocityTracker,
 }
@@ -524,14 +548,26 @@ impl Dismiss {
     /// A primary press at `at` (where the widget takes hits): the drag
     /// starts there.
     pub fn press(&mut self, at: Point, now: Instant, height: f32) {
+        self.start(Device::Mouse, at.y, now, now, height);
+    }
+
+    /// A trackpad's pan-zoom `gesture` started over it at `at` (its
+    /// event's time), handled at `now`: the drag starts, its pan at 0.
+    pub fn pan_zoom_start(&mut self, gesture: u64, at: Instant, now: Instant, height: f32) {
+        self.start(Device::PanZoom(gesture), 0.0, at, now, height);
+    }
+
+    /// The drag starts, following `device` from `y`, sampled at `at`.
+    fn start(&mut self, device: Device, y: f32, at: Instant, now: Instant, height: f32) {
         if self.reported || self.pointer.is_some() {
             return;
         }
         let mut pointer = Pointer {
-            last_y: at.y,
+            device,
+            last_y: y,
             tracker: VelocityTracker::default(),
         };
-        pointer.tracker.add(now, at.y);
+        pointer.tracker.add_at(at, y, now);
         self.pointer = Some(pointer);
         // `_handleDragStart`.
         self.drag_underway = true;
@@ -545,14 +581,29 @@ impl Dismiss {
         self.end = sign(self.extent);
     }
 
-    /// The pointer moved to `to`.
+    /// The mouse moved to `to`.
     pub fn moved(&mut self, to: Point, now: Instant, height: f32) {
-        let Some(pointer) = &mut self.pointer else {
+        self.follow(Device::Mouse, to.y, now, now, height);
+    }
+
+    /// The trackpad's `gesture` panned by `delta_y` at `at` (its event's
+    /// time), handled at `now`.
+    pub fn panned(&mut self, gesture: u64, delta_y: f32, at: Instant, now: Instant, height: f32) {
+        let Some(pointer) = self.pointer.as_ref() else {
             return;
         };
-        pointer.tracker.add(now, to.y);
-        let delta = f64::from(to.y - pointer.last_y);
-        pointer.last_y = to.y;
+        let y = pointer.last_y + delta_y;
+        self.follow(Device::PanZoom(gesture), y, at, now, height);
+    }
+
+    /// `device` moved to `y` (sampled at `at`).
+    fn follow(&mut self, device: Device, y: f32, at: Instant, now: Instant, height: f32) {
+        let Some(pointer) = self.pointer.as_mut().filter(|p| p.device == device) else {
+            return;
+        };
+        pointer.tracker.add_at(at, y, now);
+        let delta = f64::from(y - pointer.last_y);
+        pointer.last_y = y;
         // `_handleDragUpdate`, down only.
         if !self.drag_underway || self.controller.is_animating(now) {
             return;
@@ -569,19 +620,37 @@ impl Dismiss {
         }
     }
 
-    /// The pointer went up (or its buttons changed) at `now`: whether that
+    /// The mouse went up (or its buttons changed) at `now`: whether that
     /// dismissed it.
     pub fn release(&mut self, now: Instant) -> bool {
-        let Some(pointer) = self.pointer.take() else {
+        self.end(Device::Mouse, PRECISE_HIT_SLOP, now)
+    }
+
+    /// The trackpad's `gesture` ended (its fingers lifted) at `now`:
+    /// whether that dismissed it.
+    pub fn pan_zoom_end(&mut self, gesture: u64, now: Instant) -> bool {
+        self.end(Device::PanZoom(gesture), TOUCH_SLOP, now)
+    }
+
+    /// `device`'s drag ended: a fling past its hit slop `slop`, or not.
+    fn end(&mut self, device: Device, slop: f64, now: Instant) -> bool {
+        let Some(pointer) = self.pointer.take_if(|p| p.device == device) else {
             return false;
         };
-        let velocity = fling_velocity(pointer.tracker.estimate(now));
+        let velocity = fling_velocity(pointer.tracker.estimate(now), slop);
         self.drag_end(velocity, now)
     }
 
-    /// Whether a drag follows the pointer.
+    /// Whether a drag follows a pointer (the mouse or a trackpad).
     pub fn is_dragging(&self) -> bool {
         self.pointer.is_some()
+    }
+
+    /// Whether a drag follows the mouse.
+    pub fn is_mouse_dragging(&self) -> bool {
+        self.pointer
+            .as_ref()
+            .is_some_and(|p| p.device == Device::Mouse)
     }
 
     /// How far down it is drawn at `now`, over its height
@@ -673,11 +742,7 @@ impl Dismiss {
 /// When a pointer event happened: iced's events carry no time stamp, so
 /// the time it is handled (a test sets it).
 fn event_time() -> Instant {
-    #[cfg(test)]
-    if let Some(at) = testing::EVENT_TIME.with(std::cell::Cell::get) {
-        return at;
-    }
-    Instant::now()
+    pan_zoom::event_time()
 }
 
 /// Where a [`Dismissible`] takes hits (its `HitTestBehavior`).
@@ -749,11 +814,12 @@ fn in_rounded(rect: Rectangle, radius: f32, at: Point) -> bool {
     Point::new(cx, cy).distance(at) <= r
 }
 
-/// A [`Dismissible`]'s state: its key, its drag and slide, and the last
-/// frame's time.
+/// A [`Dismissible`]'s state: its key, its drag and slide, the trackpad
+/// gesture it took last, and the last frame's time.
 struct State {
     key: u64,
     dismiss: Dismiss,
+    held: Held,
     now: Instant,
 }
 
@@ -762,6 +828,7 @@ impl State {
         Self {
             key,
             dismiss: Dismiss::default(),
+            held: Held::default(),
             now: Instant::now(),
         }
     }
@@ -835,6 +902,7 @@ impl<M: Clone> Widget<M, Theme, Renderer> for Dismissible<'_, M> {
             &(*viewport - lift),
         );
         let state = tree.state.downcast_mut::<State>();
+        let held = &mut state.held;
         let dismiss = &mut state.dismiss;
         let mut dismissed = false;
         match event {
@@ -849,14 +917,15 @@ impl<M: Clone> Widget<M, Theme, Renderer> for Dismissible<'_, M> {
                 let now = event_time();
                 // A slide that ended since the last frame has ended.
                 dismissed = dismiss.frame(now);
-                if dismiss.is_dragging() {
+                if dismiss.is_mouse_dragging() {
                     // Another button: the pointer's buttons changed, which
                     // ends the drag.
                     dismissed |= dismiss.release(now);
                     shell.request_redraw();
                 } else if let Some(at) = cursor.position() {
                     if self.hits(bounds, shift, viewport, at) {
-                        if *button == mouse::Button::Left {
+                        // (A trackpad's drag under way keeps it.)
+                        if *button == mouse::Button::Left && !dismiss.is_dragging() {
                             dismiss.press(at, now, height);
                             shell.request_redraw();
                         }
@@ -866,23 +935,60 @@ impl<M: Clone> Widget<M, Theme, Renderer> for Dismissible<'_, M> {
                     }
                 }
             }
-            Event::Mouse(mouse::Event::CursorMoved { position }) if dismiss.is_dragging() => {
+            Event::Mouse(mouse::Event::CursorMoved { position }) if dismiss.is_mouse_dragging() => {
                 dismiss.moved(*position, event_time(), height);
                 shell.request_redraw();
             }
             Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left))
-                if dismiss.is_dragging() =>
+                if dismiss.is_mouse_dragging() =>
             {
                 dismissed = dismiss.release(event_time());
                 shell.capture_event();
                 shell.request_redraw();
             }
-            Event::Mouse(mouse::Event::WheelScrolled { .. })
-                if cursor
+            Event::Mouse(mouse::Event::WheelScrolled { .. }) => {
+                let over = cursor
                     .position()
-                    .is_some_and(|at| self.hits(bounds, shift, viewport, at)) =>
-            {
-                shell.capture_event();
+                    .is_some_and(|at| self.hits(bounds, shift, viewport, at));
+                let scroll = pan_zoom::current();
+                match scroll {
+                    // A wheel's signal over it: its hit test's, unheard.
+                    Scroll::Signal => {
+                        if over {
+                            shell.capture_event();
+                        }
+                    }
+                    // A swipe starting over it: the drag recognizer's, as
+                    // a press is.
+                    Scroll::Start { gesture, time } => {
+                        if over {
+                            let now = event_time();
+                            dismissed = dismiss.frame(now);
+                            held.take(gesture);
+                            dismiss.pan_zoom_start(gesture, time, now, height);
+                            shell.capture_event();
+                            shell.request_redraw();
+                        }
+                    }
+                    Scroll::Update {
+                        gesture,
+                        delta,
+                        time,
+                    } if held.holds(gesture) => {
+                        dismiss.panned(gesture, delta.y, time, event_time(), height);
+                        shell.capture_event();
+                        shell.request_redraw();
+                    }
+                    Scroll::End { gesture } if held.holds(gesture) => {
+                        dismissed = dismiss.pan_zoom_end(gesture, event_time());
+                        shell.capture_event();
+                        shell.request_redraw();
+                    }
+                    // Its momentum reached no widget.
+                    Scroll::Nothing { .. } if held.owns(&scroll) => shell.capture_event(),
+                    // Another's gesture.
+                    Scroll::Update { .. } | Scroll::End { .. } | Scroll::Nothing { .. } => {}
+                }
             }
             _ => {}
         }
@@ -989,19 +1095,12 @@ impl<'a, M: Clone + 'a> From<Dismissible<'a, M>> for Element<'a, M> {
 /// The pointer events' clock, for tests.
 #[cfg(test)]
 pub(crate) mod testing {
-    use std::cell::Cell;
-
     use iced::time::Instant;
-
-    thread_local! {
-        /// The time every pointer event is handled at, when set.
-        pub(super) static EVENT_TIME: Cell<Option<Instant>> = const { Cell::new(None) };
-    }
 
     /// Pointer events are handled at `at` (or at the time they are, with
     /// `None`) on this thread.
     pub fn set_event_time(at: Option<Instant>) {
-        EVENT_TIME.with(|t| t.set(at));
+        super::pan_zoom::testing::set_event_time(at);
     }
 }
 

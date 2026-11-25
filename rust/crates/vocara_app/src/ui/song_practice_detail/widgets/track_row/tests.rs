@@ -255,13 +255,14 @@ fn a_plain_tap_selects_the_clip_and_never_commits_a_move() {
 fn a_two_finger_trackpad_swipe_over_a_clip_never_moves_it() {
     // A two-finger trackpad swipe is how the timeline pans; it moved, and
     // saved, the clip the cursor happened to rest on.
+    use crate::ui::core::widgets::pan_zoom::testing as pan_zoom;
+
     let mut lane = ClipLane::new(&[("a", 4000)]);
     lane.ui.point_at(clip_center(4000, 1000));
-    lane.run([scroll(-60.0, 0.0), scroll(-200.0, 0.0)]);
-    assert!(
-        lane.messages.is_empty(),
-        "a swipe pans the view, not the clip"
-    );
+    let track = clips_take(&lane.starts);
+    let swipe = pan_zoom::swipe(&[(-60.0, 0.0), (-200.0, 0.0)], Instant::now());
+    let messages = lane.ui.run_sent(row_of(&track), swipe);
+    assert!(messages.is_empty(), "a swipe pans the view, not the clip");
     assert_eq!(lane.start("a"), 4000);
 }
 

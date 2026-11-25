@@ -89,14 +89,84 @@ fn a_mouse_drag_end_is_a_fling_past_50_px_s_and_one_pixel_clamped_to_8000() {
             offset_y,
         })
     };
-    assert_eq!(fling_velocity(e(50.0, 10.0)), 0.0);
-    assert_eq!(fling_velocity(e(51.0, 1.0)), 0.0, "the hit slop");
-    assert_eq!(fling_velocity(e(51.0, 1.5)), 51.0);
-    assert_eq!(fling_velocity(e(-9000.0, -30.0)), -8000.0);
-    assert_eq!(fling_velocity(None), 0.0);
+    let mouse = |e| fling_velocity(e, PRECISE_HIT_SLOP);
+    assert_eq!(mouse(e(50.0, 10.0)), 0.0);
+    assert_eq!(mouse(e(51.0, 1.0)), 0.0, "the hit slop");
+    assert_eq!(mouse(e(51.0, 1.5)), 51.0);
+    assert_eq!(mouse(e(-9000.0, -30.0)), -8000.0);
+    assert_eq!(mouse(None), 0.0);
+}
+
+#[test]
+fn a_trackpad_drag_end_is_a_fling_only_past_its_18_px_slop() {
+    let e = |velocity_y, offset_y| {
+        Some(VelocityEstimate {
+            velocity_y,
+            offset_y,
+        })
+    };
+    assert_eq!(fling_velocity(e(900.0, 18.0), TOUCH_SLOP), 0.0);
+    assert_eq!(fling_velocity(e(900.0, 18.5), TOUCH_SLOP), 900.0);
+}
+
+#[test]
+fn the_stopwatch_runs_from_when_a_sample_was_added_not_its_time() {
+    // Samples timed 10 ms apart but handled together, late: their own
+    // times give the slope; the stopwatch starts as the last is added.
+    let t0 = Instant::now();
+    let handled = t0 + 200 * MS;
+    let mut v = VelocityTracker::default();
+    for i in 0..4u32 {
+        v.add_at(t0 + 10 * MS * i, 10.0 * i as f32, handled);
+    }
+    let e = v.estimate(handled + 5 * MS).expect("an estimate");
+    assert!(close(e.velocity_y, 1000.0, 1e-6), "{e:?}");
+    let e = v.estimate(handled + 41 * MS).expect("an estimate");
+    assert_eq!((e.velocity_y, e.offset_y), (0.0, 0.0), "stopped");
 }
 
 // ------------------------------------------------------------- dismiss
+
+#[test]
+fn a_trackpad_swipe_drags_it_by_its_pan_and_flings_it_out() {
+    let mut d = Dismiss::default();
+    let t0 = Instant::now();
+    d.pan_zoom_start(1, t0, t0, HEIGHT);
+    assert!(d.is_dragging() && !d.is_mouse_dragging());
+    // The mouse does not move a trackpad's drag, nor end it.
+    d.moved(at(90.0), t0, HEIGHT);
+    assert_eq!(d.offset(t0), 0.0);
+    assert!(!d.release(t0));
+    // Down 8 px every 8 ms, sampled at the events' times.
+    let mut t = t0;
+    for _ in 0..5 {
+        t += 8 * MS;
+        d.panned(1, 8.0, t, t, HEIGHT);
+    }
+    assert!(close(
+        f64::from(d.offset(t)),
+        40.0 / f64::from(HEIGHT),
+        1e-6
+    ));
+    // Another gesture's pan is not this drag's.
+    d.panned(2, 50.0, t, t, HEIGHT);
+    assert!(close(
+        f64::from(d.offset(t)),
+        40.0 / f64::from(HEIGHT),
+        1e-6
+    ));
+    // The fingers lift at 1000 px/s over 40 px: a fling down, out.
+    assert!(!d.pan_zoom_end(1, t));
+    assert!(!d.is_dragging());
+    assert!(d.is_animating(t + MS));
+    let mut now = t;
+    let mut dismissed = false;
+    for _ in 0..100 {
+        now += 16 * MS;
+        dismissed |= d.frame(now);
+    }
+    assert!(dismissed);
+}
 
 #[test]
 fn it_follows_a_drag_down_and_never_up() {

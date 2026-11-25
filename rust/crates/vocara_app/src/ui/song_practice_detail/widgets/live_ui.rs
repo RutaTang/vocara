@@ -12,6 +12,7 @@ use iced_test::core::widget;
 use iced_test::renderer::Renderer;
 use iced_test::runtime::user_interface::{self, UserInterface};
 use iced_test::selector::Selector;
+use iced_winit::gesture::{self, Wheel};
 
 /// See the module docs.
 pub struct LiveUi {
@@ -63,21 +64,33 @@ impl LiveUi {
         view: impl Into<Element<'a, M>>,
         events: impl IntoIterator<Item = Event>,
     ) -> Vec<M> {
+        self.run_sent(view, events.into_iter().map(|event| (event, None)))
+    }
+
+    /// [`LiveUi::run`] for events and the gestures the run loop hands
+    /// along with the wheel's (`pan_zoom::testing`).
+    pub fn run_sent<'a, M>(
+        &mut self,
+        view: impl Into<Element<'a, M>>,
+        sent: impl IntoIterator<Item = (Event, Option<Wheel>)>,
+    ) -> Vec<M> {
         let mut ui = self.build(view);
         let mut messages = Vec::new();
         // One event at a time, each with the cursor where it is then: a
         // move puts it where it went.
-        for event in events {
+        for (event, wheel) in sent {
             if let Event::Mouse(mouse::Event::CursorMoved { position }) = event {
                 self.cursor = mouse::Cursor::Available(position);
             }
-            let _ = ui.update(
-                std::slice::from_ref(&event),
-                self.cursor,
-                &mut self.renderer,
-                &mut clipboard::Null,
-                &mut messages,
-            );
+            gesture::with(wheel, || {
+                let _ = ui.update(
+                    std::slice::from_ref(&event),
+                    self.cursor,
+                    &mut self.renderer,
+                    &mut clipboard::Null,
+                    &mut messages,
+                );
+            });
         }
         self.cache = Some(ui.into_cache());
         messages
@@ -192,7 +205,9 @@ pub fn redraw() -> Event {
     ))
 }
 
-/// A wheel (or two-finger trackpad) scroll of `(x, y)` pixels.
+/// A precise scroll of `(x, y)` pixels the run loop knew no gesture of: a
+/// scroll signal to the app's widgets, a scroll to iced's scroll views
+/// (`pan_zoom::testing` makes a trackpad's swipe).
 pub fn scroll(x: f32, y: f32) -> Event {
     Event::Mouse(mouse::Event::WheelScrolled {
         delta: mouse::ScrollDelta::Pixels { x, y },

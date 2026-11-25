@@ -34,6 +34,9 @@ tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "process
 # it); iced's default shapes ASCII text glyph by glyph, with no kerning.
 iced = { version = "0.14", default-features = false, features = ["wgpu", "tiny-skia", "canvas", "image", "tokio", "advanced", "advanced-shaping", "x11", "wayland", "web-colors"] }
 iced_test = "0.14"
+# The wheel events' gestures (`iced_winit::gesture`, vendor/README.md); the
+# same crate iced runs on.
+iced_winit = { version = "0.14", default-features = false }
 lucide-icons = { version = "1.77", features = ["iced"] }
 # The open and save panels off macOS only (vocara_services::file_panels).
 # The portal backend alone: rfd's `wayland` feature only names a parent
@@ -72,3 +75,6 @@ codegen-units = 1
 # See vendor/README.md: iced_wgpu's quads draw their border over their fill.
 [patch.crates-io]
 iced_wgpu = { path = "vendor/iced_wgpu" }
+# See vendor/README.md: iced_winit hands the app each wheel event's gesture
+# phases.
+iced_winit = { path = "vendor/iced_winit" }
