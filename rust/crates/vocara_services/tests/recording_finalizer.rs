@@ -21,6 +21,16 @@ fn ms(n: u64) -> Duration {
     Duration::from_millis(n)
 }
 
+/// The tests here time a quit's budgets in tens of milliseconds, so they run
+/// one at a time: side by side (cargo's default), their threads' sleeps and
+/// wake-ups on a loaded CI runner overran those budgets with nothing wrong.
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    static SERIAL: Mutex<()> = Mutex::new(());
+    SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// A one-shot signal (Dart's `Completer<void>`): [`Gate::wait`] returns once
 /// [`Gate::open`] ran.
 #[derive(Clone, Default)]
@@ -168,6 +178,7 @@ fn until_called(calls: &AtomicUsize, n: usize) {
 
 #[test]
 fn a_wedged_finalizer_cannot_hold_the_quit_and_does_not_starve_the_rest() {
+    let _serial = serial();
     let f = shared(
         RecordingFinalizer::for_testing()
             .with_per_finalizer_budget(ms(30))
@@ -197,6 +208,7 @@ fn a_wedged_finalizer_cannot_hold_the_quit_and_does_not_starve_the_rest() {
 
 #[test]
 fn a_stuck_progress_reading_holds_neither_the_saves_nor_a_quit_they_finished_in_time() {
+    let _serial = serial();
     // Read first, the reading held every save back for its whole limit, and
     // the quit after they were done.
     let never = Never::default();
@@ -225,9 +237,13 @@ fn a_stuck_progress_reading_holds_neither_the_saves_nor_a_quit_they_finished_in_
 
 #[test]
 fn a_quit_whose_finalizers_all_settled_leaves_the_next_one_its_full_budget() {
+    let _serial = serial();
+    // A fresh run waits up to the total (150 ms) for the 20 ms save; a spent
+    // one waits nothing. The per-finalizer window is wide, so only the total
+    // tells them apart.
     let f = shared(
         RecordingFinalizer::for_testing()
-            .with_per_finalizer_budget(ms(100))
+            .with_per_finalizer_budget(ms(300))
             .with_total_budget(ms(150)),
     );
     f.register(&Finalizer::new(|| {}), false);
@@ -249,6 +265,7 @@ fn a_quit_whose_finalizers_all_settled_leaves_the_next_one_its_full_budget() {
 
 #[test]
 fn a_take_armed_while_a_cut_off_quit_waited_is_still_finalized_by_the_exit_request() {
+    let _serial = serial();
     let f = shared(
         RecordingFinalizer::for_testing()
             .with_per_finalizer_budget(ms(50))
@@ -280,6 +297,7 @@ fn a_take_armed_while_a_cut_off_quit_waited_is_still_finalized_by_the_exit_reque
 
 #[test]
 fn a_take_rearmed_on_the_same_screen_during_the_wait_is_finalized_too() {
+    let _serial = serial();
     // The mic controller registers the SAME finalizer for every take: reusing
     // the first call's run, the exit request's run never stopped take 2.
     let f = shared(
@@ -327,12 +345,15 @@ fn a_take_rearmed_on_the_same_screen_during_the_wait_is_finalized_too() {
 
 #[test]
 fn a_take_armed_during_the_wait_and_stopped_by_the_user_keeps_its_own_budget() {
+    let _serial = serial();
     // Its stop-and-save carries on under waits not marked starts_work; with
     // the take's own finalizer gone, the exit request's run found the budget
     // spent and exited mid-save.
+    // The take's own budget is the per-finalizer window (300 ms, for the
+    // 50 ms save); the spent total (60 ms) would give it nothing.
     let f = shared(
         RecordingFinalizer::for_testing()
-            .with_per_finalizer_budget(ms(100))
+            .with_per_finalizer_budget(ms(300))
             .with_total_budget(ms(60)),
     );
     let never = Never::default();
@@ -361,6 +382,7 @@ fn a_take_armed_during_the_wait_and_stopped_by_the_user_keeps_its_own_budget() {
 
 #[test]
 fn a_take_stopped_during_the_wait_with_nothing_to_save_earns_no_budget() {
+    let _serial = serial();
     // A practice take holds nothing once stopped: counted as uncounted work
     // anyway, it gave the exit request's run a full wait on nothing.
     let f = shared(
@@ -386,6 +408,7 @@ fn a_take_stopped_during_the_wait_with_nothing_to_save_earns_no_budget() {
 
 #[test]
 fn a_stops_tail_added_during_the_wait_is_waited_on_by_the_next_run() {
+    let _serial = serial();
     // Reusing the first call's run, the exit request's run waited only on the
     // tails that existed then, and exited mid-save of the later one.
     let f = shared(
@@ -432,6 +455,7 @@ fn a_stops_tail_added_during_the_wait_is_waited_on_by_the_next_run() {
 
 #[test]
 fn a_takes_own_stop_and_save_earns_the_quit_no_second_budget() {
+    let _serial = serial();
     // Stopping a take registers its tail and its save's hold as it goes;
     // counted as new work, they gave the exit request's run a full budget and
     // the quit ran past its total with nothing moving.
@@ -464,6 +488,7 @@ fn a_takes_own_stop_and_save_earns_the_quit_no_second_budget() {
 
 #[test]
 fn a_quit_the_app_survived_leaves_the_next_one_a_fresh_budget() {
+    let _serial = serial();
     let f = shared(
         RecordingFinalizer::for_testing()
             .with_per_finalizer_budget(ms(30))
@@ -490,6 +515,7 @@ fn a_quit_the_app_survived_leaves_the_next_one_a_fresh_budget() {
 
 #[test]
 fn several_wedged_finalizers_cost_the_quit_one_budget_not_one_each() {
+    let _serial = serial();
     let f = shared(
         RecordingFinalizer::for_testing()
             .with_per_finalizer_budget(ms(100))
@@ -555,6 +581,7 @@ fn copy_for(copied: &AtomicI64, mut at_step: impl FnMut(usize)) {
 
 #[test]
 fn a_save_queued_behind_a_long_copy_lands_before_the_quit_exits() {
+    let _serial = serial();
     // One after another, the copy used up the total budget and the mute
     // queued behind it was never waited on: it needs only milliseconds, but
     // only once the copy is done.
@@ -588,6 +615,7 @@ fn a_save_queued_behind_a_long_copy_lands_before_the_quit_exits() {
 
 #[test]
 fn a_copy_keeps_the_quit_waiting_for_the_save_it_belongs_to_then_a_wedged_one_is_cut_off() {
+    let _serial = serial();
     // The copy is evidence for the save it belongs to, which the quit waits
     // on alongside the wedged one; once it lands nothing moves, and the
     // wedged save is cut off one budget later.
@@ -622,6 +650,7 @@ fn a_copy_keeps_the_quit_waiting_for_the_save_it_belongs_to_then_a_wedged_one_is
 
 #[test]
 fn the_exit_request_after_a_close_button_quit_does_not_wait_it_all_over_again() {
+    let _serial = serial();
     // The close button runs the quit, then the window's close raises an exit
     // request that runs it again for whatever is still pending.
     let f = shared(
@@ -641,6 +670,7 @@ fn the_exit_request_after_a_close_button_quit_does_not_wait_it_all_over_again() 
 
 #[test]
 fn a_held_save_still_copying_past_its_budget_keeps_the_quit_waiting() {
+    let _serial = serial();
     // A Save pooling a large example (a 1 GB video copies for well over the
     // 5 s budget) is working, not wedged: cutting it off lost the Save.
     let copied = Arc::new(AtomicI64::new(0));
@@ -663,6 +693,7 @@ fn a_held_save_still_copying_past_its_budget_keeps_the_quit_waiting() {
 
 #[test]
 fn a_save_still_copying_is_not_cut_off_when_another_copy_lands() {
+    let _serial = serial();
     // The reading is the staging files in flight, so it DROPS when another
     // import finishes and leaves staging: that is progress, not a stall.
     let copied = Arc::new(AtomicI64::new(100 << 20)); // another import's 100 MB already in staging
@@ -690,6 +721,7 @@ fn a_save_still_copying_is_not_cut_off_when_another_copy_lands() {
 
 #[test]
 fn settled_waits_out_a_landing_past_the_budget_and_one_listed_while_it_waits() {
+    let _serial = serial();
     let f = shared(RecordingFinalizer::for_testing().with_per_finalizer_budget(ms(20)));
     let first = Gate::default();
     let second = Gate::default();
@@ -732,6 +764,7 @@ fn settled_waits_out_a_landing_past_the_budget_and_one_listed_while_it_waits() {
 
 #[test]
 fn a_held_save_that_stops_progressing_is_still_cut_off() {
+    let _serial = serial();
     let f = shared(
         RecordingFinalizer::for_testing()
             .with_per_finalizer_budget(ms(40))
@@ -749,6 +782,7 @@ fn a_held_save_that_stops_progressing_is_still_cut_off() {
 
 #[test]
 fn a_held_save_keeps_the_quit_waiting_until_it_settles_and_only_that_long() {
+    let _serial = serial();
     let f = shared(RecordingFinalizer::for_testing());
     let commit = Gate::default();
     let saved = {
@@ -776,6 +810,7 @@ fn a_held_save_keeps_the_quit_waiting_until_it_settles_and_only_that_long() {
 
 #[test]
 fn a_failed_held_save_reaches_its_caller_never_the_quit() {
+    let _serial = serial();
     let f = shared(RecordingFinalizer::for_testing());
     let commit = Gate::default();
     let saved = {
@@ -795,6 +830,7 @@ fn a_failed_held_save_reaches_its_caller_never_the_quit() {
 
 #[test]
 fn a_panicking_held_save_still_releases_the_quit() {
+    let _serial = serial();
     // Rust's form of a held save that throws: the panic reaches its caller,
     // and the hold is gone with it.
     let f = shared(RecordingFinalizer::for_testing());
@@ -809,6 +845,7 @@ fn a_panicking_held_save_still_releases_the_quit() {
 
 #[test]
 fn the_normal_path_still_runs_every_finalizer_to_completion() {
+    let _serial = serial();
     let f = shared(RecordingFinalizer::for_testing());
     let ran = Arc::new(AtomicUsize::new(0));
     for fails in [false, true, false] {
@@ -831,6 +868,7 @@ fn the_normal_path_still_runs_every_finalizer_to_completion() {
 
 #[test]
 fn a_reopened_practice_waits_for_its_landing_take_but_not_for_a_wedged_one() {
+    let _serial = serial();
     // A budget of 300 ms (Dart: 30) so the landed take is seen to return
     // well inside it, not at its end, on a loaded machine too.
     let f = shared(RecordingFinalizer::for_testing().with_per_finalizer_budget(ms(300)));
@@ -880,6 +918,7 @@ fn a_reopened_practice_waits_for_its_landing_take_but_not_for_a_wedged_one() {
 
 #[test]
 fn landed_waits_only_for_the_takes_landing_when_it_was_asked() {
+    let _serial = serial();
     // Unlike settled: a reopened screen shows what landed by the time it
     // opened, and a take stopped after that is not its to wait for.
     let f = shared(RecordingFinalizer::for_testing());
@@ -913,6 +952,7 @@ fn landed_waits_only_for_the_takes_landing_when_it_was_asked() {
 
 #[test]
 fn settled_within_gives_up_at_its_limit_and_answers_once_the_take_lands() {
+    let _serial = serial();
     // Dart's settled(id).timeout(grace), which the song screen waits on.
     let f = shared(RecordingFinalizer::for_testing());
     assert!(f.settled_within("p", ms(10)), "nothing landing");
@@ -930,6 +970,7 @@ fn settled_within_gives_up_at_its_limit_and_answers_once_the_take_lands() {
 
 #[test]
 fn the_guard_forms_hold_and_list_until_dropped() {
+    let _serial = serial();
     // A save handed off to another thread is held from the hand-off on.
     let f = shared(RecordingFinalizer::for_testing());
     let hold = f.begin_hold();
@@ -951,6 +992,7 @@ fn the_guard_forms_hold_and_list_until_dropped() {
 
 #[test]
 fn concurrent_quits_share_one_run() {
+    let _serial = serial();
     // A close click racing a Cmd+Q exit request: the second waits on the
     // first's run instead of calling the finalizers again.
     let f = shared(RecordingFinalizer::for_testing());
@@ -1008,6 +1050,7 @@ fn a_progress_reading_that_misbehaves_neither_holds_nor_stops_the_quit(
 
 #[test]
 fn a_progress_reading_that_never_answers_neither_holds_nor_stops_the_quit() {
+    let _serial = serial();
     let never = Never::default();
     let stuck = never.gate();
     a_progress_reading_that_misbehaves_neither_holds_nor_stops_the_quit(move || {
@@ -1018,5 +1061,6 @@ fn a_progress_reading_that_never_answers_neither_holds_nor_stops_the_quit() {
 
 #[test]
 fn a_progress_reading_that_throws_neither_holds_nor_stops_the_quit() {
+    let _serial = serial();
     a_progress_reading_that_misbehaves_neither_holds_nor_stops_the_quit(|| panic!("gone"));
 }
