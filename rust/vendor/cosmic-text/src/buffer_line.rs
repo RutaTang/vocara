@@ -2,8 +2,10 @@
 use alloc::{string::String, vec::Vec};
 use core::mem;
 
+use crate::fallback::FontFallbackIter;
 use crate::{
-    Align, Attrs, AttrsList, Cached, FontSystem, LayoutLine, LineEnding, ShapeLine, Shaping, Wrap,
+    Align, Attrs, AttrsList, Cached, FontSystem, FontVerticals, LayoutLine, LineEnding, Metrics,
+    RunMetrics, ShapeLine, Shaping, Wrap,
 };
 
 /// A line (or paragraph) of text that is shaped and laid out
@@ -260,9 +262,50 @@ impl BufferLine {
                 &mut layout,
                 match_mono_width,
             );
+            // vocara: a line without glyphs is measured by the font its
+            // text would be set in, as SkParagraph measures an empty
+            // paragraph by its text style's font
+            // (`ParagraphImpl::computeEmptyMetrics`) and an empty line by
+            // the run of the line break before it.
+            if layout.iter().any(|line| line.runs.is_empty()) {
+                if let Some(run) = self.default_run(font_system, font_size) {
+                    for line in layout.iter_mut().filter(|line| line.runs.is_empty()) {
+                        line.runs.push(run);
+                    }
+                }
+            }
             self.layout_opt.set_used(layout);
         }
         self.layout_opt.get().expect("layout not found")
+    }
+
+    /// vocara: the metrics of a run of the line's default attributes at
+    /// `font_size` (or the size they set), in the first font shaping would
+    /// try for them, if there is one.
+    fn default_run(&self, font_system: &mut FontSystem, font_size: f32) -> Option<RunMetrics> {
+        let attrs = self.attrs_list.defaults();
+        let fonts = font_system.get_font_matches(&attrs);
+        let default_families = [&attrs.family];
+        let font = FontFallbackIter::new(
+            font_system,
+            &fonts,
+            &default_families,
+            &[],
+            "",
+            attrs.weight,
+        )
+        .next()?;
+        // As shaping takes a glyph's (`shape_fallback`).
+        let font_size = attrs
+            .metrics_opt
+            .map_or(font_size, |x| Metrics::from(x).font_size);
+        let (ascent, descent) = FontVerticals::of(font.metrics()).at(font_size);
+        Some(RunMetrics {
+            font_size,
+            ascent,
+            descent,
+            line_height_opt: attrs.metrics_opt.map(|x| Metrics::from(x).line_height),
+        })
     }
 
     /// Get line layout cache

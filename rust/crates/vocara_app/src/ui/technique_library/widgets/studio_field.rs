@@ -28,6 +28,13 @@ use crate::ui::core::widgets::text_field::text_input;
 const TEXT_SIZE: f32 = 14.0;
 const LINE_HEIGHT: f32 = 1.45;
 
+/// A line of the field: SkParagraph's, a whole pixel tall (20 for 14 px
+/// at 1.45), as `RenderEditable` held a field to `minLines` and
+/// `maxLines` of its `preferredLineHeight`.
+fn field_line() -> f32 {
+    crate::ui::core::text::line_box(font::REGULAR, TEXT_SIZE, LINE_HEIGHT.into()).height
+}
+
 enum Input<'a, M> {
     Line {
         value: &'a str,
@@ -195,7 +202,7 @@ impl<'a, M: Clone + 'a> From<StudioField<'a, M>> for Element<'a, M> {
                 min_lines,
                 max_lines,
             } => {
-                let line = TEXT_SIZE * LINE_HEIGHT;
+                let line = field_line();
                 // iced's editor holds its text's height (not its own) to
                 // `min_height`..`max_height` but lays its text out in
                 // `max_height` less its padding: the padding goes on the
@@ -303,8 +310,8 @@ mod tests {
     fn the_field_sits_in_its_well_as_the_collapsed_decoration_put_it() {
         // The caption (10.5 px) and 6 above the well; the well's 10 by 12
         // inside its 1 px border; then the field, forui's content padding
-        // less compact density's: 10 across and 6 down, so a line of
-        // 14 × 1.45 and 12.
+        // less compact density's: 10 across and 6 down, so a line (14 px
+        // at 1.45) and 12.
         let id = widget::Id::unique();
         let mut ui = iced_test::simulator(Element::from(
             container(
@@ -315,9 +322,13 @@ mod tests {
             .width(300),
         ));
         let field = ui.find(id).expect("the field").bounds();
-        let line = TEXT_SIZE * LINE_HEIGHT;
+        // SkParagraph's lines: 14 × 1.45 = 20.3 makes a line of 20, and
+        // the caption's 10.5 × 1 a line of 10 (its ascent and descent,
+        // scaled to 10.5, add up to a hair under it).
+        let line = field_line();
+        assert_eq!(line, 20.0);
         assert_eq!(field.x, 13.0, "{field:?}");
-        assert_eq!(field.y, 10.5 + 6.0 + 11.0, "{field:?}");
+        assert_eq!(field.y, 10.0 + 6.0 + 11.0, "{field:?}");
         assert_eq!(field.width, 300.0 - 2.0 * 13.0, "{field:?}");
         assert!((field.height - (line + 12.0)).abs() < 1e-3, "{field:?}");
 

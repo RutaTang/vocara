@@ -726,6 +726,75 @@ fn a_multi_line_field_draws_the_caret_on_its_line() {
     assert!(!near(window.pixel(x, LINE_TOP as u32 + 7), Studio::ACCENT));
 }
 
+/// [`prose`] with 14 px lines at 1.4.
+fn prose_at_1_4(content: &Content) -> Element<'_, Msg> {
+    container(
+        text_editor(content)
+            .on_action(Msg::Edit)
+            .font(font::REGULAR)
+            .size(14)
+            .line_height(1.4)
+            .padding(theme::FIELD_PADDING)
+            .caret_color(Studio::ACCENT),
+    )
+    .width(280)
+    .padding(Padding {
+        top: 20.0,
+        left: 20.0,
+        ..Padding::ZERO
+    })
+    .into()
+}
+
+/// Runs [`prose_at_1_4`] over `content` with `events` at `at`, performing
+/// what it publishes.
+fn edit_at_1_4(window: &mut Window, content: &mut Content, at: Point, events: &[Event]) {
+    let (messages, _) = window.run(prose_at_1_4(content), at, events, Instant::now());
+    for message in messages {
+        if let Msg::Edit(action) = message {
+            content.perform(action);
+        }
+    }
+}
+
+#[test]
+fn a_multi_line_fields_caret_and_selection_lie_on_skparagraphs_lines() {
+    // 14 px at 1.4: iced's editor puts each line 19.6 below the last, but
+    // SkParagraph's are 20 tall, which the text is laid out and drawn on:
+    // the fifth line's top is 80 down, not 78.4, and the caret and the
+    // selection lie on it.
+    let line = 20.0;
+    let top = LINE_TOP + 4.0 * line;
+    let mut content = Content::with_text("a\nb\nc\nd\nend");
+    let mut window = window();
+    // A click after "end" puts the caret at the end of the fifth line.
+    let after = Point::new(TEXT_X + 150.0, top + line / 2.0);
+    edit_at_1_4(&mut window, &mut content, after, &click());
+    edit_at_1_4(&mut window, &mut content, after, &[]);
+    let x = (TEXT_X + width("end") - 2.0).round() as u32;
+    for y in top as u32 + 1..(top + line) as u32 - 1 {
+        assert!(near(window.pixel(x, y), Studio::ACCENT), "({x}, {y})");
+    }
+    // A pixel above it (where iced's line began) and below it are not.
+    assert!(!near(window.pixel(x, top as u32 - 3), Studio::ACCENT));
+    assert!(!near(
+        window.pixel(x, (top + line) as u32 + 2),
+        Studio::ACCENT
+    ));
+
+    // A right-click on "end" selects it, on the same line.
+    let on_end = Point::new(TEXT_X + 4.0, top + line / 2.0);
+    edit_at_1_4(&mut window, &mut content, on_end, &right_click());
+    assert_eq!(content.selection().as_deref(), Some("end"));
+    edit_at_1_4(&mut window, &mut content, on_end, &[escape()]);
+    let field = window.pixel((TEXT_X + 100.0) as u32, top as u32 + 1);
+    let selected = window.pixel(TEXT_X as u32 + 2, top as u32 + 1);
+    assert!(!near(selected, field), "{selected:?} on {field:?}");
+    // Under "d", above the line, nothing (iced's selection began at 78.4).
+    let above = window.pixel(TEXT_X as u32 + 2, top as u32 - 2);
+    assert!(near(above, field), "{above:?} on {field:?}");
+}
+
 // ------------------------------------------------------------ the scroll
 
 /// Reads the first single-line field's scroll.
