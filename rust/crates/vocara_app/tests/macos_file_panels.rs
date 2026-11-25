@@ -32,8 +32,9 @@
 //!    gets exactly that file: an open panel is told the file's full path in
 //!    its Go to Folder sheet (⌘⇧G, ⌘A, the path, Return), which takes it to
 //!    the file's folder with the file selected, and Return opens it; the
-//!    save panel gets a name in its name field (⌘A, the name), a folder
-//!    through ⌘⇧G, and Return saves;
+//!    save panel gets a name in its name field (the name's stem typed over
+//!    the suggested stem, which the panel opens selected), a folder through
+//!    ⌘⇧G, and Return saves;
 //! 4. once it is gone the main window is key again, and the activation
 //!    policy is as it was.
 //!
@@ -148,10 +149,10 @@ mod macos {
     /// paths as they are typed).
     const TYPED_WAIT: Duration = Duration::from_secs(1);
     /// How long the save panel's name field may take to read a name typed
-    /// to it, and how many times it is typed (⌘A, then the name) before the
-    /// run goes on with what it reads.
+    /// to it, and how many times it is cleared and the name typed again
+    /// before the run goes on with what it reads.
     const NAME_WAIT: Duration = Duration::from_secs(2);
-    const NAME_TRIES: usize = 3;
+    const NAME_TRIES: usize = 2;
     /// How long a panel gets to show the folder (and the file) Go to
     /// Folder's Return took it to.
     const GO_WAIT: Duration = Duration::from_secs(5);
@@ -377,6 +378,14 @@ mod macos {
         pub const A: u16 = 0x00;
         /// `kVK_ANSI_G`.
         pub const G: u16 = 0x05;
+        /// `kVK_ANSI_E`.
+        pub const E: u16 = 0x0E;
+        /// `kVK_Delete` (Backspace).
+        pub const BACKSPACE: u16 = 0x33;
+        /// `kVK_ForwardDelete`.
+        pub const FORWARD_DELETE: u16 = 0x75;
+        /// `kVK_Control`.
+        const CONTROL: u16 = 0x3B;
         /// `kVK_Command`.
         const COMMAND: u16 = 0x37;
         /// `kVK_Shift`.
@@ -420,28 +429,34 @@ mod macos {
             thread::sleep(GAP);
         }
 
-        /// Presses and releases `code`, with ⌘ and ⇧ held as asked, typing
-        /// `text` if given.
-        fn press_typing(code: u16, command: bool, shift: bool, text: Option<char>) {
+        /// Presses and releases `code` with the modifier keys `held` (each
+        /// a key code and its flag) held, pressed in order and released in
+        /// reverse, typing `text` if given.
+        fn press_held(code: u16, held: &[(u16, CGEventFlags)], text: Option<char>) {
             let mut flags = CGEventFlags::empty();
-            if command {
-                flags |= CGEventFlags::MaskCommand;
-                post(COMMAND, true, flags, None);
-            }
-            if shift {
-                flags |= CGEventFlags::MaskShift;
-                post(SHIFT, true, flags, None);
+            for &(key, flag) in held {
+                flags |= flag;
+                post(key, true, flags, None);
             }
             post(code, true, flags, text);
             post(code, false, flags, text);
-            if shift {
-                flags.remove(CGEventFlags::MaskShift);
-                post(SHIFT, false, flags, None);
+            for &(key, flag) in held.iter().rev() {
+                flags.remove(flag);
+                post(key, false, flags, None);
             }
+        }
+
+        /// Presses and releases `code`, with ⌘ and ⇧ held as asked, typing
+        /// `text` if given.
+        fn press_typing(code: u16, command: bool, shift: bool, text: Option<char>) {
+            let mut held = Vec::new();
             if command {
-                flags.remove(CGEventFlags::MaskCommand);
-                post(COMMAND, false, flags, None);
+                held.push((COMMAND, CGEventFlags::MaskCommand));
             }
+            if shift {
+                held.push((SHIFT, CGEventFlags::MaskShift));
+            }
+            press_held(code, &held, text);
         }
 
         /// Presses and releases `code` alone.
@@ -452,6 +467,12 @@ mod macos {
         /// ⌘ and the key `code` (⇧ too if `shift`).
         pub fn command(code: u16, shift: bool) {
             press_typing(code, true, shift, None);
+        }
+
+        /// ⌃ and the key `code`: a text field's Emacs keys (⌃E, the end of
+        /// the line), which its key bindings handle, not a menu.
+        pub fn control(code: u16) {
+            press_held(code, &[(CONTROL, CGEventFlags::MaskControl)], None);
         }
 
         /// Types `text`, a key for each character: the key a US keyboard
@@ -1029,35 +1050,50 @@ mod macos {
     }
 
     /// Saves as `name` in `folder` in the save panel up now as a user does
-    /// from the keyboard: the name typed over the one suggested (⌘A, then
-    /// the name, again if the field does not read it: the name field has
-    /// the keyboard when the panel opens), the folder through the Go to
-    /// Folder sheet, then Return to save (a second Return if the first
-    /// leaves the panel up: the sheet's first Return may only have taken
-    /// the path it completed). `Ok` once the panel closed (what it answered
-    /// is the caller's check); `Err` says how it stayed up.
+    /// from the keyboard: `name`'s stem typed over the suggested name's
+    /// (the panel opens with its name field holding the keyboard and the
+    /// stem selected), the folder through the Go to Folder sheet, then
+    /// Return to save (a second Return if the first leaves the panel up:
+    /// the sheet's first Return may only have taken the path it
+    /// completed). `Ok` once the panel closed (what it answered is the
+    /// caller's check); `Err` says how it stayed up.
     fn accept_save(what: &str, folder: &Path, name: &str) -> Result<(), String> {
-        // The panel selects the suggested name's stem itself once it is up,
-        // and that can land after a quick ⌘A: the name typed then replaces
-        // the stem only ("chosen.zip.zip"). So the name is typed until the
-        // field reads it, as a user would retype it.
+        let reads_name = || wait_until(NAME_WAIT, || name_field().as_deref() == Some(name));
+        let stem = Path::new(name)
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().into_owned())
+            .unwrap_or_else(|| name.to_string());
+        println!("  typing {stem:?} over the {what}'s selected stem");
+        typed::text(&stem);
+        thread::sleep(TYPED_WAIT);
+        // Not ⌘A: on CI's macOS 26 the panel took it in one run and ignored
+        // it in the next. If the field does not read the name, it is
+        // emptied with editing keys (its key bindings, not a menu: ⌃E to
+        // its end, then Backspace and Forward Delete enough for all of it)
+        // and the whole name typed.
+        let mut reads = reads_name();
         for attempt in 1..=NAME_TRIES {
-            let again = if attempt > 1 { " again" } else { "" };
-            println!("  typing ⌘A, then {name:?} to the {what}'s name field{again}");
-            typed::command(typed::A, false);
-            typed::text(name);
-            thread::sleep(TYPED_WAIT);
-            if wait_until(NAME_WAIT, || name_field().as_deref() == Some(name)) {
+            if reads {
                 break;
             }
             if closed() {
                 return Err(format!("the {what} closed while {name:?} was typed to it"));
             }
+            let shown = name_field().unwrap_or_default();
             note(format!(
-                "the {what}'s name field reads {:?} after ⌘A and {name:?} (try {attempt} of \
-                 {NAME_TRIES})",
-                name_field()
+                "the {what}'s name field reads {shown:?}, not {name:?}: emptying it and typing \
+                 {name:?} (try {attempt} of {NAME_TRIES})"
             ));
+            typed::control(typed::E);
+            for _ in 0..=shown.chars().count() {
+                typed::press(typed::BACKSPACE);
+            }
+            for _ in 0..=shown.chars().count() {
+                typed::press(typed::FORWARD_DELETE);
+            }
+            typed::text(name);
+            thread::sleep(TYPED_WAIT);
+            reads = reads_name();
         }
         report(what);
         let path = format!("{}/", folder.display());
