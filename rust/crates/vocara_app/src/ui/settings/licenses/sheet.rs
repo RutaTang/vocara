@@ -16,9 +16,13 @@
 //!   drag's velocity (`MacOSScrollViewFlingVelocityTracker`, a fling past
 //!   18 px and 50 px/s) flings the sheet on a `ClampingScrollSimulation`
 //!   in its pixels and, once it is full (or least) with velocity left, the
-//!   list on its own (`goBallistic`, `scroll_fling`); a new swipe on it, or
-//!   a wheel that scrolls the list, stops that. The momentum macOS sends
-//!   once the fingers lift moves nothing. A scroll signal (a mouse wheel's,
+//!   list on its own (`goBallistic`, `scroll_fling`); a new swipe on it, a
+//!   wheel that scrolls the list, or a finger touching the trackpad over
+//!   it while macOS's momentum runs (an inertia cancel, `pan_zoom`: the
+//!   list's `pointerScroll(0)`, whose `beginActivity` stopped the sheet's
+//!   own simulation too) stops that where the last frame left it. The
+//!   momentum macOS sends once the fingers lift moves nothing. A scroll
+//!   signal (a mouse wheel's,
 //!   Flutter's `pointerScroll`) only ever scrolls the list. The pinned
 //!   `SliverAppBar` over the list takes the scheme's surface tint at
 //!   elevation 3 (8 % of `primary`) once the list is scrolled under it.
@@ -417,6 +421,13 @@ impl<M> Widget<M, Theme, Renderer> for Sheet<'_, M> {
                     }
                     // Its momentum reached nothing.
                     Scroll::Nothing { .. } if state.held.owns(&scroll) => pass = false,
+                    // A finger on the trackpad during macOS's momentum: the
+                    // list's `pointerScroll(0)` (or its shown bar's
+                    // `jumpTo`) goes idle, whose `beginActivity` stops the
+                    // sheet's ballistic controllers too, so the sheet and
+                    // the list stay where the last frame left them. The
+                    // list's view, which it goes on to, stops its own.
+                    Scroll::InertiaCancel if over => state.run = None,
                     _ => {}
                 }
                 if !pass {

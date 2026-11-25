@@ -110,8 +110,9 @@ optional = true
 default-features = false
 
 # vocara: `gesture` reads the scroll event AppKit is dispatching
-# (`NSApp.currentEvent`) for the phases winit merges away. The objc2 0.6
-# bindings the app's services use (winit's are 0.5's); no new crate.
+# (`NSApp.currentEvent`) for the phases winit merges away, and has each
+# window's view report trackpad touches (`NSTouch`, `NSView`). The objc2
+# 0.6 bindings the app's services use (winit's are 0.5's); no new crate.
 [target.'cfg(target_os = "macos")'.dependencies.objc2]
 version = "0.6"
 
@@ -123,6 +124,8 @@ features = [
     "NSApplication",
     "NSEvent",
     "NSResponder",
+    "NSTouch",
+    "NSView",
     "objc2-core-foundation",
 ]
 
@@ -132,6 +135,7 @@ default-features = false
 features = [
     "std",
     "NSProcessInfo",
+    "NSSet",
 ]
 
 [lints.clippy]

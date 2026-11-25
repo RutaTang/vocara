@@ -356,6 +356,10 @@ where
                                     .create_window(window_attributes)
                                     .expect("Create window");
 
+                                // vocara: its view reports trackpad
+                                // touches, as Flutter's did (`gesture`).
+                                gesture::accept_touches(&window);
+
                                 #[cfg(target_os = "macos")]
                                 if let Some(position) = position {
                                     window.set_outer_position(position);
@@ -580,6 +584,25 @@ async fn run_instance<P>(
         let Some(event) = event else {
             break;
         };
+
+        // vocara: the touches AppKit reported before this event, each an
+        // inertia cancel where Flutter's embedder sent one (`gesture`).
+        for touch in gesture::take_touches() {
+            let window = window_manager.iter_mut().find(|(_, window)| {
+                gesture::view_of(&window.raw) == Some(touch.view)
+            });
+            if let Some((id, window)) = window
+                && let Some((event, wheel)) =
+                    embedders.entry(id).or_default().touched(
+                        &touch,
+                        window.raw.scale_factor(),
+                        window.state.scale_factor(),
+                    )
+            {
+                wheels.push((id, Some(wheel)));
+                events.push((id, event));
+            }
+        }
 
         match event {
             Event::WindowCreated {
@@ -1205,7 +1228,9 @@ async fn run_instance<P>(
                                 |events| {
                                     interface.update(
                                         events,
-                                        window.state.cursor(),
+                                        // vocara: an inertia cancel where
+                                        // its touch was.
+                                        gesture::cursor(window.state.cursor()),
                                         &mut window.renderer,
                                         &mut clipboard,
                                         &mut messages,

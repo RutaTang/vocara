@@ -369,3 +369,27 @@ fn it_takes_presses_and_the_wheel_on_its_material_and_lets_the_margin_through() 
         assert_eq!(heard(&mut window, off, &wheel), [Heard::Scrolled]);
     }
 }
+
+#[test]
+fn it_keeps_an_inertia_cancel_on_its_material_from_the_page_beneath() {
+    use crate::ui::core::widgets::animated::testing::Frames;
+    use crate::ui::core::widgets::pan_zoom::testing::Trackpad;
+    use iced_winit::gesture::Phase;
+    let mut window = Frames::new(Size::new(200.0, 100.0));
+    let t0 = Instant::now();
+    let mut pad = Trackpad::new();
+    let mut heard = |window: &mut Frames, at: Point| {
+        // macOS's momentum changes, and a finger lands at once.
+        let _ = pad.momentum(Phase::Changed, 0.0, -10.0, t0);
+        let cancel = pad.touch(t0).expect("a cancel");
+        window.point_at(at);
+        let (_, messages) = window.frame_sent(page_and_bar(), &[cancel], t0);
+        messages
+    };
+    // On the Material its hit test stops: the page beneath (a scrollable
+    // there would have stopped its fling) never sees it.
+    assert!(heard(&mut window, Point::new(100.0, 60.0)).is_empty());
+    for off in [Point::new(100.0, 36.0), Point::new(17.0, 45.0)] {
+        assert_eq!(heard(&mut window, off), [Heard::Scrolled]);
+    }
+}

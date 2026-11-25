@@ -256,6 +256,9 @@ impl<'a, Message> TextEditor<'a, Message> {
     ///   (the rest carried to the next). It does not fling when the
     ///   fingers lift, where Flutter's did: iced's editor scrolls by lines.
     /// - The momentum after reaches nothing.
+    /// - An inertia cancel (a finger touching the trackpad during macOS's
+    ///   momentum) has nothing to stop here, the text never moving on its
+    ///   own; a view around it stops.
     /// - With nothing to scroll it takes no wheel event: the view around
     ///   it, if any, has them.
     fn wheel(
@@ -330,6 +333,10 @@ impl<'a, Message> TextEditor<'a, Message> {
                 true
             }
             Scroll::Nothing { .. } => true,
+            // An inertia cancel stopped what moved its `Scrollable`: here
+            // nothing does (no fling, no animated scroll). A view around it
+            // stops its own.
+            Scroll::InertiaCancel => true,
         }
     }
 

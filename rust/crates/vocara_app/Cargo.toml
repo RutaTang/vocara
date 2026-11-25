@@ -38,9 +38,9 @@ iced_test.workspace = true
 tempfile.workspace = true
 
 # The app's AppKit paths on a real Mac (the open and save panels, Cmd+Q
-# while a take is armed, the scroll phases the run loop reads off AppKit):
-# AppKit wants the main thread, so `main` is each test's own (see the
-# files).
+# while a take is armed, the scroll phases and the trackpad touches the run
+# loop reads off AppKit): AppKit wants the main thread, so `main` is each
+# test's own (see the files).
 [[test]]
 name = "macos_file_panels"
 harness = false
@@ -51,6 +51,10 @@ harness = false
 
 [[test]]
 name = "macos_scroll_phases"
+harness = false
+
+[[test]]
+name = "macos_touches"
 harness = false
 
 # What those tests drive AppKit with and make their events with (objc2
@@ -77,6 +81,8 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
     "NSResponder",
     "NSRunningApplication",
     "NSSavePanel",
+    # The touches test reads the view's touch types.
+    "NSTouch",
     "NSView",
     "NSWindow",
     "objc2-core-foundation",
@@ -87,10 +93,13 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
     "NSArray",
     "NSDate",
     "NSDictionary",
+    # The touches test's touch event answers a point and a set.
+    "NSGeometry",
     "NSObjCRuntime",
     "NSObject",
     "NSProcessInfo",
     "NSRunLoop",
+    "NSSet",
     "NSString",
     "NSURL",
     "NSUserDefaults",

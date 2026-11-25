@@ -45,6 +45,12 @@
 //!   lifting fling it (`MacOSScrollViewFlingVelocityTracker`,
 //!   `ClampingScrollSimulation`, `scroll_fling`) until it stops or meets
 //!   an end. The momentum macOS sends after moves nothing.
+//! - **An inertia cancel** (a finger touching the trackpad less than 50 ms
+//!   after macOS's momentum last moved, `pan_zoom`), the pointer over the
+//!   field, stops a run, a fling or an animated reveal, where its last
+//!   frame left it (`pointerScroll(0)`: `goBallistic(0)`), an offset out of
+//!   range then settling into it at the next frame; a reveal asked for
+//!   after a frame still runs. A scroll view around the field stops too.
 //!
 //! Each reveal also asks the scroll view around the field to show the
 //! caret, as `RenderEditable.showOnScreen` did (see
@@ -211,6 +217,17 @@ impl Scroll {
     pub fn hold(&mut self) {
         self.drive = None;
         self.ballistic = None;
+    }
+
+    /// `goBallistic(0)`, an inertia cancel's `pointerScroll(0)`: a run (a
+    /// fling, an animated reveal) stops where its last frame left it, and
+    /// an offset out of the range settles into it at the next frame (the
+    /// clamping physics' settle, which starts at its end); a reveal due
+    /// after a frame still runs. Whether a frame is due for the settle.
+    pub fn stop(&mut self, geometry: &Geometry) -> bool {
+        self.hold();
+        self.out_of_range = !(0.0..=geometry.max()).contains(&self.pixels);
+        self.out_of_range
     }
 
     /// `goBallistic(velocity)` at the end of a drag (px/s, positive toward
@@ -459,5 +476,38 @@ mod tests {
         assert!(!s.scroll_by(&g, -30.0), "at the start");
         assert!(s.scroll_by(&g, 500.0));
         assert_eq!(s.pixels(), 203.0);
+    }
+
+    #[test]
+    fn an_inertia_cancel_stops_a_run_where_its_frame_left_it_and_settles_an_offset_out_of_range() {
+        let g = geometry(300.0);
+        let t0 = Instant::now();
+        // An animated reveal, cut off after its frame at 50 ms.
+        let mut s = at(0.0);
+        s.animate_to(150.0);
+        s.frame(t0, &g, 0.0);
+        s.frame(t0 + 50 * MS, &g, 0.0);
+        let there = s.pixels();
+        assert!(there > 0.0 && there < 150.0, "{there}");
+        assert!(!s.stop(&g), "in range: no frame due");
+        assert!(!s.is_moving());
+        assert!(!s.frame(t0 + 66 * MS, &g, 0.0));
+        assert_eq!(s.pixels(), there);
+        // A fling over a line that has since shrunk under it: it settles
+        // into the range at the next frame.
+        let mut s = at(150.0);
+        s.fling(&g, 1000.0);
+        s.frame(t0, &g, 0.0);
+        let shrunk = geometry(200.0);
+        assert!(s.stop(&shrunk), "out of range");
+        assert_eq!(s.pixels(), 150.0);
+        assert!(!s.frame(t0 + 16 * MS, &shrunk, 0.0));
+        assert_eq!(s.pixels(), shrunk.max());
+        // A reveal asked for after a frame still runs.
+        let mut s = at(0.0);
+        s.schedule(Reveal::Jump);
+        s.frame(t0, &g, 150.0);
+        assert!(!s.stop(&g));
+        assert_eq!(s.flush(&g, 150.0), Some(Reveal::Jump));
     }
 }
