@@ -8,11 +8,12 @@
 //! pixels:
 //!
 //! - **a run's ascent and descent** (`Run::calculateMetrics`, `Run.cpp`):
-//!   its font's at its size (the line gap split above and below). With a
-//!   `height` (the run's style's `heightOverride`, `OneLineShaper.cpp`;
-//!   a multiplier within `SK_ScalarNearlyZero` of zero counts as none),
-//!   both are scaled by `height × fontSize / (ascent + descent)`, so they
-//!   add up to the height and keep their proportion: Flutter's default
+//!   its font's at its size, its line gap (CoreText's leading) split half
+//!   above and half below. With a `height` (the run's style's
+//!   `heightOverride`, `OneLineShaper.cpp`; a multiplier within
+//!   `SK_ScalarNearlyZero` of zero counts as none), both are scaled by
+//!   `height × fontSize / (ascent + descent)`, so they add up to the
+//!   height and keep their proportion: Flutter's default
 //!   `TextLeadingDistribution.proportional`, which every text of the app
 //!   had (nothing set `even`, and an `Icon`'s `even` puts Lucide's glyphs,
 //!   which have no descent, where `proportional` would);
@@ -27,8 +28,9 @@
 //!   rounded heights above it, so the paragraph is as tall as its lines
 //!   (`ParagraphImpl::fHeight`), each on a whole pixel;
 //! - **an empty paragraph** (`ParagraphImpl::computeEmptyMetrics`): its
-//!   style's font's ascent and descent, with a height scaled by the height
-//!   over their *rounded* sum, then rounded as a line's;
+//!   style's font's ascent, descent and line gap, with a height scaled by
+//!   the height over their *rounded* sum, then rounded as a line's, its
+//!   baseline half the line gap and the ascent below its top;
 //! - **a `TextPainter`** (and a `RenderParagraph`) paints the paragraph at
 //!   the offset it is given: its first line's top there.
 //!
@@ -41,22 +43,24 @@
 //! [`studio_text`](super::widgets::studio_text), canvas text and the text
 //! fields. A style with no `height` (a `TextPainter`'s, which inherits no
 //! theme) is [`NATURAL`]: a line height of zero, as SkParagraph takes a
-//! multiplier of zero. A run's ascent and descent are its font's units
-//! scaled to its size in `double` and made `float`s, as CoreText gave them
-//! to Skia: their last bit decides which way a line whose ascent and
-//! descent add up to exactly half a pixel rounds (12.5 px at 1.4 makes 18
-//! so, 17 from a ratio scaled in `float`). Skia then places each glyph's
-//! baseline on the nearest device pixel (`SkGlyphPositionRoundingSpec`,
-//! `SubRunContainer.cpp`: half a pixel added, then floored), which the
-//! vendored cosmic-text's `LayoutGlyph::physical` does too, for both
-//! renderers.
+//! multiplier of zero. A run's ascent, descent and line gap are its font's
+//! units scaled to its size in `double` and made `float`s, as CoreText
+//! gave them to Skia: their last bit decides which way a line whose ascent
+//! and descent add up to exactly half a pixel rounds (12.5 px at 1.4 makes
+//! 18 so, 17 from a ratio scaled in `float`). The line gap is `hhea`'s with
+//! its `MVAR` delta, as CoreText's leading is, whatever a face's `OS/2`
+//! table asks for (Lucide asks for its typographic line gap, 90 units, but
+//! CoreText's is `hhea`'s, 0); Inter's and Lucide's are zero, and the
+//! text toolbar's system UI font's its own (`text_field::toolbar_face`).
+//! Skia then places each glyph's baseline on the nearest device pixel
+//! (`SkGlyphPositionRoundingSpec`, `SubRunContainer.cpp`: half a pixel
+//! added, then floored), which the vendored cosmic-text's
+//! `LayoutGlyph::physical` does too, for both renderers.
 //!
-//! What is not identical: a face's line gap is taken as zero (Inter's and
-//! Lucide's `hhea` line gaps are, which is what CoreText gave Skia; the
-//! text toolbar's system font sets its line itself, line gap and all:
-//! `text_field::toolbar_face`); and the metrics are the ones cosmic-text
-//! shapes with, the same as CoreText's for these faces (`hhea`'s), but not
-//! checked against CoreText's here, off a Mac.
+//! What is not identical: the metrics are the ones cosmic-text shapes
+//! with, the same as CoreText's for the bundled faces (`hhea`'s), but not
+//! checked against CoreText's here, off a Mac (the toolbar's system UI
+//! font's are, on a Mac: `text_field::toolbar_face`'s macOS test).
 
 use iced::advanced::graphics::text::cosmic_text::{self, Buffer, LineBox, Metrics};
 use iced::advanced::graphics::text::{font_system, to_attributes, Version};
@@ -65,9 +69,10 @@ use std::cell::RefCell;
 
 pub use iced::widget::text::*;
 
-/// A text style without a `height`: its lines are its font's own ascent and
-/// descent tall (SkParagraph's height multiplier of zero), as a
-/// `TextPainter`'s text was, which inherits no theme. A line height of zero.
+/// A text style without a `height`: its lines are its font's own ascent,
+/// descent and line gap tall (SkParagraph's height multiplier of zero), as
+/// a `TextPainter`'s text was, which inherits no theme. A line height of
+/// zero.
 pub const NATURAL: LineHeight = LineHeight::Absolute(Pixels(0.0));
 
 /// The line one line of text in `font` at `size` px and `line_height` lays

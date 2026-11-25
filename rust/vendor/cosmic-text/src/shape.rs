@@ -138,7 +138,7 @@ fn shape_fallback(
     let ascent = font.metrics().ascent / font_scale;
     let descent = -font.metrics().descent / font_scale;
     // vocara: the font's verticals in its units, for SkParagraph's lines.
-    let vertical = FontVerticals::of(font.metrics());
+    let vertical = FontVerticals::of(font);
 
     let mut buffer = scratch.harfrust_buffer.take().unwrap_or_default();
     buffer.set_direction(if span_rtl {
@@ -507,6 +507,8 @@ fn shape_skip(
     let font = font_iter.next().expect("no default font found");
     let font_id = font.id();
     let font_monospace_em_width = font.monospace_em_width();
+    // vocara: its line gap, as CoreText takes it.
+    let line_gap = font.line_gap();
     let font = font.as_swash();
 
     let charmap = font.charmap();
@@ -519,6 +521,7 @@ fn shape_skip(
     let vertical = FontVerticals {
         ascent: metrics.ascent,
         descent: metrics.descent,
+        leading: line_gap,
         units_per_em: f32::from(metrics.units_per_em),
     };
 
@@ -565,7 +568,7 @@ pub struct ShapeGlyph {
     pub y_offset: f32,
     pub ascent: f32,
     pub descent: f32,
-    /// vocara: its font's ascent and descent in its units, which
+    /// vocara: its font's ascent, descent and line gap in its units, which
     /// SkParagraph's lines are measured by ([`RunMetrics`]).
     pub vertical: FontVerticals,
     pub font_monospace_em_width: Option<f32>,
@@ -1667,11 +1670,12 @@ impl ShapeLine {
                             max_descent = max_descent.max(glyph_font_size * glyph.descent);
                             // vocara: a run per change of font, size or
                             // line height.
-                            let (ascent, descent) = glyph.vertical.at(glyph_font_size);
+                            let (ascent, descent, leading) = glyph.vertical.at(glyph_font_size);
                             let run = RunMetrics {
                                 font_size: glyph_font_size,
                                 ascent,
                                 descent,
+                                leading,
                                 line_height_opt: glyph.metrics_opt.map(|x| x.line_height),
                             };
                             if runs.last() != Some(&run) {

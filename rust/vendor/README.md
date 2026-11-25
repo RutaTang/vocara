@@ -65,19 +65,21 @@ comments) and the files named below; `LICENSE` is the upstream project's
   the rules, with their sources, are in
   `rust/crates/vocara_app/src/ui/core/text.rs`), where upstream centres a
   line's glyphs' ascent and descent in the line height, unrounded:
-  `src/layout.rs` adds `RunMetrics` (a run's font size, ascent, descent
-  and own line height: `Run::calculateMetrics`, the font's own without a
-  height, a height multiplier within `SK_ScalarNearlyZero` of zero being
-  none, else scaled by the height over their sum), `LineBox` (a line's
-  height rounded to the nearest pixel, its baseline its ascent rounded
-  half up: `InternalLineMetrics::height`, `TextLine`'s
+  `src/layout.rs` adds `RunMetrics` (a run's font size, ascent, descent,
+  line gap and own line height: `Run::calculateMetrics`, the font's own
+  ascent and descent with half the line gap above and half below without
+  a height, a height multiplier within `SK_ScalarNearlyZero` of zero
+  being none, else those scaled by the height over their sum), `LineBox`
+  (a line's height rounded to the nearest pixel, its baseline its ascent
+  rounded half up: `InternalLineMetrics::height`, `TextLine`'s
   `correctedBaseline`), `LayoutLine::runs` and `LayoutLine::line_box`
   (the largest ascent and descent of its runs; an empty paragraph's by
-  `ParagraphImpl::computeEmptyMetrics`), and `FontVerticals` (a font's
-  ascent, descent and units per em, scaled to a size in `f64` and made
-  `f32`s, as CoreText gave Skia its metrics); `src/shape.rs` records a
-  glyph's font's verticals (`ShapeGlyph::vertical`) and a line's runs as
-  it lays the line out; `src/buffer_line.rs` gives a line without glyphs
+  `ParagraphImpl::computeEmptyMetrics`, its leading the font's line gap),
+  and `FontVerticals` (a font's ascent, descent, line gap and units per
+  em, scaled to a size in `f64` and made `f32`s, as CoreText gave Skia
+  its metrics); `src/shape.rs` records a glyph's font's verticals
+  (`ShapeGlyph::vertical`) and a line's runs as it lays the line out;
+  `src/buffer_line.rs` gives a line without glyphs
   its default font's run (`BufferLine::default_run`); `src/buffer.rs`
   makes `LayoutRunIter` (every line's `line_top`, `line_y`,
   `line_height`, so every renderer and measure) and the scroll
@@ -90,10 +92,14 @@ comments) and the files named below; `LICENSE` is the upstream project's
   (`src/layout.rs`) rounds a glyph's vertical origin to the nearest device
   pixel, half up, as Skia places a glyph (`SkGlyphPositionRoundingSpec`),
   where upstream truncates; `src/math.rs` drops the `truncf` no longer
-  used. The line gap a face may have is taken as zero (CoreText's is
-  `hhea`'s, zero for every face the app's text is set in). The `syntect`
-  and `vi` editors (features the workspace does not enable) still step by
-  the line height.
+  used. A face's ascent and descent are the ones it is shaped with
+  (skrifa's: `hhea`'s with their `MVAR` deltas at its instance, or
+  `OS/2`'s typographic ones for a face that asks for them, the same for
+  every face the app draws with), its line gap `hhea`'s with its `MVAR`
+  delta whatever `OS/2` asks for (`Font::line_gap`, `src/font/mod.rs`:
+  Lucide asks for its typographic line gap of 90 units, `hhea`'s is 0):
+  what CoreText gave Skia. The `syntect` and `vi` editors (features the
+  workspace does not enable) still step by the line height.
 
 Moving to a new cosmic-text release: carry the marked lines over (or drop
 the patch if upstream comes to take a face's variation coordinates and to

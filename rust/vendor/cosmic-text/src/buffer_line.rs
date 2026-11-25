@@ -299,11 +299,12 @@ impl BufferLine {
         let font_size = attrs
             .metrics_opt
             .map_or(font_size, |x| Metrics::from(x).font_size);
-        let (ascent, descent) = FontVerticals::of(font.metrics()).at(font_size);
+        let (ascent, descent, leading) = FontVerticals::of(&font).at(font_size);
         Some(RunMetrics {
             font_size,
             ascent,
             descent,
+            leading,
             line_height_opt: attrs.metrics_opt.map(|x| Metrics::from(x).line_height),
         })
     }
