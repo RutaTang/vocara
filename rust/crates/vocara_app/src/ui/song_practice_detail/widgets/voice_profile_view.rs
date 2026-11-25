@@ -15,8 +15,9 @@
 
 use std::sync::Arc;
 
-use crate::ui::core::text;
+use crate::ui::core::{system_font, text};
 use iced::alignment::{Horizontal, Vertical};
+use iced::font::Weight;
 use iced::widget::canvas::{self, gradient, Frame, Geometry, LineCap, Path, Stroke, Style};
 use iced::widget::text::Alignment;
 use iced::widget::{canvas as canvas_widget, column, container, row, stack, Space};
@@ -349,9 +350,10 @@ fn profile_text(
         position: Point::new(x, y),
         color,
         size: Pixels(size),
-        // A `TextPainter`'s style has no height: the font's own line.
+        // A `TextPainter`'s style has no height and no family: the system
+        // UI font, on its own line.
         line_height: text::NATURAL,
-        font: font::SEMIBOLD,
+        font: system_font::font(Weight::Semibold),
         align_x: align,
         align_y: Vertical::Top,
         ..canvas::Text::default()

@@ -42,9 +42,10 @@ comments) and the files named below; `LICENSE` is the upstream project's
   `LICENSE-APACHE` its own; only `src`, the manifests, the licenses and
   the README vendored, the `[[test]]` and `[[bench]]` targets dropped from
   `Cargo.toml`, whose files are not): a face drawn at a fixed instance of
-  its variation axes, which the text toolbar's labels need (the system UI
-  font at the optical size Flutter's Skia drew it at, untracked;
-  `rust/crates/vocara_app/src/ui/core/widgets/text_field/toolbar_face.rs`).
+  its variation axes, which the labels Flutter set in the system UI font
+  need (the text toolbar's and the canvas labels': that face at the
+  instance Flutter's Skia drew each weight at, untracked;
+  `rust/crates/vocara_app/src/ui/core/system_font.rs`).
   Upstream varies a face along its weight axis alone, the weight asked
   for, every other axis at its default, and its shaper (harfrust) applies
   a face's `trak` table at 12 pt when the face has a `STAT` table.

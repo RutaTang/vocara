@@ -14,13 +14,15 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use iced::alignment::Vertical;
+use iced::font::Weight;
 use iced::widget::canvas::{self, Frame, Geometry, Path, Stroke};
 use iced::widget::{canvas as canvas_widget, Canvas};
 use iced::{mouse, Color, Length, Pixels, Point, Rectangle, Renderer, Size, Theme};
 
 use super::painter::{color_key, KeyedCache, Same};
 use super::studio_text::fill_tabular_text;
-use crate::ui::core::theme::{alpha, font};
+use crate::ui::core::system_font;
+use crate::ui::core::theme::alpha;
 pub use vocara_model::util::format::format_clock_ms;
 
 /// Picks a readable time-grid interval (in ms) so labels/lines land roughly
@@ -636,7 +638,8 @@ impl<M> canvas::Program<M> for TimeRulerPainter {
                         .with_width(1.0),
                 );
                 // A `TextPainter`'s line (no height: the font's own, a
-                // whole pixel tall), its bottom 5 off the ruler's.
+                // whole pixel tall), its bottom 5 off the ruler's, in the
+                // system UI font (no family).
                 fill_tabular_text(
                     frame,
                     canvas::Text {
@@ -645,7 +648,7 @@ impl<M> canvas::Program<M> for TimeRulerPainter {
                         color: self.text_color,
                         size: Pixels(10.0),
                         line_height: crate::ui::core::text::NATURAL,
-                        font: font::REGULAR,
+                        font: system_font::font(Weight::Normal),
                         align_y: Vertical::Bottom,
                         ..canvas::Text::default()
                     },

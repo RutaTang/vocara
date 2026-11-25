@@ -5,6 +5,7 @@ pub mod icons;
 pub mod material_icons;
 pub mod motion;
 pub mod scale_factor;
+pub mod system_font;
 pub mod text;
 pub mod theme;
 pub mod widgets;

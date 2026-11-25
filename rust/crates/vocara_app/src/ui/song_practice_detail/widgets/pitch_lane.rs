@@ -27,8 +27,9 @@ use std::collections::{BTreeSet, HashMap};
 use std::f64::consts::LN_2;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
-use crate::ui::core::text;
+use crate::ui::core::{system_font, text};
 use iced::alignment::Vertical;
+use iced::font::Weight;
 use iced::widget::canvas::{self, Frame, Geometry, LineCap, Path, Stroke};
 use iced::widget::{canvas as canvas_widget, column, container, rich_text, row, span, stack};
 use iced::{
@@ -767,14 +768,15 @@ fn draw_ops(frame: &mut Frame, size: Size, ops: &[PitchOp]) {
             }
             PitchOp::Label { text, x, y, color } => {
                 // `_label`: a `TextPainter`'s line (no height: the font's
-                // own, a whole pixel tall), centred on `y`.
+                // own, a whole pixel tall), centred on `y`, in the system
+                // UI font (no family).
                 frame.fill_text(canvas::Text {
                     content: text.clone(),
                     position: Point::new(*x as f32, *y as f32),
                     color: *color,
                     size: Pixels(LABEL_SIZE),
                     line_height: text::NATURAL,
-                    font: font::REGULAR,
+                    font: system_font::font(Weight::Normal),
                     align_y: Vertical::Center,
                     ..canvas::Text::default()
                 });

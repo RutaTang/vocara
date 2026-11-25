@@ -13,6 +13,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use iced::alignment::Vertical;
+use iced::font::Weight;
 use iced::widget::canvas::{self, Frame, Geometry, Path, Stroke};
 use iced::widget::image::{FilterMethod, Handle};
 use iced::widget::{canvas as canvas_widget, Space};
@@ -21,7 +22,8 @@ use iced::{
 };
 
 use super::painter::{KeyedCache, Same};
-use crate::ui::core::theme::{alpha, font, Studio};
+use crate::ui::core::system_font;
+use crate::ui::core::theme::{alpha, Studio};
 
 // ------------------------------------------------------------- model seam
 
@@ -1000,14 +1002,15 @@ impl<M> canvas::Program<M> for PowerSpectrumPainter {
                         .with_color(alpha(color, 0.85))
                         .with_width(1.5),
                 );
-                // A `TextPainter`'s line: no height, the font's own.
+                // A `TextPainter`'s line: no height, the font's own; no
+                // family, the system UI font, w700.
                 frame.fill_text(canvas::Text {
                     content: format!("F{}", i + 1),
                     position: Point::new(fx + 2.0, 2.0),
                     color,
                     size: Pixels(9.0),
                     line_height: crate::ui::core::text::NATURAL,
-                    font: font::BOLD,
+                    font: system_font::font(Weight::Bold),
                     align_y: Vertical::Top,
                     ..canvas::Text::default()
                 });
@@ -1234,14 +1237,15 @@ impl<M> canvas::Program<M> for VowelSpacePainter {
         for (label, rf1, rf2) in VOWEL_REFS {
             let p = vowel_position(rf1, rf2, size);
             frame.fill(&Path::circle(p, 2.0), alpha(Studio::TEXT_FAINT, 0.5));
-            // A `TextPainter`'s line: no height, the font's own.
+            // A `TextPainter`'s line: no height, the font's own; no
+            // family, the system UI font.
             frame.fill_text(canvas::Text {
                 content: label.to_string(),
                 position: p + Vector::new(3.0, -4.0),
                 color: Studio::TEXT_FAINT,
                 size: Pixels(9.0),
                 line_height: crate::ui::core::text::NATURAL,
-                font: font::REGULAR,
+                font: system_font::font(Weight::Normal),
                 align_y: Vertical::Top,
                 ..canvas::Text::default()
             });

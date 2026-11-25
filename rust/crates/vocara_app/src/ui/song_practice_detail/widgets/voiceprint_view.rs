@@ -49,9 +49,10 @@ use std::f64::consts::LN_2;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::ui::core::text;
+use crate::ui::core::{system_font, text};
 use iced::alignment::{Horizontal, Vertical};
 use iced::border::Radius;
+use iced::font::Weight;
 use iced::widget::canvas::{self, gradient, Frame, Geometry, LineCap, Path, Stroke};
 use iced::widget::text::Alignment;
 use iced::widget::{
@@ -1679,9 +1680,18 @@ fn spectrum_strip<'a>(s: SpectrumStrip) -> Element<'a, Message> {
 
 // --------------------------------------------------------------- painters
 
-/// A canvas text at `position`, aligned as given, on `line_height`'s line:
-/// [`text::NATURAL`] for a `TextPainter`'s, 1.0 for a `Text`'s under the
-/// app's Material theme.
+/// What set a label in Flutter, and so its face and line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SetBy {
+    /// A `TextPainter`, which inherits no theme: the system UI font
+    /// ([`system_font`]), on the font's own line ([`text::NATURAL`]).
+    Painter,
+    /// A `Text` under the app's Material theme: Inter, at height 1.0.
+    Text,
+}
+
+/// A canvas text at `position`, aligned as given, in w400 on the line of
+/// what set it ([`SetBy`]).
 fn label_text(
     content: String,
     position: Point,
@@ -1689,15 +1699,19 @@ fn label_text(
     color: Color,
     align_x: Alignment,
     align_y: Vertical,
-    line_height: text::LineHeight,
+    set_by: SetBy,
 ) -> canvas::Text {
+    let (font, line_height) = match set_by {
+        SetBy::Painter => (system_font::font(Weight::Normal), text::NATURAL),
+        SetBy::Text => (font::REGULAR, 1.0.into()),
+    };
     canvas::Text {
         content,
         position,
         color,
         size: Pixels(size),
         line_height,
-        font: font::REGULAR,
+        font,
         align_x,
         align_y,
         ..canvas::Text::default()
@@ -1738,7 +1752,7 @@ impl<M> canvas::Program<M> for FreqAxisPainter {
                     Alignment::Right,
                     Vertical::Center,
                     // `_FreqAxisPainter`'s `TextPainter`, centred on y.
-                    text::NATURAL,
+                    SetBy::Painter,
                 ));
                 hz += 1000.0;
             }
@@ -1800,7 +1814,7 @@ impl<M> canvas::Program<M> for FreqAxisLabels {
                     align,
                     Vertical::Bottom,
                     // A `Text` (`_FreqAxisLabels`), 2 off the bottom.
-                    1.0.into(),
+                    SetBy::Text,
                 ));
             }
         })]
@@ -1835,7 +1849,7 @@ impl<M> canvas::Program<M> for RotatedLabel {
             Alignment::Center,
             Vertical::Center,
             // A `Text` in a `RotatedBox`, centred.
-            1.0.into(),
+            SetBy::Text,
         ));
         vec![frame.into_geometry()]
     }

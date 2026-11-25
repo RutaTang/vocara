@@ -51,16 +51,17 @@
 //! its `MVAR` delta, as CoreText's leading is, whatever a face's `OS/2`
 //! table asks for (Lucide asks for its typographic line gap, 90 units, but
 //! CoreText's is `hhea`'s, 0); Inter's and Lucide's are zero, and the
-//! text toolbar's system UI font's its own (`text_field::toolbar_face`).
-//! Skia then places each glyph's baseline on the nearest device pixel
+//! system UI font's, which the `TextPainter` labels are set in
+//! ([`system_font`](super::system_font)), its own. Skia then places each
+//! glyph's baseline on the nearest device pixel
 //! (`SkGlyphPositionRoundingSpec`, `SubRunContainer.cpp`: half a pixel
 //! added, then floored), which the vendored cosmic-text's
 //! `LayoutGlyph::physical` does too, for both renderers.
 //!
 //! What is not identical: the metrics are the ones cosmic-text shapes
 //! with, the same as CoreText's for the bundled faces (`hhea`'s), but not
-//! checked against CoreText's here, off a Mac (the toolbar's system UI
-//! font's are, on a Mac: `text_field::toolbar_face`'s macOS test).
+//! checked against CoreText's here, off a Mac (the system UI font's are, on
+//! a Mac: `system_font`'s macOS tests).
 
 use iced::advanced::graphics::text::cosmic_text::{self, Buffer, LineBox, Metrics};
 use iced::advanced::graphics::text::{font_system, to_attributes, Version};
