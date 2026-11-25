@@ -1000,11 +1000,13 @@ impl<M> canvas::Program<M> for PowerSpectrumPainter {
                         .with_color(alpha(color, 0.85))
                         .with_width(1.5),
                 );
+                // A `TextPainter`'s line: no height, the font's own.
                 frame.fill_text(canvas::Text {
                     content: format!("F{}", i + 1),
                     position: Point::new(fx + 2.0, 2.0),
                     color,
                     size: Pixels(9.0),
+                    line_height: crate::ui::core::text::NATURAL,
                     font: font::BOLD,
                     align_y: Vertical::Top,
                     ..canvas::Text::default()
@@ -1232,11 +1234,13 @@ impl<M> canvas::Program<M> for VowelSpacePainter {
         for (label, rf1, rf2) in VOWEL_REFS {
             let p = vowel_position(rf1, rf2, size);
             frame.fill(&Path::circle(p, 2.0), alpha(Studio::TEXT_FAINT, 0.5));
+            // A `TextPainter`'s line: no height, the font's own.
             frame.fill_text(canvas::Text {
                 content: label.to_string(),
                 position: p + Vector::new(3.0, -4.0),
                 color: Studio::TEXT_FAINT,
                 size: Pixels(9.0),
+                line_height: crate::ui::core::text::NATURAL,
                 font: font::REGULAR,
                 align_y: Vertical::Top,
                 ..canvas::Text::default()

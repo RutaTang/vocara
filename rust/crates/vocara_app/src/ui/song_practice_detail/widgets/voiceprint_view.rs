@@ -1679,7 +1679,9 @@ fn spectrum_strip<'a>(s: SpectrumStrip) -> Element<'a, Message> {
 
 // --------------------------------------------------------------- painters
 
-/// A canvas text at `position`, aligned as given.
+/// A canvas text at `position`, aligned as given, on `line_height`'s line:
+/// [`text::NATURAL`] for a `TextPainter`'s, 1.0 for a `Text`'s under the
+/// app's Material theme.
 fn label_text(
     content: String,
     position: Point,
@@ -1687,12 +1689,14 @@ fn label_text(
     color: Color,
     align_x: Alignment,
     align_y: Vertical,
+    line_height: text::LineHeight,
 ) -> canvas::Text {
     canvas::Text {
         content,
         position,
         color,
         size: Pixels(size),
+        line_height,
         font: font::REGULAR,
         align_x,
         align_y,
@@ -1733,6 +1737,8 @@ impl<M> canvas::Program<M> for FreqAxisPainter {
                     Studio::TEXT_FAINT,
                     Alignment::Right,
                     Vertical::Center,
+                    // `_FreqAxisPainter`'s `TextPainter`, centred on y.
+                    text::NATURAL,
                 ));
                 hz += 1000.0;
             }
@@ -1793,6 +1799,8 @@ impl<M> canvas::Program<M> for FreqAxisLabels {
                     Studio::TEXT_FAINT,
                     align,
                     Vertical::Bottom,
+                    // A `Text` (`_FreqAxisLabels`), 2 off the bottom.
+                    1.0.into(),
                 ));
             }
         })]
@@ -1826,6 +1834,8 @@ impl<M> canvas::Program<M> for RotatedLabel {
             Studio::TEXT_FAINT,
             Alignment::Center,
             Vertical::Center,
+            // A `Text` in a `RotatedBox`, centred.
+            1.0.into(),
         ));
         vec![frame.into_geometry()]
     }
