@@ -86,3 +86,7 @@ iced_wgpu = { path = "vendor/iced_wgpu" }
 iced_winit = { path = "vendor/iced_winit" }
 iced_tiny_skia = { path = "vendor/iced_tiny_skia" }
 iced_renderer = { path = "vendor/iced_renderer" }
+# See vendor/README.md: a face drawn at a fixed instance of its variation
+# axes (the text toolbar's labels, in the system UI font at its optical
+# size), its `trak` table left unapplied.
+cosmic-text = { path = "vendor/cosmic-text" }

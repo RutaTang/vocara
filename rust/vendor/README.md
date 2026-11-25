@@ -37,6 +37,32 @@ comments) and the files named below; `LICENSE` is the upstream project's
   `src/effects.rs` (new) is the `Effects` trait the app's widgets call,
   implemented by both renderers and by the fallback renderer that is
   `iced::Renderer`, and `BackdropFilter`.
+- `cosmic-text` 0.15.0 (MIT OR Apache-2.0,
+  <https://github.com/pop-os/cosmic-text>; `LICENSE-MIT` and
+  `LICENSE-APACHE` its own; only `src`, the manifests, the licenses and
+  the README vendored, the `[[test]]` and `[[bench]]` targets dropped from
+  `Cargo.toml`, whose files are not): a face drawn at a fixed instance of
+  its variation axes, which the text toolbar's labels need (the system UI
+  font at the optical size Flutter's Skia drew it at, untracked;
+  `rust/crates/vocara_app/src/ui/core/widgets/text_field/toolbar_face.rs`).
+  Upstream varies a face along its weight axis alone, the weight asked
+  for, every other axis at its default, and its shaper (harfrust) applies
+  a face's `trak` table at 12 pt when the face has a `STAT` table.
+  `FontSystem::set_face_instance` (`src/font/system.rs`) gives one face a
+  `FaceInstance` (`src/font/mod.rs`): user coordinates on its axes, set
+  after the weight's, and whether it is untracked; every `Font` of that
+  face then takes them, in `Font::new_with_instance`: its metrics, the
+  shaper's instance (advances, positioning, substitutions), the outlines
+  swash draws (`src/swash.rs`: the same normalized coordinates, for the
+  images and the outline commands), and, untracked, the shaper reads the
+  face through a copy of its table directory without its `trak` record
+  (`untracked_directory`, `shaped_font`). Setting one drops that face's
+  cached fonts and shape plans (`ShapeBuffer::forget_font`, `src/shape.rs`).
+  A face without an instance is drawn as upstream draws it.
+
+Moving to a new cosmic-text release: carry the marked lines over (or drop
+the patch if upstream comes to take a face's variation coordinates and to
+leave a face untracked), and keep the version iced's renderers use.
 
 - `iced_winit` 0.14.1 (MIT, <https://github.com/iced-rs/iced>): the run
   loop hands the app each wheel event's gesture, which iced's

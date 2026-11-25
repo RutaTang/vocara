@@ -382,7 +382,10 @@ fn the_menu_opens_at_the_click_inside_the_window_less_eight() {
     let window = Size::new(400.0, 200.0);
     let size = toolbar::size(3);
     assert_eq!(size.width, 222.0);
-    assert!((size.height - (12.0 + 3.0 * (2.0 + 14.0 * 1.21 + 5.0))).abs() < 1e-3);
+    // Each item a whole-pixel line (SkParagraph's) between its padding.
+    let line = super::toolbar_face::label_face().line_height;
+    assert_eq!(line, line.round());
+    assert_eq!(size.height, 12.0 + 3.0 * (2.0 + line + 5.0));
     // Where there is room: its top left at the click.
     assert_eq!(
         toolbar::place(Point::new(50.0, 40.0), size, window),

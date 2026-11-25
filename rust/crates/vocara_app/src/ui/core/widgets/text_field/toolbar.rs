@@ -47,7 +47,11 @@
 //! the theme's primary color (`CupertinoTheme.primaryColor`, zinc's primary
 //! under a Material theme), radius 4, and its label takes
 //! `primaryContrastingColor` (zinc's primary foreground). The labels are
-//! Cupertino's English ones (`DefaultCupertinoLocalizations`).
+//! Cupertino's English ones (`DefaultCupertinoLocalizations`), on macOS in
+//! the system UI font at the instance Flutter's Skia drew it at (its 12 pt
+//! optical size, weight 400, untracked), each on SkParagraph's whole-pixel
+//! line and baseline from that face's metrics; off macOS in Inter, its
+//! line set alike ([`toolbar_face`](super::toolbar_face)).
 //!
 //! Its corners and the items' are rounded superellipses
 //! (`RoundedSuperellipseBorder`, Apple's continuous corners, drawn from the
@@ -90,16 +94,11 @@
 //!   wgpu's 4× multisampling) is theirs, and Skia drew them straight onto
 //!   the backdrop filter's layer where the port draws them onto the
 //!   window (the same values, but for each renderer's rounding);
-//! - the labels' style set `inherit: false` and no family, so Flutter set
-//!   them in the macOS system UI font (SF Pro, CoreText's `.AppleSystemUIFont`),
-//!   a variable face whose optical size CoreText set from the text's size,
-//!   where cosmic-text (iced's text engine) varies a face along its weight
-//!   axis alone and draws every other axis at its default. The labels take
-//!   that face, at its own line box, only where its default is the 14 px
-//!   instance and the shapers' tracking agrees (read off the face, see
-//!   [`toolbar_face`](super::toolbar_face)); otherwise, and off macOS, they
-//!   are in the bundled Inter, at Inter's natural line height (1.21 em),
-//!   the box Flutter's line took from its font's metrics.
+//! - the labels' glyphs are the same outlines at the same places, but
+//!   rasterized by swash, not CoreText (its own antialiasing, and gamma),
+//!   their advances computed from the face's variations by harfrust (each
+//!   delta rounded to a font unit, as HarfBuzz rounds them) where CoreText
+//!   computed them (within 0.01 px; the macOS test checks it).
 
 use std::cell::RefCell;
 use std::sync::Arc;
@@ -167,9 +166,6 @@ pub const BUTTON_RADIUS: f32 = 4.0;
 /// `_kToolbarButtonFontStyle`'s size and letter spacing.
 pub const LABEL_SIZE: f32 = 14.0;
 pub const LABEL_SPACING: f32 = -0.15;
-/// Inter's natural line box (ascent + descent), in ems: the labels' unless
-/// they are in the system UI font ([`label_face`]).
-pub const LABEL_LINE_HEIGHT: f32 = 1.21;
 /// An item's label: `CupertinoColors.white` (dark).
 pub const LABEL: Color = Color::WHITE;
 /// An item under the pointer: its fill (`primaryColor`) and its label
@@ -231,9 +227,9 @@ pub fn clipboard_has_text(clipboard: &mut dyn Clipboard) -> bool {
         .is_some_and(|text| !text.is_empty())
 }
 
-/// An item's height: its padding around one label line.
+/// An item's height: its padding around one label line ([`label_face`]).
 pub fn item_height() -> f32 {
-    BUTTON_PADDING.top + LABEL_SIZE * label_face().line_height + BUTTON_PADDING.bottom
+    BUTTON_PADDING.top + label_face().line_height + BUTTON_PADDING.bottom
 }
 
 /// The toolbar's size with `count` items.
@@ -343,11 +339,14 @@ struct Toolbar<'b, Message> {
     position: Point,
 }
 
-/// An item's label laid out (once per label and thread), and its size.
-fn label(item: Item) -> (Arc<Buffer>, Size) {
+/// An item's label laid out (once per label and thread), and where its
+/// buffer's top goes below the line's top: its baseline where SkParagraph
+/// put it ([`label_face`]), whatever cosmic-text's own place for it in
+/// its line.
+pub(super) fn label(item: Item) -> (Arc<Buffer>, f32) {
     /// A label laid out, with the font system's version it was laid out
     /// at (a font loaded since lays it out afresh).
-    type Laid = (Item, Version, Arc<Buffer>, Size);
+    type Laid = (Item, Version, Arc<Buffer>, f32);
     thread_local! {
         static LABELS: RefCell<Vec<Laid>> = const { RefCell::new(Vec::new()) };
     }
@@ -359,14 +358,14 @@ fn label(item: Item) -> (Arc<Buffer>, Size) {
             .borrow()
             .iter()
             .find(|(i, v, ..)| *i == item && *v == version)
-            .map(|(_, _, buffer, size)| (buffer.clone(), *size));
+            .map(|(_, _, buffer, top)| (buffer.clone(), *top));
         if let Some(found) = found {
             return found;
         }
         let spec = Spec {
             content: item.label(),
             size: LABEL_SIZE,
-            line_height: LABEL_SIZE * face.line_height,
+            line_height: face.line_height,
             font: face.font,
             align_x: Alignment::Default,
             wrapping: Wrapping::None,
@@ -378,11 +377,17 @@ fn label(item: Item) -> (Arc<Buffer>, Size) {
             let mut font_system = font_system().write().expect("Write font system");
             lay_out(font_system.raw(), &spec, Size::INFINITE)
         };
+        let baseline = laid
+            .buffer
+            .layout_runs()
+            .next()
+            .map_or(face.baseline, |run| run.line_y);
+        let top = face.baseline - baseline;
         let buffer = Arc::new(laid.buffer);
         let mut labels = labels.borrow_mut();
         labels.retain(|(i, ..)| *i != item);
-        labels.push((item, version, buffer.clone(), laid.min_bounds));
-        (buffer, laid.min_bounds)
+        labels.push((item, version, buffer.clone(), top));
+        (buffer, top)
     })
 }
 
@@ -589,11 +594,14 @@ fn draw_box(
                     renderer.draw_geometry(frame.into_geometry());
                 });
             }
-            let (buffer, _) = label(*item);
+            let (buffer, top) = label(*item);
             draw_line(
                 renderer,
                 &buffer,
-                Point::new(row.x + BUTTON_PADDING.left, row.y + BUTTON_PADDING.top),
+                Point::new(
+                    row.x + BUTTON_PADDING.left,
+                    row.y + BUTTON_PADDING.top + top,
+                ),
                 if is_hovered { HOVER_LABEL } else { LABEL },
                 Rectangle {
                     x: row.x + BUTTON_PADDING.left,

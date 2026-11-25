@@ -174,11 +174,16 @@ wrong. Port the behavior, not the shape:
     none, the tone's transport is skipped, said so; the movie's runs on
     the host clock either way;
   - the text toolbar's label face (`text_field::toolbar_face`, its macOS
-    test): reads `SFNS.ttf` (its `fvar` axes and named instances, `trak`,
-    `hhea`), lays glyphs out in it through cosmic-text and checks the
-    advance it uses (the default optical size's, plus the 12 pt track its
-    shaper, harfrust, adds) and that the labels took the system font
-    exactly when that is what Flutter drew.
+    test): asks CoreText (linked by the test alone) for the fonts Flutter's
+    Skia made for the labels, step for step (the family of
+    `CTFontCreateUIFontForLanguage(kCTFontUIFontSystem, 14)`, the regular
+    one of its matching descriptors made at size 0, Skia's exact copy of it
+    at 14 pt with its optical size and no tracking), prints their sizes,
+    files and variations, and checks the labels against them: the same
+    file (`SFNS.ttf`), every axis of the instance they are drawn at, each
+    glyph's advance, what the shaper adds to it against HarfBuzz at the
+    typeface's own variation, and the line (CoreText's ascent, descent and
+    leading).
 - **Commits**: small and frequent, on the working branch, with the session's
   trailer lines. CI is not run until the whole port is done.
 
@@ -257,8 +262,10 @@ structure every screen follows, so screens ported by different hands fit:
   by a clip (both take them from `iced_tiny_skia::HardClip`), so both draw
   the same pixels. Text always uses the bundled Inter
   (`theme::font::install`), never a copy installed on the machine; only
-  the text toolbar's labels, which Flutter set in the system UI font, may
-  take that face (`text_field::toolbar_face`).
+  the text toolbar's labels, which Flutter set in the system UI font, take
+  that face on macOS, drawn at the instance of its variation axes Flutter's
+  Skia drew (`text_field::toolbar_face`; cosmic-text is vendored for it,
+  `rust/vendor/README.md`).
 - **Wheel and trackpad** (`widgets::pan_zoom`): Flutter's macOS embedder
   delivered a scroll with gesture phases (a trackpad's two fingers, a Magic
   Mouse's) as a pan-zoom gesture, hit-tested at its start, which drag
@@ -469,12 +476,11 @@ small and written down in the module that has it:
   its shadow faded on iced's curve, not a Gaussian, and its fill, border
   and items with iced's renderers' antialiasing, not Skia's, onto the
   window where Skia drew them onto the backdrop filter's layer (each
-  renderer's rounding apart, the same values). Its labels are in the macOS system UI font, as
-  Flutter's, only where cosmic-text draws that variable face as Flutter
-  did (it varies a face along its weight axis alone, so the face's default
-  optical size must be the one CoreText set at 14 px, and the shapers'
-  12 pt tracking nil; `text_field::toolbar_face` reads both off the face);
-  otherwise in Inter at Inter's natural line height.
+  renderer's rounding apart, the same values). Its labels are in the
+  macOS system UI font at the instance Flutter's Skia drew it at (the
+  12 pt optical size, weight 400, no tracking) on SkParagraph's
+  whole-pixel line, the same outlines at the same places to within
+  0.01 px, but rasterized by swash, not CoreText (`text_field::toolbar_face`).
 
 ## Tracking
 
