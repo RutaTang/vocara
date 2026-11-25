@@ -192,25 +192,6 @@ fn an_ink_press_that_wanders_off_lets_its_highlight_go() {
 }
 
 #[test]
-fn an_animated_container_draws_its_opacity_at_once() {
-    let mut window = window();
-    let t0 = Instant::now();
-    let inside = Point::new(50.0, 20.0);
-    let view = |opacity: f32| -> Element<'_, ()> {
-        animated_container(Space::new().width(100).height(40), 120 * MS)
-            .decoration(Decoration::fill(HOVER, 0.0))
-            .opacity(opacity)
-            .into()
-    };
-    window.frame(view(1.0), &[], t0);
-    assert!(!window.frame(view(0.5), &[], t0), "nothing animates");
-    assert!(near(
-        window.pixel(inside),
-        over(Color { a: 0.5, ..HOVER }, BACKGROUND)
-    ));
-}
-
-#[test]
 fn a_padding_or_alignment_change_relays_out_over_its_duration() {
     let mut window = window();
     let t0 = Instant::now();

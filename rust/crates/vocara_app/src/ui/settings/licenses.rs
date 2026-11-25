@@ -124,9 +124,10 @@ use serde::Deserialize;
 use vocara_services::update_check_service::UpdateCheckService;
 
 use crate::ui::core::motion::{Controller, Curve};
-use crate::ui::core::theme::{self, alpha, font, Studio, Zinc};
+use crate::ui::core::theme::{self, font, Studio, Zinc};
 use crate::ui::core::widgets::animated::{ink_hover, INK_HIGHLIGHT};
 use crate::ui::core::widgets::fading_scrollbar::Fading;
+use crate::ui::core::widgets::opacity_layer::opacity_layer;
 use crate::ui::core::widgets::slide::slide;
 use crate::ui::core::widgets::studio_hint::spinner;
 
@@ -860,16 +861,23 @@ impl LicensesPage {
             for going in &self.leaving {
                 if let Some(package) = data.packages.get(going.index) {
                     let (opacity, down) = self.upwards(Some(&going.controller));
-                    let card = detail(package, &data.licenses_of(package), going.loaded, opacity);
+                    let card = detail(package, &data.licenses_of(package), going.loaded);
                     details = details.push(
                         going.key,
-                        slide(sheet(card, opacity), 0.0).down(down).inert(),
+                        slide(opacity_layer(opacity, sheet(card, 1.0)), 0.0)
+                            .down(down)
+                            .inert(),
                     );
                 }
             }
             let (opacity, down) = self.upwards(self.entering.as_ref());
-            let card = detail(package, &data.licenses_of(package), self.loaded, opacity);
-            details = details.push(self.key, slide(sheet(card, opacity), 0.0).down(down));
+            let card = detail(package, &data.licenses_of(package), self.loaded);
+            // `_FadeUpwardsPageTransition`: the page slides, and fades as
+            // one layer.
+            details = details.push(
+                self.key,
+                slide(opacity_layer(opacity, sheet(card, 1.0)), 0.0).down(down),
+            );
             // The sheet spans the page's height, over the app bar, from the
             // master's edge less the card's elevation to the gutter.
             layers = layers.push(
@@ -891,20 +899,15 @@ impl LicensesPage {
 /// A Material surface: `Studio.surface` (the card colour Settings set) at
 /// elevation 4, with `radius` (`None` = square).
 fn material(radius: Option<Radius>) -> impl Fn(&Theme) -> container::Style {
-    faded_material(radius, 1.0)
-}
-
-/// [`material`] at `opacity`.
-fn faded_material(radius: Option<Radius>, opacity: f32) -> impl Fn(&Theme) -> container::Style {
     move |_| container::Style {
         text_color: Some(Zinc::FOREGROUND),
-        background: Some(Background::Color(alpha(Studio::SURFACE, opacity))),
+        background: Some(Background::Color(Studio::SURFACE)),
         border: Border {
             radius: radius.unwrap_or_default(),
             ..Border::default()
         },
         shadow: Shadow {
-            color: Color::from_rgba8(0, 0, 0, 0.45 * opacity),
+            color: Color::from_rgba8(0, 0, 0, 0.45),
             offset: Vector::new(0.0, 2.0),
             blur_radius: 6.0,
         },
@@ -1037,15 +1040,9 @@ fn package_tile<'a>(
 
 /// `_PackageLicensePage` on the detail card: the package and its license
 /// count, then each of the first `loaded` licenses after a divider,
-/// paragraph by paragraph, and Material's spinner while more are to come;
-/// all of it at `opacity` (iced has no subtree opacity: each color fades).
-fn detail<'a>(
-    package: &str,
-    licenses: &[&LicenseEntry],
-    loaded: usize,
-    opacity: f32,
-) -> Element<'a, Message> {
-    let fg = alpha(Zinc::FOREGROUND, Zinc::FOREGROUND.a * opacity);
+/// paragraph by paragraph, and Material's spinner while more are to come.
+fn detail<'a>(package: &str, licenses: &[&LicenseEntry], loaded: usize) -> Element<'a, Message> {
+    let fg = Zinc::FOREGROUND;
     // `_PackageLicensePageTitle` in the pinned `SliverAppBar`'s toolbar:
     // the title (`titleLarge`) right over the subtitle (`titleSmall`), both
     // at the column's start, the column centred on the card (macOS, no
@@ -1072,7 +1069,7 @@ fn detail<'a>(
                 container(Space::new())
                     .width(Length::Fill)
                     .height(1)
-                    .style(theme::fill(alpha(Zinc::SECONDARY, opacity))),
+                    .style(theme::fill(Zinc::SECONDARY)),
             )
             .padding([18.0 + 7.5, 18.0]),
         );
@@ -1083,9 +1080,8 @@ fn detail<'a>(
     if loaded < licenses.len() {
         // `CircularProgressIndicator()` in 24 / 0 padding, in the scheme's
         // primary.
-        let primary = alpha(Zinc::PRIMARY, Zinc::PRIMARY.a * opacity);
         body = body.push(
-            container(spinner(36.0, 4.0, primary))
+            container(spinner(36.0, 4.0, Zinc::PRIMARY))
                 .width(Length::Fill)
                 .align_x(Horizontal::Center)
                 .padding([24, 0]),
@@ -1105,15 +1101,12 @@ fn detail<'a>(
     container(content)
         .width(Length::Fill)
         .height(Length::Fill)
-        .style(faded_material(
-            Some(Radius {
-                top_left: 3.0,
-                top_right: 3.0,
-                bottom_right: 0.0,
-                bottom_left: 0.0,
-            }),
-            opacity,
-        ))
+        .style(material(Some(Radius {
+            top_left: 3.0,
+            top_right: 3.0,
+            bottom_right: 0.0,
+            bottom_left: 0.0,
+        })))
         .into()
 }
 

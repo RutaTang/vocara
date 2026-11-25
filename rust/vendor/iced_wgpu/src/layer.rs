@@ -25,6 +25,46 @@ pub struct Layer {
     pub text: text::Batch,
     pending_meshes: Vec<Mesh>,
     pending_text: Vec<Text>,
+    // vocara: what the layer composites instead of primitives of its own
+    // (a subtree at an opacity, or a filter of its backdrop).
+    pub effect: Option<Effect>,
+}
+
+/// vocara: a layer that composites what other layers drew, not primitives
+/// of its own. Such a layer holds nothing else and merges with nothing.
+#[derive(Debug)]
+pub enum Effect {
+    /// A subtree drawn offscreen, then composited at an opacity.
+    Group(Box<Group>),
+    /// What lies under a shape, filtered.
+    Backdrop(Box<Backdrop>),
+}
+
+/// vocara: a subtree composited as one layer (Flutter's `Opacity`).
+#[derive(Debug)]
+pub struct Group {
+    /// The opacity the subtree is composited at.
+    pub opacity: f32,
+    /// What the subtree drew, layered (and merged) as at the top level.
+    pub layers: Stack,
+}
+
+/// vocara: a filter of what lies under a shape (Flutter's
+/// `BackdropFilter`): a Gaussian blur, then a color matrix, drawn over what
+/// was there (source over), inside a hard-edged clip.
+#[derive(Debug)]
+pub struct Backdrop {
+    /// The clip's triangles, in logical pixels.
+    pub vertices: Vec<[f32; 2]>,
+    /// Their indices.
+    pub indices: Vec<u32>,
+    /// The clip's bounds, in logical pixels.
+    pub bounds: Rectangle,
+    /// The blur's standard deviation, in logical pixels.
+    pub blur_sigma: f32,
+    /// The color matrix: 4 rows of 5 (red, green, blue, alpha, then an
+    /// offset in 0..=1), applied to unpremultiplied colors.
+    pub color_matrix: [f32; 20],
 }
 
 impl Layer {
@@ -36,6 +76,7 @@ impl Layer {
             && self.text.is_empty()
             && self.pending_meshes.is_empty()
             && self.pending_text.is_empty()
+            && self.effect.is_none() // vocara
     }
 
     pub fn draw_quad(
@@ -330,9 +371,15 @@ impl graphics::Layer for Layer {
         self.images.clear();
         self.pending_meshes.clear();
         self.pending_text.clear();
+        self.effect = None; // vocara
     }
 
     fn start(&self) -> usize {
+        // vocara: nothing merges into an effect's layer.
+        if self.effect.is_some() {
+            return 0;
+        }
+
         if !self.quads.is_empty() {
             return 1;
         }
@@ -357,6 +404,11 @@ impl graphics::Layer for Layer {
     }
 
     fn end(&self) -> usize {
+        // vocara: an effect's layer merges into nothing.
+        if self.effect.is_some() {
+            return usize::MAX;
+        }
+
         if !self.text.is_empty() {
             return 5;
         }
@@ -400,6 +452,7 @@ impl Default for Layer {
             images: image::Batch::default(),
             pending_meshes: Vec::new(),
             pending_text: Vec::new(),
+            effect: None,
         }
     }
 }

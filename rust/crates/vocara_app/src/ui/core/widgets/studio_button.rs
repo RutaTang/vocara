@@ -16,7 +16,7 @@ use iced::widget::{button, container, row};
 use iced::{Color, Element, Length};
 
 use crate::ui::core::icons::{self, Icon};
-use crate::ui::core::theme::{alpha, bare_button, faded, font, Studio};
+use crate::ui::core::theme::{alpha, bare_button, font, Studio};
 use crate::ui::core::widgets::animated::{animated_container, Decoration};
 
 /// The look of a [`StudioButton`].
@@ -46,8 +46,6 @@ pub struct StudioButton<M> {
     variant: StudioButtonVariant,
     expand: bool,
     enabled: bool,
-    /// Every color at this opacity (a faded dialog's button).
-    opacity: f32,
 }
 
 /// A subtle, enabled, shrink-wrapped [`StudioButton`].
@@ -59,7 +57,6 @@ pub fn studio_button<M>(label: impl Into<String>, on_tap: M) -> StudioButton<M> 
         variant: StudioButtonVariant::Subtle,
         expand: false,
         enabled: true,
-        opacity: 1.0,
     }
 }
 
@@ -82,13 +79,6 @@ impl<M> StudioButton<M> {
 
     pub fn enabled(mut self, enabled: bool) -> Self {
         self.enabled = enabled;
-        self
-    }
-
-    /// Draws every color at `opacity` (inside a fading dialog: iced has no
-    /// subtree opacity).
-    pub fn opacity(mut self, opacity: f32) -> Self {
-        self.opacity = opacity;
         self
     }
 }
@@ -142,7 +132,6 @@ pub fn colors(
 impl<'a, M: Clone + 'a> From<StudioButton<M>> for Element<'a, M> {
     fn from(b: StudioButton<M>) -> Self {
         let (_, _, fg, icon_color) = colors(b.variant, b.enabled, false);
-        let (fg, icon_color) = (faded(fg, b.opacity), faded(icon_color, b.opacity));
         let mut content = row![].spacing(7).align_y(Vertical::Center);
         if let Some(i) = b.icon {
             content = content.push(icons::icon(i, 15.0, icon_color));
@@ -173,7 +162,6 @@ impl<'a, M: Clone + 'a> From<StudioButton<M>> for Element<'a, M> {
                 let (bg, border, _, _) = colors(variant, enabled, hovered);
                 Decoration::boxed(bg, 7.0, border, 1.0)
             })
-            .opacity(b.opacity)
             .into()
     }
 }

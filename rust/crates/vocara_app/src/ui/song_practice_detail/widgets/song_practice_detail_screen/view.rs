@@ -1198,24 +1198,19 @@ fn separation_overlay<'a>(progress: Option<f64>, can_cancel: bool) -> Element<'a
 
 /// The toast: a floating snack bar (set 16 in from the page's edges at its
 /// bottom by the queue, `snack::FLOATING_MARGIN`), `Studio.surfaceRaised`,
-/// radius 8, `Studio.border`, 13 px text, at `opacity`. (The app draws it
-/// too, once the page has handed it over.)
-pub(super) fn snack_bar(message: &str, opacity: f32) -> Element<'_, Infallible> {
-    let fade = move |c: Color| alpha(c, c.a * opacity);
-    let bar = container(text(message).size(13).color(fade(Studio::TEXT_PRIMARY)))
+/// radius 8, `Studio.border`, 13 px text. (The app draws it too, once the
+/// page has handed it over.)
+pub(super) fn snack_bar(message: &str) -> Element<'_, Infallible> {
+    let bar = container(text(message).size(13).color(Studio::TEXT_PRIMARY))
         .width(Length::Fill)
         .padding(Padding::from([14, 16]))
-        .style(move |_: &Theme| container::Style {
+        .style(|_: &Theme| container::Style {
             shadow: Shadow {
-                color: alpha(Color::BLACK, 0.4 * opacity),
+                color: alpha(Color::BLACK, 0.4),
                 offset: Vector::new(0.0, 3.0),
                 blur_radius: 8.0,
             },
-            ..boxed(
-                Some(fade(Studio::SURFACE_RAISED)),
-                8.0,
-                Some(fade(Studio::BORDER)),
-            )
+            ..boxed(Some(Studio::SURFACE_RAISED), 8.0, Some(Studio::BORDER))
         });
     bar.into()
 }

@@ -113,7 +113,7 @@ mod tests {
     use super::*;
     use crate::ui::snack::{SnackStyle, TRANSITION};
 
-    fn look(text: &str, _: f32) -> Element<'_, std::convert::Infallible> {
+    fn look(text: &str) -> Element<'_, std::convert::Infallible> {
         crate::ui::core::text(text).into()
     }
 

@@ -32,15 +32,16 @@
 //! `barrierCurve`), its card fading on `Curves.easeOut`, no scale. Its host
 //! (the app's dialog stack, or the page that draws it) keeps the motion,
 //! draws the dialog at its [`Fade`] and keeps drawing a closed one, taking
-//! no input, until it has gone. iced has no subtree opacity, so a card
-//! takes every color it draws (its texts, fills, borders, shadows, buttons
-//! and fields) at the fade's opacity.
+//! no input, until it has gone. The card fades as one layer
+//! (`widgets::opacity_layer`, the route's `FadeTransition`): where its
+//! parts overlap (a field on its well, a label on its button) the topmost
+//! shows at the fade's opacity; the barrier's color fades on its own.
 
 use std::time::Duration;
 
 use crate::ui::core::text;
 use iced::alignment::{Horizontal, Vertical};
-use iced::widget::{center, column, container, opaque, row, scrollable, stack, text_input, Space};
+use iced::widget::{center, column, container, opaque, row, stack, Space};
 use iced::{keyboard, widget, Background, Color, Element, Event, Length, Padding};
 
 use super::focus_traversal::focus_scope;
@@ -50,7 +51,8 @@ use super::studio_text::studio_text;
 use super::wrap::Wrap;
 use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::motion::{Controller, Curve, Status};
-use crate::ui::core::theme::{self, faded, faded_container, faded_input, font, Studio};
+use crate::ui::core::theme::{self, faded, font, Studio};
+use crate::ui::core::widgets::opacity_layer::opacity_layer;
 use crate::ui::home::widgets::update_notice::{DialogOutcome, UpdateDownloadDialog};
 use crate::ui::technique_library::widgets::media::technique_media_section::RenameExampleDialog;
 use crate::ui::technique_library::widgets::technique_dialogs::NewTechniqueDialog;
@@ -346,8 +348,8 @@ impl DialogState {
     /// The dialog at `fade` (see the module docs).
     pub fn view_at(&self, fade: Fade) -> Element<'_, Message> {
         let card = match &self.dialog {
-            Dialog::Confirm(d) => confirm_card(d, fade),
-            Dialog::Prompt(p) => prompt_card(p, &self.text, self.input.clone(), fade),
+            Dialog::Confirm(d) => confirm_card(d),
+            Dialog::Prompt(p) => prompt_card(p, &self.text, self.input.clone()),
             // The custom modals draw their own barrier and card.
             Dialog::UpdateDownload(d) => return d.view_at(fade),
             Dialog::NewTechnique(d) => return d.view_at(fade),
@@ -360,12 +362,12 @@ impl DialogState {
 /// The card's outer geometry: 400 wide, 22 padding inside its 1 px border
 /// (a Flutter `Container`'s padding includes its decoration's border; an
 /// iced border takes no room), inside a 24 margin.
-fn card<'a>(content: Element<'a, Message>, fade: Fade) -> Element<'a, Message> {
+fn card<'a>(content: Element<'a, Message>) -> Element<'a, Message> {
     container(
         container(content)
             .width(400)
             .padding(23)
-            .style(fade.style(theme::dialog_card)),
+            .style(theme::dialog_card),
     )
     .padding(24)
     .into()
@@ -375,33 +377,24 @@ fn buttons<'a>(
     cancel: &str,
     confirm: &str,
     confirm_variant: StudioButtonVariant,
-    fade: Fade,
 ) -> Element<'a, Message> {
     row![
         Space::new().width(Length::Fill),
-        studio_button(cancel, Message::Cancel).opacity(fade.card),
-        studio_button(confirm, Message::Confirm)
-            .variant(confirm_variant)
-            .opacity(fade.card),
+        studio_button(cancel, Message::Cancel),
+        studio_button(confirm, Message::Confirm).variant(confirm_variant),
     ]
     .spacing(10)
     .into()
 }
 
-fn confirm_card(d: &ConfirmDialog, fade: Fade) -> Element<'_, Message> {
+fn confirm_card(d: &ConfirmDialog) -> Element<'_, Message> {
     let mut heading = row![].align_y(Vertical::Top);
     if let Some(icon) = d.icon {
         heading = heading.push(
-            container(icons::icon(icon, 15.0, fade.color(Studio::ACCENT)))
+            container(icons::icon(icon, 15.0, Studio::ACCENT))
                 .center_x(30)
                 .center_y(30)
-                .style(move |_| {
-                    theme::boxed(
-                        Some(fade.color(theme::alpha(Studio::ACCENT, 0.14))),
-                        8.0,
-                        None,
-                    )
-                }),
+                .style(move |_| theme::boxed(Some(theme::alpha(Studio::ACCENT, 0.14)), 8.0, None)),
         );
         heading = heading.push(Space::new().width(12));
     }
@@ -411,7 +404,7 @@ fn confirm_card(d: &ConfirmDialog, fade: Fade) -> Element<'_, Message> {
             .size(15)
             .font(font::BOLD)
             .line_height(1.3)
-            .color(fade.color(Studio::TEXT_PRIMARY))
+            .color(Studio::TEXT_PRIMARY)
             .width(Length::Fill)
             .ellipsis(2),
     );
@@ -421,7 +414,7 @@ fn confirm_card(d: &ConfirmDialog, fade: Fade) -> Element<'_, Message> {
             text(body.as_str())
                 .size(13)
                 .line_height(1.5)
-                .color(fade.color(Studio::TEXT_SECONDARY)),
+                .color(Studio::TEXT_SECONDARY),
         );
     }
     let variant = if d.destructive {
@@ -433,22 +426,16 @@ fn confirm_card(d: &ConfirmDialog, fade: Fade) -> Element<'_, Message> {
         &d.cancel_label,
         &d.confirm_label,
         variant,
-        fade,
     ));
-    card(content.into(), fade)
+    card(content.into())
 }
 
-fn prompt_card<'a>(
-    p: &'a StudioPrompt,
-    value: &str,
-    input: widget::Id,
-    fade: Fade,
-) -> Element<'a, Message> {
+fn prompt_card<'a>(p: &'a StudioPrompt, value: &str, input: widget::Id) -> Element<'a, Message> {
     let mut content = column![
         text(p.title.as_str())
             .size(15)
             .font(font::BOLD)
-            .color(fade.color(Studio::TEXT_PRIMARY)),
+            .color(Studio::TEXT_PRIMARY),
         Space::new().height(16),
     ];
     if !p.label.is_empty() {
@@ -458,7 +445,7 @@ fn prompt_card<'a>(
                     .size(10.5)
                     .font(font::BOLD)
                     .letter_spacing(0.6)
-                    .color(fade.color(Studio::TEXT_FAINT)),
+                    .color(Studio::TEXT_FAINT),
             )
             .push(Space::new().height(6));
     }
@@ -469,23 +456,22 @@ fn prompt_card<'a>(
         .size(14)
         .line_height(1.0)
         .padding(theme::FIELD_PADDING)
-        .caret_color(fade.color(Studio::ACCENT))
-        .style(fade.input(theme::studio_input));
+        .caret_color(Studio::ACCENT)
+        .style(theme::studio_input);
     content = content
         .push(
             container(field)
                 // 10 by 12 inside the well's 1 px border.
                 .padding(Padding::from([11, 13]))
-                .style(fade.style(theme::inset(8.0))),
+                .style(theme::inset(8.0)),
         )
         .push(Space::new().height(22))
         .push(buttons(
             &p.cancel_label,
             &p.confirm_label,
             StudioButtonVariant::Accent,
-            fade,
         ));
-    card(content.into(), fade)
+    card(content.into())
 }
 
 /// How long a dialog takes to come in and to go (`DialogRoute`'s
@@ -507,33 +493,9 @@ impl Fade {
         card: 1.0,
     };
 
-    /// A color of the card, at its opacity.
-    pub fn color(self, color: Color) -> Color {
-        faded(color, self.card)
-    }
-
-    /// A container style of the card, at its opacity.
-    pub fn style<'a>(
-        self,
-        style: impl Fn(&iced::Theme) -> container::Style + 'a,
-    ) -> impl Fn(&iced::Theme) -> container::Style + 'a {
-        move |theme| faded_container(style(theme), self.card)
-    }
-
-    /// A text field style of the card, at its opacity.
-    pub fn input<'a>(
-        self,
-        style: impl Fn(&iced::Theme, text_input::Status) -> text_input::Style + 'a,
-    ) -> impl Fn(&iced::Theme, text_input::Status) -> text_input::Style + 'a {
-        move |theme, status| faded_input(style(theme, status), self.card)
-    }
-
-    /// A scrollable style of the card, at its opacity.
-    pub fn scrollbar<'a>(
-        self,
-        style: impl Fn(&iced::Theme, scrollable::Status) -> scrollable::Style + 'a,
-    ) -> impl Fn(&iced::Theme, scrollable::Status) -> scrollable::Style + 'a {
-        move |theme, status| theme::faded_scrollable(style(theme, status), self.card)
+    /// `card` as the dialog route drew it: one layer at the card's opacity.
+    pub fn card<'a, M: 'a>(self, card: impl Into<Element<'a, M>>) -> Element<'a, M> {
+        opacity_layer(self.card, card).into()
     }
 }
 
@@ -622,12 +584,15 @@ pub fn barrier<'a, M: Clone + 'a>(
 }
 
 /// `content` centred over a dismissible barrier (`Color(0xB0000000)`)
-/// covering everything, both at `fade`: a tap on the barrier cancels, the
-/// card takes its own taps, Escape cancels and no key reaches what lies
-/// beneath.
+/// covering everything, both at `fade` (the card as one layer): a tap on
+/// the barrier cancels, the card takes its own taps, Escape cancels and no
+/// key reaches what lies beneath.
 pub fn modal<'a>(content: Element<'a, Message>, fade: Fade) -> Element<'a, Message> {
     let barrier = barrier(theme::DIALOG_BARRIER, fade.barrier, Some(Message::Cancel));
-    let layers = stack![barrier, center(opaque(content)).align_x(Horizontal::Center)];
+    let layers = stack![
+        barrier,
+        center(opaque(fade.card(content))).align_x(Horizontal::Center)
+    ];
     Wrap::<Message, ()>::new(
         // A dialog route's scope: Tab goes round its fields.
         focus_scope(layers),
@@ -791,42 +756,50 @@ mod tests {
     }
 
     #[test]
-    fn a_dialog_draws_its_barrier_and_every_color_of_its_card_at_its_fade() {
+    fn a_dialog_draws_its_barrier_at_its_fade_and_its_card_as_one_layer_at_it() {
         use crate::ui::core::motion::Lerp;
-        use crate::ui::core::widgets::animated::testing::{near, Frames};
+        use crate::ui::core::widgets::animated::testing::{near, over, Frames};
         use iced::time::Instant;
         use iced::{Point, Size, Theme};
 
-        // Over white, so the barrier's darkening shows.
+        // Over white, so the barrier's darkening shows; a field on its well
+        // inside the card, overlapping it.
         let view = |fade: Fade| -> Element<'static, Message> {
+            let well = container(Space::new().width(Length::Fill).height(40))
+                .padding(10)
+                .style(theme::inset(8.0));
             stack![
                 container(Space::new())
                     .width(Length::Fill)
                     .height(Length::Fill)
                     .style(theme::fill(Color::WHITE)),
-                modal(card(Space::new().height(100).into(), fade), fade),
+                modal(card(well.into()), fade),
             ]
             .into()
         };
         let mut window = Frames::new(Size::new(600.0, 400.0));
         let corner = Point::new(5.0, 5.0);
-        for (barrier, card) in [(0.0, 0.0), (0.5, 0.75), (1.0, 1.0)] {
+        // The card's middle: the well over the card's fill.
+        let middle = Point::new(300.0, 200.0);
+        window.frame(view(Fade::SHOWN), &[], Instant::now());
+        let full = window.pixel(middle);
+        let fill = match theme::dialog_card(&Theme::Dark).background {
+            Some(Background::Color(fill)) => fill,
+            other => panic!("{other:?}"),
+        };
+        assert!(!near(full, fill), "the well shows over the fill");
+        for (barrier, card) in [(0.0, 0.0), (0.5, 0.75), (0.9, 0.4), (1.0, 1.0)] {
             let fade = Fade { barrier, card };
             window.frame(view(fade), &[], Instant::now());
             let shade = Color::WHITE.lerp(Color::BLACK, theme::DIALOG_BARRIER.a * barrier);
             assert!(near(window.pixel(corner), shade), "barrier at {barrier}");
-            let full = theme::dialog_card(&Theme::Dark);
-            let style = fade.style(theme::dialog_card)(&Theme::Dark);
-            assert_eq!(
-                style.background,
-                full.background.map(|b| b.scale_alpha(card)),
-                "fill at {card}"
-            );
-            assert_eq!(style.border.color, faded(full.border.color, card));
-            assert_eq!(style.shadow.color, faded(full.shadow.color, card));
-            assert_eq!(
-                fade.color(Studio::TEXT_PRIMARY).a,
-                Studio::TEXT_PRIMARY.a * card
+            // The card as drawn all in, at the card's opacity, over the
+            // barrier: not the well at it over the fill at it.
+            let drawn = window.pixel(middle);
+            let layer = over(Color { a: card, ..full }, shade);
+            assert!(
+                near(drawn, layer),
+                "card at {card}: {drawn:?}, not {layer:?}"
             );
         }
     }

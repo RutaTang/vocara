@@ -58,17 +58,25 @@
 //! box grown by its 0.5 spread on every side (`ShapeDecoration` shadows
 //! `rect.shift(offset).inflate(spreadRadius)`).
 //!
+//! Behind the box, the toolbar blurred what lay there (its own shadow
+//! included) by a Gaussian of sigma 20, then saturated it threefold
+//! (`BackdropFilter` with `ImageFilter.compose(outer:
+//! ColorFilter.matrix(_matrixWithSaturation(3)), inner:
+//! ImageFilter.blur(20, 20))`, whose blur, composed, takes the window's
+//! edge pixels beyond it), inside the box's hard-edged clip: the renderer
+//! does the same (`opacity_layer::Effects::draw_backdrop_filter`), and the
+//! box and its items go over it in a later layer. Each item fades as one
+//! layer (its hover fill and label together, the `FadeTransition` inside
+//! `CupertinoButton`).
+//!
 //! What iced cannot draw as Flutter did, kept as close as it can be:
-//! - the toolbar blurred (sigma 20) and saturated (×3) what lay behind it
-//!   (`BackdropFilter`); iced has no backdrop filter, so what lies behind
-//!   shows through the 70 % fill unblurred;
 //! - its shadow was its shape blurred by a Gaussian (`MaskFilter.blur`,
 //!   sigma 6.27 for the blur radius 10); iced's shadow is a quad's (a
 //!   circular-cornered box, radius 8, faded out over the blur radius on
 //!   its own curve), so only its place and spread are Flutter's;
-//! - its outer edge was cut by a hard-edged clip of the same shape
-//!   (`Clip.hardEdge` around the backdrop filter); iced fills it
-//!   antialiased;
+//! - the hard-edged clip of the box's shape (`Clip.hardEdge`) also cut its
+//!   fill and border; iced has no clip of a shape, so those are filled
+//!   antialiased (the filtered backdrop alone is cut hard);
 //! - the labels' style set `inherit: false` and no family, so Flutter set
 //!   them in the macOS system UI font (SF Pro, CoreText's `.AppleSystemUIFont`),
 //!   a variable face whose optical size CoreText set from the text's size,
@@ -100,6 +108,7 @@ use iced::{
 
 use crate::ui::core::motion::{cubic_curve, Lerp};
 use crate::ui::core::theme::Zinc;
+use crate::ui::core::widgets::opacity_layer::{BackdropFilter, Effects as _};
 use crate::ui::core::widgets::rsuperellipse;
 use crate::ui::core::widgets::studio_text::{draw_line, lay_out, Spec};
 
@@ -114,6 +123,10 @@ pub const WIDTH: f32 = 222.0;
 pub const RADIUS: f32 = 8.0;
 /// `_kToolbarPadding`.
 pub const PADDING: f32 = 6.0;
+/// `_kToolbarBlurSigma`: the backdrop's blur.
+pub const BLUR_SIGMA: f32 = 20.0;
+/// `_kToolbarSaturationBoost`: the blurred backdrop's saturation, scaled.
+pub const SATURATION: f32 = 3.0;
 /// `_kToolbarBackgroundColor`, dark.
 pub const BACKGROUND: Color = Color::from_rgba8(0x30, 0x30, 0x30, 0xB2 as f32 / 255.0);
 /// `_kToolbarBorderColor`, dark.
@@ -407,63 +420,19 @@ impl<Message> overlay::Overlay<Message, Theme, Renderer> for Toolbar<'_, Message
             },
             Color::TRANSPARENT,
         );
-        let hovered = item_at(bounds, &items, cursor);
-        let now = menu.now.unwrap_or_else(Instant::now);
-        // The box and the hovered item's fill, superellipses, over the
-        // shadow (a layer's quads are drawn before its geometry) and under
-        // the labels.
-        let mut frame = Frame::new(renderer, bounds.size());
-        let local = Rectangle::with_size(bounds.size());
-        frame.fill(&rsuperellipse::path(local, RADIUS), BACKGROUND);
-        frame.stroke(
-            &rsuperellipse::path(
-                local.shrink(BORDER_WIDTH / 2.0),
-                RADIUS - BORDER_WIDTH / 2.0,
-            ),
-            Stroke::default()
-                .with_width(BORDER_WIDTH)
-                .with_color(BORDER),
+        // What lies behind the box, the shadow included, blurred and
+        // saturated inside its hard-edged clip.
+        renderer.draw_backdrop_filter(
+            &rsuperellipse::path(bounds, RADIUS),
+            BackdropFilter {
+                blur_sigma: BLUR_SIGMA,
+                color_matrix: BackdropFilter::saturation_matrix(SATURATION),
+            },
         );
-        let rows: Vec<(Item, Rectangle, f32)> = items
-            .iter()
-            .enumerate()
-            .map(|(i, item)| {
-                let row = Rectangle {
-                    x: bounds.x + PADDING,
-                    y: bounds.y + PADDING + i as f32 * item_height(),
-                    width: bounds.width - 2.0 * PADDING,
-                    height: item_height(),
-                };
-                (*item, row, menu.fades[item.index()].opacity(now))
-            })
-            .collect();
-        for (item, row, opacity) in &rows {
-            if hovered == Some(*item) {
-                let row = *row - Vector::new(bounds.x, bounds.y);
-                frame.fill(
-                    &rsuperellipse::path(row, BUTTON_RADIUS),
-                    faded(HOVER, *opacity),
-                );
-            }
-        }
-        renderer.with_translation(Vector::new(bounds.x, bounds.y), |renderer| {
-            renderer.draw_geometry(frame.into_geometry());
+        // The rest over it, in a later layer.
+        renderer.with_layer(bounds.expand(1.0), |renderer| {
+            draw_box(renderer, bounds, &items, menu, cursor);
         });
-        for (item, row, opacity) in rows {
-            let is_hovered = hovered == Some(item);
-            let (buffer, _) = label(item);
-            draw_line(
-                renderer,
-                &buffer,
-                Point::new(row.x + BUTTON_PADDING.left, row.y + BUTTON_PADDING.top),
-                faded(if is_hovered { HOVER_LABEL } else { LABEL }, opacity),
-                Rectangle {
-                    x: row.x + BUTTON_PADDING.left,
-                    width: row.width - BUTTON_PADDING.x(),
-                    ..row
-                },
-            );
-        }
     }
 
     fn update(
@@ -560,11 +529,71 @@ impl<Message> overlay::Overlay<Message, Theme, Renderer> for Toolbar<'_, Message
     }
 }
 
-/// A color at `opacity` (the item's `FadeTransition`).
-fn faded(color: Color, opacity: f32) -> Color {
-    Color {
-        a: color.a * opacity,
-        ..color
+/// The box (its fill and border, superellipses) and its items over the
+/// filtered backdrop: each item (the hovered one's fill and its label) as
+/// one layer at its press fade's opacity (the item's `FadeTransition`).
+fn draw_box(
+    renderer: &mut Renderer,
+    bounds: Rectangle,
+    items: &[Item],
+    menu: &State,
+    cursor: mouse::Cursor,
+) {
+    let hovered = item_at(bounds, items, cursor);
+    let now = menu.now.unwrap_or_else(Instant::now);
+    let mut frame = Frame::new(renderer, bounds.size());
+    let local = Rectangle::with_size(bounds.size());
+    frame.fill(&rsuperellipse::path(local, RADIUS), BACKGROUND);
+    frame.stroke(
+        &rsuperellipse::path(
+            local.shrink(BORDER_WIDTH / 2.0),
+            RADIUS - BORDER_WIDTH / 2.0,
+        ),
+        Stroke::default()
+            .with_width(BORDER_WIDTH)
+            .with_color(BORDER),
+    );
+    renderer.with_translation(Vector::new(bounds.x, bounds.y), |renderer| {
+        renderer.draw_geometry(frame.into_geometry());
+    });
+    for (i, item) in items.iter().enumerate() {
+        let row = Rectangle {
+            x: bounds.x + PADDING,
+            y: bounds.y + PADDING + i as f32 * item_height(),
+            width: bounds.width - 2.0 * PADDING,
+            height: item_height(),
+        };
+        let is_hovered = hovered == Some(*item);
+        let draw = |renderer: &mut Renderer| {
+            if is_hovered {
+                let mut frame = Frame::new(renderer, row.size());
+                frame.fill(
+                    &rsuperellipse::path(Rectangle::with_size(row.size()), BUTTON_RADIUS),
+                    HOVER,
+                );
+                renderer.with_translation(Vector::new(row.x, row.y), |renderer| {
+                    renderer.draw_geometry(frame.into_geometry());
+                });
+            }
+            let (buffer, _) = label(*item);
+            draw_line(
+                renderer,
+                &buffer,
+                Point::new(row.x + BUTTON_PADDING.left, row.y + BUTTON_PADDING.top),
+                if is_hovered { HOVER_LABEL } else { LABEL },
+                Rectangle {
+                    x: row.x + BUTTON_PADDING.left,
+                    width: row.width - BUTTON_PADDING.x(),
+                    ..row
+                },
+            );
+        };
+        let opacity = menu.fades[item.index()].opacity(now);
+        if opacity < 1.0 {
+            renderer.with_opacity_layer(row.expand(1.0), opacity, draw);
+        } else {
+            draw(renderer);
+        }
     }
 }
 

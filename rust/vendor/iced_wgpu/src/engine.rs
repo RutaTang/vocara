@@ -1,3 +1,4 @@
+use crate::effect;
 use crate::graphics::{Antialiasing, Shell};
 use crate::primitive;
 use crate::quad;
@@ -18,6 +19,8 @@ pub struct Engine {
     #[cfg(any(feature = "image", feature = "svg"))]
     pub(crate) image_pipeline: crate::image::Pipeline,
     pub(crate) primitive_storage: Arc<RwLock<primitive::Storage>>,
+    // vocara: the effects' layers' pipelines.
+    pub(crate) effect_pipeline: effect::Pipeline,
     _shell: Shell,
 }
 
@@ -51,6 +54,8 @@ impl Engine {
             primitive_storage: Arc::new(RwLock::new(
                 primitive::Storage::default(),
             )),
+
+            effect_pipeline: effect::Pipeline::new(&device, format),
 
             device,
             queue,

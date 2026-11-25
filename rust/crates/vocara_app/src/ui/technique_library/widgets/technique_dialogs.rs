@@ -100,24 +100,22 @@ impl NewTechniqueDialog {
                 text("New technique")
                     .size(16)
                     .font(font::BOLD)
-                    .color(fade.color(Studio::TEXT_PRIMARY)),
+                    .color(Studio::TEXT_PRIMARY),
                 Space::new().height(16),
                 studio_field("Name", &self.name)
                     .hint("e.g. Twang, Mixed voice, Curbing")
                     .id(self.input.clone())
                     .on_input(Message::Input)
                     // Return creates, as in the app's other name dialogs.
-                    .on_submit(Message::Confirm)
-                    .opacity(fade.card),
+                    .on_submit(Message::Confirm),
                 Space::new().height(20),
                 row![
                     Space::new().width(Length::Fill),
-                    studio_button("Cancel", Message::Cancel).opacity(fade.card),
+                    studio_button("Cancel", Message::Cancel),
                     Space::new().width(8),
                     studio_button("Create", Message::Confirm)
                         .variant(StudioButtonVariant::Accent)
-                        .enabled(self.trimmed().is_some())
-                        .opacity(fade.card),
+                        .enabled(self.trimmed().is_some()),
                 ],
             ]
             .width(Length::Fill),
@@ -125,7 +123,7 @@ impl NewTechniqueDialog {
         .width(440)
         // 22 inside the card's 1 px border.
         .padding(23)
-        .style(fade.style(theme::dialog_card));
+        .style(theme::dialog_card);
         modal(container(card).padding(24).into(), fade)
     }
 }

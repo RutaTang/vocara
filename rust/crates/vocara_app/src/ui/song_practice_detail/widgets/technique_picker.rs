@@ -163,9 +163,9 @@ impl TechniquePicker {
             text(self.title.as_str())
                 .size(16)
                 .font(font::BOLD)
-                .color(fade.color(Studio::TEXT_PRIMARY)),
+                .color(Studio::TEXT_PRIMARY),
             Space::new().height(12),
-            search_field(&self.query, self.search.clone(), fade),
+            search_field(&self.query, self.search.clone()),
         ])
         .padding(Padding {
             top: 18.0,
@@ -179,21 +179,21 @@ impl TechniquePicker {
                 container(Space::new())
                     .width(Length::Fill)
                     .height(1)
-                    .style(theme::fill(fade.color(Studio::BORDER))),
-                self.body(fade),
+                    .style(theme::fill(Studio::BORDER)),
+                self.body(),
             ]
             .width(Length::Fill),
         )
         .width(WIDTH)
         // Inside the 1 px border (a decoration's border pads its child).
         .padding(1)
-        .style(fade.style(theme::dialog_card));
+        .style(theme::dialog_card);
         modal(container(card).padding(24).into(), fade)
     }
 
-    fn body(&self, fade: Fade) -> Element<'_, Message> {
+    fn body(&self) -> Element<'_, Message> {
         let Some(all) = &self.all else {
-            return container(spinner(20.0, 2.0, fade.color(Studio::TEXT_SECONDARY)))
+            return container(spinner(20.0, 2.0, Studio::TEXT_SECONDARY))
                 .width(Length::Fill)
                 .height(120)
                 .align_x(Horizontal::Center)
@@ -201,25 +201,19 @@ impl TechniquePicker {
                 .into();
         };
         if self.failed {
-            return hint(
-                "Couldn't open the technique library. Try again in a moment.",
-                fade,
-            );
+            return hint("Couldn't open the technique library. Try again in a moment.");
         }
         if all.is_empty() {
-            return hint(
-                "No techniques yet. Add some in the technique library first.",
-                fade,
-            );
+            return hint("No techniques yet. Add some in the technique library first.");
         }
         let filtered = self.filtered();
         if filtered.is_empty() {
-            return hint("No techniques match.", fade);
+            return hint("No techniques match.");
         }
-        let rows = Column::with_children(filtered.into_iter().map(|t| technique_row(t, fade)))
+        let rows = Column::with_children(filtered.into_iter().map(technique_row))
             .width(Length::Fill)
             .padding([6, 0]);
-        container(scrollable(rows).fading_with(fade.scrollbar(theme::scrollbar)))
+        container(scrollable(rows).fading())
             .width(Length::Fill)
             .max_height(LIST_MAX_HEIGHT)
             .into()
@@ -230,10 +224,10 @@ impl TechniquePicker {
 /// the field. The well's height is fixed, so the field's own inset
 /// ([`theme::FIELD_PADDING`]) moves its text in from the sides only: the
 /// field stays centred in the well.
-fn search_field(query: &str, id: widget::Id, fade: Fade) -> Element<'_, Message> {
+fn search_field(query: &str, id: widget::Id) -> Element<'_, Message> {
     container(
         row![
-            icons::icon(Icon::Search, 14.0, fade.color(Studio::TEXT_FAINT)),
+            icons::icon(Icon::Search, 14.0, Studio::TEXT_FAINT),
             Space::new().width(8),
             text_input("Search techniques", query)
                 .id(id)
@@ -241,8 +235,8 @@ fn search_field(query: &str, id: widget::Id, fade: Fade) -> Element<'_, Message>
                 .size(13)
                 .line_height(1.0)
                 .padding(theme::FIELD_PADDING)
-                .caret_color(fade.color(Studio::ACCENT))
-                .style(fade.input(theme::studio_input)),
+                .caret_color(Studio::ACCENT)
+                .style(theme::studio_input),
         ]
         .align_y(Vertical::Center),
     )
@@ -251,31 +245,31 @@ fn search_field(query: &str, id: widget::Id, fade: Fade) -> Element<'_, Message>
     // 10 inside the 1 px border.
     .padding([0, 11])
     .align_y(Vertical::Center)
-    .style(fade.style(theme::inset(8.0)))
+    .style(theme::inset(8.0))
     .into()
 }
 
 /// `_TechniqueRow`: `Studio.hover` under the pointer, 20 / 9 padding; a
 /// coral waypoints glyph, the name (13.5 px w600) and, when it has tags,
 /// them joined by " · " under it — one line each.
-fn technique_row(t: &Technique, fade: Fade) -> Element<'_, Message> {
+fn technique_row(t: &Technique) -> Element<'_, Message> {
     let mut labels = column![studio_text(t.name.as_str())
         .size(13.5)
         .font(font::SEMIBOLD)
-        .color(fade.color(Studio::TEXT_PRIMARY))
+        .color(Studio::TEXT_PRIMARY)
         .ellipsis(1)]
     .width(Length::Fill);
     if !t.tags.is_empty() {
         labels = labels.push(Space::new().height(2)).push(
             studio_text(t.tags.join(" · "))
                 .size(11)
-                .color(fade.color(Studio::TEXT_FAINT))
+                .color(Studio::TEXT_FAINT)
                 .ellipsis(1),
         );
     }
     button(
         row![
-            icons::icon(Icon::Waypoints, 13.0, fade.color(Studio::ACCENT)),
+            icons::icon(Icon::Waypoints, 13.0, Studio::ACCENT),
             Space::new().width(10),
             labels,
         ]
@@ -283,20 +277,20 @@ fn technique_row(t: &Technique, fade: Fade) -> Element<'_, Message> {
     )
     .width(Length::Fill)
     .padding([9, 20])
-    .style(move |t, s| theme::faded_button(theme::menu_item(t, s), fade.card))
+    .style(theme::menu_item)
     .on_press(Message::Pick(t.id.clone()))
     .into()
 }
 
 /// `_Hint`: a faint centred message, 20 / 28 padding.
-fn hint(label: &str, fade: Fade) -> Element<'_, Message> {
+fn hint(label: &str) -> Element<'_, Message> {
     container(
         text(label)
             .size(12.5)
             .line_height(1.4)
             .align_x(Horizontal::Center)
             .width(Length::Fill)
-            .color(fade.color(Studio::TEXT_FAINT)),
+            .color(Studio::TEXT_FAINT),
     )
     .width(Length::Fill)
     .padding([28, 20])
@@ -306,10 +300,10 @@ fn hint(label: &str, fade: Fade) -> Element<'_, Message> {
 /// `content` centred over the studio dialogs' dismissible barrier
 /// (`Color(0xB0000000)`), as `confirm_dialog::modal` draws it: a tap on the
 /// barrier cancels, the card takes its own taps, Escape cancels and no key
-/// reaches what lies beneath. Both at `fade`.
+/// reaches what lies beneath. Both at `fade` (the card as one layer).
 fn modal(content: Element<'_, Message>, fade: Fade) -> Element<'_, Message> {
     let barrier = barrier(theme::DIALOG_BARRIER, fade.barrier, Some(Message::Cancel));
-    let layers = stack![barrier, center(opaque(content))];
+    let layers = stack![barrier, center(opaque(fade.card(content)))];
     Wrap::<Message, ()>::new(
         // A dialog route's scope: Tab goes round its fields.
         focus_scope(layers),

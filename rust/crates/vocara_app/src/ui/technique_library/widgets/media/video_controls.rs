@@ -97,10 +97,6 @@
 //!
 //! # Not as Flutter had it
 //!
-//! - iced has no group opacity: the fade multiplies each part's own alpha.
-//!   Where parts overlap (a lit button under its icon) a half-faded frame
-//!   blends a little differently from Flutter's `AnimatedOpacity`, which
-//!   faded the composited bars as one.
 //! - Times come from the frames: a hover restarts the 3 s timer, and a tap
 //!   is timed for the double press, at the frame that follows it (iced
 //!   draws one at once), not at the event.
@@ -136,6 +132,7 @@ use iced::{
 use crate::ui::core::material_icons::{self, MaterialIcon};
 use crate::ui::core::motion::{Controller, Curve, Implicit};
 use crate::ui::core::theme::{faded, font, Zinc};
+use crate::ui::core::widgets::opacity_layer::Effects as _;
 use crate::ui::core::widgets::pan_zoom::{self, Scroll};
 use crate::ui::core::widgets::studio_hint::arc_at;
 
@@ -1419,29 +1416,33 @@ impl<M> Widget<M, Theme, Renderer> for VideoControls<'_, M> {
         let now = state.now.unwrap_or_else(Instant::now);
         let g = geometry(bounds, state.strip(now));
         let o = state.opacity.value(now);
-        renderer.with_layer(bounds, |renderer| {
-            if o > 0.0 {
-                self.draw_gradient(renderer, bounds, o);
-            }
-            if let (Some(bars), true) = (&state.bars, o > 0.0) {
-                self.draw_bars(renderer, &g, bars, now, o);
-            }
-        });
-        if let (Some(bars), true) = (&state.bars, o > 0.0) {
-            if let Some(clip) = g.strip.intersection(&bounds) {
-                let shown = o * bars.volume.opacity.value(now);
-                if shown > 0.0 {
-                    renderer.with_layer(clip, |renderer| {
-                        self.draw_slider(renderer, &g, shown);
-                    });
+        // The bars fade as one layer (`AnimatedOpacity`), the volume
+        // slider in a layer of its own inside them.
+        if o > 0.0 {
+            renderer.with_opacity_layer(bounds, o, |renderer| {
+                renderer.with_layer(bounds, |renderer| {
+                    self.draw_gradient(renderer, bounds);
+                    if let Some(bars) = &state.bars {
+                        self.draw_bars(renderer, &g, bars, now);
+                    }
+                });
+                if let Some(bars) = &state.bars {
+                    if let Some(clip) = g.strip.intersection(&bounds) {
+                        let shown = bars.volume.opacity.value(now);
+                        if shown > 0.0 {
+                            renderer.with_opacity_layer(clip, shown, |renderer| {
+                                self.draw_slider(renderer, &g);
+                            });
+                        }
+                    }
                 }
-            }
+            });
         }
         if let Some(since) = state.spinner_since {
             let shown = state.buffering.value(now);
             if shown > 0.0 {
-                renderer.with_layer(bounds, |renderer| {
-                    draw_spinner(renderer, &g, now.saturating_duration_since(since), shown);
+                renderer.with_opacity_layer(bounds, shown, |renderer| {
+                    draw_spinner(renderer, &g, now.saturating_duration_since(since));
                 });
             }
         }
@@ -1470,15 +1471,15 @@ fn fill(renderer: &mut Renderer, bounds: Rectangle, radius: impl Into<Radius>, c
 }
 
 impl<M> VideoControls<'_, M> {
-    /// The bottom gradient, faded to `o`.
-    fn draw_gradient(&self, renderer: &mut Renderer, bounds: Rectangle, o: f32) {
+    /// The bottom gradient.
+    fn draw_gradient(&self, renderer: &mut Renderer, bounds: Rectangle) {
         let clear = Color {
             a: 0.0,
             ..GRADIENT_COLOR
         };
         let gradient = gradient::Linear::new(Radians(std::f32::consts::PI))
             .add_stop(GRADIENT_START, clear)
-            .add_stop(1.0, faded(GRADIENT_COLOR, o));
+            .add_stop(1.0, GRADIENT_COLOR);
         renderer.fill_quad(
             Quad {
                 bounds,
@@ -1498,8 +1499,8 @@ impl<M> VideoControls<'_, M> {
         );
     }
 
-    /// The seek bar and the bottom bar, faded to `o`.
-    fn draw_bars(&self, renderer: &mut Renderer, g: &Geometry, bars: &Bars, now: Instant, o: f32) {
+    /// The seek bar and the bottom bar.
+    fn draw_bars(&self, renderer: &mut Renderer, g: &Geometry, bars: &Bars, now: Instant) {
         let playback = &self.playback;
         // The seek bar.
         let seek = &bars.seek;
@@ -1521,25 +1522,15 @@ impl<M> VideoControls<'_, M> {
         } else {
             percent(position, playback.duration)
         };
-        fill(renderer, row(width), 0.0, faded(SEEK_BAR_COLOR, o));
-        fill(
-            renderer,
-            row(width * seek.slider),
-            0.0,
-            faded(SEEK_BAR_COLOR, o),
-        );
+        fill(renderer, row(width), 0.0, SEEK_BAR_COLOR);
+        fill(renderer, row(width * seek.slider), 0.0, SEEK_BAR_COLOR);
         fill(
             renderer,
             row(width * percent(playback.buffer, playback.duration)),
             0.0,
-            faded(SEEK_BAR_COLOR, o),
+            SEEK_BAR_COLOR,
         );
-        fill(
-            renderer,
-            row(width * played),
-            0.0,
-            faded(SEEK_BAR_POSITION_COLOR, o),
-        );
+        fill(renderer, row(width * played), 0.0, SEEK_BAR_POSITION_COLOR);
         let thumb = seek.thumb.value(now);
         if thumb > 0.0 {
             let left = g.seek.x + (width - SEEK_BAR_THUMB_SIZE / 2.0) * played;
@@ -1550,7 +1541,7 @@ impl<M> VideoControls<'_, M> {
                     Size::new(thumb, thumb),
                 ),
                 (SEEK_BAR_THUMB_SIZE / 2.0).min(thumb / 2.0),
-                faded(SEEK_BAR_POSITION_COLOR, o),
+                SEEK_BAR_POSITION_COLOR,
             );
         }
         // The buttons' backgrounds and highlights.
@@ -1558,12 +1549,12 @@ impl<M> VideoControls<'_, M> {
             let rect = button.rect(g);
             let ink = &bars.ink[button.index()];
             if ink.hovered || ink.pressed {
-                fill(renderer, rect, BUTTON_RADIUS, faded(BUTTON_LIT, o));
+                fill(renderer, rect, BUTTON_RADIUS, BUTTON_LIT);
             }
             let hover = ink.hover.controller.value(now);
-            fill(renderer, rect, BUTTON_RADIUS, faded(INK_HOVERED, o * hover));
+            fill(renderer, rect, BUTTON_RADIUS, faded(INK_HOVERED, hover));
             let press = ink.press.controller.value(now);
-            fill(renderer, rect, BUTTON_RADIUS, faded(INK_PRESSED, o * press));
+            fill(renderer, rect, BUTTON_RADIUS, faded(INK_PRESSED, press));
         }
         // The position.
         renderer.fill_text(
@@ -1579,7 +1570,7 @@ impl<M> VideoControls<'_, M> {
                 wrapping: core_text::Wrapping::None,
             },
             g.text,
-            faded(BUTTON_COLOR, o),
+            BUTTON_COLOR,
             g.bounds,
         );
         // The icons.
@@ -1594,13 +1585,13 @@ impl<M> VideoControls<'_, M> {
         for (path, opacity) in
             material_icons::play_pause(progress, inset(g.play, BUTTON_SIZE), BUTTON_SIZE)
         {
-            frame.fill(&path, faded(BUTTON_COLOR, o * opacity));
+            frame.fill(&path, faded(BUTTON_COLOR, opacity));
         }
         for (icon, controller) in &bars.volume.icons {
             let shown = controller.value(now);
             if shown > 0.0 {
                 let path = icon.path(inset(g.volume, VOLUME_ICON_SIZE), VOLUME_ICON_SIZE);
-                frame.fill(&path, faded(BUTTON_COLOR, o * shown));
+                frame.fill(&path, faded(BUTTON_COLOR, shown));
             }
         }
         let icon = if self.fullscreen {
@@ -1610,13 +1601,13 @@ impl<M> VideoControls<'_, M> {
         };
         frame.fill(
             &icon.path(inset(g.fullscreen, BUTTON_SIZE), BUTTON_SIZE),
-            faded(BUTTON_COLOR, o),
+            BUTTON_COLOR,
         );
         renderer.draw_geometry(frame.into_geometry());
     }
 
-    /// The volume slider, faded to `o` (its strip clips it).
-    fn draw_slider(&self, renderer: &mut Renderer, g: &Geometry, o: f32) {
+    /// The volume slider (its strip clips it).
+    fn draw_slider(&self, renderer: &mut Renderer, g: &Geometry) {
         let slider = g.slider;
         let value = (self.playback.volume / FULL_VOLUME).clamp(0.0, 1.0) as f32;
         let cy = slider.y + slider.height / 2.0;
@@ -1631,7 +1622,7 @@ impl<M> VideoControls<'_, M> {
                     Size::new(right - (thumb - half), VOLUME_TRACK_HEIGHT),
                 ),
                 half,
-                faded(VOLUME_BAR_COLOR, o),
+                VOLUME_BAR_COLOR,
             );
         }
         if thumb > slider.x + half {
@@ -1643,7 +1634,7 @@ impl<M> VideoControls<'_, M> {
                     Size::new(thumb + half - slider.x, active),
                 ),
                 active / 2.0,
-                faded(VOLUME_BAR_ACTIVE_COLOR, o),
+                VOLUME_BAR_ACTIVE_COLOR,
             );
         }
         let r = VOLUME_THUMB_SIZE / 2.0;
@@ -1651,13 +1642,13 @@ impl<M> VideoControls<'_, M> {
             renderer,
             Rectangle::new(Point::new(thumb - r, cy - r), Size::new(2.0 * r, 2.0 * r)),
             r,
-            faded(VOLUME_BAR_ACTIVE_COLOR, o),
+            VOLUME_BAR_ACTIVE_COLOR,
         );
     }
 }
 
-/// The buffering indicator `elapsed` into its spin, at `opacity`.
-fn draw_spinner(renderer: &mut Renderer, g: &Geometry, elapsed: Duration, opacity: f32) {
+/// The buffering indicator `elapsed` into its spin.
+fn draw_spinner(renderer: &mut Renderer, g: &Geometry, elapsed: Duration) {
     let mut frame = Frame::with_bounds(renderer, g.bounds);
     let (start, sweep) = arc_at(elapsed.as_secs_f32() * 1000.0);
     let arc = Path::new(|b| {
@@ -1671,7 +1662,7 @@ fn draw_spinner(renderer: &mut Renderer, g: &Geometry, elapsed: Duration, opacit
     frame.stroke(
         &arc,
         Stroke::default()
-            .with_color(faded(Color::WHITE, opacity))
+            .with_color(Color::WHITE)
             .with_width(SPINNER_STROKE)
             .with_line_cap(canvas::LineCap::Square),
     );

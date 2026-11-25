@@ -32,6 +32,7 @@ pub mod geometry;
 
 mod buffer;
 mod color;
+mod effect; // vocara
 mod engine;
 mod quad;
 mod text;
@@ -55,6 +56,7 @@ pub use wgpu;
 
 pub use engine::Engine;
 pub use layer::Layer;
+pub use layer::{Backdrop, Effect, Group}; // vocara
 pub use primitive::Primitive;
 pub use settings::Settings;
 
@@ -93,6 +95,34 @@ pub struct Renderer {
     image_cache: std::cell::RefCell<image::Cache>,
 
     staging_belt: wgpu::util::StagingBelt,
+
+    // vocara: the opacity layers drawing, innermost last: each holds the
+    // stack it interrupted (`layers` is the group's own meanwhile).
+    groups: Vec<OpenGroup>,
+    // vocara: the groups' offscreen targets.
+    group_targets: effect::Targets,
+}
+
+/// vocara: an opacity layer being drawn.
+#[derive(Debug)]
+struct OpenGroup {
+    /// The stack the group's layer goes into when it ends.
+    parent: layer::Stack,
+    /// The group's clip, transformed and inside the layer it is in.
+    bounds: Rectangle,
+    /// The opacity it is composited at.
+    opacity: f32,
+}
+
+/// vocara: how many of each kind of prepared batch the layers drawn so far
+/// used (the batches are prepared, and drawn, in the same order).
+#[derive(Debug, Default)]
+struct Counts {
+    quad: usize,
+    mesh: usize,
+    text: usize,
+    #[cfg(any(feature = "svg", feature = "image"))]
+    image: usize,
 }
 
 impl Renderer {
@@ -127,8 +157,104 @@ impl Renderer {
                 buffer::MAX_WRITE_SIZE as u64,
             ),
 
+            groups: Vec::new(),
+            group_targets: effect::Targets::default(),
+
             engine,
         }
+    }
+
+    /// vocara: starts a group that is drawn offscreen and, when
+    /// [`end_opacity_layer`](Self::end_opacity_layer) ends it, composited
+    /// as one layer at `opacity` inside `bounds` (Flutter's `Opacity`):
+    /// what overlaps inside it shows the topmost part, not a blend of
+    /// translucent parts. Clips and transformations go on working inside,
+    /// and the clip of the layer it is drawn in clips it too.
+    pub fn start_opacity_layer(&mut self, bounds: Rectangle, opacity: f32) {
+        let (layer, transformation) = self.layers.current_mut();
+        let bounds = (bounds * transformation)
+            .intersection(&layer.bounds)
+            .unwrap_or_default();
+        let mut group = layer::Stack::new();
+
+        group.reset(bounds);
+        group.push_transformation(transformation);
+
+        let parent = std::mem::replace(&mut self.layers, group);
+
+        self.groups.push(OpenGroup {
+            parent,
+            bounds,
+            opacity,
+        });
+    }
+
+    /// vocara: ends the group [`start_opacity_layer`] started; it is
+    /// composited above what was drawn before it, like a layer started
+    /// there.
+    ///
+    /// [`start_opacity_layer`]: Self::start_opacity_layer
+    pub fn end_opacity_layer(&mut self) {
+        let Some(open) = self.groups.pop() else {
+            return;
+        };
+
+        let mut group = std::mem::replace(&mut self.layers, open.parent);
+        group.merge();
+
+        self.layers.push_clip(Rectangle::default());
+        self.layers.current_mut().0.bounds = open.bounds;
+        self.layers.current_mut().0.effect =
+            Some(layer::Effect::Group(Box::new(layer::Group {
+                opacity: open.opacity,
+                layers: group,
+            })));
+        self.layers.pop_clip();
+    }
+
+    /// vocara: filters what was drawn before under `clip` (Flutter's
+    /// `BackdropFilter`, in a `Clip.hardEdge`): a Gaussian blur of standard
+    /// deviation `blur_sigma` (logical pixels; beyond the target's edge the
+    /// nearest pixel), then `color_matrix` (4 rows of 5, applied to
+    /// unpremultiplied colors, the offsets in 0..=1), drawn over it on the
+    /// pixels whose centers `clip` holds. It is a layer of its own: what is
+    /// drawn over it must be drawn in a later layer. The target must allow
+    /// copies from it (a window's surface does where the platform allows
+    /// it, as Metal's does).
+    #[cfg(feature = "geometry")]
+    pub fn draw_backdrop_filter(
+        &mut self,
+        clip: &graphics::geometry::Path,
+        blur_sigma: f32,
+        color_matrix: [f32; 20],
+    ) {
+        let (layer, transformation) = self.layers.current_mut();
+        let Some((vertices, indices)) =
+            effect::tessellate(clip, transformation)
+        else {
+            return;
+        };
+
+        let shape = lyon::algorithms::aabb::fast_bounding_box(clip.raw());
+        let shape = Rectangle {
+            x: shape.min.x,
+            y: shape.min.y,
+            width: shape.width(),
+            height: shape.height(),
+        } * transformation;
+        let bounds = shape.intersection(&layer.bounds).unwrap_or_default();
+
+        self.layers.push_clip(Rectangle::default());
+        self.layers.current_mut().0.bounds = bounds;
+        self.layers.current_mut().0.effect =
+            Some(layer::Effect::Backdrop(Box::new(layer::Backdrop {
+                vertices,
+                indices,
+                bounds: shape,
+                blur_sigma: blur_sigma * transformation.scale_factor(),
+                color_matrix,
+            })));
+        self.layers.pop_clip();
     }
 
     fn draw(
@@ -300,18 +426,34 @@ impl Renderer {
         encoder: &mut wgpu::CommandEncoder,
         viewport: &Viewport,
     ) {
-        let scale_factor = viewport.scale_factor();
-
         self.text_viewport
             .update(&self.engine.queue, viewport.physical_size());
+
+        self.layers.merge();
+
+        // vocara: the layers are prepared by `prepare_layers` (upstream's
+        // loop), which prepares a group's layers too, in the order
+        // `render_layers` draws them.
+        let layers = std::mem::take(&mut self.layers);
+        self.prepare_layers(encoder, viewport, layers.as_slice());
+        self.layers = layers;
+    }
+
+    /// vocara: upstream's preparing loop, moved out of `prepare` so that a
+    /// group's layers are prepared with it.
+    fn prepare_layers(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        viewport: &Viewport,
+        layers: &[Layer],
+    ) {
+        let scale_factor = viewport.scale_factor();
 
         let physical_bounds = Rectangle::<f32>::from(Rectangle::with_size(
             viewport.physical_size(),
         ));
 
-        self.layers.merge();
-
-        for layer in self.layers.iter() {
+        for layer in layers {
             let clip_bounds = layer.bounds * scale_factor;
 
             if physical_bounds
@@ -319,6 +461,11 @@ impl Renderer {
                 .and_then(Rectangle::snap)
                 .is_none()
             {
+                continue;
+            }
+
+            if let Some(layer::Effect::Group(group)) = &layer.effect {
+                self.prepare_layers(encoder, viewport, group.layers.as_slice());
                 continue;
             }
 
@@ -421,6 +568,56 @@ impl Renderer {
         clear_color: Option<Color>,
         viewport: &Viewport,
     ) {
+        // vocara: the layers are drawn by `render_layers` (upstream's loop),
+        // which draws a group's layers into an offscreen target and
+        // composites them, and filters backdrops.
+        let layers = std::mem::take(&mut self.layers);
+        let mut counts = Counts::default();
+
+        self.render_layers(
+            encoder,
+            frame,
+            clear_color,
+            viewport,
+            layers.as_slice(),
+            &mut counts,
+            0,
+        );
+        self.layers = layers;
+        self.group_targets.trim();
+
+        let scale_factor = viewport.scale_factor();
+        let physical_bounds = Rectangle::<f32>::from(Rectangle::with_size(
+            viewport.physical_size(),
+        ));
+
+        debug::layers_rendered(|| {
+            self.layers
+                .iter()
+                .filter(|layer| {
+                    !layer.is_empty()
+                        && physical_bounds
+                            .intersection(&(layer.bounds * scale_factor))
+                            .is_some_and(|viewport| viewport.snap().is_some())
+                })
+                .count()
+        });
+    }
+
+    /// vocara: upstream's drawing loop, moved out of `render` so that a
+    /// group's layers can be drawn into an offscreen target with it;
+    /// `depth` is how deep in groups `layers` are.
+    #[allow(clippy::too_many_arguments)]
+    fn render_layers(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        frame: &wgpu::TextureView,
+        clear_color: Option<Color>,
+        viewport: &Viewport,
+        layers: &[Layer],
+        counts: &mut Counts,
+        depth: usize,
+    ) {
         use std::mem::ManuallyDrop;
 
         let mut render_pass = ManuallyDrop::new(encoder.begin_render_pass(
@@ -455,13 +652,6 @@ impl Renderer {
             },
         ));
 
-        let mut quad_layer = 0;
-        let mut mesh_layer = 0;
-        let mut text_layer = 0;
-
-        #[cfg(any(feature = "svg", feature = "image"))]
-        let mut image_layer = 0;
-
         let scale_factor = viewport.scale_factor();
         let physical_bounds = Rectangle::<f32>::from(Rectangle::with_size(
             viewport.physical_size(),
@@ -469,7 +659,7 @@ impl Renderer {
 
         let scale = Transformation::scale(scale_factor);
 
-        for layer in self.layers.iter() {
+        for layer in layers {
             let Some(physical_bounds) =
                 physical_bounds.intersection(&(layer.bounds * scale_factor))
             else {
@@ -480,29 +670,97 @@ impl Renderer {
                 continue;
             };
 
+            if let Some(effect) = &layer.effect {
+                let _ = ManuallyDrop::into_inner(render_pass);
+
+                match effect {
+                    layer::Effect::Group(group) => {
+                        let target = self.group_targets.get(
+                            &self.engine.device,
+                            depth,
+                            viewport.physical_size(),
+                            self.engine.format,
+                        );
+
+                        self.render_layers(
+                            encoder,
+                            &target,
+                            Some(Color::TRANSPARENT),
+                            viewport,
+                            group.layers.as_slice(),
+                            counts,
+                            depth + 1,
+                        );
+
+                        self.engine.effect_pipeline.composite(
+                            &self.engine.device,
+                            encoder,
+                            frame,
+                            viewport.physical_size(),
+                            &target,
+                            group.opacity,
+                            scissor_rect,
+                        );
+                    }
+                    layer::Effect::Backdrop(backdrop) => {
+                        self.engine.effect_pipeline.backdrop(
+                            &self.engine.device,
+                            encoder,
+                            frame,
+                            viewport.physical_size(),
+                            backdrop,
+                            scale_factor,
+                            physical_bounds,
+                        );
+                    }
+                }
+
+                render_pass = ManuallyDrop::new(encoder.begin_render_pass(
+                    &wgpu::RenderPassDescriptor {
+                        label: Some("iced_wgpu render pass"),
+                        color_attachments: &[Some(
+                            wgpu::RenderPassColorAttachment {
+                                view: frame,
+                                depth_slice: None,
+                                resolve_target: None,
+                                ops: wgpu::Operations {
+                                    load: wgpu::LoadOp::Load,
+                                    store: wgpu::StoreOp::Store,
+                                },
+                            },
+                        )],
+                        depth_stencil_attachment: None,
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                    },
+                ));
+
+                continue;
+            }
+
             if !layer.quads.is_empty() {
                 let render_span = debug::render(debug::Primitive::Quad);
                 self.quad.render(
                     &self.engine.quad_pipeline,
-                    quad_layer,
+                    counts.quad,
                     scissor_rect,
                     &layer.quads,
                     &mut render_pass,
                 );
                 render_span.finish();
 
-                quad_layer += 1;
+                counts.quad += 1;
             }
 
             if !layer.triangles.is_empty() {
                 let _ = ManuallyDrop::into_inner(render_pass);
 
                 let render_span = debug::render(debug::Primitive::Triangle);
-                mesh_layer += self.triangle.render(
+                counts.mesh += self.triangle.render(
                     &self.engine.triangle_pipeline,
                     encoder,
                     frame,
-                    mesh_layer,
+                    counts.mesh,
                     &layer.triangles,
                     physical_bounds,
                     scale,
@@ -631,21 +889,21 @@ impl Renderer {
                 let render_span = debug::render(debug::Primitive::Image);
                 self.image.render(
                     &self.engine.image_pipeline,
-                    image_layer,
+                    counts.image,
                     scissor_rect,
                     &mut render_pass,
                 );
                 render_span.finish();
 
-                image_layer += 1;
+                counts.image += 1;
             }
 
             if !layer.text.is_empty() {
                 let render_span = debug::render(debug::Primitive::Text);
-                text_layer += self.text.render(
+                counts.text += self.text.render(
                     &self.engine.text_pipeline,
                     &self.text_viewport,
-                    text_layer,
+                    counts.text,
                     &layer.text,
                     scissor_rect,
                     &mut render_pass,
@@ -655,18 +913,6 @@ impl Renderer {
         }
 
         let _ = ManuallyDrop::into_inner(render_pass);
-
-        debug::layers_rendered(|| {
-            self.layers
-                .iter()
-                .filter(|layer| {
-                    !layer.is_empty()
-                        && physical_bounds
-                            .intersection(&(layer.bounds * scale_factor))
-                            .is_some_and(|viewport| viewport.snap().is_some())
-                })
-                .count()
-        });
     }
 }
 
@@ -697,6 +943,11 @@ impl core::Renderer for Renderer {
     }
 
     fn reset(&mut self, new_bounds: Rectangle) {
+        // vocara: a group left open is dropped with what it drew.
+        if let Some(open) = self.groups.drain(..).next() {
+            self.layers = open.parent;
+        }
+
         self.layers.reset(new_bounds);
     }
 

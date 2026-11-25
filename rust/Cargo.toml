@@ -37,6 +37,10 @@ iced_test = "0.14"
 # The wheel events' gestures (`iced_winit::gesture`, vendor/README.md); the
 # same crate iced runs on.
 iced_winit = { version = "0.14", default-features = false }
+# The renderer behind `iced::Renderer`, for the compositing iced's widgets
+# cannot ask for (its `effects`, vendor/README.md): a subtree at an
+# opacity, a filtered backdrop.
+iced_renderer = { version = "0.14", default-features = false }
 lucide-icons = { version = "1.77", features = ["iced"] }
 # The open and save panels off macOS only (vocara_services::file_panels).
 # The portal backend alone: rfd's `wayland` feature only names a parent
@@ -72,9 +76,13 @@ todo = "deny"
 lto = "fat"
 codegen-units = 1
 
-# See vendor/README.md: iced_wgpu's quads draw their border over their fill.
+# See vendor/README.md: iced_wgpu's quads draw their border over their fill,
+# and both renderers (with the fallback renderer that is `iced::Renderer`)
+# composite a subtree as one layer at an opacity and filter the backdrop.
 [patch.crates-io]
 iced_wgpu = { path = "vendor/iced_wgpu" }
 # See vendor/README.md: iced_winit hands the app each wheel event's gesture
 # phases.
 iced_winit = { path = "vendor/iced_winit" }
+iced_tiny_skia = { path = "vendor/iced_tiny_skia" }
+iced_renderer = { path = "vendor/iced_renderer" }

@@ -760,11 +760,11 @@ fn error_state<'a>() -> Element<'a, Message> {
 fn opening_dialog<'a>(fade: Fade) -> Element<'a, Message> {
     // Accent disc behind the spinner — reads as a deliberate, branded
     // loader.
-    let disc = container(spinner(24.0, 2.6, fade.color(Studio::ACCENT)))
+    let disc = container(spinner(24.0, 2.6, Studio::ACCENT))
         .padding(14)
         .width(52)
         .height(52)
-        .style(fade.style(|_: &Theme| boxed(Some(alpha(Studio::ACCENT, 0.1)), 26.0, None)));
+        .style(|_: &Theme| boxed(Some(alpha(Studio::ACCENT, 0.1)), 26.0, None));
     let card = container(
         column![
             disc,
@@ -773,7 +773,7 @@ fn opening_dialog<'a>(fade: Fade) -> Element<'a, Message> {
                 .size(13.5)
                 .font(font::SEMIBOLD)
                 .letter_spacing(0.2)
-                .color(fade.color(Studio::TEXT_PRIMARY)),
+                .color(Studio::TEXT_PRIMARY),
         ]
         .align_x(Horizontal::Center),
     )
@@ -781,16 +781,16 @@ fn opening_dialog<'a>(fade: Fade) -> Element<'a, Message> {
     // 26 by 24 inside the card's 1 px border (a Flutter `Container`'s
     // padding includes its decoration's border).
     .padding(Padding::from([27, 25]))
-    .style(fade.style(|_: &Theme| container::Style {
+    .style(|_: &Theme| container::Style {
         shadow: Shadow {
             color: alpha(Color::BLACK, 0.4),
             offset: Vector::new(0.0, 10.0),
             blur_radius: 28.0,
         },
         ..boxed(Some(Studio::SURFACE_RAISED), 16.0, Some(Studio::BORDER))
-    }));
+    });
     let barrier = barrier::<Message>(alpha(Color::BLACK, 0.28), fade.barrier, None);
-    stack![barrier, center(opaque(card))].into()
+    stack![barrier, center(opaque(fade.card(card)))].into()
 }
 
 /// The page's message for what its toasts report.
@@ -804,24 +804,19 @@ fn snack_message(event: SnackEvent) -> Message {
 
 /// The failure toast: a floating SnackBar (set 16 in from the page's edges
 /// at its bottom by the queue, `snack::FLOATING_MARGIN`),
-/// `Studio.surfaceRaised`, radius 8, `Studio.border`, 13 px text, at
-/// `opacity`. (The app draws it too, once the page has handed it over.)
-fn snack_bar(message: &str, opacity: f32) -> Element<'_, Infallible> {
-    let fade = move |c: Color| alpha(c, c.a * opacity);
-    let bar = container(text(message).size(13).color(fade(Studio::TEXT_PRIMARY)))
+/// `Studio.surfaceRaised`, radius 8, `Studio.border`, 13 px text. (The
+/// app draws it too, once the page has handed it over.)
+fn snack_bar(message: &str) -> Element<'_, Infallible> {
+    let bar = container(text(message).size(13).color(Studio::TEXT_PRIMARY))
         .width(Length::Fill)
         .padding(Padding::from([14, 16]))
-        .style(move |_: &Theme| container::Style {
+        .style(|_: &Theme| container::Style {
             shadow: Shadow {
-                color: alpha(Color::BLACK, 0.4 * opacity),
+                color: alpha(Color::BLACK, 0.4),
                 offset: Vector::new(0.0, 3.0),
                 blur_radius: 8.0,
             },
-            ..boxed(
-                Some(fade(Studio::SURFACE_RAISED)),
-                8.0,
-                Some(fade(Studio::BORDER)),
-            )
+            ..boxed(Some(Studio::SURFACE_RAISED), 8.0, Some(Studio::BORDER))
         });
     bar.into()
 }

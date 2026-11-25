@@ -11,11 +11,9 @@
 //! tip itself does not hold it (Flutter's tip ignored the pointer). The
 //! time comes from the window's frames, so a test injects it, and it asks
 //! for frames only while it moves (or for one at the end of the exit
-//! delay). iced has no subtree opacity: the tip's fill and text take the
-//! fade's opacity.
+//! delay). The tip, its fill and its text, fades as one layer (the
+//! `FadeTransition` around it: `opacity_layer::Effects`).
 
-use std::cell::Cell;
-use std::rc::Rc;
 use std::time::Duration;
 
 use crate::ui::core::text;
@@ -29,7 +27,8 @@ use iced::{
 };
 
 use crate::ui::core::motion::{Controller, Curve, Status};
-use crate::ui::core::theme::{self, faded_container};
+use crate::ui::core::theme;
+use crate::ui::core::widgets::opacity_layer::Effects as _;
 
 /// How long the tip takes to fade in (`_fadeInDuration`).
 pub const FADE_IN: Duration = Duration::from_millis(150);
@@ -73,18 +72,15 @@ impl<M> MaterialTooltip<'_, M> {
 
 impl<'a, M: 'a> From<MaterialTooltip<'a, M>> for Element<'a, M> {
     fn from(tooltip: MaterialTooltip<'a, M>) -> Self {
-        let opacity = Rc::new(Cell::new(0.0_f32));
-        let shown = Rc::clone(&opacity);
         let mut tip = container(text(tooltip.tip).size(theme::TOOLTIP_TEXT_SIZE))
             .padding(theme::TOOLTIP_PADDING)
-            .style(move |t| faded_container(theme::tooltip(t), shown.get()));
+            .style(theme::tooltip);
         if let Some(width) = tooltip.max_width {
             tip = tip.max_width(width);
         }
         Element::new(Tooltip {
             target: tooltip.target,
             tip: tip.into(),
-            opacity,
             gap: tooltip.gap,
         })
     }
@@ -93,8 +89,6 @@ impl<'a, M: 'a> From<MaterialTooltip<'a, M>> for Element<'a, M> {
 struct Tooltip<'a, M> {
     target: Element<'a, M>,
     tip: Element<'a, M>,
-    /// The tip's opacity as drawn, which its style reads.
-    opacity: Rc<Cell<f32>>,
     gap: f32,
 }
 
@@ -312,12 +306,12 @@ impl<M> Widget<M, Theme, Renderer> for Tooltip<'_, M> {
             translation,
         );
         let tip = state.is_up().then(|| {
-            self.opacity.set(state.opacity());
             overlay::Element::new(Box::new(Tip {
                 tip: &mut self.tip,
                 tree: &mut tip_tree[0],
                 target: layout.bounds() + translation,
                 gap: self.gap,
+                opacity: state.opacity(),
             }))
         });
         match (target, tip) {
@@ -357,12 +351,13 @@ fn position_dependent_box(window: Size, tip: Size, target: Point, vertical_offse
     Point::new(x, y)
 }
 
-/// The tip, laid out by [`position_dependent_box`].
+/// The tip, laid out by [`position_dependent_box`], at its opacity.
 struct Tip<'a, 'b, M> {
     tip: &'b mut Element<'a, M>,
     tree: &'b mut Tree,
     target: Rectangle,
     gap: f32,
+    opacity: f32,
 }
 
 impl<M> overlay::Overlay<M, Theme, Renderer> for Tip<'_, '_, M> {
@@ -389,15 +384,17 @@ impl<M> overlay::Overlay<M, Theme, Renderer> for Tip<'_, '_, M> {
         layout: Layout<'_>,
         cursor: mouse::Cursor,
     ) {
-        self.tip.as_widget().draw(
-            self.tree,
-            renderer,
-            theme,
-            style,
-            layout,
-            cursor,
-            &layout.bounds(),
-        );
+        let bounds = layout.bounds();
+        let draw = |renderer: &mut Renderer| {
+            self.tip
+                .as_widget()
+                .draw(self.tree, renderer, theme, style, layout, cursor, &bounds);
+        };
+        if self.opacity >= 1.0 {
+            draw(renderer);
+        } else if self.opacity > 0.0 {
+            renderer.with_opacity_layer(bounds, self.opacity, draw);
+        }
     }
 
     fn mouse_interaction(
@@ -416,7 +413,6 @@ mod tests {
     use iced::{Color, Point, Size};
 
     use super::*;
-    use crate::ui::core::motion::Lerp;
     use crate::ui::core::theme::Zinc;
     use crate::ui::core::widgets::animated::testing::{near, over, Frames, BACKGROUND, MS};
 
@@ -512,20 +508,37 @@ mod tests {
     }
 
     #[test]
-    fn its_fill_and_text_fade_together() {
-        let style = |o: f32| faded_container(theme::tooltip(&Theme::Dark), o);
-        let half = style(0.5);
-        assert_eq!(half.text_color.map(|c| c.a), Some(Zinc::BACKGROUND.a * 0.5));
-        assert_eq!(
-            half.background,
-            Some(iced::Background::Color(Zinc::FOREGROUND.lerp(
-                Color {
-                    a: 0.0,
-                    ..Zinc::FOREGROUND
-                },
-                0.5
-            )))
-        );
+    fn its_fill_and_text_fade_as_one_layer() {
+        // The tip all in, then halfway in: each pixel of it (its text on
+        // its fill too) the first's at the fade's opacity, not the text at
+        // it over the fill at it.
+        let pixels = |window: &Frames| -> Vec<Color> {
+            (24..44)
+                .flat_map(|y| (0..60).map(move |x| (x, y)))
+                .map(|(x, y)| window.pixel(Point::new(x as f32, y as f32)))
+                .collect()
+        };
+        let mut window = Frames::new(Size::new(200.0, 100.0));
+        let t0 = Instant::now();
+        window.point_at(Point::new(20.0, 10.0));
+        window.frame(view(), &[], t0);
+        window.frame(view(), &[], t0 + 150 * MS);
+        let full = pixels(&window);
+        // Its text's ink, darker than the fill, on it.
+        let ink = full
+            .iter()
+            .filter(|p| p.r < 0.6 && **p != BACKGROUND)
+            .count();
+        assert!(ink > 10, "its text ({ink} pixels)");
+        let mut window = Frames::new(Size::new(200.0, 100.0));
+        window.point_at(Point::new(20.0, 10.0));
+        window.frame(view(), &[], t0);
+        window.frame(view(), &[], t0 + 75 * MS);
+        let middle = Curve::FastOutSlowIn.transform(0.5);
+        for (full, half) in full.iter().zip(pixels(&window)) {
+            let layer = over(Color { a: middle, ..*full }, BACKGROUND);
+            assert!(near(half, layer), "{half:?}, not {layer:?}");
+        }
     }
 
     #[test]

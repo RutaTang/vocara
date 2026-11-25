@@ -43,8 +43,6 @@
 //!   [`Message::RenameBus`] / [`Message::DeleteBus`] where the Dart desk
 //!   opened `showRenameDialog` / `confirmDeleteBus` and then called the
 //!   mixer.
-//! - The disabled MON fader fades its colors (iced has no subtree
-//!   opacity).
 
 #[cfg(test)]
 mod tests;
@@ -71,6 +69,7 @@ use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::theme::{self, alpha, bare_button, boxed, font, Studio};
 use crate::ui::core::widgets::fading_scrollbar::Fading;
 use crate::ui::core::widgets::material_tooltip::material_tooltip;
+use crate::ui::core::widgets::opacity_layer::opacity_layer;
 use crate::ui::core::widgets::painter::{color_key, KeyedCache};
 use crate::ui::core::widgets::studio_controls::{fader_db, studio_pan_knob};
 use crate::ui::core::widgets::studio_text::studio_text;
@@ -918,14 +917,17 @@ fn fader_column<'a>(
     let fader: Element<'a, Message> = if enabled {
         vertical_fader(value, accent, 40.0, on_changed, Message::CommitAudioGains)
     } else {
-        canvas_widget(VerticalFader {
-            value: value.clamp(0.0, 1.0),
-            accent,
-            opacity: 0.35,
-            input: None,
-        })
-        .width(40)
-        .height(Length::Fill)
+        // `Opacity(0.35)`: the fader as one layer.
+        opacity_layer(
+            0.35,
+            canvas_widget(VerticalFader {
+                value: value.clamp(0.0, 1.0),
+                accent,
+                input: None,
+            })
+            .width(40)
+            .height(Length::Fill),
+        )
         .into()
     };
     column![
@@ -1029,7 +1031,6 @@ fn vertical_fader<'a>(
     canvas_widget(VerticalFader {
         value: value.clamp(0.0, 1.0),
         accent,
-        opacity: 1.0,
         input: Some(FaderInput {
             on_changed: Box::new(on_changed),
             on_change_end,
@@ -1049,8 +1050,6 @@ fn vertical_fader<'a>(
 struct VerticalFader<'a> {
     value: f64,
     accent: Color,
-    /// 1, or 0.35 when disabled.
-    opacity: f32,
     /// What it reports; none when disabled (`IgnorePointer`).
     input: Option<FaderInput<'a>>,
 }
@@ -1064,7 +1063,7 @@ struct FaderInput<'a> {
 #[derive(Default)]
 struct FaderState {
     active: bool,
-    cache: KeyedCache<(u64, [u32; 4], u32, u32, u32)>,
+    cache: KeyedCache<(u64, [u32; 4], u32, u32)>,
 }
 
 #[cfg(test)]
@@ -1125,14 +1124,13 @@ impl canvas::Program<Message> for VerticalFader<'_> {
         let key = (
             self.value.to_bits(),
             color_key(self.accent),
-            self.opacity.to_bits(),
             size.width.to_bits(),
             size.height.to_bits(),
         );
         vec![state.cache.draw(renderer, size, key, |frame| {
             #[cfg(test)]
             FADER_DRAWS.with(|n| n.set(n.get() + 1));
-            draw_vertical_fader(frame, size, self.value as f32, self.accent, self.opacity);
+            draw_vertical_fader(frame, size, self.value as f32, self.accent);
         })]
     }
 
@@ -1150,12 +1148,8 @@ impl canvas::Program<Message> for VerticalFader<'_> {
     }
 }
 
-/// `_VFaderPainter`, its colors faded to `opacity`.
-fn draw_vertical_fader(frame: &mut Frame, size: Size, value: f32, accent: Color, opacity: f32) {
-    let fade = |c: Color| Color {
-        a: c.a * opacity,
-        ..c
-    };
+/// `_VFaderPainter`.
+fn draw_vertical_fader(frame: &mut Frame, size: Size, value: f32, accent: Color) {
     let cx = size.width / 2.0;
     let top = FADER_PAD;
     let bottom = size.height - FADER_PAD;
@@ -1163,7 +1157,7 @@ fn draw_vertical_fader(frame: &mut Frame, size: Size, value: f32, accent: Color,
     let cap_y = bottom - value * span;
     let line = |color: Color, width: f32| {
         Stroke::default()
-            .with_color(fade(color))
+            .with_color(color)
             .with_width(width)
             .with_line_cap(LineCap::Round)
     };
@@ -1178,9 +1172,7 @@ fn draw_vertical_fader(frame: &mut Frame, size: Size, value: f32, accent: Color,
         line(alpha(accent, 0.55), 4.0),
     );
     // Scale ticks down the right side (incl. a 0 dB mark at the top).
-    let tick = Stroke::default()
-        .with_color(fade(Studio::BORDER))
-        .with_width(1.0);
+    let tick = Stroke::default().with_color(Studio::BORDER).with_width(1.0);
     for i in 0..=4 {
         let ty = top + i as f32 / 4.0 * span;
         frame.stroke(
@@ -1194,11 +1186,8 @@ fn draw_vertical_fader(frame: &mut Frame, size: Size, value: f32, accent: Color,
         Size::new(28.0, 13.0),
         Radius::from(3.0),
     );
-    frame.fill(&cap, fade(Studio::SURFACE_RAISED));
-    frame.stroke(
-        &cap,
-        Stroke::default().with_color(fade(accent)).with_width(1.5),
-    );
+    frame.fill(&cap, Studio::SURFACE_RAISED);
+    frame.stroke(&cap, Stroke::default().with_color(accent).with_width(1.5));
     frame.stroke(
         &Path::line(Point::new(cx - 10.0, cap_y), Point::new(cx + 10.0, cap_y)),
         line(accent, 2.0),
