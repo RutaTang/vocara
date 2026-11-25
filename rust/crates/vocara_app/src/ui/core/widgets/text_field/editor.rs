@@ -32,7 +32,7 @@ use std::ops;
 use std::sync::Arc;
 
 use iced::advanced::clipboard::{self, Clipboard};
-use iced::advanced::graphics::text::cosmic_text::Affinity;
+use iced::advanced::graphics::text::cosmic_text::{self, Affinity, Buffer, LayoutLine, LineBox};
 use iced::advanced::input_method::{self, InputMethod};
 use iced::advanced::layout::{self, Layout};
 use iced::advanced::mouse;
@@ -223,7 +223,7 @@ impl<'a, Message> TextEditor<'a, Message> {
         let text_bounds = layout.bounds().shrink(self.padding);
         let line = self.line_height_px(renderer);
         let internal = self.content.0.borrow();
-        let (top, height) = match internal.editor.selection() {
+        let (top, height) = match selection(&internal.editor) {
             Selection::Caret(position) => {
                 (position.y - caret::OVERHANG, line + 2.0 * caret::OVERHANG)
             }
@@ -238,10 +238,16 @@ impl<'a, Message> TextEditor<'a, Message> {
         }
     }
 
+    /// A line's height: SkParagraph's, a whole pixel
+    /// (`crate::ui::core::text::line_box`; `preferredLineHeight`, which
+    /// `RenderEditable` sized its lines and caret by).
     fn line_height_px(&self, renderer: &Renderer) -> f32 {
-        self.line_height
-            .to_absolute(self.text_size.unwrap_or_else(|| renderer.default_size()))
-            .into()
+        crate::ui::core::text::line_box(
+            self.font.unwrap_or_else(|| renderer.default_font()),
+            self.text_size.unwrap_or_else(|| renderer.default_size()).0,
+            self.line_height,
+        )
+        .height
     }
 
     /// A wheel event as Flutter's multi-line field took it (`pan_zoom`),
@@ -363,7 +369,7 @@ impl<'a, Message> TextEditor<'a, Message> {
         let text_bounds = bounds.shrink(self.padding);
         let translation = text_bounds.position() - Point::ORIGIN;
 
-        let cursor = match internal.editor.selection() {
+        let cursor = match selection(&internal.editor) {
             Selection::Caret(position) => position,
             Selection::Range(ranges) => ranges.first().cloned().unwrap_or_default().position(),
         };
@@ -408,7 +414,7 @@ impl<'a, Message> TextEditor<'a, Message> {
                     let base = (base.line, base.column);
                     base.min(caret) <= at && at <= base.max(caret)
                 }
-            } || match internal.editor.selection() {
+            } || match selection(&internal.editor) {
                 Selection::Range(ranges) => {
                     ranges.iter().any(|range| range.contains(text_position))
                 }
@@ -496,6 +502,82 @@ pub(super) fn word_at(
             (at(line, start), at(line, start + word.len()))
         }
     })
+}
+
+/// The box of the visual line `line` of `buffer`: SkParagraph's, as the
+/// buffer laid it out and draws it (`crate::ui::core::text`).
+fn line_box(buffer: &Buffer, line: &LayoutLine) -> LineBox {
+    line.line_box(buffer.metrics().line_height, buffer.is_empty_paragraph())
+}
+
+/// `editor`'s selection (or caret) with its lines where the buffer lays
+/// them out. iced puts the `k`th visual line from the scroll `k` line
+/// heights down, unrounded, and makes it a line height tall; the buffer
+/// puts it below the whole-pixel heights of the lines above it, as tall as
+/// its own (SkParagraph's lines: `crate::ui::core::text`).
+fn selection(editor: &RendererEditor) -> Selection {
+    let buffer = editor.buffer();
+    let pitch = buffer.metrics().line_height;
+    let selection = editor.selection();
+    if pitch <= 0.0 {
+        return selection;
+    }
+    let scroll = buffer.scroll();
+    // The heights of the visual lines laid out from the scroll's line on,
+    // and of those before it (a line not laid out has none, as iced counts
+    // it).
+    let heights = |lines: &[cosmic_text::BufferLine]| -> Vec<f32> {
+        lines
+            .iter()
+            .flat_map(|text_line| {
+                text_line
+                    .layout_opt()
+                    .map(Vec::as_slice)
+                    .unwrap_or_default()
+            })
+            .map(|visual| line_box(buffer, visual).height)
+            .collect()
+    };
+    let split = scroll.line.min(buffer.lines.len());
+    let (above, below) = (
+        heights(&buffer.lines[..split]),
+        heights(&buffer.lines[split..]),
+    );
+    // The top (from the scroll) and height of the visual line iced put
+    // at `y`.
+    let visual = |y: f32| -> Option<(f32, f32)> {
+        let k = ((y + scroll.vertical) / pitch).round() as i64;
+        let (top, height) = if k >= 0 {
+            let k = usize::try_from(k).ok()?;
+            (
+                below[..k.min(below.len())].iter().sum::<f32>(),
+                *below.get(k)?,
+            )
+        } else {
+            let index = above.len().checked_sub(usize::try_from(-k).ok()?)?;
+            (-above[index..].iter().sum::<f32>(), above[index])
+        };
+        Some((top - scroll.vertical, height))
+    };
+    match selection {
+        Selection::Caret(position) => match visual(position.y) {
+            Some((top, _)) => Selection::Caret(Point::new(position.x, top)),
+            None => Selection::Caret(position),
+        },
+        Selection::Range(ranges) => Selection::Range(
+            ranges
+                .into_iter()
+                .map(|range| match visual(range.y) {
+                    Some((top, height)) => Rectangle {
+                        y: top,
+                        height,
+                        ..range
+                    },
+                    None => range,
+                })
+                .collect(),
+        ),
+    }
 }
 
 /// The text of a [`TextEditor`]: iced's `text_editor::Content`, over the
@@ -1261,7 +1343,7 @@ impl<Message> Widget<Message, Theme, Renderer> for TextEditor<'_, Message> {
         let mut caret = None;
 
         if let Some(focus) = state.focus.as_ref() {
-            match internal.editor.selection() {
+            match selection(&internal.editor) {
                 Selection::Caret(position) if focus.is_cursor_visible() && !self.read_only => {
                     caret = Some(caret::rect(
                         position.x,
@@ -1306,15 +1388,21 @@ impl<Message> Widget<Message, Theme, Renderer> for TextEditor<'_, Message> {
         if let Some(rect) = caret {
             let buffer = internal.editor.buffer();
             let scroll = buffer.scroll();
-            let line_height = buffer.metrics().line_height;
-            let laid_out: usize = buffer
+            let line = self.line_height_px(renderer);
+            let laid_out: f32 = buffer
                 .lines
                 .iter()
-                .map(|line| line.layout_opt().map_or(1, Vec::len))
+                .map(|text_line| {
+                    text_line.layout_opt().map_or(line, |layout| {
+                        layout
+                            .iter()
+                            .map(|visual| line_box(buffer, visual).height)
+                            .sum()
+                    })
+                })
                 .sum();
-            let overflows = scroll.line > 0
-                || scroll.vertical != 0.0
-                || laid_out as f32 * line_height > text_bounds.height + 0.01;
+            let overflows =
+                scroll.line > 0 || scroll.vertical != 0.0 || laid_out > text_bounds.height + 0.01;
             caret::draw(
                 renderer,
                 rect + translation,

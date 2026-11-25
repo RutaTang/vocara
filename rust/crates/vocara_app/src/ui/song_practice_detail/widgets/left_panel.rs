@@ -809,6 +809,8 @@ impl<M> canvas::Program<M> for RailLabel {
                 position: Point::ORIGIN,
                 color: Studio::TEXT_SECONDARY,
                 size: Pixels(11.0),
+                // A `Text` under the app's Material theme: height 1.
+                line_height: 1.0.into(),
                 font: font::BOLD,
                 align_x: Alignment::Left,
                 align_y: Vertical::Center,

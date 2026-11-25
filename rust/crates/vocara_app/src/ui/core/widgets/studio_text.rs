@@ -30,6 +30,10 @@
 //!   longest prefix that fits followed by "…". A `Text` with an ellipsis and
 //!   no `maxLines` is one line too (SkParagraph ends the paragraph at its
 //!   first line then), so `ellipsis(1)` ports it.
+//! - **Lines**: SkParagraph's, as every text's (the vendored cosmic-text
+//!   lays the buffer out so: [`crate::ui::core::text`]): each a whole
+//!   pixel tall, its baseline a whole pixel below its top, at the style's
+//!   `height` ([`StudioText::line_height`]; 1 by default, the theme's).
 //!
 //! Its width is the laid-out text's, as iced's `text`: an ellipsized line
 //! as wide as what it shows (at most the width it was given), a spaced one

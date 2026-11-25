@@ -603,11 +603,13 @@ fn draw_grid(frame: &mut Frame, size: Size) {
     for (f, label) in DECADES {
         let x = freq_to_x(f, w) as f32;
         frame.stroke(&Path::line(Point::new(x, 0.0), Point::new(x, h)), major);
+        // `_decadeLabels`' `TextPainter`s: no height, the font's own line.
         frame.fill_text(canvas::Text {
             content: label.to_string(),
             position: Point::new(x + 3.0, h - 2.0),
             color: Studio::TEXT_FAINT,
             size: Pixels(8.5),
+            line_height: crate::ui::core::text::NATURAL,
             font: font::REGULAR,
             align_x: Alignment::Left,
             align_y: Vertical::Bottom,
@@ -760,13 +762,15 @@ fn draw_curve(frame: &mut Frame, size: Size, bands: &[EqBand], on: bool) {
     }
 }
 
-/// `_ReadoutPill` at (8, 6): the text on a raised, bordered pill.
+/// `_ReadoutPill` at (8, 6): the text on a raised, bordered pill. The text
+/// is a `Text` under the panel's `Material`: its line the theme's height 1.
 fn draw_readout_pill(frame: &mut Frame, label: &str) {
+    let line_height = core_text::LineHeight::Relative(1.0);
     let measured = <Renderer as core_text::Renderer>::Paragraph::with_text(core_text::Text {
         content: label,
         bounds: Size::INFINITE,
         size: Pixels(10.0),
-        line_height: core_text::LineHeight::default(),
+        line_height,
         font: font::SEMIBOLD,
         align_x: core_text::Alignment::Left,
         align_y: Vertical::Top,
@@ -787,6 +791,7 @@ fn draw_readout_pill(frame: &mut Frame, label: &str) {
         position: Point::new(origin.x + 7.0, origin.y + 3.0),
         color: Studio::TEXT_SECONDARY,
         size: Pixels(10.0),
+        line_height,
         font: font::SEMIBOLD,
         ..canvas::Text::default()
     });

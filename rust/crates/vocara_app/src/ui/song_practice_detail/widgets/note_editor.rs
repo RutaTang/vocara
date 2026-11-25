@@ -69,6 +69,13 @@ const FIELD_LINE_HEIGHT: f32 = 1.4;
 const MIN_LINES: f32 = 3.0;
 const MAX_LINES: f32 = 6.0;
 
+/// A line of the field: SkParagraph's, a whole pixel tall (20 for 14 px
+/// at 1.4), as `RenderEditable` held a field to `minLines` and `maxLines`
+/// of its `preferredLineHeight`.
+fn field_line() -> f32 {
+    text::line_box(font::REGULAR, FIELD_SIZE, FIELD_LINE_HEIGHT.into()).height
+}
+
 /// Outcome of the note editor: either saved `content`, or `deleted`
 /// (`NoteEditorResult`).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -258,8 +265,8 @@ impl NoteEditor {
             // iced's editor holds its text's height (not its own) to these
             // but lays its text out in `max_height` less its padding: the
             // padding goes on the maximum so the text may fill six lines.
-            .min_height(FIELD_SIZE * FIELD_LINE_HEIGHT * MIN_LINES)
-            .max_height(FIELD_SIZE * FIELD_LINE_HEIGHT * MAX_LINES + theme::FIELD_PADDING.y())
+            .min_height(field_line() * MIN_LINES)
+            .max_height(field_line() * MAX_LINES + theme::FIELD_PADDING.y())
             .caret_color(Studio::ACCENT)
             .style(field_style);
 

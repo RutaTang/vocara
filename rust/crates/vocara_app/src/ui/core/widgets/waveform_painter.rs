@@ -593,10 +593,6 @@ impl<M> canvas::Program<M> for TimelineGridPainter {
     }
 }
 
-/// Inter's line box at 10 px (ascent + descent ≈ 1.21 em), the height
-/// Flutter's `TextPainter` gave a ruler label.
-const RULER_LABEL_LINE: f32 = 1.21;
-
 /// `TimeRulerPainter`: the time ruler above the tracks — 7 px ticks plus
 /// `m:ss` labels, 10 px tabular figures, 3 px right of each tick, 5 px off
 /// the bottom.
@@ -627,7 +623,6 @@ impl<M> canvas::Program<M> for TimeRulerPainter {
         );
         vec![state.draw(renderer, bounds.size(), key, |frame| {
             let h = bounds.height;
-            let label_height = 10.0 * RULER_LABEL_LINE;
             for (x, t) in ruler_ticks(
                 self.timeline_duration_ms,
                 self.start_ms,
@@ -640,16 +635,18 @@ impl<M> canvas::Program<M> for TimeRulerPainter {
                         .with_color(self.tick_color)
                         .with_width(1.0),
                 );
+                // A `TextPainter`'s line (no height: the font's own, a
+                // whole pixel tall), its bottom 5 off the ruler's.
                 fill_tabular_text(
                     frame,
                     canvas::Text {
                         content: format_clock_ms(t),
-                        position: Point::new(x + 3.0, h - label_height - 5.0),
+                        position: Point::new(x + 3.0, h - 5.0),
                         color: self.text_color,
                         size: Pixels(10.0),
-                        line_height: iced::widget::text::LineHeight::Relative(RULER_LABEL_LINE),
+                        line_height: crate::ui::core::text::NATURAL,
                         font: font::REGULAR,
-                        align_y: Vertical::Top,
+                        align_y: Vertical::Bottom,
                         ..canvas::Text::default()
                     },
                 );

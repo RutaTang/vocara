@@ -4,8 +4,8 @@
 
 use crate::fallback::FontFallbackIter;
 use crate::{
-    math, Align, AttrsList, CacheKeyFlags, Color, Font, FontSystem, LayoutGlyph, LayoutLine,
-    Metrics, Wrap,
+    math, Align, AttrsList, CacheKeyFlags, Color, Font, FontSystem, FontVerticals, LayoutGlyph,
+    LayoutLine, Metrics, RunMetrics, Wrap,
 };
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
@@ -137,6 +137,8 @@ fn shape_fallback(
     let font_scale = font.metrics().units_per_em as f32;
     let ascent = font.metrics().ascent / font_scale;
     let descent = -font.metrics().descent / font_scale;
+    // vocara: the font's verticals in its units, for SkParagraph's lines.
+    let vertical = FontVerticals::of(font.metrics());
 
     let mut buffer = scratch.harfrust_buffer.take().unwrap_or_default();
     buffer.set_direction(if span_rtl {
@@ -234,6 +236,7 @@ fn shape_fallback(
             y_offset,
             ascent,
             descent,
+            vertical,
             font_monospace_em_width: font.monospace_em_width(),
             font_id: font.id(),
             font_weight: attrs.weight,
@@ -512,6 +515,12 @@ fn shape_skip(
 
     let ascent = metrics.ascent / f32::from(metrics.units_per_em);
     let descent = metrics.descent / f32::from(metrics.units_per_em);
+    // vocara: the font's verticals in its units, for SkParagraph's lines.
+    let vertical = FontVerticals {
+        ascent: metrics.ascent,
+        descent: metrics.descent,
+        units_per_em: f32::from(metrics.units_per_em),
+    };
 
     glyphs.extend(
         line[start_run..end_run]
@@ -531,6 +540,7 @@ fn shape_skip(
                     y_offset: 0.0,
                     ascent,
                     descent,
+                    vertical,
                     font_monospace_em_width,
                     font_id,
                     font_weight: attrs.weight,
@@ -555,6 +565,9 @@ pub struct ShapeGlyph {
     pub y_offset: f32,
     pub ascent: f32,
     pub descent: f32,
+    /// vocara: its font's ascent and descent in its units, which
+    /// SkParagraph's lines are measured by ([`RunMetrics`]).
+    pub vertical: FontVerticals,
     pub font_monospace_em_width: Option<f32>,
     pub font_id: fontdb::ID,
     pub font_weight: fontdb::Weight,
@@ -1542,6 +1555,8 @@ impl ShapeLine {
             let mut y = 0.;
             let mut max_ascent: f32 = 0.;
             let mut max_descent: f32 = 0.;
+            // vocara: the line's runs, as SkParagraph measures them.
+            let mut runs: Vec<RunMetrics> = Vec::new();
             let alignment_correction = match (align, self.rtl) {
                 (Align::Left, true) => line_width - visual_line.w,
                 (Align::Left, false) => 0.,
@@ -1650,6 +1665,18 @@ impl ShapeLine {
                             y += y_advance;
                             max_ascent = max_ascent.max(glyph_font_size * glyph.ascent);
                             max_descent = max_descent.max(glyph_font_size * glyph.descent);
+                            // vocara: a run per change of font, size or
+                            // line height.
+                            let (ascent, descent) = glyph.vertical.at(glyph_font_size);
+                            let run = RunMetrics {
+                                font_size: glyph_font_size,
+                                ascent,
+                                descent,
+                                line_height_opt: glyph.metrics_opt.map(|x| x.line_height),
+                            };
+                            if runs.last() != Some(&run) {
+                                runs.push(run);
+                            }
                         }
                     }
                 }
@@ -1688,6 +1715,7 @@ impl ShapeLine {
                 max_descent,
                 line_height_opt,
                 glyphs,
+                runs,
             });
         }
 
@@ -1699,6 +1727,8 @@ impl ShapeLine {
                 max_descent: 0.0,
                 line_height_opt: self.metrics_opt.map(|x| x.line_height),
                 glyphs: Vec::default(),
+                // vocara: its default font's (`BufferLine::layout`).
+                runs: Vec::new(),
             });
         }
 

@@ -30,7 +30,6 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 use crate::ui::core::text;
 use iced::alignment::Vertical;
 use iced::widget::canvas::{self, Frame, Geometry, LineCap, Path, Stroke};
-use iced::widget::text::LineHeight;
 use iced::widget::{canvas as canvas_widget, column, container, rich_text, row, span, stack};
 use iced::{
     mouse, Color, Element, Length, Padding, Pixels, Point, Rectangle, Renderer, Size, Theme,
@@ -472,10 +471,6 @@ const LABEL_REACH_PX: f64 = 80.0;
 /// The labels' text size.
 const LABEL_SIZE: f32 = 9.0;
 
-/// Inter's line box (ascent + descent ≈ 1.21 em): the height Flutter's
-/// `TextPainter` gave a label, which `_label` centred on its y.
-const LABEL_LINE: f32 = 1.21;
-
 /// One thing [`PitchLanePainter`] draws, in lane coordinates.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PitchOp {
@@ -771,14 +766,16 @@ fn draw_ops(frame: &mut Frame, size: Size, ops: &[PitchOp]) {
                 );
             }
             PitchOp::Label { text, x, y, color } => {
+                // `_label`: a `TextPainter`'s line (no height: the font's
+                // own, a whole pixel tall), centred on `y`.
                 frame.fill_text(canvas::Text {
                     content: text.clone(),
-                    position: Point::new(*x as f32, *y as f32 - LABEL_SIZE * LABEL_LINE / 2.0),
+                    position: Point::new(*x as f32, *y as f32),
                     color: *color,
                     size: Pixels(LABEL_SIZE),
-                    line_height: LineHeight::Relative(LABEL_LINE),
+                    line_height: text::NATURAL,
                     font: font::REGULAR,
-                    align_y: Vertical::Top,
+                    align_y: Vertical::Center,
                     ..canvas::Text::default()
                 });
             }

@@ -64,7 +64,8 @@ fn spacing_keeps_the_line_height() {
         },
         f32::INFINITY,
     );
-    assert!(close(solid.min_bounds.height, 9.0 * 1.3));
+    // SkParagraph's whole-pixel line: 9 × 1.3 = 11.7 makes 12.
+    assert!(close(solid.min_bounds.height, 12.0));
     assert!(close(spaced.min_bounds.height, 9.0));
 }
 
@@ -108,7 +109,8 @@ fn a_long_line_keeps_the_longest_prefix_that_fits_with_the_ellipsis() {
             "{longer} fits {room} too"
         );
         assert!(cut.min_bounds.width <= room + 0.01);
-        assert!(close(cut.min_bounds.height, 16.0 * 1.3));
+        // 16 × 1.3 = 20.8: SkParagraph's line of 21.
+        assert!(close(cut.min_bounds.height, 21.0));
     }
 }
 
@@ -159,11 +161,12 @@ fn max_lines_wraps_then_ellipsizes_the_last_line() {
     let prefix = lines[1].strip_suffix(ELLIPSIS).expect("ends in …");
     assert!(rest.starts_with(prefix), "{prefix:?}");
     assert!(solid_width(lines[1], 13.0) <= room + 0.01);
-    assert!(close(cut.min_bounds.height, 2.0 * 13.0 * 1.3));
+    // Two of SkParagraph's lines of 13 × 1.3 = 16.9: 17 each.
+    assert!(close(cut.min_bounds.height, 2.0 * 17.0));
     // Room for all of it: no ellipsis, the lines it needs.
     let whole = laid(&ellipsized(text, 13.0, 2), 1000.0);
     assert_eq!(whole.shown, None);
-    assert!(close(whole.min_bounds.height, 13.0 * 1.3));
+    assert!(close(whole.min_bounds.height, 17.0));
 }
 
 #[test]

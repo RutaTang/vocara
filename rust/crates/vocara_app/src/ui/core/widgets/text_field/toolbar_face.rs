@@ -51,7 +51,12 @@
 //! at Flutter's instance ([`Instance::of`]: `opsz` 12 and `wght` 400, each
 //! clamped to its axis, every other axis at its default), untracked, and
 //! sets the labels' line as SkParagraph did from the face's `hhea` metrics
-//! and their `MVAR` deltas at that instance ([`Instance::line`]).
+//! and their `MVAR` deltas at that instance ([`Instance::line`]). (The
+//! vendored cosmic-text lays every text's lines out on SkParagraph's whole
+//! pixels too, `crate::ui::core::text`, but from a face's ascent and
+//! descent alone; the labels' line takes the face's line gap as well, so
+//! it is set here, and their buffer drawn with its baseline where this
+//! line puts it: `toolbar::label`.)
 //!
 //! Off macOS, or without the face, the labels are in Inter, their line
 //! set the same way from its metrics. On a Mac (CI's runner), the test

@@ -284,7 +284,10 @@ fn the_counter_reads_the_playhead_over_the_timeline() {
         position: Duration::from_millis(61_500),
         ..bar(&p)
     });
-    assert!(ui.find("01:01 / 00:30").is_ok());
+    let counter = ui.find("01:01 / 00:30").expect("the counter").bounds();
+    // A `Text` under the screen's Material: the theme's height 1, a 14 px
+    // line (not Inter's natural 17).
+    assert_eq!(counter.height, 14.0, "{counter:?}");
     assert_eq!(lcd_text(Duration::ZERO, 0), "00:00 / 00:00");
     assert_eq!(
         lcd_text(Duration::from_millis(59_999), 180_000),

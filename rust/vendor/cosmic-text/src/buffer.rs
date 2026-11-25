@@ -126,22 +126,26 @@ impl<'b> Iterator for LayoutRunIter<'b> {
             while let Some(layout_line) = layout.get(self.layout_i) {
                 self.layout_i += 1;
 
-                let line_height = layout_line
-                    .line_height_opt
-                    .unwrap_or(self.buffer.metrics.line_height);
+                // vocara: the line as SkParagraph lays it out (a whole
+                // number of pixels tall, its baseline a whole number of
+                // pixels below its top), where upstream centres its glyphs'
+                // ascent and descent in the line height, unrounded.
+                let line_box = layout_line.line_box(
+                    self.buffer.metrics.line_height,
+                    self.buffer.is_empty_paragraph(),
+                );
+                let line_height = line_box.height;
                 self.total_height += line_height;
 
                 let line_top = self.line_top - self.buffer.scroll.vertical;
-                let glyph_height = layout_line.max_ascent + layout_line.max_descent;
-                let centering_offset = (line_height - glyph_height) / 2.0;
-                let line_y = line_top + centering_offset + layout_line.max_ascent;
+                let line_y = line_top + line_box.baseline;
                 if let Some(height) = self.buffer.height_opt {
-                    if line_y - layout_line.max_ascent > height {
+                    if line_y - line_box.ascent > height {
                         return None;
                     }
                 }
                 self.line_top += line_height;
-                if line_y + layout_line.max_descent < 0.0 {
+                if line_y + line_box.descent < 0.0 {
                     continue;
                 }
 
@@ -246,11 +250,10 @@ impl Buffer {
     ///
     /// If you have a [`FontSystem`] in scope, you should use [`Buffer::new`] instead.
     ///
-    /// # Panics
-    ///
-    /// Will panic if `metrics.line_height` is zero.
+    /// vocara: a line height of zero is SkParagraph's line without a
+    /// height (the font's own ascent and descent: [`crate::RunMetrics`]),
+    /// where upstream panics.
     pub fn new_empty(metrics: Metrics) -> Self {
-        assert_ne!(metrics.line_height, 0.0, "line height cannot be 0");
         Self {
             lines: Vec::new(),
             metrics,
@@ -265,10 +268,6 @@ impl Buffer {
     }
 
     /// Create a new [`Buffer`] with the provided [`FontSystem`] and [`Metrics`]
-    ///
-    /// # Panics
-    ///
-    /// Will panic if `metrics.line_height` is zero.
     pub fn new(font_system: &mut FontSystem, metrics: Metrics) -> Self {
         let mut buffer = Self::new_empty(metrics);
         buffer.set_text(font_system, "", &Attrs::new(), Shaping::Advanced, None);
@@ -320,6 +319,9 @@ impl Buffer {
     ) {
         let metrics = self.metrics;
         let old_scroll = self.scroll;
+        // vocara: each line as tall as SkParagraph lays it out.
+        let empty = self.is_empty_paragraph();
+        let height_of = |line: &LayoutLine| line.line_box(metrics.line_height, empty).height;
 
         let layout_cursor = self
             .layout_cursor(font_system, cursor)
@@ -331,14 +333,9 @@ impl Buffer {
                 .line_layout(font_system, layout_cursor.line)
                 .expect("shape_until_cursor failed to scroll forwards");
             (0..layout_cursor.layout).for_each(|layout_i| {
-                layout_y += layout[layout_i]
-                    .line_height_opt
-                    .unwrap_or(metrics.line_height);
+                layout_y += height_of(&layout[layout_i]);
             });
-            layout_y
-                + layout[layout_cursor.layout]
-                    .line_height_opt
-                    .unwrap_or(metrics.line_height)
+            layout_y + height_of(&layout[layout_cursor.layout])
         };
 
         if self.scroll.line > layout_cursor.line
@@ -362,7 +359,7 @@ impl Buffer {
                         .line_layout(font_system, line_i)
                         .expect("shape_until_cursor failed to scroll forwards");
                     for layout_line in layout {
-                        total_height += layout_line.line_height_opt.unwrap_or(metrics.line_height);
+                        total_height += height_of(layout_line);
                     }
                     if total_height > height + self.scroll.vertical {
                         self.scroll.line = line_i;
@@ -412,6 +409,9 @@ impl Buffer {
     pub fn shape_until_scroll(&mut self, font_system: &mut FontSystem, prune: bool) {
         let metrics = self.metrics;
         let old_scroll = self.scroll;
+        // vocara: each line as tall as SkParagraph lays it out.
+        let empty = self.is_empty_paragraph();
+        let height_of = |line: &LayoutLine| line.line_box(metrics.line_height, empty).height;
 
         loop {
             // Adjust scroll.layout to be positive by moving scroll.line backwards
@@ -421,8 +421,7 @@ impl Buffer {
                     if let Some(layout) = self.line_layout(font_system, line_i) {
                         let mut layout_height = 0.0;
                         for layout_line in layout {
-                            layout_height +=
-                                layout_line.line_height_opt.unwrap_or(metrics.line_height);
+                            layout_height += height_of(layout_line);
                         }
                         self.scroll.line = line_i;
                         self.scroll.vertical += layout_height;
@@ -461,13 +460,18 @@ impl Buffer {
                     .line_layout(font_system, line_i)
                     .expect("shape_until_scroll invalid line");
                 for layout_line in layout {
-                    let line_height = layout_line.line_height_opt.unwrap_or(metrics.line_height);
+                    let line_height = height_of(layout_line);
                     layout_height += line_height;
                     total_height += line_height;
                 }
 
                 // Adjust scroll.vertical to be smaller by moving scroll.line forwards
-                if line_i == self.scroll.line && layout_height <= self.scroll.vertical {
+                // vocara: not past a line no pixels tall (a line height
+                // that rounds to none), which would never stop moving.
+                if line_i == self.scroll.line
+                    && layout_height > 0.0
+                    && layout_height <= self.scroll.vertical
+                {
                     self.scroll.line += 1;
                     self.scroll.vertical -= layout_height;
                 }
@@ -879,6 +883,12 @@ impl Buffer {
         self.redraw = redraw;
     }
 
+    /// vocara: whether the buffer has no text: one line, empty, which
+    /// SkParagraph lays out as an empty paragraph ([`LayoutLine::line_box`]).
+    pub fn is_empty_paragraph(&self) -> bool {
+        matches!(self.lines.as_slice(), [line] if line.text().is_empty())
+    }
+
     /// Get the visible layout runs for rendering and other tasks
     pub fn layout_runs(&self) -> LayoutRunIter<'_> {
         LayoutRunIter::new(self)
@@ -1223,7 +1233,9 @@ impl Buffer {
             }
             Motion::Vertical(px) => {
                 // TODO more efficient, use layout run line height
-                let lines = px / self.metrics().line_height as i32;
+                // vocara: at least a pixel (a line height of zero is a
+                // line without a height).
+                let lines = px / (self.metrics().line_height as i32).max(1);
                 match lines.cmp(&0) {
                     cmp::Ordering::Less => {
                         for _ in 0..-lines {

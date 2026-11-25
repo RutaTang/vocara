@@ -551,7 +551,11 @@ impl<'a, Message: Clone + 'a> Widget<Message, Theme, Renderer> for TextInput<'a,
         let font = self.font.unwrap_or_else(|| renderer.default_font());
         let text_size = self.size.unwrap_or_else(|| renderer.default_size());
         let padding = self.padding.fit(Size::ZERO, limits.max());
-        let height = self.line_height.to_absolute(text_size);
+        // One line, as SkParagraph laid it out (a whole pixel tall:
+        // `RenderEditable` took a single-line field's text's height), where
+        // iced's is the line height unrounded.
+        let height =
+            Pixels(crate::ui::core::text::line_box(font, text_size.0, self.line_height).height);
 
         let limits = limits.width(self.width).shrink(padding);
         let text_bounds = limits.resolve(self.width, height, Size::ZERO);

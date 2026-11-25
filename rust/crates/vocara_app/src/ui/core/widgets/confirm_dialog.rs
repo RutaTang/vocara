@@ -970,8 +970,10 @@ mod tests {
         let mut ui = iced_test::simulator(state.view());
         // Found by its full text, as a Flutter finder reads `Text.data`...
         let full = ui.find(title).expect("the title").bounds();
-        // ...it shows two lines (15 px at 1.3), the second ending in "…".
-        assert!((full.height - 2.0 * 15.0 * 1.3).abs() < 0.01, "{full:?}");
+        // ...it shows two lines (15 px at 1.3: 19.5, which SkParagraph's
+        // ascent and descent, scaled to it, round up to 20), the second
+        // ending in "…".
+        assert!((full.height - 2.0 * 20.0).abs() < 0.01, "{full:?}");
         let shown = ui
             .find(|candidate: Candidate<'_>| match candidate {
                 Candidate::Text { content, .. } if content.ends_with('\u{2026}') => {
@@ -987,7 +989,7 @@ mod tests {
         let state = DialogState::new(ConfirmDialog::new("Delete?"));
         let mut ui = iced_test::simulator(state.view());
         let short = ui.find("Delete?").expect("the title").bounds();
-        assert!((short.height - 15.0 * 1.3).abs() < 0.01, "{short:?}");
+        assert!((short.height - 20.0).abs() < 0.01, "{short:?}");
     }
 
     #[test]

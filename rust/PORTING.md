@@ -287,7 +287,9 @@ structure every screen follows, so screens ported by different hands fit:
   the text toolbar's labels, which Flutter set in the system UI font, take
   that face on macOS, drawn at the instance of its variation axes Flutter's
   Skia drew (`text_field::toolbar_face`; cosmic-text is vendored for it,
-  `rust/vendor/README.md`).
+  and for SkParagraph's lines, `rust/vendor/README.md`). The canvas
+  labels, which Flutter's `TextPainter`s set in that face too, are in
+  Inter (see **Text**).
 - **Wheel and trackpad** (`widgets::pan_zoom`): Flutter's macOS embedder
   delivered a scroll with gesture phases (a trackpad's two fingers, a Magic
   Mouse's) as a pan-zoom gesture, hit-tested at its start, which drag
@@ -341,7 +343,35 @@ structure every screen follows, so screens ported by different hands fit:
   `studio_text` (`.letter_spacing(px)`, `.tabular()`,
   `.ellipsis(max_lines)`), which lays its own cosmic-text buffer out as
   SkParagraph did; a canvas label with spacing or tabular figures is drawn
-  with `studio_text::fill_spaced_text` / `fill_tabular_text`.
+  with `studio_text::fill_spaced_text` / `fill_tabular_text`. Every line
+  is laid out on SkParagraph's (`ui::core::text`, the vendored
+  cosmic-text: `rust/vendor/README.md`): a run's ascent and descent are
+  its font's, scaled together to the style's `height` when it has one
+  (`TextLeadingDistribution.proportional`, every text's), a line's are its
+  runs' largest, its height is their sum rounded to the nearest pixel, its
+  glyphs' baseline their ascent below its top rounded to a pixel, each
+  line lies under the rounded lines above it (so a text is as tall as its
+  lines), an empty paragraph is measured by its font's metrics scaled to
+  their rounded sum, and each glyph's baseline is put on the nearest
+  device pixel, half up. So iced's `text`, `studio_text`, canvas text and
+  the fields sit where Flutter's did, and a box sized by its text (a row,
+  a button, a field: `ui::core::text::line_box`, `RenderEditable`'s
+  `preferredLineHeight`) is as tall as Flutter's. A `Text` takes the
+  Material theme's height 1 (`crate::ui::core::text`, and every line
+  height the port sets for one: the transport bar's counter and the
+  faders' readouts had iced's 1.3 or a natural 1.21 before); a
+  `TextPainter`'s style has none, so its labels are `text::NATURAL` (a
+  line height of zero, as SkParagraph takes a multiplier of zero: the
+  font's own ascent and descent). Not identical: a face's line gap is
+  taken as zero (Inter's and Lucide's are; the toolbar's system font sets
+  its line itself), a line whose ascent and descent add up to exactly
+  half a pixel rounds the way their last bit says, which cosmic-text
+  computes as CoreText did (font units scaled in `double`, made
+  `float`s) but cannot check against CoreText off a Mac, and a field's
+  empty text is a line tall where `RenderEditable` took an empty
+  paragraph's height or its hint's (the same for every field the app has).
+  The `TextPainter` labels are set in Inter, where Flutter (no family, no
+  theme) set them in the system UI font.
 - **Text fields** (`widgets::text_field`): iced's `text_input` and
   `text_editor` keep their caret, focus and blink in private state and draw
   a 1 px square caret in the text's color, under the text, so the app forks

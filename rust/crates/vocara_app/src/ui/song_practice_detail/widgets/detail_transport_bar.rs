@@ -77,9 +77,9 @@ const ZOOM_SLIDER_HEIGHT: f32 = 22.0;
 pub const ZOOM_OUT_FACTOR: f64 = 1.25;
 pub const ZOOM_IN_FACTOR: f64 = 0.8;
 
-/// The counter's line box: Inter's ascent + descent (≈ 1.21 em), the height
-/// Flutter's `Text` gave it.
-const LCD_LINE_HEIGHT: f32 = 1.21;
+/// The counter's line height: a `Text` under the screen's `Scaffold`, so
+/// the Material theme's height 1 (a 14 px line).
+const LCD_LINE_HEIGHT: f32 = 1.0;
 
 /// What the transport bar asks of the detail view model (or the screen).
 #[derive(Debug, Clone, PartialEq)]

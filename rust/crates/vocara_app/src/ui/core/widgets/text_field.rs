@@ -42,6 +42,14 @@
 //!   macOS: Cut and Copy with a selection, Paste when the clipboard holds
 //!   text, none of them in a read-only field but Copy, and no Select All
 //!   (`selectAllEnabled` is false on macOS).
+//! - **The lines**: SkParagraph's, as every text's
+//!   ([`crate::ui::core::text`]): a single-line field is one line tall and
+//!   a multi-line field's lines lie one under the other, each a whole pixel
+//!   tall (`text::line_box`, the `preferredLineHeight` `RenderEditable`
+//!   sized its lines by; a field's `minLines` and `maxLines` are that many
+//!   of it), where iced's were the line height, unrounded. iced's editor
+//!   still puts its caret and selection a line height apart: they are moved
+//!   onto the lines the text is laid out on.
 //! - **The caret margin**: a multi-line field wraps its text 3 px short of
 //!   its width (`_kCaretGap + cursorWidth`), as `RenderEditable` laid it
 //!   out, leaving the caret room at the end of a full line.

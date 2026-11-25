@@ -422,12 +422,13 @@ impl FixedWidthReadout {
         self
     }
 
-    /// The reading laid out at `size` px, as `studio_text` sets it.
+    /// The reading laid out at `size` px, as `studio_text` sets it: a
+    /// `Text` under the app's Material theme, its line height 1.
     fn line_at(&self, size: f32) -> (Arc<Buffer>, Size) {
         studio_text::line(
             &self.text,
             size,
-            LineHeight::default(),
+            LineHeight::Relative(1.0),
             self.font,
             self.tabular,
         )
@@ -914,7 +915,8 @@ mod tests {
                 ((drawn.x + drawn.width) - FADER_DB_READOUT_WIDTH).abs() < 0.01,
                 "{text}"
             );
-            assert!(drawn.height < 10.0 * 1.3 * 1.5, "{text} is one line");
+            // One line of a `Text` at the theme's height 1: 10 px.
+            assert_eq!(drawn.height, 10.0, "{text} is one line");
         }
     }
 
@@ -926,7 +928,7 @@ mod tests {
         let drawn = readout_text_bounds(wide.into(), "1444 ms 1444 ms");
         assert!(drawn.x >= -0.01);
         assert!(((drawn.x + drawn.width) - 42.0).abs() < 0.05);
-        assert!(drawn.height < 10.5 * 1.3, "scaled down, not wrapped");
+        assert!(drawn.height < 10.5, "scaled down, not wrapped");
     }
 
     #[test]

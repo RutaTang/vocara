@@ -18,7 +18,7 @@ use std::sync::Arc;
 use crate::ui::core::text;
 use iced::alignment::{Horizontal, Vertical};
 use iced::widget::canvas::{self, gradient, Frame, Geometry, LineCap, Path, Stroke, Style};
-use iced::widget::text::{Alignment, LineHeight};
+use iced::widget::text::Alignment;
 use iced::widget::{canvas as canvas_widget, column, container, row, stack, Space};
 use iced::{mouse, Color, Element, Length, Padding, Pixels, Point, Rectangle, Renderer, Theme};
 use vocara_model::models::audio_track::AudioTrack;
@@ -334,10 +334,6 @@ fn stat<'a, M: 'a>(label: &str, value: String, sub: String, accent: Color) -> El
     .into()
 }
 
-/// Inter's line box (ascent + descent ≈ 1.21 em): the height Flutter's
-/// `TextPainter` gave a painted label.
-const LABEL_LINE: f32 = 1.21;
-
 /// `_profileText`: `s` in w600 at `size`, its top at `y`, its left edge at
 /// `x` (or centred on it, or ending at it).
 fn profile_text(
@@ -353,7 +349,8 @@ fn profile_text(
         position: Point::new(x, y),
         color,
         size: Pixels(size),
-        line_height: LineHeight::Relative(LABEL_LINE),
+        // A `TextPainter`'s style has no height: the font's own line.
+        line_height: text::NATURAL,
         font: font::SEMIBOLD,
         align_x: align,
         align_y: Vertical::Top,
