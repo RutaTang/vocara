@@ -998,6 +998,50 @@ fn a_swipe_on_a_field_whose_text_fits_is_the_views_from_its_first_move() {
 }
 
 #[test]
+fn a_swipe_on_a_multi_line_field_is_its_own_only_while_its_text_overflows() {
+    use crate::ui::core::widgets::text_field::editor::{text_editor, Content};
+
+    /// A 40 px field at the top of the view.
+    fn view(content: &Content) -> Element<'_, f32> {
+        fading_scrollbar(
+            scrollable(column![
+                text_editor(content)
+                    .read_only(true)
+                    .size(14)
+                    .line_height(1.0)
+                    .padding(0)
+                    .height(40),
+                Space::new().height(300),
+            ])
+            .width(100)
+            .height(100)
+            .on_scroll(|viewport| viewport.absolute_offset().y),
+        )
+    }
+    let long = Content::with_text(&"line\n".repeat(20));
+    let short = Content::with_text("one line");
+    let mut window = window();
+    let t0 = Instant::now();
+    window.point_at(Point::new(40.0, 20.0));
+    window.frame(view(&long), &[], t0);
+    let mut pad = Trackpad::new();
+    // Its text overflows: its drag and the view's race, and the field's,
+    // handed the moves first, wins the tie; the view stays.
+    send(&mut window, view(&long), &[pad.began(t0)], t0);
+    for _ in 0..4 {
+        let moved = send(&mut window, view(&long), &[pad.changed(0.0, -12.0, t0)], t0);
+        assert_eq!(moved, None);
+    }
+    send(&mut window, view(&long), &[pad.ended(t0)], t0);
+    // Its text fits: the view's drag is alone, from the first move.
+    window.frame(view(&short), &[], t0 + 100 * MS);
+    let t1 = t0 + 200 * MS;
+    send(&mut window, view(&short), &[pad.began(t1)], t1);
+    let moved = send(&mut window, view(&short), &[pad.changed(0.0, -4.0, t1)], t1);
+    assert_eq!(moved, Some(4.0));
+}
+
+#[test]
 fn a_horizontal_view_drags_flings_and_takes_the_wheel_across() {
     let mut window = window();
     let t0 = Instant::now();

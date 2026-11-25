@@ -308,7 +308,10 @@ structure every screen follows, so screens ported by different hands fit:
   while its text overflows) and its right-click menu (the word under the
   click selected unless it was on the selection, and the desktop Cupertino
   toolbar there with what macOS offered: Cut, Copy, Paste, no Select All).
-  A multi-line field wraps 3 px short of its width (the caret's room); one
+  A multi-line field wraps 3 px short of its width (the caret's room),
+  takes a wheel event only while its text overflows, and then a swipe
+  drags its text with the fingers in whole lines (iced's editor scrolls
+  by lines; Flutter's also flung it when they lifted); one
   read-only is `SelectableText` (it selects and copies, shows no caret,
   and keeps its own selection). A single-line field's text, when wider
   than the field, scrolls as `EditableText` scrolled it
