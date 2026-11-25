@@ -135,6 +135,50 @@ wrong. Port the behavior, not the shape:
   modes on CI, whose runner has a GUI session; on a Mac it opens two small
   windows for a few seconds, takes the keyboard and overwrites the
   clipboard. Elsewhere it prints a skip line.
+- **Verified on CI's Mac**, beyond type-checking, by more tests of that
+  kind (each prints every check it makes, and says plainly what it could
+  not check there):
+  - the open and save panels (`crates/vocara_app/tests/macos_file_panels.rs`):
+    each opened through the app's own entry point (the lyrics import, the
+    technique examples' browse, the settings' save panel asked from a
+    worker) inside `-[NSApplication run]`, as iced runs the app; an open
+    panel comes up as a sheet on the main window, the save panel
+    application-modal, each with the call site's file types, selection
+    mode and suggested name; Escape cancels it (the call site gets
+    nothing), and a file chosen through OK comes back to the call site;
+    the main window is key again after. A panel the posted Escape does not
+    reach is cancelled with `cancel:`, and an open panel that cannot be
+    made to select a file programmatically is cancelled instead of
+    accepted: the run says so;
+  - ⌘Q with a take armed (`crates/vocara_app/tests/macos_quit.rs`): the
+    hook `main` installs, the app's own quit guard (`App` with the real
+    `ServiceQuitHooks` and `RecordingFinalizer::instance`) and a stand-in
+    take registered as a recording registers. A posted ⌘Q goes through
+    the menu's Quit to the intercepted `terminate:`: AppKit's own never
+    runs (the app does not answer `NSTerminateLater`; it exits by itself),
+    the app hears `QuitRequested`, the guard runs the finalizer, a second
+    ⌘Q meanwhile is ignored, and the guard's `QuitGuardDone` (then
+    `iced::exit`) comes only after the take's file landed; a ⌘Q past
+    `REPEAT_WINDOW` (it waits the 65 s out, in the run without `device`)
+    reaches AppKit's own `terminate:`, which asks the application
+    delegate;
+  - the example players' AVFoundation backend, with `device`
+    (`crates/vocara_services/tests/macos_media_player.rs`), on clips
+    written at test time (a WAV tone by `audio_dsp::write_wav_mono`, a
+    movie of solid red, green and blue seconds by `AVAssetWriter`): load
+    and duration, play, pause, exact seek, the end and a replay, frames
+    (size, fresh revisions, each second's colour in the right channel
+    order), buffering and the buffered extent, and volume and mute read
+    back from the `AVPlayer` (mpv's cube law, clamped; mute keeps the
+    volume). An audio item's clock needs an output device: on a Mac with
+    none, the tone's transport is skipped, said so; the movie's runs on
+    the host clock either way;
+  - the text toolbar's label face (`text_field::toolbar_face`, its macOS
+    test): reads `SFNS.ttf` (its `fvar` axes and named instances, `trak`,
+    `hhea`), lays glyphs out in it through cosmic-text and checks the
+    advance it uses (the default optical size's, plus the 12 pt track its
+    shaper, harfrust, adds) and that the labels took the system font
+    exactly when that is what Flutter drew.
 - **Commits**: small and frequent, on the working branch, with the session's
   trailer lines. CI is not run until the whole port is done.
 
@@ -200,7 +244,9 @@ structure every screen follows, so screens ported by different hands fit:
   tiny-skia renderer, which the Linux tests draw with) do: upstream drew it
   in place of the fill, so a translucent border (a hovered card's coral at
   60 %) showed the page behind the card. Text always uses the bundled
-  Inter (`theme::font::install`), never a copy installed on the machine.
+  Inter (`theme::font::install`), never a copy installed on the machine;
+  only the text toolbar's labels, which Flutter set in the system UI font,
+  may take that face (`text_field::toolbar_face`).
 - **Text**: every text is shaped fully and kerned, as Flutter set it: the
   workspace enables iced's `advanced-shaping` feature, which makes
   `Shaping::Advanced` every text's default (iced's own default shapes ASCII
@@ -362,11 +408,12 @@ small and written down in the module that has it:
   superellipse corners and its shadow's spread Flutter's) shows what lies
   behind it unblurred and unsaturated (Flutter's `BackdropFilter`; iced
   has no backdrop filter), its shadow faded on iced's curve, not a
-  Gaussian, and its labels in Inter at Inter's natural line height, where
-  Flutter set them in the macOS system UI font: the font system reaches
-  that face by its hidden family name, but cosmic-text varies a face
-  along its weight axis alone, so it would draw the variable system font
-  at its default optical size, not the 14 px one CoreText set.
+  Gaussian. Its labels are in the macOS system UI font, as Flutter's,
+  only where cosmic-text draws that variable face as Flutter did (it
+  varies a face along its weight axis alone, so the face's default
+  optical size must be the one CoreText set at 14 px, and the shapers'
+  12 pt tracking nil; `text_field::toolbar_face` reads both off the
+  face); otherwise in Inter at Inter's natural line height.
 
 ## Tracking
 
@@ -493,7 +540,7 @@ behavior and its tests are ported and the gates pass.
 | `ui/technique_library/technique_library_screen.dart` | 914 | `vocara_app::ui::technique_library::technique_library_screen` (the snack bars queue, timed by a subscription, and go to the app's `messenger` when a page covers the library or it leaves) | done |
 | `ui/technique_library/view_model/technique_detail_view_model.dart` | 2013 | `vocara_app::ui::technique_library::view_model::technique_detail_view_model` (each awaited I/O is a `Job` the screen runs on a worker and lands, the code after the `await` a continuation; Dart's return values are `Answer`s; `micArmed` / `analysisScrub` are effects; the recorder's timers are the screen's ticks, which also carry a quit's `quitFinalize` from the finalizer thread; the screen API is in the module doc) | done |
 | `ui/technique_library/view_model/technique_library_view_model.dart` | 280 | `vocara_app::ui::technique_library::view_model::technique_library_view_model` | done |
-| `ui/technique_library/widgets/media/technique_audio_player.dart` | 417 | `vocara_app::ui::technique_library::widgets::media::technique_audio_player` (media_kit's `Player` → `vocara_services::media_player`, polled: AVFoundation on macOS with `device`, the null player elsewhere, a fake in tests; the keyed players a technique page keeps → `media::example_players`) | done (the AVFoundation backend type-checked for macOS; its pure parts tested everywhere) |
+| `ui/technique_library/widgets/media/technique_audio_player.dart` | 417 | `vocara_app::ui::technique_library::widgets::media::technique_audio_player` (media_kit's `Player` → `vocara_services::media_player`, polled: AVFoundation on macOS with `device`, the null player elsewhere, a fake in tests; the keyed players a technique page keeps → `media::example_players`) | done (the AVFoundation backend played on CI's Mac with `device`, `vocara_services`' `tests/macos_media_player.rs`; its pure parts tested everywhere) |
 | `ui/technique_library/widgets/media/technique_media_section.dart` | 898 | `vocara_app::ui::technique_library::widgets::media::technique_media_section` (plain data in — `TechniqueMediaSection`, the constructor's parameters — and `Message`s out, which `MediaSectionState::update` turns into the callbacks' `Event`s; the page keeps that state (hover, drag) and the `ExamplePlayers`; the picker is `vocara_services::file_panels`' (`browse`), the rename dialog goes through the app's dialog stack (`Dialog::RenameExample`)) | done |
 | `ui/technique_library/widgets/media/technique_video_player.dart` | 190 | `vocara_app::ui::technique_library::widgets::media::technique_video_player` (the controls `AdaptiveVideoControls` gave it on macOS, media_kit_video 2.0.1's `MaterialDesktopVideoControls` with `modifyVolumeOnScroll: false` → `media::video_controls`, one widget drawing and handling them all; its fullscreen route → the page's `Screen::overlay` plus the window's native fullscreen; the controls' keyboard → the first video started, through `ExamplePlayers::shortcuts`) | done (what iced cannot do the same — group opacity, focus scopes, rounded clips, scroll phases — is listed in `video_controls`' and the player's module docs) |
 | `ui/technique_library/widgets/studio_field.dart` | 96 | `vocara_app::ui::technique_library::widgets::studio_field` | done |
