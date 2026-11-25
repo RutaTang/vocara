@@ -38,7 +38,11 @@ Then create the public releases repo itself: <https://github.com/new>, name
 tag, and an empty repo has none). The workflow's guard checks all of it
 (token set and allowed to create releases there, repo public, repo not
 empty) before it builds anything; its write check creates a draft release
-and deletes it at once.
+and deletes it at once. To check the setup without cutting a release (after
+creating the repo and the token, or renewing the token), run the **Release
+setup check** workflow by hand (Actions → Release setup check → Run
+workflow): it runs the same check (`.github/scripts/releases-repo-check.sh`)
+and nothing else.
 
 ## Cutting a release
 
