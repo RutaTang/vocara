@@ -222,6 +222,19 @@ pub trait MediaPlayer {
     fn frame(&mut self) -> Option<VideoFrame> {
         None
     }
+
+    /// What [`MediaPlayer::set_volume`] and [`MediaPlayer::set_muted`] left
+    /// the platform's player with, read back from it: `(gain, muted)`, for
+    /// the AVFoundation backend `AVPlayer.volume` (0–1: the
+    /// [`volume_gain`] of the volume set) and `AVPlayer.isMuted`. `None`
+    /// for a player with no platform side (the null and fake players).
+    /// Only the macOS device test reads it
+    /// (`tests/macos_media_player.rs`); the app reads
+    /// [`MediaPlayer::state`].
+    #[doc(hidden)]
+    fn platform_volume(&self) -> Option<(f32, bool)> {
+        None
+    }
 }
 
 /// Builds the example players: Dart's `createExamplePlayer` seam, which

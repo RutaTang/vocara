@@ -62,6 +62,12 @@ workspace = true
 name = "macos_gui"
 harness = false
 
+# The example players' AVPlayer on a real Mac (with `device`): AVFoundation
+# settles a player through the main run loop, so `main` is the test's own.
+[[test]]
+name = "macos_media_player"
+harness = false
+
 # What tests/macos_gui.rs builds its windows, fields and events with.
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 objc2-app-kit = { version = "0.3", default-features = false, features = [
@@ -78,6 +84,34 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
     "std",
     "NSDate",
     "NSRunLoop",
+] }
+# What tests/macos_media_player.rs writes its movie with (AVAssetWriter, a
+# test-only API here) and runs the main run loop with.
+objc2-av-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "AVAssetWriter",
+    "AVAssetWriterInput",
+    "AVMediaFormat",
+    "AVVideoSettings",
+    "objc2-core-media",
+    "objc2-core-video",
+] }
+objc2-core-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "CFDate",
+    "CFRunLoop",
+] }
+objc2-core-media = { version = "0.3", default-features = false, features = [
+    "std",
+    "CMTime",
+] }
+objc2-core-video = { version = "0.3", default-features = false, features = [
+    "std",
+    "CVBase",
+    "CVBuffer",
+    "CVImageBuffer",
+    "CVPixelBuffer",
+    "CVReturn",
 ] }
 
 # HTTPS for the update check: the system trust store on macOS (as Dart's
