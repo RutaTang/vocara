@@ -439,15 +439,65 @@ mod macos {
         });
     }
 
-    /// Sends the panel up now its OK button's action, `ok:`.
-    fn press_ok() {
-        on_main(|mtm| {
-            if let Some((panel, _)) = find_panel(&NSApplication::sharedApplication(mtm)) {
-                // SAFETY: `-[NSSavePanel ok:]`, an action method; a nil
-                // sender is what a programmatic press sends.
-                unsafe { panel.ok(None) };
+    /// Runs `f`, AppKit calls on a panel that may raise: an Objective-C
+    /// exception (which no Rust frame can catch, so it aborted the run) is
+    /// caught, said with its name and reason, and answered `None`.
+    fn guarded<R, F: FnOnce() -> R>(what: &str, f: F) -> Option<R> {
+        struct Call<F, R> {
+            f: Option<F>,
+            out: Option<R>,
+        }
+        extern "C-unwind" fn run<F: FnOnce() -> R, R>(context: *mut std::ffi::c_void) {
+            // SAFETY: `context` is the `Call<F, R>` below, alive and not
+            // otherwise borrowed for the whole of `try_catch`.
+            let call = unsafe { &mut *context.cast::<Call<F, R>>() };
+            if let Some(f) = call.f.take() {
+                call.out = Some(f());
             }
-        });
+        }
+        let mut call = Call {
+            f: Some(f),
+            out: None,
+        };
+        let mut exception: *mut std::ffi::c_void = std::ptr::null_mut();
+        // SAFETY: `run::<F, R>` reads its context as the `Call<F, R>` it is
+        // handed; `exception` is written only when one was caught.
+        let caught = unsafe {
+            objc2_exception_helper::try_catch(
+                run::<F, R>,
+                (&raw mut call).cast(),
+                &raw mut exception,
+            )
+        };
+        if caught == 0 {
+            return call.out;
+        }
+        let said = if exception.is_null() {
+            "nil".to_string()
+        } else {
+            // SAFETY: `try_catch` hands the caught exception over retained
+            // (+1); it is an NSException, which answers `description`.
+            let exception: Retained<AnyObject> =
+                unsafe { Retained::from_raw(exception.cast()) }.expect("not null");
+            let description: Retained<NSString> =
+                unsafe { objc2::msg_send![&*exception, description] };
+            description.to_string()
+        };
+        note(format!("AppKit raised an exception on {what}: {said}"));
+        None
+    }
+
+    /// Sends the panel up now its OK button's action, `ok:`. Whether AppKit
+    /// took it without raising.
+    fn press_ok() -> bool {
+        on_main(|mtm| {
+            let Some((panel, _)) = find_panel(&NSApplication::sharedApplication(mtm)) else {
+                return true;
+            };
+            // SAFETY: `-[NSSavePanel ok:]`, an action method; a nil sender
+            // is what a programmatic press sends.
+            guarded("ok:", || unsafe { panel.ok(None) }).is_some()
+        })
     }
 
     /// Closes the panel up now as a cancel: Escape, posted as typed, else
@@ -468,7 +518,7 @@ mod macos {
             if let Some((panel, _)) = find_panel(&NSApplication::sharedApplication(mtm)) {
                 // SAFETY: `-[NSSavePanel cancel:]`, an action method; a nil
                 // sender is what a programmatic press sends.
-                unsafe { panel.cancel(None) };
+                guarded("cancel:", || unsafe { panel.cancel(None) });
             }
         });
         if !wait_until(CLOSE, closed) {
@@ -495,11 +545,14 @@ mod macos {
             let Some(open) = object.downcast_ref::<NSOpenPanel>() else {
                 return Vec::new();
             };
-            open.URLs()
-                .to_vec()
-                .into_iter()
-                .filter_map(|url| url.to_file_path())
-                .collect()
+            guarded("URLs", || open.URLs())
+                .map(|urls| {
+                    urls.to_vec()
+                        .into_iter()
+                        .filter_map(|url| url.to_file_path())
+                        .collect()
+                })
+                .unwrap_or_default()
         })
     }
 
@@ -518,7 +571,7 @@ mod macos {
             if let (Some((panel, _)), Some(url)) =
                 (find_panel(&app), NSURL::from_file_path(&target))
             {
-                panel.setDirectoryURL(Some(&url));
+                guarded("setDirectoryURL:", || panel.setDirectoryURL(Some(&url)));
             }
         });
         let chosen = || selection().iter().any(|chosen| same_file(chosen, file));
@@ -542,8 +595,7 @@ mod macos {
             ));
             return false;
         }
-        press_ok();
-        wait_until(CLOSE, closed)
+        press_ok() && wait_until(CLOSE, closed)
     }
 
     /// Checks that the main window is key again once a panel has gone.
@@ -807,15 +859,18 @@ mod macos {
             if let (Some((panel, _)), Some(url)) =
                 (find_panel(&app), NSURL::from_directory_path(&folder))
             {
-                panel.setDirectoryURL(Some(&url));
-                panel.setNameFieldStringValue(&NSString::from_str(chosen));
+                guarded("setDirectoryURL:", || panel.setDirectoryURL(Some(&url)));
+                guarded("setNameFieldStringValue:", || {
+                    panel.setNameFieldStringValue(&NSString::from_str(chosen));
+                });
             }
         });
         let shows_folder = wait_until(SELECT_WAIT, || {
             let folder = on_main(|mtm| {
                 let app = NSApplication::sharedApplication(mtm);
                 find_panel(&app)
-                    .and_then(|(panel, _)| panel.directoryURL())
+                    .and_then(|(panel, _)| guarded("directoryURL", || panel.directoryURL()))
+                    .flatten()
                     .and_then(|url| url.to_file_path())
             });
             folder.is_some_and(|folder| same_file(&folder, &exports))
@@ -826,8 +881,7 @@ mod macos {
                 exports.display()
             ));
         }
-        press_ok();
-        if wait_until(CLOSE, closed) {
+        if press_ok() && wait_until(CLOSE, closed) {
             let out = answer.recv_timeout(RESULT_WAIT);
             let lands = |path: &str| {
                 let path = Path::new(path);

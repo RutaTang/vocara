@@ -57,6 +57,11 @@ harness = false
 # 0.6's bindings, the versions vocara_services and the run loop use).
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 objc2 = "0.6"
+# The panels test catches an Objective-C exception AppKit raises, through
+# objc2's own @try helper, taken directly so that no shipped crate's
+# features change (objc2's `exception` feature would make the helper a
+# dependency of the app's objc2).
+objc2-exception-helper = "0.1"
 block2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = [
     "std",
