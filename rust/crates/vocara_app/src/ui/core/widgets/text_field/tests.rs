@@ -981,14 +981,14 @@ fn a_two_finger_swipe_alone_on_the_field_drags_it_and_flings_it() {
 
 #[test]
 fn in_a_scroll_view_a_swipe_is_the_fields_past_18_px_across_or_the_views_past_18_down() {
-    use crate::ui::core::widgets::fading_scrollbar::Fading;
+    use crate::ui::core::widgets::fading_scrollbar::{scrollable, Fading};
 
     caret::set_scale_factor(1.0);
     let mut window = window();
     let text = format!("{}WWWW", filler());
     let at = Point::new(150.0, MIDDLE);
     fn page(text: &str) -> Element<'_, Msg> {
-        iced::widget::scrollable(column![field(text), Space::new().height(400)])
+        scrollable(column![field(text), Space::new().height(400)])
             .width(Length::Fill)
             .height(200)
             .fading()

@@ -36,9 +36,9 @@
 #[cfg(test)]
 mod tests;
 
+use crate::ui::core::widgets::fading_scrollbar::scrollable;
 use iced::alignment::Vertical;
-use iced::widget::scrollable::{Direction, Scrollbar};
-use iced::widget::{button, column, container, row, scrollable, stack, Row, Space};
+use iced::widget::{button, column, container, row, stack, Row, Space};
 use iced::{mouse, Color, Element, Event, Length, Padding};
 use vocara_model::models::voice_metrics::{Ltas, RegisterMap, VoiceMetrics, VoiceProfile};
 
@@ -276,11 +276,7 @@ fn tab_bar<'a>(open: bool, tab: DockTab, shows_live: bool, live: bool) -> Elemen
     let mut bar = row![
         Space::new().width(12),
         // Left: the voice-analysis tabs (scroll on a narrow window).
-        scrollable(tabs)
-            .direction(Direction::Horizontal(
-                Scrollbar::new().width(0).scroller_width(0)
-            ))
-            .width(Length::Fill),
+        scrollable(tabs).horizontal().width(Length::Fill),
     ]
     .align_y(Vertical::Center)
     .height(TAB_BAR_HEIGHT);

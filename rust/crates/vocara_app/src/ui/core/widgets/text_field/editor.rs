@@ -14,7 +14,11 @@
 //! - its text wraps [`caret::MARGIN`] short of its width (`RenderEditable`
 //!   kept that room for the caret);
 //! - a press of any button outside it takes its focus away
-//!   (`TextFieldTapRegion`), not the primary button's only.
+//!   (`TextFieldTapRegion`), not the primary button's only;
+//! - a wheel event is its own only while its text overflows, and a
+//!   trackpad's swipe drags the text with the fingers (in lines), first
+//!   winning the gesture's arena from a scroll view around it; the
+//!   momentum after reaches nothing (`pan_zoom`, see `TextEditor::wheel`).
 //!
 //! [`TextEditor::read_only`] makes it `SelectableText`: the text can be
 //! selected (click, drag, double and triple click, the keyboard) and copied,
@@ -54,6 +58,7 @@ pub use iced::widget::text_editor::{
     Action, Cursor, Edit, Line, LineEnding, Motion, Position, Selection,
 };
 
+use super::super::pan_zoom::{self, Scroll, TOUCH_SLOP};
 use super::show_on_screen::{self, Request};
 use super::toolbar::{self, Item};
 use super::{caret, DEFAULT_CARET};
@@ -237,6 +242,95 @@ impl<'a, Message> TextEditor<'a, Message> {
         self.line_height
             .to_absolute(self.text_size.unwrap_or_else(|| renderer.default_size()))
             .into()
+    }
+
+    /// A wheel event as Flutter's multi-line field took it (`pan_zoom`),
+    /// its `Scrollable` a vertical one that could drag, and take a
+    /// scroll signal, only while its text overflowed (`setCanDrag`,
+    /// `shouldAcceptUserOffset`); whether it is done with the event (iced's
+    /// handling below takes the rest: a signal it scrolls by its lines).
+    ///
+    /// - A swipe that starts on it enters the gesture's arena, as a
+    ///   single-line field's does (`input::scroll`); won, each move scrolls
+    ///   the text by the pan, in the whole lines iced's editor scrolls by
+    ///   (the rest carried to the next). It does not fling when the
+    ///   fingers lift, where Flutter's did: iced's editor scrolls by lines.
+    /// - The momentum after reaches nothing.
+    /// - With nothing to scroll it takes no wheel event: the view around
+    ///   it, if any, has them.
+    fn wheel(
+        &self,
+        state: &mut State,
+        bounds: Rectangle,
+        cursor: mouse::Cursor,
+        renderer: &Renderer,
+        sink: Sink<'_, Message>,
+        shell: &mut Shell<'_, Message>,
+    ) -> bool {
+        let overflows = {
+            let internal = self.content.0.borrow();
+            let laid = internal.editor.bounds().height;
+            laid < i32::MAX as f32 && internal.editor.min_bounds().height > laid + 0.5
+        };
+        match pan_zoom::current() {
+            Scroll::Signal => !overflows,
+            Scroll::Start { gesture, time } => {
+                if overflows && cursor.is_over(bounds) {
+                    state.pan = Some(Pan {
+                        gesture,
+                        pan: 0.0,
+                        entry: pan_zoom::enter(gesture, time),
+                        won: None,
+                    });
+                    shell.capture_event();
+                }
+                true
+            }
+            Scroll::Update { gesture, delta, .. } => {
+                let Some(pan) = state.pan.as_mut().filter(|pan| pan.gesture == gesture) else {
+                    return true;
+                };
+                pan.pan += delta.y;
+                let mut moves = true;
+                if pan.won.is_none() {
+                    pan.won = pan.entry.standing();
+                    if pan.won.is_none() && pan.pan.abs() > TOUCH_SLOP as f32 {
+                        pan.won = Some(pan.entry.accept());
+                        moves = false;
+                    }
+                }
+                match pan.won {
+                    Some(false) => {}
+                    Some(true) if moves => {
+                        // `applyUserOffset(dy)`, in lines.
+                        let lines = -delta.y / self.line_height_px(renderer) + state.partial_scroll;
+                        state.partial_scroll = lines.fract();
+                        if lines.trunc() != 0.0 {
+                            sink.act(
+                                Action::Scroll {
+                                    lines: lines as i32,
+                                },
+                                shell,
+                            );
+                        }
+                        shell.capture_event();
+                    }
+                    _ => shell.capture_event(),
+                }
+                true
+            }
+            Scroll::End { gesture } => {
+                if state
+                    .pan
+                    .take_if(|pan| pan.gesture == gesture)
+                    .is_some_and(|pan| pan.won != Some(false))
+                {
+                    shell.capture_event();
+                }
+                true
+            }
+            Scroll::Nothing { .. } => true,
+        }
     }
 
     fn input_method<'b>(
@@ -541,6 +635,19 @@ pub struct State {
     /// What it asks the scroll view around it to show
     /// (`show_on_screen`).
     pub(super) requests: Vec<Request>,
+    /// The trackpad gesture its `Scrollable`'s drag took last.
+    pan: Option<Pan>,
+}
+
+/// A trackpad gesture that started on the field while its text could
+/// scroll: its pan down so far, its vertical drag's place in the
+/// gesture's arena and whether it won there (`None` while undecided).
+#[derive(Debug, Clone, Copy)]
+struct Pan {
+    gesture: u64,
+    pan: f32,
+    entry: pan_zoom::Entry,
+    won: Option<bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -886,6 +993,11 @@ impl<Message> Widget<Message, Theme, Renderer> for TextEditor<'_, Message> {
                 // The press closes the menu (`onTapDown` on macOS), in the
                 // field or out of it.
                 state.toolbar = None;
+            }
+            Event::Mouse(mouse::Event::WheelScrolled { .. })
+                if self.wheel(state, layout.bounds(), cursor, renderer, sink, shell) =>
+            {
+                return;
             }
             _ => {}
         }

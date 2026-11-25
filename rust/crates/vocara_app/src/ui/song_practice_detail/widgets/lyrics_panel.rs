@@ -70,8 +70,8 @@ use iced::alignment::{Horizontal, Vertical};
 use iced::widget::canvas::{self, Frame, Geometry};
 use iced::widget::text::{Alignment, Wrapping};
 use iced::widget::{
-    button, canvas as canvas_widget, center, column, container, responsive, row, scrollable, stack,
-    Column, Space,
+    button, canvas as canvas_widget, center, column, container, responsive, row, stack, Column,
+    Space,
 };
 use iced::{
     keyboard, mouse, widget, Border, Color, Element, Event, Length, Padding, Pixels, Point,
@@ -86,7 +86,7 @@ use vocara_model::util::format::format_clock_ms;
 use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::motion::{Curve, Implicit};
 use crate::ui::core::theme::{self, alpha, boxed, fill, font, Studio};
-use crate::ui::core::widgets::fading_scrollbar::Fading;
+use crate::ui::core::widgets::fading_scrollbar::{scrollable, Fading};
 use crate::ui::core::widgets::holds_keyboard::holds_keyboard;
 use crate::ui::core::widgets::material_tooltip::material_tooltip;
 use crate::ui::core::widgets::studio_button::{studio_button, StudioButtonVariant};

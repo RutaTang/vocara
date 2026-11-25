@@ -9,11 +9,11 @@
 
 use crate::ui::core::text;
 use iced::alignment::Horizontal;
-use iced::widget::{button, center, column, container, row, scrollable, Space};
+use iced::widget::{button, center, column, container, row, Space};
 use iced::{Background, Border, Element, Length, Shadow, Theme};
 
 use crate::ui::core::theme::{self, alpha, font, Studio};
-use crate::ui::core::widgets::fading_scrollbar::Fading;
+use crate::ui::core::widgets::fading_scrollbar::{scrollable, Fading};
 
 /// What the user can do on the fatal window.
 #[derive(Debug, Clone, PartialEq, Eq)]

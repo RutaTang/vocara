@@ -10,7 +10,10 @@
 //!   rest of it to what that hit, as it did a pointer's press: a drag
 //!   recognizer that took the trackpad (every one by default; the app's
 //!   own controls left it out with `kPointerDragDevices`) took it as a
-//!   drag, its moves the pan's deltas; a `Listener` saw its updates.
+//!   drag, its moves the pan's deltas; a `Listener` saw its updates. The
+//!   drag recognizers its start reached shared its gesture arena
+//!   ([`enter`]): alone, one won as the start closed the arena; with
+//!   others, the first moved past its slop along its axis won.
 //! - **A scroll signal** (`PointerScrollEvent`): a scroll with neither
 //!   phase nor momentum phase (a mouse wheel, or a precise device that
 //!   sends no phases). Only `onPointerSignal` handlers saw it (a scroll
@@ -61,8 +64,14 @@ pub fn scroll_delta(delta: mouse::ScrollDelta, shift: bool) -> Vector {
 thread_local! {
     /// The handling time tests set (see [`event_time`]).
     static EVENT_TIME: Cell<Option<Instant>> = const { Cell::new(None) };
-    /// How many vertical scroll views the widget being updated lies in.
-    static SCROLL_VIEWS: Cell<u32> = const { Cell::new(0) };
+    /// The arena of the pan-zoom gesture last entered.
+    static ARENA: Cell<Arena> = const {
+        Cell::new(Arena {
+            key: None,
+            entrants: 0,
+            winner: None,
+        })
+    };
 }
 
 /// When a pointer event is handled: iced's events carry no time stamp, so
@@ -71,27 +80,89 @@ pub fn event_time() -> Instant {
     EVENT_TIME.with(Cell::get).unwrap_or_else(Instant::now)
 }
 
-/// Runs `f`, a vertical scroll view's update of its content: a drag
-/// recognizer in the content then shares a trackpad gesture's arena with
-/// the view's own ([`in_scroll_view`]).
-pub fn within_scroll_view<R>(f: impl FnOnce() -> R) -> R {
-    struct Leave;
-
-    impl Drop for Leave {
-        fn drop(&mut self) {
-            SCROLL_VIEWS.with(|n| n.set(n.get().saturating_sub(1)));
-        }
-    }
-
-    SCROLL_VIEWS.with(|n| n.set(n.get() + 1));
-    let _leave = Leave;
-    f()
+/// A pan-zoom gesture's arena (`GestureArenaManager`'s for its pointer):
+/// the drag recognizers its start reached, in the order it reached them,
+/// and the one that won.
+#[derive(Debug, Clone, Copy)]
+struct Arena {
+    /// The gesture and when it started: each embedder (each test's
+    /// trackpad) counts gestures afresh, so the time tells them apart.
+    key: Option<(u64, Instant)>,
+    entrants: u32,
+    winner: Option<u32>,
 }
 
-/// Whether the widget being updated lies in a vertical scroll view, whose
-/// drag recognizer a trackpad gesture starting on it would also reach.
-pub fn in_scroll_view() -> bool {
-    SCROLL_VIEWS.with(Cell::get) > 0
+/// A drag recognizer's place in a pan-zoom gesture's arena (see
+/// [`enter`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Entry {
+    key: (u64, Instant),
+    index: u32,
+}
+
+/// Enters the arena of `gesture`, which started at `time` (a
+/// [`Scroll::Start`]'s): a drag recognizer that takes the trackpad and
+/// that the start reached (`addAllowedPointerPanZoom`). Recognizers enter
+/// in the order Flutter's hit test reached them, the innermost first, the
+/// order the pointer router then handed each of them the gesture's
+/// events in: a widget with content enters once its content has handled
+/// the start, and hands it each update before it looks at the update.
+pub fn enter(gesture: u64, time: Instant) -> Entry {
+    let key = (gesture, time);
+    ARENA.with(|cell| {
+        let mut arena = cell.get();
+        if arena.key != Some(key) {
+            arena = Arena {
+                key: Some(key),
+                entrants: 0,
+                winner: None,
+            };
+        }
+        let index = arena.entrants;
+        arena.entrants += 1;
+        cell.set(arena);
+        Entry { key, index }
+    })
+}
+
+impl Entry {
+    /// Where it stands once its gesture's start has been dispatched:
+    /// `Some(true)` won (alone in the arena, it won as the start closed
+    /// the arena: `_resolveByDefault`), `Some(false)` another won, `None`
+    /// still racing.
+    pub fn standing(self) -> Option<bool> {
+        ARENA.with(|cell| {
+            let mut arena = cell.get();
+            if arena.key != Some(self.key) {
+                // A later gesture's arena: this one is over.
+                return Some(false);
+            }
+            if arena.winner.is_none() && arena.entrants == 1 {
+                arena.winner = Some(self.index);
+                cell.set(arena);
+            }
+            arena.winner.map(|winner| winner == self.index)
+        })
+    }
+
+    /// It moved past its slop along its axis (`resolve(accepted)`): it
+    /// wins, unless another already has. Whether it won.
+    pub fn accept(self) -> bool {
+        ARENA.with(|cell| {
+            let mut arena = cell.get();
+            if arena.key != Some(self.key) {
+                return false;
+            }
+            match arena.winner {
+                Some(winner) => winner == self.index,
+                None => {
+                    arena.winner = Some(self.index);
+                    cell.set(arena);
+                    true
+                }
+            }
+        })
+    }
 }
 
 /// What a `WheelScrolled` was to Flutter (see the module docs).
@@ -374,6 +445,28 @@ mod tests {
             read(pad.send(Phase::Stationary, Phase::None, (0.0, 0.0), t)),
             Scroll::Nothing { gesture: 1 }
         );
+    }
+
+    #[test]
+    fn an_arena_goes_to_its_sole_entrant_or_to_the_first_to_accept() {
+        let t = Instant::now();
+        // Alone: won once the start has been dispatched.
+        let alone = enter(1, t);
+        assert_eq!(alone.standing(), Some(true));
+        // Two: undecided until one accepts, the other then lost.
+        let inner = enter(2, t);
+        let outer = enter(2, t);
+        assert_eq!(inner.standing(), None);
+        assert_eq!(outer.standing(), None);
+        assert!(outer.accept());
+        assert!(!inner.accept());
+        assert_eq!(inner.standing(), Some(false));
+        assert_eq!(outer.standing(), Some(true));
+        // Another embedder's gesture 2, started later: an arena of its
+        // own, the last one over.
+        let later = enter(2, t + std::time::Duration::from_millis(1));
+        assert_eq!(later.standing(), Some(true));
+        assert_eq!(outer.standing(), Some(false));
     }
 
     #[test]

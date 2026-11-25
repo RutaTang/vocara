@@ -1,9 +1,72 @@
-//! The scrollbar Flutter's desktop scroll behavior put on every vertical
-//! scrollable (Material's `Scrollbar` over `RawScrollbar`, Flutter 3.38 on
-//! macOS, with a mouse), drawn and driven here over an iced scrollable
-//! whose own scrollbar is hidden (`Scrollbar::hidden()`: nothing drawn,
-//! nothing to grab); the iced scrollable keeps the content, the wheel and
-//! the layout.
+//! The app's scroll views: each a Flutter `Scrollable` under the app's
+//! `ClampingScrollPhysics` (`app.dart`'s `_NoBounceScrollBehavior`, a
+//! `MaterialScrollBehavior`), Flutter 3.38 on macOS, made with
+//! [`scrollable`] as iced's `scrollable` is, and the scrollbar Material's
+//! desktop behavior put on a vertical one ([`Fading::fading`]). An iced
+//! scrollable keeps the content, its layout and its offset; this wrapper
+//! moves the offset as Flutter's scroll position moved, and draws and drives
+//! the scrollbar.
+//!
+//! # Scrolling
+//!
+//! The view scrolls along its axis (vertical, or across with
+//! [`ScrollView::horizontal`]) as `Scrollable` and
+//! `ScrollPositionWithSingleContext` scrolled it, from the gesture each
+//! wheel event was to Flutter's macOS embedder ([`pan_zoom`]); iced's own
+//! scrollable never scrolls by a wheel event (its content is a probe that
+//! keeps the event from it once the content has seen it):
+//!
+//! - **A trackpad's swipe** (a pan-zoom gesture) that starts over the view
+//!   reaches its drag recognizer (`VerticalDragGestureRecognizer`, or
+//!   horizontal; `ScrollBehavior.dragDevices` holds the trackpad), there
+//!   while the view can scroll (`setCanDrag`: a range, or an offset off the
+//!   start). The start holds the position (`_handleDragDown`, `hold`: a
+//!   fling, a page or the thumb's drag stops) and enters the gesture's
+//!   arena after the drag recognizers inside the view it reached (a
+//!   single-line field's, a nested view's: `pan_zoom::enter`). Alone there,
+//!   the view's drag starts at once and each move of the pan along its axis
+//!   moves the view 1:1 (`ScrollDragController.update`, `applyUserOffset`),
+//!   clamped to its range (a move against an end shows the bar, as the
+//!   overscroll notification did); with others, nothing moves until one is
+//!   past `kTouchSlop` (18 px, the trackpad's hit slop) along its axis,
+//!   the innermost first on a tie, and the move that takes the view's past
+//!   starts its drag without moving it (`DragStartBehavior.start`). When
+//!   the fingers lift, the drag's velocity
+//!   (`MacOSScrollViewFlingVelocityTracker`, a fling past 18 px and
+//!   50 px/s, at most 8000 px/s: `scroll_fling::drag_end`) flings the view
+//!   on a `ClampingScrollSimulation` from the next frame until it is done
+//!   or meets an end (`scroll_fling::Ballistic`); too slow, it stays. A
+//!   drag that lost the arena, or one still undecided when the fingers
+//!   lift, moves nothing. The momentum macOS sends once they lift reaches
+//!   nothing at all: neither the view nor its content sees it.
+//! - **A scroll signal** (a mouse wheel's, or a precise device's without
+//!   gesture phases) goes to the content first; if nothing there took it
+//!   (the innermost scrollable that would scroll wins Flutter's
+//!   `pointerSignalResolver`), it scrolls the view by its delta along the
+//!   axis, the other one with Shift held (`_pointerSignalEventDelta`'s
+//!   `pointerAxisModifiers`, a signal being a mouse's), at once and within
+//!   the range (`pointerScroll`: a line 40 px, as the embedder sent it, a
+//!   precise device's point a pixel); one that would not move the view
+//!   goes on to what lies around it.
+//! - A new swipe that reaches the view, a signal that scrolls it, a press
+//!   of the thumb or the track, a caret shown or the app scrolling it stop
+//!   a fling (`beginActivity`); a swipe that starts elsewhere, a press of
+//!   the content or a signal that does not move it do not. A fling after a
+//!   trackpad's drag leaves the content its pointer, as Flutter's did.
+//!
+//! Left as it is: `PointerScrollInertiaCancelEvent`, which the embedder
+//! sent when a finger touched the trackpad within 50 ms of macOS's
+//! momentum and which stopped every fling under the pointer, needs the
+//! touches AppKit reports apart from scrolls, which winit does not read
+//! (two fingers landing, a pan-zoom start, still stop it).
+//!
+//! # The scrollbar
+//!
+//! A vertical view under [`Fading::fading`] takes the scrollbar Flutter's
+//! desktop scroll behavior put on every vertical scrollable (Material's
+//! `Scrollbar` over `RawScrollbar`, with a mouse), drawn and driven here
+//! over the iced scrollable, whose own scrollbar is hidden
+//! (`Scrollbar::hidden()`: nothing drawn, nothing to grab).
 //!
 //! The thumb is `ScrollbarPainter`'s as Material set it up: 8 wide
 //! (`_kScrollbarThickness`), 2 in from the right edge (`_kScrollbarMargin`),
@@ -15,14 +78,14 @@
 //!
 //! How it moves (`RawScrollbarState`, `_MaterialScrollbarState`):
 //!
-//! - It is hidden until the view scrolls (the wheel, a drag of the thumb, a
-//!   press on the track, the app) or the pointer comes over the bar; it
-//!   then fades in over 300 ms and, 600 ms after the scroll ends, the
-//!   pointer leaves the bar or the view, or a drag ends, fades out over
-//!   300 ms, both on `Curves.fastOutSlowIn` (`fadeDuration`, `timeToFade`).
-//!   The pointer holds it only as it moves over it (Flutter's hover events
-//!   came with motion only): a scroll that ends under a resting pointer
-//!   starts the 600 ms too.
+//! - It is hidden until the view scrolls (a swipe, the wheel, a drag of the
+//!   thumb, a press on the track, the app) or the pointer comes over the
+//!   bar; it then fades in over 300 ms and, 600 ms after the scroll ends
+//!   (a fling's when it stops), the pointer leaves the bar or the view, or
+//!   a drag ends, fades out over 300 ms, both on `Curves.fastOutSlowIn`
+//!   (`fadeDuration`, `timeToFade`). The pointer holds it only as it moves
+//!   over it (Flutter's hover events came with motion only): a scroll that
+//!   ends under a resting pointer starts the 600 ms too.
 //! - Under the pointer the thumb's color moves to its hovered one over
 //!   200 ms, linear (Material's hover animation); dragged, it takes the
 //!   dragged one at once.
@@ -43,27 +106,27 @@
 //! - A view with nothing to scroll shows none.
 //!
 //! The time comes from the window's frames, so a test injects it. What an
-//! event starts (a fade, the hover's color, a page's scroll) starts at the
-//! next frame, as a Flutter ticker did; the widget asks for frames only
-//! while something moves, or for one when the bar is due to fade.
+//! event starts (a fade, the hover's color, a page's scroll, a fling)
+//! starts at the next frame, as a Flutter ticker did; the widget asks for
+//! frames only while something moves, or for one when the bar is due to
+//! fade.
 //!
 //! Material's scroll behavior gave a horizontal scrollable no scrollbar, and
 //! `ScrollConfiguration(scrollbars: false)` took it off a vertical one:
-//! those take `Scrollbar::hidden()` without this widget.
+//! those are a [`ScrollView`] as it is ([`no_scrollbar`],
+//! [`ScrollView::horizontal`]), scrolling as above with no bar.
 //!
 //! - The wheel over the shown track is the bar's (`_receivedPointerSignal`,
-//!   the content under the track out of the hit test): a scroll signal (a
-//!   mouse wheel's lines, the app's 60 px a line, or a precise device's
-//!   points when it sends no gesture phases) scrolls the view by its
-//!   vertical delta (`pointerScroll`; Shift's axis swap macOS makes
-//!   undone, as Flutter's embedder undid it), within its range, and the
-//!   content under the track never sees it; during a drag of the thumb
-//!   nothing scrolls. A trackpad's (or a Magic Mouse's) swipe that starts
-//!   on the shown track scrolls nothing to its end, nor does its momentum:
-//!   Flutter took it as a pan-zoom gesture, which only the recognizers its
-//!   start hit saw, the view's own drag not among them. One that starts
-//!   elsewhere is the content's to its end, should the bar come in under
-//!   the pointer meanwhile ([`pan_zoom`](super::pan_zoom)).
+//!   the content and the view's own listener under the track out of the
+//!   hit test): a scroll signal scrolls the view by its vertical delta
+//!   (`pointerScroll`: the bar flipped no axis for Shift), within its
+//!   range, and the content under the track never sees it; during a drag
+//!   of the thumb nothing scrolls. A trackpad's (or a Magic Mouse's) swipe
+//!   that starts on the shown track scrolls nothing to its end, nor does
+//!   its momentum, and a fling goes on: only the recognizers its start hit
+//!   saw it, the view's own drag not among them. One that starts elsewhere
+//!   is the view's to its end, should the bar come in under the pointer
+//!   meanwhile.
 //! - The pointer leaving the view is noticed after each frame too, not
 //!   only when it moves (Flutter's mouse tracker re-tested a still pointer
 //!   after each frame and sent the bar's region its exit when the view no
@@ -85,6 +148,7 @@
 //! with no arena: no widget above the view can claim the press back, so
 //! there is no later moment for the bar to learn it won.
 
+use std::cell::Cell;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -94,14 +158,15 @@ use iced::advanced::widget::{tree, Id, Operation, Tree};
 use iced::advanced::{overlay, renderer, Clipboard, Renderer as _, Shell, Widget};
 use iced::time::Instant;
 use iced::widget::scrollable::{
-    self, AbsoluteOffset, Direction, Scrollable, Scrollbar, Status, Style,
+    self, AbsoluteOffset, Direction, Scrollable, Scrollbar, Status, Style, Viewport,
 };
 use iced::{
     keyboard, mouse, window, Background, Border, Color, Element, Event, Length, Point, Rectangle,
     Renderer, Size, Theme, Vector,
 };
 
-use super::pan_zoom::{self, Scroll};
+use super::pan_zoom::{self, Scroll, TOUCH_SLOP};
+use super::scroll_fling::{self, Ballistic, MacOsVelocityTracker};
 use crate::ui::core::motion::{self, Controller, Curve, Lerp};
 use crate::ui::core::scale_factor::{scale_factor, set_scale_factor};
 use crate::ui::core::theme;
@@ -159,22 +224,54 @@ fn near() -> f32 {
 }
 
 /// How far a scroll signal's `delta` over the shown track scrolls the view
-/// down (`_pointerSignalEventDelta`, the vertical delta: Flutter's bar
-/// flipped no axis for Shift): a line the app's 60 px, a precise device's
-/// point a pixel.
+/// down (the bar's `_pointerSignalEventDelta`: the vertical scroll delta,
+/// no axis flipped for Shift).
 fn wheel_on_track(delta: mouse::ScrollDelta, modifiers: keyboard::Modifiers) -> f32 {
-    let (x, y, per_line) = match delta {
-        mouse::ScrollDelta::Lines { x, y } => (x, y, 60.0),
-        mouse::ScrollDelta::Pixels { x, y } => (x, y, 1.0),
-    };
-    // macOS hands Shift's scroll over across; Flutter's embedder put it
-    // back down.
-    let down = if cfg!(target_os = "macos") && modifiers.shift() {
-        x
-    } else {
-        y
-    };
-    -down * per_line
+    pan_zoom::scroll_delta(delta, modifiers.shift()).y
+}
+
+/// The axis a scroll view scrolls along (`Scrollable.axis`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Axis {
+    #[default]
+    Vertical,
+    Horizontal,
+}
+
+impl Axis {
+    /// `vector`'s part along the axis.
+    fn of(self, vector: Vector) -> f32 {
+        match self {
+            Axis::Vertical => vector.y,
+            Axis::Horizontal => vector.x,
+        }
+    }
+
+    /// `size`'s extent along the axis.
+    fn extent(self, size: Size) -> f32 {
+        match self {
+            Axis::Vertical => size.height,
+            Axis::Horizontal => size.width,
+        }
+    }
+
+    /// A scroll signal's scroll along the axis for its scroll delta
+    /// `delta` (`_pointerSignalEventDelta`): the other axis's with Shift
+    /// held (`pointerAxisModifiers`, a signal being a mouse's).
+    fn signal(self, delta: Vector, shift: bool) -> f32 {
+        match (self, shift) {
+            (Axis::Vertical, false) | (Axis::Horizontal, true) => delta.y,
+            (Axis::Vertical, true) | (Axis::Horizontal, false) => delta.x,
+        }
+    }
+
+    /// The iced scrollable's direction, its own scrollbar hidden.
+    fn direction(self) -> Direction {
+        match self {
+            Axis::Vertical => Direction::Vertical(Scrollbar::hidden()),
+            Axis::Horizontal => Direction::Horizontal(Scrollbar::hidden()),
+        }
+    }
 }
 
 /// The style's statuses the thumb's colors are read at.
@@ -198,45 +295,110 @@ const DRAGGED: Status = Status::Dragged {
 /// The scrollbar's style, which the wrapper and its scrollable share.
 type SharedStyle<'a> = Rc<dyn Fn(&Theme, Status) -> Style + 'a>;
 
-/// `scrollable` under the app's scrollbar (`theme::scrollbar`), as the
-/// module docs say. It scrolls vertically: its direction is set here.
-pub fn fading_scrollbar<'a, M: 'a>(scrollable: Scrollable<'a, M>) -> Element<'a, M> {
-    fading_scrollbar_with(scrollable, theme::scrollbar)
+/// An app scroll view, built as iced's `scrollable` is (see the module
+/// docs): with no scrollbar as it is, vertical unless made
+/// [`ScrollView::horizontal`]; [`Fading::fading`] puts the bar on it.
+pub struct ScrollView<'a, M> {
+    scrollable: Scrollable<'a, M>,
+    axis: Axis,
 }
 
-/// `scrollable` under the scrollbar whose colors and radius `style` gives
-/// (its vertical rail's scroller, idle, hovered and dragged), as the module
+/// `content` in an app scroll view (see the module docs).
+pub fn scrollable<'a, M: 'a>(content: impl Into<Element<'a, M>>) -> ScrollView<'a, M> {
+    ScrollView {
+        scrollable: iced::widget::scrollable(Element::new(Probe {
+            content: content.into(),
+        })),
+        axis: Axis::Vertical,
+    }
+}
+
+impl<'a, M: 'a> ScrollView<'a, M> {
+    pub fn width(mut self, width: impl Into<Length>) -> Self {
+        self.scrollable = self.scrollable.width(width);
+        self
+    }
+
+    pub fn height(mut self, height: impl Into<Length>) -> Self {
+        self.scrollable = self.scrollable.height(height);
+        self
+    }
+
+    /// The iced scrollable's id, for the app's scroll operations.
+    pub fn id(mut self, id: impl Into<Id>) -> Self {
+        self.scrollable = self.scrollable.id(id);
+        self
+    }
+
+    /// Publishes the viewport as the offset changes.
+    pub fn on_scroll(mut self, f: impl Fn(Viewport) -> M + 'a) -> Self {
+        self.scrollable = self.scrollable.on_scroll(f);
+        self
+    }
+
+    /// Scrolls across (`scrollDirection: Axis.horizontal`): Material's
+    /// scroll behavior gave such a view no scrollbar.
+    pub fn horizontal(mut self) -> Self {
+        self.axis = Axis::Horizontal;
+        self
+    }
+}
+
+impl<'a, M: 'a> From<ScrollView<'a, M>> for Element<'a, M> {
+    fn from(view: ScrollView<'a, M>) -> Self {
+        Element::new(FadingScrollbar {
+            scrollable: view.scrollable.direction(view.axis.direction()).into(),
+            style: None,
+            axis: view.axis,
+        })
+    }
+}
+
+/// `view` scrolling vertically with no scrollbar
+/// (`ScrollConfiguration(scrollbars: false)`): nothing is drawn and
+/// nothing takes the pointer (iced's own scrollbar, even clear, would take
+/// the strip at its edge from the content).
+pub fn no_scrollbar<M>(view: ScrollView<'_, M>) -> ScrollView<'_, M> {
+    debug_assert_eq!(view.axis, Axis::Vertical, "a vertical view");
+    view
+}
+
+/// `view` under the app's scrollbar (`theme::scrollbar`), as the module
+/// docs say. It scrolls vertically.
+pub fn fading_scrollbar<'a, M: 'a>(view: ScrollView<'a, M>) -> Element<'a, M> {
+    fading_scrollbar_with(view, theme::scrollbar)
+}
+
+/// `view` under the scrollbar whose colors and radius `style` gives (its
+/// vertical rail's scroller, idle, hovered and dragged), as the module
 /// docs say.
 pub fn fading_scrollbar_with<'a, M: 'a>(
+    view: ScrollView<'a, M>,
+    style: impl Fn(&Theme, Status) -> Style + 'a,
+) -> Element<'a, M> {
+    with_bar(view.scrollable, style)
+}
+
+/// `scrollable`, probed, scrolling vertically under the bar `style` gives.
+fn with_bar<'a, M: 'a>(
     scrollable: Scrollable<'a, M>,
     style: impl Fn(&Theme, Status) -> Style + 'a,
 ) -> Element<'a, M> {
     let style: SharedStyle<'a> = Rc::new(style);
     let looks = Rc::clone(&style);
     // The iced scrollable draws its container; its own scrollbar is hidden.
-    let scrollable = vertical(scrollable).style(move |theme, status| looks(theme, status));
+    let scrollable = scrollable
+        .direction(Axis::Vertical.direction())
+        .style(move |theme, status| looks(theme, status));
     Element::new(FadingScrollbar {
         scrollable: scrollable.into(),
-        style,
+        style: Some(style),
+        axis: Axis::Vertical,
     })
 }
 
-/// `scrollable` scrolling vertically, its own scrollbar hidden.
-fn vertical<M>(scrollable: Scrollable<'_, M>) -> Scrollable<'_, M> {
-    scrollable.direction(Direction::Vertical(Scrollbar::hidden()))
-}
-
-/// `scrollable` scrolling vertically with no scrollbar
-/// (`ScrollConfiguration(scrollbars: false)`): the wheel scrolls it;
-/// nothing is drawn and nothing takes the pointer (iced's own scrollbar,
-/// even clear, would take the strip at its edge from the content).
-pub fn no_scrollbar<M>(scrollable: Scrollable<'_, M>) -> Scrollable<'_, M> {
-    vertical(scrollable)
-}
-
-/// A scrollable that will take the fading scrollbar, still taking its
-/// size: what [`Fading::fading`] makes of one, to finish as the scrollable
-/// was.
+/// A scroll view that will take the fading scrollbar, still taking its
+/// size: what [`Fading::fading`] makes of one, to finish as the view was.
 pub struct FadingScrollable<'a, M> {
     scrollable: Scrollable<'a, M>,
     style: scrollable::StyleFn<'a, Theme>,
@@ -256,11 +418,12 @@ impl<M> FadingScrollable<'_, M> {
 
 impl<'a, M: 'a> From<FadingScrollable<'a, M>> for Element<'a, M> {
     fn from(fading: FadingScrollable<'a, M>) -> Self {
-        fading_scrollbar_with(fading.scrollable, fading.style)
+        with_bar(fading.scrollable, fading.style)
     }
 }
 
-/// `.fading()` where an iced scrollable took `.style(theme::scrollbar)`.
+/// `.fading()` on a [`ScrollView`] that Material's desktop scroll behavior
+/// gave a scrollbar.
 pub trait Fading<'a, M> {
     /// Under the app's scrollbar (see the module docs), scrolling
     /// vertically.
@@ -270,47 +433,236 @@ pub trait Fading<'a, M> {
     fn fading_with(self, style: impl Fn(&Theme, Status) -> Style + 'a) -> FadingScrollable<'a, M>;
 }
 
-impl<'a, M: 'a> Fading<'a, M> for Scrollable<'a, M> {
+impl<'a, M: 'a> Fading<'a, M> for ScrollView<'a, M> {
     fn fading(self) -> FadingScrollable<'a, M> {
         self.fading_with(theme::scrollbar)
     }
 
     fn fading_with(self, style: impl Fn(&Theme, Status) -> Style + 'a) -> FadingScrollable<'a, M> {
+        debug_assert_eq!(self.axis, Axis::Vertical, "the bar is a vertical view's");
         FadingScrollable {
-            scrollable: vertical(self),
+            scrollable: self.scrollable,
             style: Box::new(style),
         }
     }
 }
 
-struct FadingScrollbar<'a, M> {
-    scrollable: Element<'a, M>,
-    style: SharedStyle<'a>,
+// -------------------------------------------------------------- the probe
+
+/// Where a wheel event's handover between a scroll view and its probe
+/// stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Probing {
+    Idle,
+    /// The view handed its scrollable the event.
+    Armed,
+    /// The probe handed it to the content, which took it or not.
+    Answered(bool),
 }
 
-impl<M> FadingScrollbar<'_, M> {
-    /// The thumb's color at `opacity` (`_thumbColor` resolved, then
-    /// `_paintThumb`'s `color.withOpacity(color.opacity * fade)`, its alpha
-    /// in 8 bits each time).
-    fn thumb_color(&self, theme: &Theme, dragged: bool, hover: f32, opacity: f32) -> Color {
-        let color = |status| match (self.style)(theme, status)
-            .vertical_rail
-            .scroller
-            .background
-        {
-            Background::Color(color) => color,
-            Background::Gradient(_) => Color::TRANSPARENT,
-        };
-        let color = if dragged {
-            color(DRAGGED)
-        } else {
-            color(IDLE).lerp(color(HOVERED), hover)
-        };
-        let alpha = (color.a * 255.0).round();
-        Color {
-            a: (alpha * opacity).round() / 255.0,
-            ..color
+thread_local! {
+    static PROBE: Cell<Probing> = const { Cell::new(Probing::Idle) };
+}
+
+/// A scroll view's content inside its iced scrollable: lays out, draws and
+/// operates as the content does (its tree is the content's), and hands it
+/// every event; a wheel event the view hands over then goes no further,
+/// so iced's scrollable never scrolls by it (the view scrolls itself, see
+/// the module docs), and the view learns whether the content took it.
+struct Probe<'a, M> {
+    content: Element<'a, M>,
+}
+
+impl<M> Widget<M, Theme, Renderer> for Probe<'_, M> {
+    fn size(&self) -> Size<Length> {
+        self.content.as_widget().size()
+    }
+
+    fn size_hint(&self) -> Size<Length> {
+        self.content.as_widget().size_hint()
+    }
+
+    fn tag(&self) -> tree::Tag {
+        self.content.as_widget().tag()
+    }
+
+    fn state(&self) -> tree::State {
+        self.content.as_widget().state()
+    }
+
+    fn children(&self) -> Vec<Tree> {
+        self.content.as_widget().children()
+    }
+
+    fn diff(&self, tree: &mut Tree) {
+        self.content.as_widget().diff(tree);
+    }
+
+    fn layout(
+        &mut self,
+        tree: &mut Tree,
+        renderer: &Renderer,
+        limits: &layout::Limits,
+    ) -> layout::Node {
+        self.content.as_widget_mut().layout(tree, renderer, limits)
+    }
+
+    fn update(
+        &mut self,
+        tree: &mut Tree,
+        event: &Event,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        renderer: &Renderer,
+        clipboard: &mut dyn Clipboard,
+        shell: &mut Shell<'_, M>,
+        viewport: &Rectangle,
+    ) {
+        // A view inside the content hands its own over.
+        let armed = matches!(event, Event::Mouse(mouse::Event::WheelScrolled { .. }))
+            && PROBE.with(|probe| probe.replace(Probing::Idle)) == Probing::Armed;
+        self.content.as_widget_mut().update(
+            tree, event, layout, cursor, renderer, clipboard, shell, viewport,
+        );
+        if armed {
+            PROBE.with(|probe| probe.set(Probing::Answered(shell.is_event_captured())));
+            shell.capture_event();
         }
+    }
+
+    fn draw(
+        &self,
+        tree: &Tree,
+        renderer: &mut Renderer,
+        theme: &Theme,
+        style: &renderer::Style,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        viewport: &Rectangle,
+    ) {
+        self.content
+            .as_widget()
+            .draw(tree, renderer, theme, style, layout, cursor, viewport);
+    }
+
+    fn operate(
+        &mut self,
+        tree: &mut Tree,
+        layout: Layout<'_>,
+        renderer: &Renderer,
+        operation: &mut dyn Operation,
+    ) {
+        self.content
+            .as_widget_mut()
+            .operate(tree, layout, renderer, operation);
+    }
+
+    fn mouse_interaction(
+        &self,
+        tree: &Tree,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        viewport: &Rectangle,
+        renderer: &Renderer,
+    ) -> mouse::Interaction {
+        self.content
+            .as_widget()
+            .mouse_interaction(tree, layout, cursor, viewport, renderer)
+    }
+
+    fn overlay<'b>(
+        &'b mut self,
+        tree: &'b mut Tree,
+        layout: Layout<'b>,
+        renderer: &Renderer,
+        viewport: &Rectangle,
+        translation: Vector,
+    ) -> Option<overlay::Element<'b, M, Theme, Renderer>> {
+        self.content
+            .as_widget_mut()
+            .overlay(tree, layout, renderer, viewport, translation)
+    }
+}
+
+/// Hands `event`, a wheel event, to the content of `scrollable` through
+/// its probe, in a shell of its own: what the content did reaches `shell`
+/// but for the probe's capture. Whether the content took the event (or
+/// something before it had).
+#[allow(clippy::too_many_arguments)]
+fn update_probed<M>(
+    scrollable: &mut Element<'_, M>,
+    tree: &mut Tree,
+    event: &Event,
+    layout: Layout<'_>,
+    cursor: mouse::Cursor,
+    renderer: &Renderer,
+    clipboard: &mut dyn Clipboard,
+    shell: &mut Shell<'_, M>,
+    viewport: &Rectangle,
+) -> bool {
+    let mut messages = Vec::new();
+    let mut inner = Shell::new(&mut messages);
+    if shell.is_event_captured() {
+        inner.capture_event();
+    }
+    let before = PROBE.with(|probe| probe.replace(Probing::Armed));
+    scrollable.as_widget_mut().update(
+        tree, event, layout, cursor, renderer, clipboard, &mut inner, viewport,
+    );
+    let answer = PROBE.with(|probe| probe.replace(before));
+    shell.request_redraw_at(inner.redraw_request());
+    shell.request_input_method(inner.input_method());
+    if inner.is_layout_invalid() {
+        shell.invalidate_layout();
+    }
+    if inner.are_widgets_invalid() {
+        shell.invalidate_widgets();
+    }
+    let captured = inner.is_event_captured();
+    drop(inner);
+    for message in messages {
+        shell.publish(message);
+    }
+    match answer {
+        Probing::Answered(taken) => taken,
+        // The probe was not reached (iced's scrollable kept the event from
+        // its content): what the scrollable did with it stands.
+        Probing::Idle | Probing::Armed => captured,
+    }
+}
+
+// ---------------------------------------------------------- the wrapper
+
+struct FadingScrollbar<'a, M> {
+    scrollable: Element<'a, M>,
+    /// The bar's style; none for a view with no bar.
+    style: Option<SharedStyle<'a>>,
+    axis: Axis,
+}
+
+/// The thumb's color in `style` at `opacity` (`_thumbColor` resolved, then
+/// `_paintThumb`'s `color.withOpacity(color.opacity * fade)`, its alpha in
+/// 8 bits each time).
+fn thumb_color(
+    style: &SharedStyle<'_>,
+    theme: &Theme,
+    dragged: bool,
+    hover: f32,
+    opacity: f32,
+) -> Color {
+    let color = |status| match style(theme, status).vertical_rail.scroller.background {
+        Background::Color(color) => color,
+        Background::Gradient(_) => Color::TRANSPARENT,
+    };
+    let color = if dragged {
+        color(DRAGGED)
+    } else {
+        color(IDLE).lerp(color(HOVERED), hover)
+    };
+    let alpha = (color.a * 255.0).round();
+    Color {
+        a: (alpha * opacity).round() / 255.0,
+        ..color
     }
 }
 
@@ -446,6 +798,40 @@ struct Page {
     curve: Curve,
 }
 
+/// A pan-zoom gesture that started over the view: whether the shown track
+/// took its start (nothing scrolls, and the content sees none of it), and
+/// the view's drag recognizer on it, if the start reached it.
+#[derive(Debug, Clone)]
+struct Pan {
+    gesture: u64,
+    on_track: bool,
+    drag: Option<PanDrag>,
+}
+
+/// Where the view's drag recognizer is on a gesture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stage {
+    /// In the arena, holding the position (`_DragState.possible`).
+    Possible,
+    /// Won: its drag moves the view (`DragScrollActivity`).
+    Dragging,
+    /// Lost, ended, or its drag disposed by another activity.
+    Done,
+}
+
+/// The view's drag recognizer on a pan-zoom gesture
+/// (`VerticalDragGestureRecognizer`, `Scrollable._handleDrag*`).
+#[derive(Debug, Clone)]
+struct PanDrag {
+    entry: pan_zoom::Entry,
+    /// The pan along the axis since the start: what the velocity tracker
+    /// samples, and how far it has moved toward its slop
+    /// (`_globalDistanceMoved`).
+    pan: f32,
+    tracker: MacOsVelocityTracker,
+    stage: Stage,
+}
+
 /// What the timer is told, the last word counting.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Timer {
@@ -462,8 +848,11 @@ struct Pending {
     hover: Option<bool>,
 }
 
-/// The bar's state (`RawScrollbarState`'s and Material's).
+/// The view's state: its scroll position's (`ScrollPosition`'s activity)
+/// and its bar's (`RawScrollbarState`'s and Material's).
 struct State {
+    /// The view has a bar.
+    has_bar: bool,
     fade: Controller,
     /// When the thumb is due to fade, while that is pending
     /// (`_fadeoutTimer`).
@@ -483,11 +872,13 @@ struct State {
     held: bool,
     drag: Option<Drag>,
     page: Option<Page>,
+    /// A fling under way (`BallisticScrollActivity`).
+    fling: Option<Ballistic>,
     pending: Pending,
     /// Something changed that a frame must show.
     dirty: bool,
-    /// The scroll offset down (`pixels`), once seen: what this widget set,
-    /// to the fraction, or what the scrollable shows.
+    /// The scroll offset along the axis (`pixels`), once seen: what this
+    /// widget set, to the fraction, or what the scrollable shows.
     pixels: Option<f32>,
     now: Option<Instant>,
     /// The keyboard's modifiers (Shift, for the wheel).
@@ -495,9 +886,8 @@ struct State {
     /// The text fields' request count it last looked at
     /// (`text_field::show_on_screen`).
     asked: u64,
-    /// The trackpad gesture last started over the view, and whether the
-    /// shown track took it (or the content did).
-    pan: Option<(u64, bool)>,
+    /// The pan-zoom gesture last started over the view.
+    pan: Option<Pan>,
 }
 
 /// `controller` is heading in or in (`isForwardOrCompleted`).
@@ -522,8 +912,9 @@ fn button_bit(button: mouse::Button) -> u8 {
 }
 
 impl State {
-    fn new() -> Self {
+    fn new(has_bar: bool) -> Self {
         Self {
+            has_bar,
             fade: Controller::new(FADE, FADE),
             timer: None,
             hover: Controller::new(HOVER, HOVER),
@@ -533,6 +924,7 @@ impl State {
             held: false,
             drag: None,
             page: None,
+            fling: None,
             pending: Pending::default(),
             dirty: false,
             pixels: None,
@@ -550,6 +942,9 @@ impl State {
     }
 
     fn bar(&self, bounds: Rectangle, content: f32) -> Option<Bar> {
+        if !self.has_bar {
+            return None;
+        }
         Bar::new(bounds, content, self.pixels.unwrap_or(0.0))
     }
 
@@ -573,7 +968,7 @@ impl State {
 
     /// Fades the thumb in (`_fadeoutAnimationController.forward()`).
     fn show(&mut self) {
-        if !heading_in(&self.fade, self.now) && !self.pending.show {
+        if self.has_bar && !heading_in(&self.fade, self.now) && !self.pending.show {
             self.pending.show = true;
             self.dirty = true;
         }
@@ -610,12 +1005,21 @@ impl State {
         }
     }
 
-    /// The view scrolled (`ScrollUpdateNotification`) and, if `ended`, the
-    /// scroll ended (`ScrollEndNotification`).
+    /// The view scrolled (`ScrollUpdateNotification`, or an
+    /// `OverscrollNotification` for a move against an end) and, if `ended`,
+    /// the scroll ended (`ScrollEndNotification`).
     fn scrolled(&mut self, ended: bool) {
         self.show();
         self.cancel_timer();
-        if ended && !self.drag.is_some_and(|drag| drag.live) {
+        if ended {
+            self.scroll_ended();
+        }
+    }
+
+    /// The scroll ended (`ScrollEndNotification`): the bar fades once the
+    /// time is up, unless the thumb's drag holds it.
+    fn scroll_ended(&mut self) {
+        if self.has_bar && !self.drag.is_some_and(|drag| drag.live) {
             self.start_timer();
         }
     }
@@ -627,10 +1031,35 @@ impl State {
         self.scrolled(ended);
     }
 
+    /// Something new drives the position (`beginActivity`): what drove it
+    /// stops (a page's or a caret's run, a fling, the trackpad's drag, the
+    /// thumb's drag, which goes on holding the button). Whether a run that
+    /// was scrolling stopped (its scroll then ends, unless what comes
+    /// scrolls on).
+    fn stop_runs(&mut self) -> bool {
+        let paged = self.page.take().is_some();
+        let flung = self.fling.take().is_some();
+        let dragged = self
+            .pan
+            .as_mut()
+            .and_then(|pan| pan.drag.as_mut())
+            .is_some_and(|drag| {
+                let dragging = drag.stage == Stage::Dragging;
+                if dragging {
+                    drag.stage = Stage::Done;
+                }
+                dragging
+            });
+        if let Some(drag) = &mut self.drag {
+            drag.live = false;
+        }
+        paged || flung || dragged
+    }
+
     /// Takes in the offset the scrollable shows, `seen`, with `range` to
-    /// scroll: a change this widget did not make (the wheel, the app) is a
-    /// scroll that ended, and it ends a page and a drag's hold on the view
-    /// (`goIdle`).
+    /// scroll: a change this widget did not make (the app's) is a scroll
+    /// that ended, and it ends what drove the position (`jumpTo`'s
+    /// `goIdle`).
     fn observe(&mut self, seen: Option<f32>, range: f32) {
         let Some(seen) = seen else { return };
         let Some(pixels) = self.pixels else {
@@ -643,11 +1072,140 @@ impl State {
             return;
         }
         self.pixels = Some(seen);
-        self.page = None;
-        if let Some(drag) = &mut self.drag {
-            drag.live = false;
-        }
+        self.stop_runs();
         self.scrolled(true);
+    }
+
+    /// `pointerScroll(delta)` of a scroll signal the view takes: at once
+    /// by `delta` within `0..=range`, what drove the position stopped
+    /// (`goIdle`), the scroll ending; none when it would not move. Where
+    /// it scrolls to.
+    fn pointer_scroll(&mut self, delta: f32, range: f32) -> Option<f32> {
+        let pixels = self.pixels.unwrap_or(0.0);
+        let to = (pixels + delta).clamp(0.0, range.max(0.0));
+        if delta == 0.0 || to == pixels {
+            return None;
+        }
+        self.stop_runs();
+        self.moved(to, true);
+        Some(to)
+    }
+
+    /// The view's drag recognizer on `gesture`, if it holds it.
+    fn pan_drag(&mut self, gesture: u64) -> Option<&mut PanDrag> {
+        self.pan
+            .as_mut()
+            .filter(|pan| pan.gesture == gesture)?
+            .drag
+            .as_mut()
+    }
+
+    /// A pan-zoom start that reached the view's drag recognizer, the pan
+    /// being `gesture` started at `time` (`addAllowedPointerPanZoom`,
+    /// `_handleDragDown`): the position held, a run moving it ending its
+    /// scroll; the recognizer enters the arena.
+    fn pan_start(&mut self, gesture: u64, time: Instant) {
+        if self.stop_runs() {
+            self.scroll_ended();
+        }
+        let mut tracker = MacOsVelocityTracker::default();
+        tracker.add(time, 0.0, pan_zoom::event_time());
+        if let Some(pan) = self.pan.as_mut().filter(|pan| pan.gesture == gesture) {
+            pan.drag = Some(PanDrag {
+                entry: pan_zoom::enter(gesture, time),
+                pan: 0.0,
+                tracker,
+                stage: Stage::Possible,
+            });
+        }
+    }
+
+    /// A move of `gesture` by `along` on the axis at `time`, if the view's
+    /// drag recognizer holds it (`handleEvent` for a
+    /// `PointerPanZoomUpdateEvent`): the move the view's drag makes, if
+    /// any (`Some(None)`: held, nothing moves).
+    fn pan_update(&mut self, gesture: u64, along: f32, time: Instant) -> Option<Option<f32>> {
+        let drag = self
+            .pan_drag(gesture)
+            .filter(|drag| drag.stage != Stage::Done)?;
+        drag.pan += along;
+        drag.tracker.add(time, drag.pan, pan_zoom::event_time());
+        let (stage, moves) = match drag.stage {
+            Stage::Possible => match drag.entry.standing() {
+                // Alone, it won as the start closed the arena: its drag
+                // started then, and this is its first move.
+                Some(true) => (Stage::Dragging, true),
+                // Another won: `rejectGesture`, its hold let go.
+                Some(false) => (Stage::Done, false),
+                // Past its slop it accepts; the drag starts from here.
+                None if drag.pan.abs() > TOUCH_SLOP as f32 => {
+                    if drag.entry.accept() {
+                        (Stage::Dragging, false)
+                    } else {
+                        (Stage::Done, false)
+                    }
+                }
+                None => (Stage::Possible, false),
+            },
+            stage => (stage, stage == Stage::Dragging),
+        };
+        let starts = drag.stage == Stage::Possible && stage == Stage::Dragging;
+        if starts {
+            // `position.drag`: a `DragScrollActivity` takes over.
+            self.stop_runs();
+        }
+        if let Some(drag) = self.pan_drag(gesture) {
+            drag.stage = stage;
+        }
+        Some((moves && along != 0.0).then_some(along))
+    }
+
+    /// The end of `gesture`, if the view's drag recognizer holds it
+    /// (`didStopTrackingLastPointer`): a drag under way ends in a fling
+    /// (`_checkEnd`, `ScrollDragController.end`, `goBallistic`), in
+    /// `0..=range`; an undecided one is let go. Whether it held it.
+    fn pan_end(&mut self, gesture: u64, range: f32) -> bool {
+        let Some(drag) = self
+            .pan_drag(gesture)
+            .filter(|drag| drag.stage != Stage::Done)
+        else {
+            return false;
+        };
+        let was = drag.stage;
+        // Alone, it won at the start though nothing moved since.
+        let dragging = was == Stage::Dragging || drag.entry.standing() == Some(true);
+        let estimate = drag.tracker.estimate(pan_zoom::event_time());
+        drag.stage = Stage::Done;
+        if !dragging {
+            return true;
+        }
+        if was == Stage::Possible {
+            self.stop_runs();
+        }
+        let velocity = scroll_fling::drag_end(estimate);
+        let pixels = self.pixels.unwrap_or(0.0);
+        self.fling = Ballistic::new(f64::from(pixels), f64::from(range.max(0.0)), velocity);
+        if self.fling.is_some() {
+            self.dirty = true;
+        } else {
+            // `goIdle`.
+            self.scroll_ended();
+        }
+        true
+    }
+
+    /// The drag's move by `delta` along the axis (`applyUserOffset`):
+    /// against it, clamped to `0..=range` (a move against an end
+    /// overscrolls, which shows the bar). Where the view scrolls to.
+    fn apply_user_offset(&mut self, delta: f32, range: f32) -> Option<f32> {
+        let pixels = self.pixels.unwrap_or(0.0);
+        let to = (pixels - delta).clamp(0.0, range.max(0.0));
+        if to == pixels {
+            self.scrolled(false);
+            return None;
+        }
+        self.moved(to, false);
+        Some(to)
     }
 
     /// The pointer moved with no button down, to `at` over the view or off
@@ -694,6 +1252,13 @@ impl State {
         Some((y, t >= 1.0))
     }
 
+    /// Where the fling is at `now` in `0..=range`, and whether it goes on.
+    fn fling_at(&mut self, now: Instant, range: f32) -> Option<(f32, bool)> {
+        let fling = self.fling.as_mut()?;
+        let (to, more) = fling.frame(now, f64::from(range.max(0.0)));
+        Some((to as f32, more))
+    }
+
     /// Does what the events asked, fades the thumb if it is due or there is
     /// nothing to scroll, and asks for the frames that takes.
     fn settle<M>(&mut self, now: Instant, scrolls: bool, shell: &mut Shell<'_, M>) {
@@ -724,7 +1289,8 @@ impl State {
             self.timer = None;
             self.fade.reverse(due);
         }
-        if self.fade.is_animating(now) || self.hover.is_animating(now) || self.page.is_some() {
+        let moving = self.page.is_some() || self.fling.is_some();
+        if self.fade.is_animating(now) || self.hover.is_animating(now) || moving {
             shell.request_redraw();
         } else if let Some(due) = self.timer {
             shell.request_redraw_at(due);
@@ -732,9 +1298,13 @@ impl State {
     }
 }
 
-/// Reads the scrollable's offset down as it shows it, stopping at it.
+/// Reads the scrollable's offset along an axis as it shows it, stopping at
+/// it.
 #[derive(Default)]
-struct Read(Option<f32>);
+struct Read {
+    axis: Axis,
+    offset: Option<f32>,
+}
 
 impl Operation for Read {
     fn traverse(&mut self, _operate: &mut dyn FnMut(&mut dyn Operation)) {}
@@ -747,12 +1317,15 @@ impl Operation for Read {
         translation: Vector,
         _state: &mut dyn ScrollableState,
     ) {
-        self.0.get_or_insert(translation.y);
+        self.offset.get_or_insert(self.axis.of(translation));
     }
 }
 
-/// Scrolls the scrollable to an offset down, stopping at it.
-struct ScrollTo(Option<f32>);
+/// Scrolls the scrollable to an offset along an axis, stopping at it.
+struct ScrollTo {
+    axis: Axis,
+    to: Option<f32>,
+}
 
 impl Operation for ScrollTo {
     fn traverse(&mut self, _operate: &mut dyn FnMut(&mut dyn Operation)) {}
@@ -765,48 +1338,60 @@ impl Operation for ScrollTo {
         _translation: Vector,
         state: &mut dyn ScrollableState,
     ) {
-        if let Some(y) = self.0.take() {
-            state.scroll_to(AbsoluteOffset {
-                x: None,
-                y: Some(y),
+        if let Some(to) = self.to.take() {
+            state.scroll_to(match self.axis {
+                Axis::Vertical => AbsoluteOffset {
+                    x: None,
+                    y: Some(to),
+                },
+                Axis::Horizontal => AbsoluteOffset {
+                    x: Some(to),
+                    y: None,
+                },
             });
         }
     }
 }
 
-/// The content's height under the scrollable laid out at `layout`.
-fn content_height(layout: Layout<'_>) -> f32 {
+/// The content's extent along `axis` under the scrollable laid out at
+/// `layout`.
+fn content_extent(layout: Layout<'_>, axis: Axis) -> f32 {
     layout
         .children()
         .next()
-        .map_or(0.0, |content| content.bounds().height)
+        .map_or(0.0, |content| axis.extent(content.bounds().size()))
 }
 
-/// The offset down `scrollable` shows.
+/// The offset along `axis` `scrollable` shows.
 fn read<M>(
     scrollable: &mut Element<'_, M>,
     tree: &mut Tree,
     layout: Layout<'_>,
     renderer: &Renderer,
+    axis: Axis,
 ) -> Option<f32> {
-    let mut read = Read::default();
+    let mut read = Read { axis, offset: None };
     scrollable
         .as_widget_mut()
         .operate(tree, layout, renderer, &mut read);
-    read.0
+    read.offset
 }
 
-/// Scrolls `scrollable` to `y` down.
+/// Scrolls `scrollable` to `to` along `axis`.
 fn scroll_to<M>(
     scrollable: &mut Element<'_, M>,
     tree: &mut Tree,
     layout: Layout<'_>,
     renderer: &Renderer,
-    y: f32,
+    axis: Axis,
+    to: f32,
 ) {
-    scrollable
-        .as_widget_mut()
-        .operate(tree, layout, renderer, &mut ScrollTo(Some(y)));
+    scrollable.as_widget_mut().operate(
+        tree,
+        layout,
+        renderer,
+        &mut ScrollTo { axis, to: Some(to) },
+    );
 }
 
 impl<M> Widget<M, Theme, Renderer> for FadingScrollbar<'_, M> {
@@ -823,7 +1408,7 @@ impl<M> Widget<M, Theme, Renderer> for FadingScrollbar<'_, M> {
     }
 
     fn state(&self) -> tree::State {
-        tree::State::new(State::new())
+        tree::State::new(State::new(self.style.is_some()))
     }
 
     fn children(&self) -> Vec<Tree> {
@@ -831,6 +1416,7 @@ impl<M> Widget<M, Theme, Renderer> for FadingScrollbar<'_, M> {
     }
 
     fn diff(&self, tree: &mut Tree) {
+        tree.state.downcast_mut::<State>().has_bar = self.style.is_some();
         tree.diff_children(std::slice::from_ref(&self.scrollable));
     }
 
@@ -856,20 +1442,21 @@ impl<M> Widget<M, Theme, Renderer> for FadingScrollbar<'_, M> {
         shell: &mut Shell<'_, M>,
         viewport: &Rectangle,
     ) {
+        let axis = self.axis;
         let bounds = layout.bounds();
-        let content = content_height(layout);
-        let range = content - bounds.height;
+        let content = content_extent(layout, axis);
+        let range = content - axis.extent(bounds.size());
         let Tree {
             state, children, ..
         } = tree;
         let state = state.downcast_mut::<State>();
         let child = &mut children[0];
         let scrollable = &mut self.scrollable;
-        let scroll = |scrollable: &mut Element<'_, M>, child: &mut Tree, y: f32| {
-            scroll_to(scrollable, child, layout, renderer, y);
+        let scroll = |scrollable: &mut Element<'_, M>, child: &mut Tree, to: f32| {
+            scroll_to(scrollable, child, layout, renderer, axis, to);
         };
         // A scroll since the last event (an operation of the app's).
-        state.observe(read(scrollable, child, layout, renderer), range);
+        state.observe(read(scrollable, child, layout, renderer, axis), range);
 
         if let Event::Window(window::Event::RedrawRequested(at)) = event {
             let now = state.advance(*at);
@@ -881,6 +1468,18 @@ impl<M> Widget<M, Theme, Renderer> for FadingScrollbar<'_, M> {
                 if over {
                     state.page = None;
                     state.start_timer();
+                }
+            }
+            // The fling's frame (`BallisticScrollActivity`): done, or
+            // stopped at an end, it goes idle and its scroll ends.
+            if let Some((to, more)) = state.fling_at(now, range) {
+                if state.pixels != Some(to) {
+                    scroll(scrollable, child, to);
+                    state.moved(to, false);
+                }
+                if !more {
+                    state.fling = None;
+                    state.scroll_ended();
                 }
             }
             let scrolls = state.bar(bounds, content).is_some();
@@ -898,6 +1497,8 @@ impl<M> Widget<M, Theme, Renderer> for FadingScrollbar<'_, M> {
         let shown = state.opacity() > 0.0;
         let mut content_cursor = state.content_cursor(bar, cursor);
         let mut pass = true;
+        // A wheel event the view looks at once its content has.
+        let mut wheel = None;
         match event {
             Event::Mouse(mouse::Event::ButtonPressed(button)) => {
                 // The pointer goes down with its first button, and is hit
@@ -915,9 +1516,9 @@ impl<M> Widget<M, Theme, Renderer> for FadingScrollbar<'_, M> {
                     pass = false;
                     shell.capture_event();
                     if bar.on_thumb(at, shown) {
-                        // `handleThumbPress` (its hold ends a page) and
-                        // `handleThumbPressStart`.
-                        state.page = None;
+                        // `handleThumbPress` (its hold ends a page or a
+                        // fling) and `handleThumbPressStart`.
+                        state.stop_runs();
                         state.cancel_timer();
                         state.show();
                         state.drag = Some(Drag {
@@ -933,14 +1534,15 @@ impl<M> Widget<M, Theme, Renderer> for FadingScrollbar<'_, M> {
                         let step = if at.y > bar.thumb.y { step } else { -step };
                         let to = (pixels + step).clamp(0.0, bar.range);
                         if (to - pixels).abs() < near() {
-                            let paging = state.page.take().is_some();
+                            let running = state.stop_runs();
                             if to != pixels {
                                 scroll(scrollable, child, to);
                                 state.moved(to, true);
-                            } else if paging {
+                            } else if running {
                                 state.start_timer();
                             }
                         } else {
+                            state.stop_runs();
                             state.page = Some(Page {
                                 from: pixels,
                                 to,
@@ -1010,22 +1612,29 @@ impl<M> Widget<M, Theme, Renderer> for FadingScrollbar<'_, M> {
                     .zip(bar)
                     .filter(|(at, bar)| bar.takes(*at, shown))
                     .map(|(_, bar)| bar);
-                let wheel = pan_zoom::current();
-                // A trackpad's gesture is where its start was hit: the
-                // shown track's (nothing scrolls) or the content's, to its
-                // end and through its momentum.
-                let track_owns = match wheel {
-                    Scroll::Signal => None,
-                    Scroll::Start { gesture, .. } => {
-                        state.pan = Some((gesture, track.is_some()));
-                        Some(track.is_some())
-                    }
-                    _ => state
-                        .pan
-                        .filter(|(held, _)| Some(*held) == wheel.gesture())
-                        .map(|(_, on_track)| on_track),
+                let scroll_event = pan_zoom::current();
+                if let Scroll::Start { gesture, .. } = scroll_event {
+                    // Hit tested at its start: the shown track's, or the
+                    // view's and its content's.
+                    state.pan = Some(Pan {
+                        gesture,
+                        on_track: track.is_some(),
+                        drag: None,
+                    });
+                }
+                // The gesture as its start found the view: whether on the
+                // shown track, and whether the view's drag took it.
+                let started = state
+                    .pan
+                    .as_ref()
+                    .filter(|pan| Some(pan.gesture) == scroll_event.gesture())
+                    .map(|pan| (pan.on_track, pan.drag.is_some()));
+                let on_track = match scroll_event {
+                    Scroll::Signal => track.is_some(),
+                    _ => started.map_or(track.is_some(), |(on_track, _)| on_track),
                 };
-                match (wheel, track) {
+                let held = started.is_some_and(|(on_track, dragged)| on_track || dragged);
+                match (scroll_event, track) {
                     (Scroll::Signal, Some(bar)) => {
                         // The shown track's: the content under it never
                         // sees the wheel. Held by a drag, the bar's own
@@ -1035,20 +1644,28 @@ impl<M> Widget<M, Theme, Renderer> for FadingScrollbar<'_, M> {
                         let to = (pixels + dy).clamp(0.0, bar.range);
                         if state.drag.is_none() && dy != 0.0 && to != pixels {
                             // `pointerScroll`: a scroll that ends at once,
-                            // any page stopped.
-                            state.page = None;
+                            // anything moving the view stopped.
+                            state.stop_runs();
                             scroll(scrollable, child, to);
                             state.moved(to, true);
                             shell.capture_event();
                         }
                     }
-                    _ if track_owns.unwrap_or(track.is_some()) => {
-                        // The track's gesture: nothing scrolls, and the
-                        // content never sees it.
+                    (Scroll::Nothing { .. }, _) => {
+                        // Momentum: it reaches nothing at all.
                         pass = false;
+                        if held || cursor.position_over(bounds).is_some() {
+                            shell.capture_event();
+                        }
                     }
-                    // Elsewhere the scrollable has it.
-                    _ => content_cursor = cursor,
+                    // The track's gesture: nothing scrolls, and the
+                    // content never sees it.
+                    _ if on_track => pass = false,
+                    // Elsewhere the content has it first, then the view.
+                    _ => {
+                        content_cursor = cursor;
+                        wheel = Some((scroll_event, *delta));
+                    }
                 }
             }
             Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers)) => {
@@ -1061,9 +1678,19 @@ impl<M> Widget<M, Theme, Renderer> for FadingScrollbar<'_, M> {
         }
 
         if pass {
-            // The content's drags share a trackpad gesture's arena with
-            // the view's (a text field's horizontal scroll).
-            pan_zoom::within_scroll_view(|| {
+            let taken = if wheel.is_some() {
+                update_probed(
+                    scrollable,
+                    child,
+                    event,
+                    layout,
+                    content_cursor,
+                    renderer,
+                    clipboard,
+                    shell,
+                    viewport,
+                )
+            } else {
                 scrollable.as_widget_mut().update(
                     child,
                     event,
@@ -1074,11 +1701,52 @@ impl<M> Widget<M, Theme, Renderer> for FadingScrollbar<'_, M> {
                     shell,
                     viewport,
                 );
-            });
+                false
+            };
             // What the event scrolled.
-            state.observe(read(scrollable, child, layout, renderer), range);
+            state.observe(read(scrollable, child, layout, renderer, axis), range);
+            if let Some((scroll_event, delta)) = wheel {
+                let over = cursor.position_over(bounds).is_some();
+                let pixels = state.pixels.unwrap_or(0.0);
+                // `setCanDrag`, `shouldAcceptUserOffset`.
+                let can_drag = range > PRECISION || pixels != 0.0;
+                let mut held = false;
+                match scroll_event {
+                    Scroll::Signal if !taken && over => {
+                        let delta = pan_zoom::scroll_delta(delta, state.modifiers.shift());
+                        let along = axis.signal(delta, state.modifiers.shift());
+                        if let Some(to) = state.pointer_scroll(along, range) {
+                            scroll(scrollable, child, to);
+                            held = true;
+                        }
+                    }
+                    Scroll::Start { gesture, time } if over && can_drag => {
+                        state.pan_start(gesture, time);
+                        held = true;
+                    }
+                    Scroll::Update {
+                        gesture,
+                        delta,
+                        time,
+                    } => {
+                        if let Some(moves) = state.pan_update(gesture, axis.of(delta), time) {
+                            held = true;
+                            if let Some(to) =
+                                moves.and_then(|along| state.apply_user_offset(along, range))
+                            {
+                                scroll(scrollable, child, to);
+                            }
+                        }
+                    }
+                    Scroll::End { gesture } => held = state.pan_end(gesture, range),
+                    _ => {}
+                }
+                if taken || held {
+                    shell.capture_event();
+                }
+            }
             // A text field inside asked to have its caret shown.
-            if state.asked != show_on_screen::asked() {
+            if axis == Axis::Vertical && state.asked != show_on_screen::asked() {
                 state.asked = show_on_screen::asked();
                 let mut take = show_on_screen::Take::default();
                 scrollable
@@ -1101,6 +1769,7 @@ impl<M> Widget<M, Theme, Renderer> for FadingScrollbar<'_, M> {
                     };
                     if request.animate && (to - pixels).abs() >= near() {
                         // `moveTo` over the caret's 100 ms.
+                        state.stop_runs();
                         state.page = Some(Page {
                             from: pixels,
                             to,
@@ -1109,7 +1778,7 @@ impl<M> Widget<M, Theme, Renderer> for FadingScrollbar<'_, M> {
                         });
                         state.dirty = true;
                     } else if to != pixels {
-                        state.page = None;
+                        state.stop_runs();
                         scroll(scrollable, child, to);
                         state.moved(to, true);
                     }
@@ -1133,7 +1802,7 @@ impl<M> Widget<M, Theme, Renderer> for FadingScrollbar<'_, M> {
     ) {
         let state = tree.state.downcast_ref::<State>();
         let bounds = layout.bounds();
-        let bar = state.bar(bounds, content_height(layout));
+        let bar = state.bar(bounds, content_extent(layout, self.axis));
         self.scrollable.as_widget().draw(
             &tree.children[0],
             renderer,
@@ -1144,19 +1813,17 @@ impl<M> Widget<M, Theme, Renderer> for FadingScrollbar<'_, M> {
             viewport,
         );
         let opacity = state.opacity();
-        let (Some(bar), Some(clip)) = (bar, bounds.intersection(viewport)) else {
+        let (Some(bar), Some(bar_style), Some(clip)) =
+            (bar, &self.style, bounds.intersection(viewport))
+        else {
             return;
         };
         if opacity == 0.0 {
             return;
         }
         let hover = state.now.map_or(0.0, |now| state.hover.value(now));
-        let color = self.thumb_color(theme, state.drag.is_some(), hover, opacity);
-        let radius = (self.style)(theme, IDLE)
-            .vertical_rail
-            .scroller
-            .border
-            .radius;
+        let color = thumb_color(bar_style, theme, state.drag.is_some(), hover, opacity);
+        let radius = bar_style(theme, IDLE).vertical_rail.scroller.border.radius;
         // Over the content, which the scrollable drew in a layer of its own.
         renderer.with_layer(clip, |renderer| {
             renderer.fill_quad(
@@ -1195,7 +1862,7 @@ impl<M> Widget<M, Theme, Renderer> for FadingScrollbar<'_, M> {
         renderer: &Renderer,
     ) -> mouse::Interaction {
         let state = tree.state.downcast_ref::<State>();
-        let bar = state.bar(layout.bounds(), content_height(layout));
+        let bar = state.bar(layout.bounds(), content_extent(layout, self.axis));
         self.scrollable.as_widget().mouse_interaction(
             &tree.children[0],
             layout,
@@ -1224,593 +1891,4 @@ impl<M> Widget<M, Theme, Renderer> for FadingScrollbar<'_, M> {
 }
 
 #[cfg(test)]
-mod tests {
-    use iced::widget::{button, column, mouse_area, scrollable, Space};
-    use iced_winit::gesture::Phase;
-
-    use super::pan_zoom::testing::Trackpad;
-    use super::*;
-    use crate::ui::core::theme::Zinc;
-    use crate::ui::core::widgets::animated::testing::{near, over, Frames, BACKGROUND, MS};
-
-    /// A 100 × 100 view of a `content` px column at the window's top left,
-    /// publishing its offset down as it scrolls.
-    fn view<'a>(content: f32) -> Element<'a, f32> {
-        fading_scrollbar(
-            scrollable(column![Space::new().width(100).height(content)])
-                .width(100)
-                .height(100)
-                .on_scroll(|viewport| viewport.absolute_offset().y),
-        )
-    }
-
-    fn window() -> Frames {
-        Frames::new(Size::new(120.0, 120.0))
-    }
-
-    /// The thumb drawn at `alpha` of the zinc foreground.
-    fn thumb(alpha: f32) -> Color {
-        over(
-            Color {
-                a: Zinc::FOREGROUND.a * alpha,
-                ..Zinc::FOREGROUND
-            },
-            BACKGROUND,
-        )
-    }
-
-    fn wheel(down: f32) -> Event {
-        Event::Mouse(mouse::Event::WheelScrolled {
-            delta: mouse::ScrollDelta::Pixels { x: 0.0, y: -down },
-        })
-    }
-
-    /// A mouse wheel turned `down` lines (60 px each).
-    fn lines(down: f32) -> Event {
-        Event::Mouse(mouse::Event::WheelScrolled {
-            delta: mouse::ScrollDelta::Lines { x: 0.0, y: -down },
-        })
-    }
-
-    fn press() -> Event {
-        Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left))
-    }
-
-    fn release() -> Event {
-        Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left))
-    }
-
-    /// The offset the view last published, if it did.
-    fn offset(messages: &[f32]) -> Option<f32> {
-        messages.last().copied()
-    }
-
-    fn view_box() -> Rectangle {
-        Rectangle::new(Point::ORIGIN, Size::new(100.0, 100.0))
-    }
-
-    #[test]
-    fn the_thumb_is_8_wide_2_in_from_the_edge_and_its_share_of_the_track_but_48_at_least() {
-        // A third of 300 px shows: its share of the 100 px track would be
-        // 33, under the least.
-        let bar = Bar::new(view_box(), 300.0, 0.0).expect("a bar");
-        assert_eq!(
-            bar.track,
-            Rectangle::new(Point::new(88.0, 0.0), Size::new(12.0, 100.0))
-        );
-        assert_eq!(
-            bar.thumb,
-            Rectangle::new(Point::new(90.0, 0.0), Size::new(8.0, 48.0))
-        );
-        // Two thirds of 150 px: 66.7 long, its travel the remaining 33.3.
-        let bar = Bar::new(view_box(), 150.0, 25.0).expect("a bar");
-        assert!((bar.thumb.height - 200.0 / 3.0).abs() < 1e-3);
-        assert!((bar.thumb.y - 0.5 * 100.0 / 3.0).abs() < 1e-3);
-        // The offset is the share scrolled of the travel: 450 of 900 over
-        // a 52 px travel.
-        let bar = Bar::new(view_box(), 1000.0, 450.0).expect("a bar");
-        assert_eq!(
-            bar.thumb,
-            Rectangle::new(Point::new(90.0, 26.0), Size::new(8.0, 48.0))
-        );
-        let end = Bar::new(view_box(), 1000.0, 900.0).expect("a bar");
-        assert_eq!(end.thumb.y, 52.0);
-        // In a view under 48 tall the thumb fills its track, and a drag of
-        // it moves nothing.
-        let short = Rectangle::new(Point::ORIGIN, Size::new(100.0, 40.0));
-        let bar = Bar::new(short, 400.0, 0.0).expect("a bar");
-        assert_eq!(bar.thumb.height, 40.0);
-        assert_eq!(bar.track_to_scroll(10.0), None);
-        // Nothing to scroll: no bar.
-        assert_eq!(Bar::new(view_box(), 100.0, 0.0), None);
-    }
-
-    #[test]
-    fn the_thumb_is_drawn_where_the_painter_put_it() {
-        let mut window = window();
-        let t0 = Instant::now();
-        // The pointer on the track brings the bar in.
-        window.point_at(Point::new(94.0, 80.0));
-        window.frame(view(1000.0), &[], t0);
-        window.frame(view(1000.0), &[], t0 + 300 * MS);
-        let on = thumb(0.65);
-        assert!(near(window.pixel(Point::new(90.0, 24.0)), on), "left edge");
-        assert!(near(window.pixel(Point::new(97.0, 24.0)), on), "right edge");
-        assert!(
-            near(window.pixel(Point::new(89.0, 24.0)), BACKGROUND),
-            "margin"
-        );
-        assert!(
-            near(window.pixel(Point::new(98.0, 24.0)), BACKGROUND),
-            "margin"
-        );
-        assert!(near(window.pixel(Point::new(94.0, 46.0)), on), "48 long");
-        assert!(
-            near(window.pixel(Point::new(94.0, 48.0)), BACKGROUND),
-            "no more"
-        );
-        // Half way down the content (the wheel on the track is the
-        // bar's), half way down its 52 px travel.
-        window.frame(view(1000.0), &[lines(7.5)], t0 + 400 * MS);
-        assert!(near(window.pixel(Point::new(94.0, 25.0)), BACKGROUND));
-        assert!(near(window.pixel(Point::new(94.0, 27.0)), on));
-        assert!(near(window.pixel(Point::new(94.0, 72.0)), on));
-        assert!(near(window.pixel(Point::new(94.0, 74.0)), BACKGROUND));
-    }
-
-    #[test]
-    fn the_thumb_shows_on_a_scroll_and_fades_600_ms_after_it() {
-        let mut window = window();
-        let t0 = Instant::now();
-        window.point_at(Point::new(40.0, 50.0));
-        assert!(!window.frame(view(300.0), &[], t0), "idle");
-        assert!(
-            near(window.pixel(Point::new(94.0, 10.0)), BACKGROUND),
-            "hidden"
-        );
-        // Scrolled 30 of 200, the 48 px thumb is 7.8 down its 52 px travel.
-        let on_thumb = Point::new(94.0, 30.0);
-        assert!(
-            window.frame(view(300.0), &[wheel(30.0)], t0),
-            "a scroll: frames"
-        );
-        assert!(near(window.pixel(on_thumb), BACKGROUND), "start");
-        window.frame(view(300.0), &[], t0 + 150 * MS);
-        let middle = Curve::FastOutSlowIn.transform(0.5);
-        assert!(near(window.pixel(on_thumb), thumb(0.30 * middle)), "middle");
-        assert!(!window.frame(view(300.0), &[], t0 + 300 * MS), "in: waits");
-        assert!(near(window.pixel(on_thumb), thumb(0.30)), "end");
-        // 600 ms after the scroll it fades out.
-        window.frame(view(300.0), &[], t0 + 599 * MS);
-        assert!(near(window.pixel(on_thumb), thumb(0.30)), "still");
-        assert!(window.frame(view(300.0), &[], t0 + 600 * MS), "fading");
-        window.frame(view(300.0), &[], t0 + 750 * MS);
-        assert!(near(window.pixel(on_thumb), thumb(0.30 * middle)), "going");
-        assert!(!window.frame(view(300.0), &[], t0 + 900 * MS), "rests");
-        assert!(near(window.pixel(on_thumb), BACKGROUND), "gone");
-    }
-
-    #[test]
-    fn the_pointer_on_the_bar_holds_it_and_warms_its_color_over_200_ms() {
-        let mut window = window();
-        let t0 = Instant::now();
-        window.point_at(Point::new(95.0, 90.0));
-        window.frame(view(300.0), &[], t0);
-        window.frame(view(300.0), &[], t0 + 100 * MS);
-        // The thumb sits at the top (0..48).
-        let on = Point::new(95.0, 16.0);
-        let mid = Curve::FastOutSlowIn.transform(1.0 / 3.0);
-        let warming = 0.30_f32.lerp(0.65, 0.5);
-        assert!(
-            near(window.pixel(on), thumb(warming * mid)),
-            "both on the way"
-        );
-        window.frame(view(300.0), &[], t0 + 300 * MS);
-        assert!(near(window.pixel(on), thumb(0.65)), "in, hovered");
-        // Held while the pointer moves on it.
-        assert!(!window.frame(view(300.0), &[], t0 + 2000 * MS));
-        assert!(near(window.pixel(on), thumb(0.65)), "held");
-        // Off the bar: back to idle over 200 ms, and gone 600 ms on.
-        window.point_at(Point::new(40.0, 50.0));
-        let t1 = t0 + 2100 * MS;
-        window.frame(view(300.0), &[], t1);
-        window.frame(view(300.0), &[], t1 + 200 * MS);
-        assert!(near(window.pixel(on), thumb(0.30)), "cooled");
-        window.frame(view(300.0), &[], t1 + 600 * MS);
-        assert!(!window.frame(view(300.0), &[], t1 + 900 * MS));
-        assert!(near(window.pixel(on), BACKGROUND), "gone");
-    }
-
-    #[test]
-    fn a_hidden_bar_comes_in_for_the_pointer_near_it_then_wants_it_on_its_track() {
-        let mut window = window();
-        let t0 = Instant::now();
-        // 25 px in from the edge, beside the 12 px track: near enough
-        // while the bar is hidden (the track widened to take a 48 px square
-        // round the thumb's centre), too far once it shows.
-        window.point_at(Point::new(60.0, 90.0));
-        assert!(!window.frame(view(300.0), &[], t0), "too far");
-        window.point_at(Point::new(75.0, 90.0));
-        assert!(window.frame(view(300.0), &[], t0 + 16 * MS), "near: in");
-        window.frame(view(300.0), &[], t0 + 32 * MS);
-        // The next move finds it showing and the pointer off its track: it
-        // fades 600 ms on.
-        window.frame(view(300.0), &[], t0 + 48 * MS);
-        window.frame(view(300.0), &[], t0 + 316 * MS);
-        let on = Point::new(94.0, 16.0);
-        assert!(near(window.pixel(on), thumb(0.30)), "in, not hovered");
-        window.frame(view(300.0), &[], t0 + 647 * MS);
-        assert!(near(window.pixel(on), thumb(0.30)), "still");
-        assert!(window.frame(view(300.0), &[], t0 + 648 * MS), "fading");
-        assert!(!window.frame(view(300.0), &[], t0 + 948 * MS));
-        assert!(near(window.pixel(on), BACKGROUND), "gone");
-    }
-
-    #[test]
-    fn a_view_with_nothing_to_scroll_shows_no_bar() {
-        let mut window = window();
-        let t0 = Instant::now();
-        window.point_at(Point::new(95.0, 20.0));
-        assert!(!window.frame(view(50.0), &[], t0));
-        assert!(!window.frame(view(50.0), &[wheel(30.0)], t0 + 10 * MS));
-        assert!(near(window.pixel(Point::new(94.0, 20.0)), BACKGROUND));
-    }
-
-    #[test]
-    fn dragging_the_thumb_scrolls_the_view_in_proportion() {
-        let mut window = window();
-        let t0 = Instant::now();
-        // 200 px to scroll over the 48 px thumb's 52 px travel.
-        window.point_at(Point::new(94.0, 10.0));
-        window.frame(view(300.0), &[], t0);
-        window.frame(view(300.0), &[], t0 + 300 * MS);
-        // Pressed, the thumb takes its dragged color at once.
-        let (_, scrolled) = window.frame_messages(view(300.0), &[press()], t0 + 316 * MS);
-        assert_eq!(offset(&scrolled), None, "a press moves nothing");
-        let at = Point::new(94.0, 30.0);
-        assert!(near(window.pixel(at), thumb(0.75)), "dragged");
-        // 26 px down the track is half its travel: half the content.
-        window.point_at(Point::new(94.0, 36.0));
-        let (_, scrolled) = window.frame_messages(view(300.0), &[], t0 + 332 * MS);
-        assert_eq!(offset(&scrolled), Some(100.0));
-        let at = Point::new(94.0, 60.0);
-        assert!(near(window.pixel(at), thumb(0.75)), "it follows");
-        // Across, nothing.
-        window.point_at(Point::new(80.0, 36.0));
-        let (_, scrolled) = window.frame_messages(view(300.0), &[], t0 + 348 * MS);
-        assert_eq!(offset(&scrolled), None);
-        // Past either end of the view, the content's end.
-        window.point_at(Point::new(94.0, 200.0));
-        let (_, scrolled) = window.frame_messages(view(300.0), &[], t0 + 364 * MS);
-        assert_eq!(offset(&scrolled), Some(200.0));
-        window.point_at(Point::new(94.0, -50.0));
-        let (_, scrolled) = window.frame_messages(view(300.0), &[], t0 + 380 * MS);
-        assert_eq!(offset(&scrolled), Some(0.0));
-        // Let go over the thumb: hovered.
-        window.point_at(Point::new(94.0, 10.0));
-        window.frame(view(300.0), &[release()], t0 + 396 * MS);
-        let at = Point::new(94.0, 30.0);
-        assert!(near(window.pixel(at), thumb(0.65)), "hovered");
-    }
-
-    #[test]
-    fn a_press_on_the_track_pages_0_8_of_the_view_over_100_ms() {
-        let mut window = window();
-        let t0 = Instant::now();
-        // 900 px to scroll; the thumb sits at 0..48.
-        window.point_at(Point::new(94.0, 90.0));
-        window.frame(view(1000.0), &[], t0);
-        window.frame(view(1000.0), &[], t0 + 300 * MS);
-        // Below the thumb: down 80, from the next frame on.
-        let t1 = t0 + 400 * MS;
-        let (more, scrolled) = window.frame_messages(view(1000.0), &[press()], t1);
-        assert!(more, "paging");
-        assert_eq!(offset(&scrolled), None, "it starts from here");
-        window.frame(view(1000.0), &[release()], t1 + 10 * MS);
-        let (_, scrolled) = window.frame_messages(view(1000.0), &[], t1 + 50 * MS);
-        let half = 80.0 * Curve::EaseInOut.transform(0.5);
-        assert!(offset(&scrolled).is_some_and(|y| (y - half).abs() < 1e-3));
-        let (_, scrolled) = window.frame_messages(view(1000.0), &[], t1 + 75 * MS);
-        let most = 80.0 * Curve::EaseInOut.transform(0.75);
-        assert!(offset(&scrolled).is_some_and(|y| (y - most).abs() < 1e-3));
-        let (more, scrolled) = window.frame_messages(view(1000.0), &[], t1 + 100 * MS);
-        assert_eq!(offset(&scrolled), Some(80.0));
-        assert!(!more, "paged");
-        // Above the thumb (now 4.6 down): back up, no further than the top.
-        window.point_at(Point::new(94.0, 2.0));
-        let t2 = t1 + 200 * MS;
-        window.frame(view(1000.0), &[press(), release()], t2);
-        let (_, scrolled) = window.frame_messages(view(1000.0), &[], t2 + 100 * MS);
-        assert_eq!(offset(&scrolled), Some(0.0));
-    }
-
-    #[test]
-    fn the_shown_bar_takes_the_pointer_from_the_content_and_the_hidden_one_does_not() {
-        let view = || -> Element<'_, ()> {
-            fading_scrollbar(
-                scrollable(column![
-                    button(Space::new().height(40))
-                        .width(Length::Fill)
-                        .on_press(()),
-                    Space::new().height(260),
-                ])
-                .width(100)
-                .height(100),
-            )
-        };
-        let mut window = window();
-        let t0 = Instant::now();
-        // On the hidden thumb: the button's (and the bar comes in).
-        window.point_at(Point::new(95.0, 20.0));
-        let (_, clicked) = window.frame_messages(view(), &[press(), release()], t0);
-        assert_eq!(clicked.len(), 1, "the button");
-        // Shown, the thumb's.
-        window.frame(view(), &[], t0 + 300 * MS);
-        let (_, clicked) = window.frame_messages(view(), &[press(), release()], t0 + 316 * MS);
-        assert!(clicked.is_empty(), "the bar");
-        // Off the track, the button's.
-        window.point_at(Point::new(50.0, 20.0));
-        let (_, clicked) = window.frame_messages(view(), &[press(), release()], t0 + 332 * MS);
-        assert_eq!(clicked.len(), 1, "the button again");
-    }
-
-    #[test]
-    fn the_shown_track_takes_the_hover_but_not_a_drag_the_content_began() {
-        let view = || -> Element<'_, Point> {
-            fading_scrollbar(
-                scrollable(mouse_area(Space::new().width(100).height(300)).on_move(|at| at))
-                    .width(100)
-                    .height(100),
-            )
-        };
-        let mut window = window();
-        let t0 = Instant::now();
-        let on_track = Point::new(95.0, 50.0);
-        window.point_at(on_track);
-        let (_, moves) = window.frame_messages(view(), &[], t0);
-        assert_eq!(moves, [on_track], "hidden, the content's");
-        window.frame(view(), &[], t0 + 300 * MS);
-        window.point_at(Point::new(95.0, 60.0));
-        let (_, moves) = window.frame_messages(view(), &[], t0 + 316 * MS);
-        assert!(moves.is_empty(), "shown, the bar's");
-        // Pressed on the content, the pointer stays the content's over the
-        // track.
-        window.point_at(Point::new(50.0, 50.0));
-        window.frame(view(), &[press()], t0 + 332 * MS);
-        window.point_at(on_track);
-        let (_, moves) = window.frame_messages(view(), &[], t0 + 348 * MS);
-        assert_eq!(moves, [on_track], "the content's drag");
-    }
-
-    #[derive(Debug, Clone, Copy, PartialEq)]
-    enum Scrolled {
-        Outer(f32),
-        Inner(f32),
-    }
-
-    #[test]
-    fn the_wheel_on_the_shown_track_is_the_bars_not_the_contents() {
-        // A view whose content is, at the top, a scroll view of its own
-        // across its whole width, under the track too.
-        let view = || -> Element<'_, Scrolled> {
-            fading_scrollbar(
-                scrollable(column![
-                    scrollable(column![Space::new().width(100).height(400)])
-                        .width(Length::Fill)
-                        .height(150)
-                        .on_scroll(|v| Scrolled::Inner(v.absolute_offset().y)),
-                    Space::new().height(300),
-                ])
-                .width(100)
-                .height(100)
-                .on_scroll(|v| Scrolled::Outer(v.absolute_offset().y)),
-            )
-        };
-        let mut window = window();
-        let t0 = Instant::now();
-        window.point_at(Point::new(95.0, 70.0));
-        window.frame(view(), &[], t0);
-        window.frame(view(), &[], t0 + 300 * MS);
-        // A wheel's line on the shown track: the view scrolls, the content
-        // under the track does not.
-        let (_, scrolled) = window.frame_messages(view(), &[lines(1.0)], t0 + 316 * MS);
-        assert_eq!(scrolled, [Scrolled::Outer(60.0)]);
-        // A trackpad's swipe there, and its momentum: nothing.
-        let mut pad = Trackpad::new();
-        let at = t0 + 332 * MS;
-        let swipe = [
-            pad.began(at),
-            pad.changed(0.0, -30.0, at),
-            pad.ended(at),
-            pad.momentum(Phase::Began, 0.0, -20.0, at),
-        ];
-        let (_, scrolled) = window.frame_sent(view(), &swipe, at);
-        assert_eq!(scrolled, []);
-        // A precise device's points without phases: a scroll signal, the
-        // view's.
-        let (_, scrolled) = window.frame_sent(view(), &[pad.pixels(0.0, -10.0, at)], t0 + 340 * MS);
-        assert_eq!(scrolled, [Scrolled::Outer(70.0)]);
-        // Off the track the content has the wheel first.
-        window.point_at(Point::new(50.0, 70.0));
-        let (_, scrolled) = window.frame_messages(view(), &[lines(1.0)], t0 + 348 * MS);
-        assert_eq!(scrolled, [Scrolled::Inner(60.0)]);
-    }
-
-    #[test]
-    fn a_swipe_begun_on_the_content_stays_the_contents_when_the_bar_comes_in() {
-        let mut window = window();
-        let t0 = Instant::now();
-        // On the track's place while the bar is hidden: the content's.
-        window.point_at(Point::new(95.0, 50.0));
-        window.frame(view(1000.0), &[], t0);
-        let mut pad = Trackpad::new();
-        let (_, scrolled) = window.frame_sent(view(1000.0), &[pad.began(t0)], t0);
-        assert_eq!(offset(&scrolled), None);
-        let mut at = t0;
-        let mut last = 0.0;
-        // The bar fades in under the still pointer; the swipe goes on
-        // scrolling the content, and its momentum too (iced's scroll view
-        // takes it as its inertia).
-        for _ in 0..30 {
-            at += 16 * MS;
-            let (_, scrolled) = window.frame_sent(view(1000.0), &[pad.changed(0.0, -10.0, at)], at);
-            let y = offset(&scrolled).expect("it scrolled");
-            assert!(y > last, "{y} after {last}");
-            last = y;
-        }
-        assert!(window.pixel(Point::new(94.0, 50.0)) != BACKGROUND, "shown");
-        window.frame_sent(view(1000.0), &[pad.ended(at)], at);
-        let (_, scrolled) = window.frame_sent(
-            view(1000.0),
-            &[pad.momentum(Phase::Began, 0.0, -10.0, at)],
-            at + 16 * MS,
-        );
-        assert_eq!(offset(&scrolled), Some(last + 10.0));
-        // A new swipe there now is the track's.
-        let next = at + 400 * MS;
-        let swipe = [pad.began(next), pad.changed(0.0, -10.0, next)];
-        let (_, scrolled) = window.frame_sent(view(1000.0), &swipe, next);
-        assert_eq!(offset(&scrolled), None);
-    }
-
-    #[test]
-    fn a_held_thumb_keeps_the_wheel_on_the_track_from_scrolling() {
-        let mut window = window();
-        let t0 = Instant::now();
-        window.point_at(Point::new(94.0, 10.0));
-        window.frame(view(1000.0), &[], t0);
-        window.frame(view(1000.0), &[], t0 + 300 * MS);
-        window.frame(view(1000.0), &[press()], t0 + 316 * MS);
-        let (_, scrolled) = window.frame_messages(view(1000.0), &[lines(1.0)], t0 + 332 * MS);
-        assert_eq!(offset(&scrolled), None);
-    }
-
-    #[test]
-    fn a_page_under_a_device_pixel_jumps() {
-        // 0.8 px to scroll: a press below the thumb pages 0.8.
-        let mut window = window();
-        let t0 = Instant::now();
-        window.point_at(Point::new(94.0, 99.8));
-        set_scale_factor(1.0);
-        window.frame(view(100.8), &[], t0);
-        window.frame(view(100.8), &[], t0 + 300 * MS);
-        let (_, scrolled) =
-            window.frame_messages(view(100.8), &[press(), release()], t0 + 316 * MS);
-        assert!(
-            offset(&scrolled).is_some_and(|y| (y - 0.8).abs() < 1e-4),
-            "a pixel's tolerance: at once"
-        );
-
-        // On a Retina display half a pixel is the tolerance: it runs.
-        let mut window = Frames::new(Size::new(120.0, 120.0));
-        set_scale_factor(2.0);
-        window.point_at(Point::new(94.0, 99.8));
-        window.frame(view(100.8), &[], t0);
-        window.frame(view(100.8), &[], t0 + 300 * MS);
-        let (more, scrolled) =
-            window.frame_messages(view(100.8), &[press(), release()], t0 + 316 * MS);
-        set_scale_factor(1.0);
-        assert_eq!(offset(&scrolled), None, "it starts at the next frame");
-        assert!(more);
-    }
-
-    #[test]
-    fn a_view_that_leaves_a_still_pointer_lets_its_bar_fade() {
-        // The view `top` down a taller window (a column leaves out a
-        // child of no size: the view is never its first).
-        let view = |top: f32| -> Element<'_, f32> {
-            column![
-                Space::new().height(top),
-                fading_scrollbar(
-                    scrollable(column![Space::new().width(100).height(1000.0)])
-                        .width(100)
-                        .height(100)
-                ),
-            ]
-            .into()
-        };
-        let mut window = Frames::new(Size::new(120.0, 400.0));
-        let t0 = Instant::now();
-        // The pointer on the track holds the bar in.
-        window.point_at(Point::new(94.0, 30.0));
-        window.frame(view(1.0), &[], t0);
-        window.frame(view(1.0), &[], t0 + 300 * MS);
-        window.frame(view(1.0), &[], t0 + 2000 * MS);
-        let thumb_at = |top: f32| Point::new(94.0, top + 24.0);
-        assert!(near(window.pixel(thumb_at(1.0)), thumb(0.65)), "held");
-        // The view moves down from under the pointer, which stays still:
-        // after the frame the bar learns it left, and fades 600 ms on.
-        let t1 = t0 + 2100 * MS;
-        assert!(window.frame_still(view(201.0), &[], t1), "a frame to come");
-        window.frame_still(view(201.0), &[], t1 + 16 * MS);
-        assert!(!near(window.pixel(thumb_at(201.0)), BACKGROUND), "still in");
-        window.frame_still(view(201.0), &[], t1 + 616 * MS);
-        window.frame_still(view(201.0), &[], t1 + 1000 * MS);
-        assert!(near(window.pixel(thumb_at(201.0)), BACKGROUND), "faded");
-    }
-
-    #[test]
-    fn a_text_field_inside_has_its_caret_shown_with_its_scroll_padding() {
-        use crate::ui::core::widgets::focus_traversal::focus_scope;
-        use crate::ui::core::widgets::text_field::text_input;
-        use iced::keyboard::{self, key::Named};
-
-        // Two 14 px fields 300 apart in a 100 px view, room below them.
-        let field = || {
-            text_input("", "text")
-                .on_input(|_| -1.0)
-                .size(14)
-                .line_height(1.0)
-                .padding(0)
-        };
-        let view = || -> Element<'_, f32> {
-            focus_scope(fading_scrollbar(
-                scrollable(column![
-                    field(),
-                    Space::new().height(300),
-                    field(),
-                    Space::new().height(100)
-                ])
-                .width(100)
-                .height(100),
-            ))
-        };
-        let tab = || iced_test::simulator::press_key(keyboard::Key::Named(Named::Tab), None);
-        let mut window = window();
-        let offset = |window: &mut Frames| {
-            let mut read = Read::default();
-            window.operate(view(), &mut read);
-            read.0.expect("a scrollable")
-        };
-        let t0 = Instant::now();
-        window.frame(view(), &[tab()], t0);
-        window.frame(view(), &[], t0 + 16 * MS);
-        window.frame(view(), &[], t0 + 200 * MS);
-        assert_eq!(offset(&mut window), 0.0, "the first is in view");
-
-        // Tab to the second: at once its text box ends at the view's
-        // bottom (`ensureVisible`); after its frame, the view runs on over
-        // 100 ms until its selection's line (Tab selected all its text) and
-        // 24 px of scroll padding below it show.
-        let t1 = t0 + 300 * MS;
-        window.frame(view(), &[tab()], t1);
-        assert_eq!(offset(&mut window), 314.0 + 14.0 - 100.0);
-        window.frame(view(), &[], t1 + 16 * MS);
-        assert_eq!(offset(&mut window), 228.0, "the run's first frame");
-        window.frame(view(), &[], t1 + 66 * MS);
-        // (The scroll view draws on whole pixels.)
-        let half = 228.0 + 24.0 * Curve::FastOutSlowIn.transform(0.5);
-        assert_eq!(offset(&mut window), half.round());
-        window.frame(view(), &[], t1 + 116 * MS);
-        assert_eq!(offset(&mut window), 314.0 + 14.0 + 24.0 - 100.0);
-
-        // Round to the first, above the view: `ensureVisible` going forward
-        // leaves it; its caret's reveal brings the view back to the top.
-        let t2 = t1 + 300 * MS;
-        window.frame(view(), &[tab()], t2);
-        assert_eq!(offset(&mut window), 252.0);
-        window.frame(view(), &[], t2 + 16 * MS);
-        window.frame(view(), &[], t2 + 116 * MS);
-        assert_eq!(offset(&mut window), 0.0);
-    }
-}
+mod tests;

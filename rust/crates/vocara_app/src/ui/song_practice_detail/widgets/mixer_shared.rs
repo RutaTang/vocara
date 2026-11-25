@@ -28,7 +28,7 @@ use iced::advanced::widget::{tree, Operation, Tree};
 use iced::advanced::{overlay, renderer, Clipboard, Shell, Widget};
 use iced::alignment::Vertical;
 use iced::widget::text::Wrapping;
-use iced::widget::{column, container, row, scrollable, Column, Space};
+use iced::widget::{column, container, row, Column, Space};
 use iced::{
     keyboard, mouse, Alignment, Background, Border, Element, Event, Length, Padding, Point,
     Rectangle, Renderer, Shadow, Size, Theme, Vector,
@@ -36,7 +36,7 @@ use iced::{
 
 use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::theme::{self, Studio};
-use crate::ui::core::widgets::fading_scrollbar::no_scrollbar;
+use crate::ui::core::widgets::fading_scrollbar::{no_scrollbar, scrollable};
 use crate::ui::core::widgets::gesture::{any_tap_event, AnyTap};
 use crate::ui::core::widgets::wrap::Wrap;
 
