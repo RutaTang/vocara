@@ -373,6 +373,12 @@ impl MediaPlayer for AvMediaPlayer {
         unsafe { self.player.setMuted(muted) };
     }
 
+    fn platform_volume(&self) -> Option<(f32, bool)> {
+        // SAFETY: plain property reads on the player we own, on the main
+        // thread (the type is `!Send`, created there).
+        Some(unsafe { (self.player.volume(), self.player.isMuted()) })
+    }
+
     fn state(&self) -> PlayerState {
         match &self.opened {
             Some(opened) => autoreleasepool(|_| map_state(&self.native(&opened.item))),
