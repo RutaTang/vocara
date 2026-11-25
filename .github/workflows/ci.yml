@@ -5,6 +5,14 @@ on:
     branches: [master]
   pull_request:
   workflow_dispatch:
+    inputs:
+      release_setup_only:
+        description: >-
+          Only check the release setup (the public releases repo and the
+          RELEASES_TOKEN secret, as the Release workflow's guard does):
+          nothing is built or tested
+        type: boolean
+        default: false
 
 # CI never mutates the repository; actions are pinned to commit SHAs.
 permissions:
@@ -23,6 +31,7 @@ jobs:
   # (all behind `device`), so only the device run compiles and tests them.
   rust:
     name: Rust format, lint, test
+    if: ${{ !inputs.release_setup_only }}
     runs-on: macos-latest
     defaults:
       run:
@@ -56,6 +65,7 @@ jobs:
   # the proved models compute would test the code against stale behaviour.
   lean:
     name: Lean proofs and vectors
+    if: ${{ !inputs.release_setup_only }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -91,6 +101,7 @@ jobs:
   # 10.15 (an x86_64 debug build on top of the arm64 one, not a release).
   macos-build:
     name: macOS app bundle
+    if: ${{ !inputs.release_setup_only }}
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -120,7 +131,7 @@ jobs:
   # (.github/scripts/launch-check.sh). Manual: a release build takes a while.
   sandbox-launch:
     name: Sandboxed release launch (manual)
-    if: github.event_name == 'workflow_dispatch'
+    if: ${{ github.event_name == 'workflow_dispatch' && !inputs.release_setup_only }}
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -133,3 +144,23 @@ jobs:
         run: echo "app=$(rust/packaging/macos/bundle.sh --flavor prod)" >> "$GITHUB_OUTPUT"
       - name: Launch it and check it boots inside its sandbox
         run: .github/scripts/launch-check.sh "${{ steps.bundle.outputs.app }}"
+
+  # The release pipeline's external setup, checked as the Release workflow's
+  # guard checks it before a release (.github/scripts/releases-repo-check.sh:
+  # its write check creates a draft release there and deletes it at once).
+  # Only when a manual run asks for it (`release_setup_only`); the Release
+  # setup check workflow runs the same check once it is on master.
+  release-setup:
+    name: Release setup check
+    if: ${{ inputs.release_setup_only }}
+    runs-on: ubuntu-latest
+    env:
+      # The repo release.yml publishes to (pinned by
+      # rust/crates/vocara_services/tests/update_check_pins.rs).
+      RELEASES_REPO: RutaTang/vocara-releases
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Verify the public releases repo
+        env:
+          GH_TOKEN: ${{ secrets.RELEASES_TOKEN }}
+        run: .github/scripts/releases-repo-check.sh

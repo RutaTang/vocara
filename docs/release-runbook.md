@@ -42,7 +42,9 @@ and deletes it at once. To check the setup without cutting a release (after
 creating the repo and the token, or renewing the token), run the **Release
 setup check** workflow by hand (Actions → Release setup check → Run
 workflow): it runs the same check (`.github/scripts/releases-repo-check.sh`)
-and nothing else.
+and nothing else. The CI workflow runs it too when started by hand with
+**release_setup_only** checked (then it builds and tests nothing), which
+works from any branch.
 
 ## Cutting a release
 
