@@ -561,6 +561,15 @@ small and written down in the module that has it:
   (`ui::core::system_font`), on SkParagraph's line, rasterized by swash,
   not CoreText; the time ruler's tabular figures are the font's own
   `tnum` figures (`studio_text::tabular_font`).
+- Pixels are rasterized by iced's renderers, not Skia: glyph images by
+  swash, where Skia on macOS drew them with CoreText and its own gamma and
+  contrast tables, and shape edges with `iced_wgpu`'s shaders (tiny-skia's
+  antialiasing in the Linux tests), where Skia's GPU backend computed its
+  own coverage. Every shape, size, glyph, advance, line and position is
+  Flutter's; an edge's or a glyph's antialiased pixels can differ by a few
+  levels. This is the renderer the port is built on, kept by decision:
+  rasterizing glyphs with CoreText and porting Skia's edge coverage were
+  weighed and not taken.
 
 ## Tracking
 
