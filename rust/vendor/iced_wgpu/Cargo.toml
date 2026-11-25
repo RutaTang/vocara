@@ -45,6 +45,7 @@ all-features = true
 default = ["wgpu/default"]
 geometry = [
     "iced_graphics/geometry",
+    "iced_tiny_skia/geometry",
     "lyon",
 ]
 image = ["iced_graphics/image"]
@@ -89,6 +90,14 @@ version = "0.14.0"
 
 [dependencies.iced_graphics]
 version = "0.14.0"
+
+# vocara: the effects' hard-edged clips (`effect.rs`) take the pixels they
+# hold from iced_tiny_skia's `HardClip`, so both renderers clip the same
+# ones. The patched crate iced already builds (its fallback renderer); no
+# new crate.
+[dependencies.iced_tiny_skia]
+version = "0.14.1"
+default-features = false
 
 [dependencies.log]
 version = "0.4"

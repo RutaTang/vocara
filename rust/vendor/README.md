@@ -14,24 +14,55 @@ comments) and the files named below; `LICENSE` is the upstream project's
   - The effects' layers (see below): `src/effect.rs` and
     `src/shader/effect.wgsl` (new), `src/layer.rs` (`Layer::effect`, an
     effect's layer merging with nothing), `src/lib.rs` (the renderer's
-    `start_opacity_layer`, `end_opacity_layer` and `draw_backdrop_filter`;
-    the preparing and drawing loops moved into `prepare_layers` and
-    `render_layers`, which go into a group's layers, draw them into an
-    offscreen texture and composite it, and filter backdrops),
-    `src/engine.rs` (the effects' pipelines), and
+    `start_opacity_layer`, `end_opacity_layer`, `start_clip_layer`,
+    `end_clip_layer` and `draw_backdrop_filter`; the preparing and drawing
+    loops moved into `prepare_layers` and `render_layers`, which go into a
+    group's layers, draw them into an offscreen texture and composite it,
+    or in place and put back what lies outside its clip, and filter
+    backdrops), `src/engine.rs` (the effects' pipelines),
     `src/window/compositor.rs` (a window's surface allows copies from it,
-    where the platform's does, for the backdrop filter to read it).
+    where the platform's does, for the backdrop filter and the clip layer
+    to read it), and `Cargo.toml` (`iced_tiny_skia`, whose `HardClip` gives
+    both renderers the pixels a clip holds; the patched crate iced builds
+    anyway, no new crate).
 - `iced_tiny_skia` 0.14.1 (MIT, <https://github.com/iced-rs/iced>): the
-  effects' layers: `src/effect.rs` (new), `src/layer.rs` (`Layer::effect`,
-  redrawn whole in the damage), `src/lib.rs` (the same three methods; the
-  drawing loop moved into `draw_layers`, which draws a group's layers into
-  an offscreen pixmap and composites it, and filters backdrops),
-  `src/engine.rs` and `src/geometry.rs` (two helpers made visible to the
-  crate).
+  effects' layers: `src/effect.rs` (new; with `HardClip` and `PixelBox`,
+  public for `iced_wgpu`), `src/layer.rs` (`Layer::effect`, redrawn whole
+  in the damage), `src/lib.rs` (the same five methods; the drawing loop
+  moved into `draw_layers`, which draws a group's layers into an offscreen
+  pixmap and composites it, or in place and puts back what lies outside
+  its clip, and filters backdrops), `src/engine.rs` and `src/geometry.rs`
+  (two helpers made visible to the crate).
 - `iced_renderer` 0.14.0 (MIT, <https://github.com/iced-rs/iced>):
   `src/effects.rs` (new) is the `Effects` trait the app's widgets call,
   implemented by both renderers and by the fallback renderer that is
   `iced::Renderer`, and `BackdropFilter`.
+- `cosmic-text` 0.15.0 (MIT OR Apache-2.0,
+  <https://github.com/pop-os/cosmic-text>; `LICENSE-MIT` and
+  `LICENSE-APACHE` its own; only `src`, the manifests, the licenses and
+  the README vendored, the `[[test]]` and `[[bench]]` targets dropped from
+  `Cargo.toml`, whose files are not): a face drawn at a fixed instance of
+  its variation axes, which the text toolbar's labels need (the system UI
+  font at the optical size Flutter's Skia drew it at, untracked;
+  `rust/crates/vocara_app/src/ui/core/widgets/text_field/toolbar_face.rs`).
+  Upstream varies a face along its weight axis alone, the weight asked
+  for, every other axis at its default, and its shaper (harfrust) applies
+  a face's `trak` table at 12 pt when the face has a `STAT` table.
+  `FontSystem::set_face_instance` (`src/font/system.rs`) gives one face a
+  `FaceInstance` (`src/font/mod.rs`): user coordinates on its axes, set
+  after the weight's, and whether it is untracked; every `Font` of that
+  face then takes them, in `Font::new_with_instance`: its metrics, the
+  shaper's instance (advances, positioning, substitutions), the outlines
+  swash draws (`src/swash.rs`: the same normalized coordinates, for the
+  images and the outline commands), and, untracked, the shaper reads the
+  face through a copy of its table directory without its `trak` record
+  (`untracked_directory`, `shaped_font`). Setting one drops that face's
+  cached fonts and shape plans (`ShapeBuffer::forget_font`, `src/shape.rs`).
+  A face without an instance is drawn as upstream draws it.
+
+Moving to a new cosmic-text release: carry the marked lines over (or drop
+the patch if upstream comes to take a face's variation coordinates and to
+leave a face untracked), and keep the version iced's renderers use.
 
 - `iced_winit` 0.14.1 (MIT, <https://github.com/iced-rs/iced>): the run
   loop hands the app each wheel event's gesture, which iced's
@@ -80,6 +111,17 @@ Flutter did:
   (premultiplied source over), inside its bounds and the clip of the
   layer it was started in (iced's layers do not clip each other, but a
   group stands for what that layer would have drawn).
+- A **clip layer** (Flutter's `ClipPath` with `Clip.hardEdge`, which
+  Skia applies without antialiasing): a subtree, in a stack of layers of
+  its own as an opacity layer's, drawn in place exactly as it would be
+  without the clip (its antialiased edges and all), after which every
+  pixel of its bounds whose center the clip's path does not hold (nonzero
+  winding) is put back as it was before it. Skia's hard clip kept each
+  drawing off those pixels instead; with a clip that is all or nothing on
+  each pixel, the two leave the same pixels. tiny-skia saves the pixels and
+  puts them back on the CPU; wgpu copies them out of the target before the
+  subtree and draws them back after it (a pass without blending,
+  `restore`), discarding the pixels the clip holds.
 - A **backdrop filter** (Flutter's `BackdropFilter` in a `Clip.hardEdge`):
   a layer that blurs what was drawn before it under a shape (a Gaussian,
   each pixel beyond the target's edge the nearest one inside, as a composed
@@ -91,7 +133,15 @@ Both renderers compute them in the same float arithmetic on the same
 sRGB-encoded, premultiplied 8-bit values, each result rounded once, so they
 draw the same pixels: `iced_wgpu`'s shaders step for step as
 `iced_tiny_skia`'s loops (the Gaussian's weights computed alike on the
-CPU), the blur's horizontal pass kept in floats in both.
+CPU), the blur's horizontal pass kept in floats in both. Which pixels a
+clip (a clip layer's, a backdrop filter's) holds is found once, for both,
+by `iced_tiny_skia::HardClip::mask`: tiny-skia's fill without
+antialiasing (Skia's, ported) of the path under the layer's transformation
+and the scale factor, which wgpu uploads as an 8-bit texture and its
+shaders discard by. A clip layer's subtree is drawn by each renderer's own
+pipelines; tiny-skia draws a shape that crosses its layer's box (the clip's
+bounding box, inside a clip layer) through a mask, which rounds within one
+8-bit step of drawing it unmasked.
 
 Moving to a new iced release: re-check whether upstream composites the
 border over the fill, and drop that patch if it does; carry the effects'

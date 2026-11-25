@@ -314,3 +314,220 @@ fn a_layer_inside_a_clip_stays_inside_it() {
     assert!(near(window.pixel(Point::new(45.0, 20.0)), faded(RED, 0.5)));
     assert_eq!(window.pixel(Point::new(75.0, 20.0)), BACKGROUND);
 }
+
+// ------------------------------------------------------ the clip layer
+
+/// A diamond centered at `center`, `a` across and `b` down from its center
+/// to its corners.
+#[derive(Clone, Copy)]
+struct Diamond {
+    center: Point,
+    a: f32,
+    b: f32,
+}
+
+impl Diamond {
+    fn path(self) -> iced::widget::canvas::Path {
+        let Point { x, y } = self.center;
+        iced::widget::canvas::Path::new(|p| {
+            p.move_to(Point::new(x - self.a, y));
+            p.line_to(Point::new(x, y - self.b));
+            p.line_to(Point::new(x + self.a, y));
+            p.line_to(Point::new(x, y + self.b));
+            p.close();
+        })
+    }
+
+    /// How far `point` lies inside its edge (negative: outside).
+    fn depth(self, point: Point) -> f32 {
+        let s = (point.x - self.center.x).abs() / self.a + (point.y - self.center.y).abs() / self.b;
+        (1.0 - s) / (1.0 / (self.a * self.a) + 1.0 / (self.b * self.b)).sqrt()
+    }
+}
+
+/// Stripes of three colors filling the window, then (`content`) a
+/// translucent antialiased disc, a rounded box, a line of text and a faded
+/// block, inside `clip` if any, all moved by `shift`.
+struct ClipProbe {
+    content: bool,
+    clip: Option<Diamond>,
+    shift: Vector,
+}
+
+impl Widget<(), Theme, Renderer> for ClipProbe {
+    fn size(&self) -> Size<Length> {
+        Size::new(Length::Fill, Length::Fill)
+    }
+
+    fn layout(
+        &mut self,
+        _tree: &mut Tree,
+        _renderer: &Renderer,
+        limits: &layout::Limits,
+    ) -> layout::Node {
+        layout::Node::new(limits.max())
+    }
+
+    fn draw(
+        &self,
+        _tree: &Tree,
+        renderer: &mut Renderer,
+        _theme: &Theme,
+        _style: &renderer::Style,
+        layout: Layout<'_>,
+        _cursor: mouse::Cursor,
+        _viewport: &Rectangle,
+    ) {
+        use iced::advanced::graphics::geometry::Renderer as _;
+        use iced::advanced::text::Renderer as _;
+        use iced::advanced::Renderer as _;
+        let bounds = layout.bounds();
+        for (i, color) in [RED, GREY, BLUE].into_iter().enumerate() {
+            renderer.fill_quad(
+                renderer::Quad {
+                    bounds: Rectangle {
+                        x: bounds.width / 3.0 * i as f32,
+                        width: bounds.width / 3.0,
+                        ..bounds
+                    },
+                    ..renderer::Quad::default()
+                },
+                color,
+            );
+        }
+        if !self.content {
+            return;
+        }
+        let content = |renderer: &mut Renderer| {
+            let mut frame = iced::widget::canvas::Frame::new(renderer, bounds.size());
+            frame.fill(
+                &iced::widget::canvas::Path::circle(Point::new(60.0, 40.0), 33.0),
+                Color::from_rgba(0.9, 0.8, 0.1, 0.7),
+            );
+            renderer.draw_geometry(frame.into_geometry());
+            renderer.fill_quad(
+                renderer::Quad {
+                    bounds: Rectangle::new(Point::new(70.5, 8.25), Size::new(30.0, 20.0)),
+                    border: iced::Border {
+                        radius: 6.0.into(),
+                        width: 1.5,
+                        color: Color::WHITE,
+                    },
+                    ..renderer::Quad::default()
+                },
+                Color::from_rgba(0.2, 0.9, 0.4, 0.8),
+            );
+            renderer.fill_text(
+                iced::advanced::text::Text {
+                    content: "Wgy".to_string(),
+                    bounds: Size::new(80.0, 30.0),
+                    size: 22.0.into(),
+                    line_height: iced::advanced::text::LineHeight::default(),
+                    font: theme::font::REGULAR,
+                    align_x: iced::advanced::text::Alignment::Default,
+                    align_y: iced::alignment::Vertical::Top,
+                    shaping: iced::advanced::text::Shaping::Advanced,
+                    wrapping: iced::advanced::text::Wrapping::None,
+                },
+                Point::new(14.0, 44.0),
+                Color::WHITE,
+                bounds,
+            );
+            let faded = Rectangle::new(Point::new(20.0, 10.0), Size::new(30.0, 25.0));
+            renderer.with_opacity_layer(faded, 0.5, |renderer| {
+                renderer.fill_quad(
+                    renderer::Quad {
+                        bounds: faded,
+                        ..renderer::Quad::default()
+                    },
+                    Color::WHITE,
+                );
+            });
+        };
+        renderer.with_translation(self.shift, |renderer| match self.clip {
+            Some(clip) => renderer.with_clip_layer(&clip.path(), content),
+            None => content(renderer),
+        });
+    }
+}
+
+/// Every pixel of `view` drawn alone in a window.
+fn drawn(view: ClipProbe) -> Vec<Color> {
+    let mut window = Frames::new(WINDOW);
+    window.frame(Element::new(view), &[], Instant::now());
+    pixels(&window)
+}
+
+#[test]
+fn a_clip_layer_draws_inside_as_without_it_and_leaves_the_rest_as_it_was() {
+    // Flutter's `ClipPath` with `Clip.hardEdge`: Skia draws each thing
+    // inside it, antialiased as without the clip, on the pixels whose
+    // centers the clip holds, and nothing on the others. The diamond's
+    // edges cut the disc, the box, the text and the faded block slantwise.
+    let clip = Diamond {
+        center: Point::new(58.3, 37.6),
+        a: 41.7,
+        b: 30.35,
+    };
+    for shift in [Vector::ZERO, Vector::new(7.0, -3.0)] {
+        let probe = |content: bool, clip: Option<Diamond>| ClipProbe {
+            content,
+            clip,
+            shift,
+        };
+        let backdrop = drawn(probe(false, None));
+        let unclipped = drawn(probe(true, None));
+        let clipped = drawn(probe(true, Some(clip)));
+        let (mut cut, mut kept) = (0, 0);
+        for (i, drawn) in clipped.iter().enumerate() {
+            let (x, y) = (i % WINDOW.width as usize, i / WINDOW.width as usize);
+            let center = Point::new(x as f32 + 0.5, y as f32 + 0.5) - shift;
+            let depth = clip.depth(center);
+            if depth.abs() < 0.02 {
+                // On the edge, to within how the rasterizer rounds it.
+                continue;
+            }
+            let inside = depth > 0.0;
+            if inside {
+                // As drawn without the clip: on wgpu exactly; tiny-skia
+                // draws a shape its layer's box cuts (here the clip's box)
+                // through a mask, which rounds to within one step.
+                let [a, b] = [*drawn, unclipped[i]].map(Color::into_rgba8);
+                assert!(
+                    a.iter().zip(b).all(|(a, b)| a.abs_diff(b) <= 1),
+                    "pixel ({x}, {y}), inside the clip by {depth:.3}: {a:?}, not \
+                     {b:?} (shift {shift:?})"
+                );
+            } else {
+                assert_eq!(
+                    *drawn, backdrop[i],
+                    "pixel ({x}, {y}), outside the clip by {:.3} (shift {shift:?})",
+                    -depth
+                );
+            }
+            if unclipped[i] != backdrop[i] {
+                if inside {
+                    kept += 1;
+                } else {
+                    cut += 1;
+                }
+            }
+        }
+        assert!(cut > 200 && kept > 1000, "cut {cut}, kept {kept}");
+    }
+}
+
+#[test]
+fn a_clip_layer_with_an_empty_clip_draws_nothing() {
+    let empty = Diamond {
+        center: Point::new(60.0, 40.0),
+        a: 0.0,
+        b: 0.0,
+    };
+    let probe = |content: bool, clip: Option<Diamond>| ClipProbe {
+        content,
+        clip,
+        shift: Vector::ZERO,
+    };
+    assert_eq!(drawn(probe(true, Some(empty))), drawn(probe(false, None)));
+}

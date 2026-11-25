@@ -26,7 +26,8 @@ pub struct Layer {
     pending_meshes: Vec<Mesh>,
     pending_text: Vec<Text>,
     // vocara: what the layer composites instead of primitives of its own
-    // (a subtree at an opacity, or a filter of its backdrop).
+    // (a subtree at an opacity or inside a hard-edged clip, or a filter of
+    // its backdrop).
     pub effect: Option<Effect>,
 }
 
@@ -38,6 +39,20 @@ pub enum Effect {
     Group(Box<Group>),
     /// What lies under a shape, filtered.
     Backdrop(Box<Backdrop>),
+    /// A subtree drawn in place, then cut by a hard-edged clip.
+    Clip(Box<Clip>),
+}
+
+/// vocara: a subtree inside a hard-edged clip (Flutter's `ClipPath` with
+/// `Clip.hardEdge`): drawn as it would be without the clip, then every
+/// pixel whose center the clip does not hold is put back as it was.
+#[derive(Debug)]
+pub struct Clip {
+    /// The clip (iced_tiny_skia finds the pixels it holds, for both
+    /// renderers).
+    pub clip: iced_tiny_skia::HardClip,
+    /// What the subtree drew, layered (and merged) as at the top level.
+    pub layers: Stack,
 }
 
 /// vocara: a subtree composited as one layer (Flutter's `Opacity`).
@@ -54,12 +69,9 @@ pub struct Group {
 /// was there (source over), inside a hard-edged clip.
 #[derive(Debug)]
 pub struct Backdrop {
-    /// The clip's triangles, in logical pixels.
-    pub vertices: Vec<[f32; 2]>,
-    /// Their indices.
-    pub indices: Vec<u32>,
-    /// The clip's bounds, in logical pixels.
-    pub bounds: Rectangle,
+    /// The clip (iced_tiny_skia finds the pixels it holds, for both
+    /// renderers).
+    pub clip: iced_tiny_skia::HardClip,
     /// The blur's standard deviation, in logical pixels.
     pub blur_sigma: f32,
     /// The color matrix: 4 rows of 5 (red, green, blue, alpha, then an

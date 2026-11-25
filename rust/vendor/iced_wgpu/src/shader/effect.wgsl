@@ -1,16 +1,20 @@
 // vocara: the effects' layers (`effect.rs`): a group composited at an
-// opacity, and a backdrop blurred (two passes) and color-filtered. The
+// opacity, a clip layer's backdrop put back outside its clip, and a
+// backdrop blurred (two passes) and color-filtered inside its clip. The
 // arithmetic is iced_tiny_skia's `effect` module's, step for step, so the
-// two renderers draw the same 8-bit values.
+// two renderers draw the same 8-bit values; a clip's pixels are
+// iced_tiny_skia's own (`HardClip::mask`), uploaded as `mask`.
 
 struct Effect {
-    // The target pixel of this pass's output (0, 0).
+    // The target pixel of this pass's output (0, 0), or of the saved
+    // backdrop's.
     origin: vec2<i32>,
-    // The target's size: what the blur clamps to, and what maps a clip's
-    // vertices to clip space.
+    // The target's size: what the blur clamps to.
     size: vec2<i32>,
     // The target pixel of the source texture's (0, 0).
     source: vec2<i32>,
+    // The target pixel of the clip's mask's (0, 0).
+    mask: vec2<i32>,
     // How far the blur reaches on each side.
     radius: i32,
     // A group's opacity.
@@ -25,6 +29,8 @@ struct Effect {
 
 @group(0) @binding(0) var<uniform> effect: Effect;
 @group(0) @binding(1) var source: texture_2d<f32>;
+// A clip's mask: 1 where it holds the pixel, 0 elsewhere.
+@group(0) @binding(2) var mask: texture_2d<f32>;
 
 // A triangle over the whole target.
 @vertex
@@ -34,17 +40,9 @@ fn cover(@builtin(vertex_index) index: u32) -> @builtin(position) vec4<f32> {
     return vec4<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, 0.0, 1.0);
 }
 
-// A vertex of a clip, in the target's pixels.
-@vertex
-fn clip(@location(0) position: vec2<f32>) -> @builtin(position) vec4<f32> {
-    let size = vec2<f32>(effect.size);
-
-    return vec4<f32>(
-        position.x / size.x * 2.0 - 1.0,
-        1.0 - position.y / size.y * 2.0,
-        0.0,
-        1.0,
-    );
+// Whether the clip holds the target pixel `pixel`.
+fn clipped(pixel: vec2<i32>) -> bool {
+    return textureLoad(mask, pixel - effect.mask, 0).r > 0.0;
 }
 
 // A group's pixel at its opacity (premultiplied).
@@ -53,6 +51,19 @@ fn composite(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     let texel = textureLoad(source, vec2<i32>(floor(position.xy)), 0);
 
     return texel * effect.opacity;
+}
+
+// What a clip layer's pixel held before it, where the clip does not hold
+// it (drawn with no blending); nothing where it does.
+@fragment
+fn restore(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let pixel = vec2<i32>(floor(position.xy));
+
+    if clipped(pixel) {
+        discard;
+    }
+
+    return textureLoad(source, pixel - effect.origin, 0);
 }
 
 fn weight(offset: i32) -> f32 {
@@ -87,10 +98,16 @@ fn row(n: i32, color: vec4<f32>) -> f32 {
 }
 
 // The blur down each column of the horizontal pass, through the color
-// matrix (on unpremultiplied colors), premultiplied again.
+// matrix (on unpremultiplied colors), premultiplied again, on the pixels
+// the clip holds.
 @fragment
 fn vertical(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     let pixel = vec2<i32>(floor(position.xy));
+
+    if !clipped(pixel) {
+        discard;
+    }
+
     var sum = vec4<f32>(0.0);
 
     for (var i = -effect.radius; i <= effect.radius; i++) {

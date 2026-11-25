@@ -1,67 +1,107 @@
-//! The face the text toolbar's labels are set in ([`label_face`]): the
-//! macOS system UI font where iced's text engine draws it as Flutter drew
-//! the labels, else the bundled Inter.
+//! The face the text toolbar's labels are set in ([`label_face`]): on
+//! macOS the system UI font at the instance Flutter drew it at, else the
+//! bundled Inter.
 //!
-//! Flutter's label style set no family (`inherit: false`), so the labels
-//! were in the platform's default, `.AppleSystemUIFont`: SF, which macOS
-//! (10.15 on) ships as one variable face, `/System/Library/Fonts/SFNS.ttf`,
-//! under a hidden family (`.SF NS`) the font system loads with the other
-//! system fonts. Whether cosmic-text 0.15 (iced's text engine) draws that
-//! face as Flutter did depends on the face, so [`SystemUiFace`] reads it,
-//! once, and the labels take it only when all of these hold:
+//! **What Flutter drew.** The labels' style (`_kToolbarButtonFontStyle`)
+//! set `inherit: false`, 14 px, w400 and no family, so the engine gave the
+//! paragraph its default family, `[NSFont systemFontOfSize:14].familyName`
+//! (`txt::GetDefaultFontFamilies`, `txt/platform_mac.mm`): CoreText's
+//! `.AppleSystemUIFont`, which macOS (10.15 on) serves from one variable
+//! face, `/System/Library/Fonts/SFNS.ttf`. On macOS Flutter 3.38 draws
+//! with Skia (Impeller only where `FLTEnableImpeller` asks for it, which
+//! the app's `Info.plist` did not), and Skia (the revision Flutter 3.38.4
+//! pins) went on like this:
 //!
-//! - **design**: cosmic-text varies a face along its weight axis alone (its
-//!   shaper's instance and its rasterizer's), so every other axis stays at
-//!   its default. CoreText, which drew Flutter's glyphs, sets the optical
-//!   size (`opsz`) from the size in points, clamped to the axis: the
-//!   label's 14 pt, or 12 pt, CoreText's default size, at which Skia made
-//!   the face and whose optical size it keeps. The outlines and advances
-//!   are the same only where the axis's default is where both clamp to;
-//!   a face without the axis has nothing to set;
-//! - **tracking**: Flutter's shaper (HarfBuzz) and cosmic-text's (harfrust)
-//!   both apply a face's `trak` table, at the size they are given, else
-//!   12 pt (harfrust, and HarfBuzz since 2025; HarfBuzz before applied none
-//!   then), and only to a face with a `STAT` table. Neither is given one.
-//!   The normal track at 12 pt must be 0, as Apple's tracking is at 12 pt,
-//!   for every one of them to agree; the -0.15 px letter spacing on top is
-//!   the toolbar style's own;
-//! - **line box**: the labels' line is the face's ascent and descent (its
-//!   `hhea`, as CoreText reports them), in place of Inter's 1.21 em:
-//!   Flutter's line had no `height`, so its box was its font's.
+//! - **the typeface**: SkParagraph matched the family through
+//!   `SkFontMgr_Mac::onMatchFamily` and the regular style of its
+//!   descriptors, and `create_from_desc` made it with
+//!   `CTFontCreateWithFontDescriptor(desc, 0, nullptr)`: size 0, so
+//!   CoreText's default, 12 pt (`SkFontMgr_mac_ct.cpp`);
+//! - **the optical size**: every CoreText font Skia measured or drew the
+//!   glyphs with was `SkCTFontCreateExactCopy` of it at the size needed
+//!   (`SkScalerContext_mac_ct.cpp`), which sets `NSCTFontOpticalSizeAttribute`
+//!   to the typeface's own optical size attribute, or, without one, its size:
+//!   12 (`SkCTFontCreateExactCopy.cpp`). CoreText sets the `opsz` axis from
+//!   that attribute first, clamped to the axis; so the labels were the
+//!   12 pt design at every pixel size, whatever the screen's scale, not
+//!   the 14 pt one CoreText would pick by itself;
+//! - **the weight**: w400, the regular descriptor: `wght` 400;
+//! - **the tracking**: none. The exact copy also sets
+//!   `NSCTFontUnscaledTrackingAttribute` to 0, which turns CoreText's
+//!   `trak` off, and the advances HarfBuzz (11.0.0) shaped with came from
+//!   Skia's font functions (`SkFont::getWidths` through CoreText), not
+//!   HarfBuzz's own, the only ones that apply `trak` in that release; the
+//!   labels' -0.15 px letter spacing is the style's own;
+//! - **the line**: SkParagraph's line is the run's metrics (CoreText's
+//!   `CTFontGetAscent`, `Descent`, `Leading` of the exact copy at 14 pt),
+//!   the leading split above and below (`Run::calculateMetrics`), its
+//!   height rounded to a whole pixel (`InternalLineMetrics::height`), and
+//!   its glyphs drawn on a baseline half the leading and the ascent below
+//!   its top, rounded to a whole pixel too (`TextLine`'s
+//!   `correctedBaseline`).
 //!
-//! Off macOS, without the face, or when a check fails, the labels stay in
-//! Inter at its natural line box. On a Mac (CI's runner), the test
-//! `the_labels_take_the_system_font_exactly_when_cosmic_text_draws_it_as_flutter_did`
-//! reads the face, prints what it found, and checks each step against what
-//! cosmic-text does with it.
+//! **What the port draws.** cosmic-text (iced's text engine, vendored in
+//! `rust/vendor/cosmic-text`) draws a face at a fixed instance of its axes
+//! when told to (`FontSystem::set_face_instance`): metrics, shaping
+//! (harfrust's advances, positioning and substitutions) and outlines
+//! (swash) all at those coordinates, and, `untracked`, with the shaper
+//! reading the face without its `trak` table (harfrust would apply it at
+//! 12 pt, the face having a `STAT` table). [`register`] adds a copy of the
+//! face to the font system under a family of its own ([`LABEL_FAMILY`]),
+//! at Flutter's instance ([`Instance::of`]: `opsz` 12 and `wght` 400, each
+//! clamped to its axis, every other axis at its default), untracked, and
+//! sets the labels' line as SkParagraph did from the face's `hhea` metrics
+//! and their `MVAR` deltas at that instance ([`Instance::line`]).
+//!
+//! Off macOS, or without the face, the labels are in Inter, their line
+//! set the same way from its metrics. On a Mac (CI's runner), the test
+//! `the_labels_are_drawn_at_the_instance_and_metrics_coretext_gave_skia`
+//! asks CoreText for Skia's fonts as Skia made them and checks the
+//! instance, the glyph advances cosmic-text lays the labels out with and
+//! the line against them.
 
 use std::sync::OnceLock;
 
-use iced::advanced::graphics::text::cosmic_text::fontdb::{Database, Source, ID};
+use iced::advanced::graphics::text::cosmic_text::fontdb::{Language, Source, ID};
 use iced::advanced::graphics::text::cosmic_text::skrifa::{
-    raw::{tables::trak::Trak, TableProvider},
+    raw::{
+        tables::variations::{DeltaSetIndex, FloatItemDeltaTarget},
+        types::{F2Dot14, FWord},
+        TableProvider,
+    },
     FontRef, MetadataProvider, Tag,
 };
+use iced::advanced::graphics::text::cosmic_text::{FaceInstance, FontSystem};
+use iced::font::{Family, Stretch, Style, Weight};
 use iced::Font;
 
 use crate::ui::core::theme::font;
 
-use super::toolbar::{LABEL_LINE_HEIGHT, LABEL_SIZE};
+use super::toolbar::LABEL_SIZE;
 
 /// Where macOS keeps its system UI font.
 pub const SYSTEM_UI_FONT: &str = "/System/Library/Fonts/SFNS.ttf";
 
-/// The size HarfBuzz and harfrust track a face at when given none
-/// (CoreText's default size), which cosmic-text never gives its shaper;
-/// and the size Skia made Flutter's system font face at.
-pub const DEFAULT_PT: f32 = 12.0;
+/// The family the labels' instance of the system UI font is added to the
+/// font system under (no font of the machine's has it).
+pub const LABEL_FAMILY: &str = ".Vocara Toolbar Label";
 
-/// The labels' face and line box.
+/// CoreText's default size, at which Skia made the typeface, and so the
+/// optical size it drew the labels at (see the module docs).
+pub const OPTICAL_SIZE: f32 = 12.0;
+
+/// The labels' weight (`FontWeight.w400`).
+pub const WEIGHT: f32 = 400.0;
+
+/// The labels' face and line.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LabelFace {
     pub font: Font,
-    /// The line box, in ems of the label size.
+    /// The line's height, in pixels: SkParagraph's, a whole pixel.
     pub line_height: f32,
+    /// How far below the line's top its glyphs' baseline lies, in pixels:
+    /// SkParagraph's, a whole pixel.
+    pub baseline: f32,
     /// Whether it is the system UI font (else Inter).
     pub system: bool,
 }
@@ -71,215 +111,189 @@ pub struct LabelFace {
 /// with that lock held.
 pub fn label_face() -> &'static LabelFace {
     static FACE: OnceLock<LabelFace> = OnceLock::new();
-    FACE.get_or_init(|| choose(LABEL_SIZE))
+    FACE.get_or_init(choose)
 }
 
-/// Inter at its natural line box.
-fn inter() -> LabelFace {
+/// Inter (the bundled regular face), its line set from its metrics.
+pub fn inter() -> LabelFace {
+    let instance = FontRef::new(font::FACES[0])
+        .ok()
+        .and_then(|face| Instance::of(&face))
+        .expect("the bundled Inter parses");
+    let (line_height, baseline) = instance.line(LABEL_SIZE);
     LabelFace {
         font: font::REGULAR,
-        line_height: LABEL_LINE_HEIGHT,
+        line_height,
+        baseline,
         system: false,
     }
 }
 
 #[cfg(target_os = "macos")]
-fn choose(pt: f32) -> LabelFace {
+fn choose() -> LabelFace {
     use iced::advanced::graphics::text::font_system;
-    use iced::font::{Family, Stretch, Style, Weight};
-    let face = {
-        let mut fonts = font_system().write().expect("the font system");
-        SystemUiFace::read(fonts.raw().db())
-    };
-    match face.filter(|face| face.draws_as_flutter(pt)) {
-        Some(face) => LabelFace {
-            font: Font {
-                // Once per process: the family outlives every text.
-                family: Family::Name(Box::leak(face.family.into_boxed_str())),
-                weight: Weight::Normal,
-                stretch: Stretch::Normal,
-                style: Style::Normal,
-            },
-            line_height: face.line_height,
-            system: true,
-        },
-        None => inter(),
-    }
+    let mut fonts = font_system().write().expect("the font system");
+    let fonts = fonts.raw();
+    system_ui_face(fonts.db())
+        .and_then(|id| register(fonts, id))
+        .map(|(face, _)| face)
+        .unwrap_or_else(inter)
 }
 
 #[cfg(not(target_os = "macos"))]
-fn choose(_pt: f32) -> LabelFace {
+fn choose() -> LabelFace {
     inter()
 }
 
-/// One of a variable face's axes, in user units.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Axis {
-    pub tag: String,
-    pub min: f32,
-    pub default: f32,
-    pub max: f32,
-}
-
-/// What the choice reads off the system UI face.
-#[derive(Debug, Clone, PartialEq)]
-pub struct SystemUiFace {
-    /// The face in the font system's database.
-    pub id: ID,
-    /// Its (hidden) family name.
-    pub family: String,
-    /// Its variation axes (`fvar`), in order.
-    pub axes: Vec<Axis>,
-    pub units_per_em: u16,
-    /// `hhea`'s ascender + |descender|, in ems (its line gap is not part of
-    /// a line's box).
-    pub line_height: f32,
-    /// What cosmic-text's shaper adds to each glyph's advance, in font
-    /// units: the `trak` table's normal track at [`DEFAULT_PT`], rounded
-    /// (harfrust applies it only with a `STAT` table too); 0 without.
-    pub default_tracking: f32,
-    /// The normal track at 14 pt, in font units: CoreText's at the label
-    /// size (for the record; Flutter did not shape with CoreText).
-    pub label_tracking: f32,
-}
-
-impl SystemUiFace {
-    /// Reads the face loaded from [`SYSTEM_UI_FONT`], if the font system
-    /// has one.
-    pub fn read(db: &Database) -> Option<SystemUiFace> {
-        let face = db.faces().find(|face| match &face.source {
+/// The system UI face the font system loaded from [`SYSTEM_UI_FONT`], if
+/// any.
+pub fn system_ui_face(
+    db: &iced::advanced::graphics::text::cosmic_text::fontdb::Database,
+) -> Option<ID> {
+    db.faces()
+        .find(|face| match &face.source {
             Source::File(path) | Source::SharedFile(path, _) => {
                 // However the font system spelled the folder it loaded.
                 path.ends_with(SYSTEM_UI_FONT.trim_start_matches('/'))
             }
             Source::Binary(_) => false,
-        })?;
-        let family = face.families.first()?.0.clone();
-        let id = face.id;
-        db.with_face_data(id, |data, index| {
-            Self::parse(FontRef::from_index(data, index).ok()?, id, family)
-        })?
-    }
+        })
+        .map(|face| face.id)
+}
 
-    fn parse(font: FontRef<'_>, id: ID, family: String) -> Option<SystemUiFace> {
-        let axes = font
-            .axes()
+/// Adds a copy of the face `id` to `fonts` under [`LABEL_FAMILY`], drawn
+/// at Flutter's instance of it, untracked: the labels' face, and the
+/// instance.
+pub fn register(fonts: &mut FontSystem, id: ID) -> Option<(LabelFace, Instance)> {
+    let info = fonts.db().face(id)?.clone();
+    let instance = fonts
+        .db()
+        .with_face_data(id, |data, index| {
+            Instance::of(&FontRef::from_index(data, index).ok()?)
+        })
+        .flatten()?;
+    let copy = iced::advanced::graphics::text::cosmic_text::fontdb::FaceInfo {
+        families: vec![(LABEL_FAMILY.to_string(), Language::English_UnitedStates)],
+        ..info
+    };
+    let copy = fonts.db_mut().push_face_info(copy);
+    fonts.set_face_instance(
+        copy,
+        Some(FaceInstance {
+            coords: instance
+                .coords
+                .iter()
+                .map(|(tag, value)| (tag.to_be_bytes(), *value))
+                .collect(),
+            untracked: true,
+        }),
+    );
+    let (line_height, baseline) = instance.line(LABEL_SIZE);
+    let face = LabelFace {
+        font: Font {
+            family: Family::Name(LABEL_FAMILY),
+            weight: Weight::Normal,
+            stretch: Stretch::Normal,
+            style: Style::Normal,
+        },
+        line_height,
+        baseline,
+        system: true,
+    };
+    Some((face, instance))
+}
+
+/// The instance of a face Flutter drew the labels at, and its line
+/// metrics there.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Instance {
+    /// Its coordinate on each of the face's axes (`fvar` order), in user
+    /// units: `opsz` [`OPTICAL_SIZE`] and `wght` [`WEIGHT`], clamped, the
+    /// others their defaults.
+    pub coords: Vec<(Tag, f32)>,
+    pub units_per_em: u16,
+    /// `hhea`'s ascender, |descender| and line gap, with their `MVAR`
+    /// deltas there (`hasc`, `hdsc`, `hlgp`, unrounded), in font units:
+    /// what CoreText reports (the macOS test checks it).
+    pub ascent: f32,
+    pub descent: f32,
+    pub leading: f32,
+}
+
+impl Instance {
+    /// Flutter's instance of `face` (see the module docs).
+    pub fn of(face: &FontRef<'_>) -> Option<Self> {
+        let axes = face.axes();
+        let coords: Vec<(Tag, f32)> = axes
             .iter()
-            .map(|axis| Axis {
-                tag: axis.tag().to_string(),
-                min: axis.min_value(),
-                default: axis.default_value(),
-                max: axis.max_value(),
+            .map(|axis| {
+                let value = match &axis.tag().to_be_bytes() {
+                    b"opsz" => OPTICAL_SIZE,
+                    b"wght" => WEIGHT,
+                    _ => axis.default_value(),
+                };
+                (axis.tag(), value.clamp(axis.min_value(), axis.max_value()))
             })
             .collect();
-        let units_per_em = font.head().ok()?.units_per_em();
-        let hhea = font.hhea().ok()?;
-        let line_height = (f32::from(hhea.ascender().to_i16())
-            - f32::from(hhea.descender().to_i16()))
-            / f32::from(units_per_em.max(1));
-        let trak = font.trak().ok();
-        let applied = trak.is_some() && font.table_data(Tag::new(b"STAT")).is_some();
-        let track_at = |pt: f32| trak.as_ref().map_or(0.0, |trak| normal_track(trak, pt));
-        Some(SystemUiFace {
-            id,
-            family,
-            axes,
-            units_per_em,
-            line_height,
-            default_tracking: if applied {
-                track_at(DEFAULT_PT).round()
-            } else {
-                0.0
-            },
-            label_tracking: track_at(LABEL_SIZE),
+        let location = axes.location(coords.iter().copied());
+        let normalized: Vec<F2Dot14> = location.coords().to_vec();
+        let hhea = face.hhea().ok()?;
+        let mvar = face.mvar().ok();
+        // A metric's `MVAR` delta there, unrounded.
+        let delta = |tag: &[u8; 4]| {
+            let mvar = mvar.as_ref()?;
+            let record = mvar
+                .value_records()
+                .iter()
+                .find(|record| record.value_tag() == Tag::new(tag))?;
+            let index = DeltaSetIndex {
+                outer: record.delta_set_outer_index(),
+                inner: record.delta_set_inner_index(),
+            };
+            mvar.item_variation_store()?
+                .ok()?
+                .compute_float_delta(index, &normalized)
+                .ok()
+        };
+        let metric = |value: FWord, tag: &[u8; 4]| {
+            delta(tag).map_or(f32::from(value.to_i16()), |delta| {
+                value.apply_float_delta(delta)
+            })
+        };
+        Some(Self {
+            coords,
+            units_per_em: face.head().ok()?.units_per_em(),
+            ascent: metric(hhea.ascender(), b"hasc"),
+            descent: -metric(hhea.descender(), b"hdsc"),
+            leading: metric(hhea.line_gap(), b"hlgp"),
         })
     }
 
-    /// Its optical size axis, if it has one.
-    pub fn opsz(&self) -> Option<&Axis> {
-        self.axes.iter().find(|axis| axis.tag == "opsz")
+    /// Its coordinate on the axis `tag`, if the face has the axis.
+    pub fn coord(&self, tag: &[u8; 4]) -> Option<f32> {
+        self.coords
+            .iter()
+            .find(|(t, _)| t.to_be_bytes() == *tag)
+            .map(|(_, value)| *value)
     }
 
-    /// The optical size CoreText draws it at `pt` points with: `pt`,
-    /// clamped to the axis.
-    pub fn core_text_opsz(&self, pt: f32) -> Option<f32> {
-        self.opsz().map(|axis| pt.clamp(axis.min, axis.max))
+    /// SkParagraph's line at `size` pixels: its height (the ascent, the
+    /// descent and the leading, rounded to a whole pixel:
+    /// `InternalLineMetrics::height`) and its baseline's distance below
+    /// its top (half the leading over the ascent, rounded to a whole pixel
+    /// too: `TextLine`'s `correctedBaseline`, where its glyphs are drawn).
+    pub fn line(&self, size: f32) -> (f32, f32) {
+        let scale = size / f32::from(self.units_per_em.max(1));
+        let (ascent, descent, leading) = (
+            self.ascent * scale,
+            self.descent * scale,
+            self.leading * scale,
+        );
+        (
+            (ascent + descent + leading).round(),
+            (leading / 2.0 + ascent + 0.5).floor(),
+        )
     }
-
-    /// Whether cosmic-text draws it at `pt` points as Flutter drew it: the
-    /// optical size's default where CoreText puts both `pt` and
-    /// [`DEFAULT_PT`], and no tracking added (see the module docs).
-    pub fn draws_as_flutter(&self, pt: f32) -> bool {
-        let design = self.opsz().is_none_or(|axis| {
-            [pt, DEFAULT_PT]
-                .iter()
-                .all(|size| size.clamp(axis.min, axis.max) == axis.default)
-        });
-        design && self.default_tracking == 0.0
-    }
-}
-
-/// The `trak` table's horizontal tracking for the normal track (0) at
-/// `pt` points, in font units, as HarfBuzz and harfrust compute it: a
-/// track's per-size values interpolated linearly between the sizes around
-/// `pt` (the first or last value outside them), and between the two
-/// tracks around 0 when none is 0.
-pub fn normal_track(trak: &Trak<'_>, pt: f32) -> f32 {
-    let Some(Ok(data)) = trak.horiz() else {
-        return 0.0;
-    };
-    let offsets = trak.offset_data();
-    let Ok(sizes) = data.size_table(offsets) else {
-        return 0.0;
-    };
-    let tracks = data.track_table();
-    if sizes.is_empty() || tracks.is_empty() {
-        return 0.0;
-    }
-    let value = |index: usize| -> f32 {
-        let Ok(values) = tracks[index].per_size_values(offsets, data.n_sizes()) else {
-            return 0.0;
-        };
-        let n = sizes.len().min(values.len());
-        if n == 0 {
-            return 0.0;
-        }
-        for i in 0..n {
-            let size = sizes[i].get().to_f32();
-            if size >= pt {
-                let v1 = f32::from(values[i].get());
-                if i == 0 {
-                    return v1;
-                }
-                let s0 = sizes[i - 1].get().to_f32();
-                let v0 = f32::from(values[i - 1].get());
-                if (size - s0).abs() < f32::EPSILON {
-                    return (v0 + v1) * 0.5;
-                }
-                return v0 + (pt - s0) / (size - s0) * (v1 - v0);
-            }
-        }
-        f32::from(values[n - 1].get())
-    };
-    let track = |index: usize| tracks[index].track().to_f32();
-    let (mut i, mut j) = (0, tracks.len() - 1);
-    while i + 1 < tracks.len() && track(i + 1) <= 0.0 {
-        i += 1;
-    }
-    while j > 0 && track(j - 1) >= 0.0 {
-        j -= 1;
-    }
-    if i == j {
-        return value(i);
-    }
-    let (t0, t1) = (track(i), track(j));
-    let along = if (t1 - t0).abs() < f32::EPSILON {
-        0.0
-    } else {
-        -t0 / (t1 - t0)
-    };
-    let (a, b) = (value(i), value(j));
-    a + along * (b - a)
 }
 
 #[cfg(test)]
