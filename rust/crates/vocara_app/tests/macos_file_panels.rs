@@ -25,21 +25,53 @@
 //!    allowed file types (as set, or as the type identifiers macOS 11+ may
 //!    report them as) and no message (no title was set); the save panel
 //!    suggests the call site's file name and allows any type;
-//! 2. Escape, posted to the panel as typed, closes it as a cancel, and the
-//!    call site gets nothing (the lyrics import no message, the examples an
-//!    empty pick, the save panel `None`). A panel the posted key does not
-//!    reach is closed with its Cancel button's action (`cancel:`), and the
-//!    run says so;
-//! 3. accepted with a file chosen — an open panel pointed at the file, which
-//!    selects it, the save panel given a folder and a name — through the OK
-//!    button's action (`ok:`), it hands the call site that file. A panel
-//!    that cannot be made to choose a file here is cancelled instead, and
-//!    the run says the accept went unverified;
+//! 2. Escape, typed, closes it as a cancel, and the call site gets nothing
+//!    (the lyrics import no message, the examples an empty pick, the save
+//!    panel `None`);
+//! 3. a file chosen as a user chooses it from the keyboard, the call site
+//!    gets exactly that file: an open panel is told the file's full path in
+//!    its Go to Folder sheet (⌘⇧G, ⌘A, the path, Return), which takes it to
+//!    the file's folder with the file selected, and Return opens it; the
+//!    save panel gets a name in its name field (⌘A, the name), a folder
+//!    through ⌘⇧G, and Return saves;
 //! 4. once it is gone the main window is key again, and the activation
 //!    policy is as it was.
 //!
-//! On a Mac it opens a window and six panels for a minute or so, and takes
-//! the keyboard. Off macOS it prints a skip line.
+//! The keys are typed through the window server, as a keyboard types them:
+//! each a `CGEvent` posted at the HID tap (`CGEventPost`), which the system
+//! routes to the active app's key window, whichever process draws it. On
+//! recent macOS (26 on CI) a panel's UI is a remote view another process
+//! serves (`NSRemoteView`, `NSSavePanelService`): an event the app posts to
+//! its own queue never reaches it, pointing the panel object at a file
+//! (`setDirectoryURL:`) selects nothing, and `-[NSSavePanel ok:]` raises
+//! "not implemented". Posting through the window server needs the
+//! process's post-event access (TCC: Accessibility or PostEvent, asked of
+//! the process responsible for it, on GitHub's hosted runners the agent the
+//! job runs under, which the runner image grants Accessibility). The run
+//! checks it up front (`CGPreflightPostEventAccess`, and
+//! `AXIsProcessTrusted` for the record) and never asks for it
+//! (`CGRequestPostEventAccess` would put a system prompt over the panels
+//! that nobody answers):
+//! - with it, every step is checked strictly: a typed Escape that does not
+//!   close a panel, or a typed accept that leaves it up or hands the call
+//!   site anything but the chosen file, fails the run;
+//! - with Accessibility trusted but post-event access not reported, the
+//!   keys are typed all the same, and a step they do not complete is left
+//!   unverified, said so (what they do complete is checked strictly);
+//! - with neither, nothing is typed: Escape is posted to the app's own
+//!   queue (a panel it does not close is closed with its Cancel button's
+//!   action, `cancel:`, said so), and every accept is left unverified,
+//!   said so.
+//!
+//! A panel left up by a step that went wrong is closed (typed Escapes,
+//! then `cancel:`) so the rest of the run still reports, and the panel
+//! calls that may raise (the panel object fronting a remote UI) are
+//! guarded: an Objective-C exception is caught and said, not left to abort
+//! the process.
+//!
+//! On a Mac it opens a window and six panels for a minute or two, and types
+//! into them through the window server: it takes the keyboard, and must not
+//! run while someone is using the Mac. Off macOS it prints a skip line.
 
 #[cfg(target_os = "macos")]
 mod macos_support;
@@ -76,7 +108,8 @@ mod macos {
         NSOpenPanel, NSSavePanel, NSWindow,
     };
     use objc2_core_foundation::{kCFRunLoopCommonModes, CFRunLoop, CFType};
-    use objc2_foundation::{NSDictionary, NSPoint, NSString, NSUserDefaults, NSURL};
+    use objc2_core_graphics::CGPreflightPostEventAccess;
+    use objc2_foundation::{NSDictionary, NSPoint, NSString, NSUserDefaults};
     use objc2_uniform_type_identifiers::UTType;
     use vocara_app::app::library::Library;
     use vocara_app::app::AppEnvironment;
@@ -93,7 +126,7 @@ mod macos {
     };
 
     /// How long the whole run may take.
-    const LIMIT: Duration = Duration::from_secs(300);
+    const LIMIT: Duration = Duration::from_secs(480);
     /// How long the main thread may take to run a step handed to it.
     const MAIN_TIMEOUT: Duration = Duration::from_secs(30);
     /// How long the main window gets to become key.
@@ -102,10 +135,23 @@ mod macos {
     const APPEAR: Duration = Duration::from_secs(15);
     /// How long a panel gets to go once asked to close.
     const CLOSE: Duration = Duration::from_secs(10);
-    /// How long a posted Escape gets to close a panel.
+    /// How long an Escape gets to close a panel.
     const ESCAPE_WAIT: Duration = Duration::from_secs(5);
-    /// How long a panel gets to show the file or folder it was pointed at.
-    const SELECT_WAIT: Duration = Duration::from_secs(10);
+    /// How long the app gets to be active, and the panel key, before keys
+    /// are typed to it.
+    const FRONT_WAIT: Duration = Duration::from_secs(5);
+    /// A panel's remote UI settling before the first key is typed to it.
+    const SETTLE: Duration = Duration::from_secs(1);
+    /// The Go to Folder sheet coming up after ⌘⇧G.
+    const SHEET_WAIT: Duration = Duration::from_secs(2);
+    /// A typed path or name settling (the Go to Folder sheet completes
+    /// paths as they are typed).
+    const TYPED_WAIT: Duration = Duration::from_secs(1);
+    /// How long a panel gets to show the folder (and the file) Go to
+    /// Folder's Return took it to.
+    const GO_WAIT: Duration = Duration::from_secs(5);
+    /// How long a typed Return gets to close a panel.
+    const RETURN_WAIT: Duration = Duration::from_secs(5);
     /// How long a call site gets to report, once its panel closed.
     const RESULT_WAIT: Duration = Duration::from_secs(10);
 
@@ -277,12 +323,7 @@ mod macos {
                     return true;
                 }
                 if ask {
-                    // As winit asks, and on macOS 14+ with the newer call too.
-                    #[allow(deprecated)]
-                    app.activateIgnoringOtherApps(true);
-                    if available!(macos = 14.0) {
-                        app.activate();
-                    }
+                    activate(&app);
                     window.makeKeyAndOrderFront(None);
                     window.orderFrontRegardless();
                 }
@@ -296,6 +337,216 @@ mod macos {
                  the GUI session must let a test app activate and take the keyboard",
                 KEY_TIMEOUT.as_secs()
             ));
+        }
+    }
+
+    /// Asks for the app to be active: as winit asks, and on macOS 14+ with
+    /// the newer call too.
+    fn activate(app: &NSApplication) {
+        #[allow(deprecated)]
+        app.activateIgnoringOtherApps(true);
+        if available!(macos = 14.0) {
+            app.activate();
+        }
+    }
+
+    /// Typing through the window server, as a keyboard types: each key a
+    /// `CGEvent` posted at the HID tap, which the system routes to the
+    /// active app's key window as it routes a keyboard's, into a panel's
+    /// remote UI too. A modifier goes down before the key it modifies and
+    /// up after it, as on a keyboard; each event carries the modifiers held
+    /// then. Only typed with post-event access (see the file's docs).
+    mod typed {
+        use std::thread;
+        use std::time::Duration;
+
+        use objc2_core_graphics::{CGEvent, CGEventFlags, CGEventTapLocation};
+
+        use crate::macos_support::{fatal, ESCAPE_KEY};
+
+        /// `kVK_Return`.
+        pub const RETURN: u16 = 0x24;
+        /// `kVK_Escape`.
+        pub const ESCAPE: u16 = ESCAPE_KEY;
+        /// `kVK_ANSI_A`.
+        pub const A: u16 = 0x00;
+        /// `kVK_ANSI_G`.
+        pub const G: u16 = 0x05;
+        /// `kVK_Command`.
+        const COMMAND: u16 = 0x37;
+        /// `kVK_Shift`.
+        const SHIFT: u16 = 0x38;
+        /// Between two events: a fast typist's pace, which a text field
+        /// that completes what is typed keeps up with.
+        const GAP: Duration = Duration::from_millis(20);
+
+        /// The ANSI key codes of `a` to `z` (`kVK_ANSI_*`).
+        const LETTERS: [u16; 26] = [
+            0x00, 0x0B, 0x08, 0x02, 0x0E, 0x03, 0x05, 0x04, 0x22, 0x26, 0x28, 0x25, 0x2E, 0x2D,
+            0x1F, 0x23, 0x0C, 0x0F, 0x01, 0x11, 0x20, 0x09, 0x0D, 0x07, 0x10, 0x06,
+        ];
+        /// The ANSI key codes of `0` to `9`.
+        const DIGITS: [u16; 10] = [0x1D, 0x12, 0x13, 0x14, 0x15, 0x17, 0x16, 0x1A, 0x1C, 0x19];
+
+        /// Posts one key event: `code` going down or up with `flags` held,
+        /// typing `text` if given (else what the layout makes of `code`).
+        fn post(code: u16, down: bool, flags: CGEventFlags, text: Option<char>) {
+            let event = CGEvent::new_keyboard_event(None, code, down).unwrap_or_else(|| {
+                fatal(&format!(
+                    "CGEventCreateKeyboardEvent made no event for key code {code}"
+                ))
+            });
+            let event: &CGEvent = &event;
+            CGEvent::set_flags(Some(event), flags);
+            if let Some(c) = text {
+                let mut units = [0u16; 2];
+                let units = c.encode_utf16(&mut units);
+                // SAFETY: `units` holds `units.len()` UTF-16 code units,
+                // alive for the call, which copies them into the event.
+                unsafe {
+                    CGEvent::keyboard_set_unicode_string(
+                        Some(event),
+                        units.len() as _,
+                        units.as_ptr(),
+                    );
+                }
+            }
+            CGEvent::post(CGEventTapLocation::HIDEventTap, Some(event));
+            thread::sleep(GAP);
+        }
+
+        /// Presses and releases `code`, with ⌘ and ⇧ held as asked, typing
+        /// `text` if given.
+        fn press_typing(code: u16, command: bool, shift: bool, text: Option<char>) {
+            let mut flags = CGEventFlags::empty();
+            if command {
+                flags |= CGEventFlags::MaskCommand;
+                post(COMMAND, true, flags, None);
+            }
+            if shift {
+                flags |= CGEventFlags::MaskShift;
+                post(SHIFT, true, flags, None);
+            }
+            post(code, true, flags, text);
+            post(code, false, flags, text);
+            if shift {
+                flags.remove(CGEventFlags::MaskShift);
+                post(SHIFT, false, flags, None);
+            }
+            if command {
+                flags.remove(CGEventFlags::MaskCommand);
+                post(COMMAND, false, flags, None);
+            }
+        }
+
+        /// Presses and releases `code` alone.
+        pub fn press(code: u16) {
+            press_typing(code, false, false, None);
+        }
+
+        /// ⌘ and the key `code` (⇧ too if `shift`).
+        pub fn command(code: u16, shift: bool) {
+            press_typing(code, true, shift, None);
+        }
+
+        /// Types `text`, a key for each character: the key a US keyboard
+        /// types it with (⇧ held for a capital or an underscore), carrying
+        /// the character itself, so that it types the same on any layout.
+        pub fn text(text: &str) {
+            for c in text.chars() {
+                let (code, shift) = us_key(c).unwrap_or((0, false));
+                press_typing(code, false, shift, Some(c));
+            }
+        }
+
+        /// The US layout's key for `c`, and whether ⇧ is held for it.
+        fn us_key(c: char) -> Option<(u16, bool)> {
+            let lower = c.to_ascii_lowercase();
+            let code = match lower {
+                'a'..='z' => LETTERS[usize::from(lower as u8 - b'a')],
+                '0'..='9' => DIGITS[usize::from(lower as u8 - b'0')],
+                '/' => 0x2C,
+                '.' => 0x2F,
+                '-' => 0x1B,
+                ' ' => 0x31,
+                '_' => return Some((0x1B, true)),
+                '~' => return Some((0x32, true)),
+                _ => return None,
+            };
+            Some((code, c.is_ascii_uppercase()))
+        }
+    }
+
+    #[link(name = "ApplicationServices", kind = "framework")]
+    extern "C" {
+        /// `Boolean AXIsProcessTrusted(void)` (HIServices' AXUIElement.h,
+        /// macOS 10.4): whether the process (as TCC sees it: the process
+        /// responsible for it) is trusted with Accessibility.
+        fn AXIsProcessTrusted() -> u8;
+    }
+
+    /// How the run's keys reach a panel, as the process's post-event access
+    /// allows (see the file's docs).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Keys {
+        /// Typed through the window server, with post-event access: every
+        /// step is checked strictly.
+        Typed,
+        /// Typed through the window server with Accessibility trusted but
+        /// post-event access not reported: a step the keys do not complete
+        /// is left unverified.
+        Tried,
+        /// Posted to the app's own queue, with neither: a panel's remote UI
+        /// may not take them, and nothing is accepted.
+        InApp,
+    }
+
+    impl Keys {
+        /// Asks what the process may do (never asking for more), and says.
+        fn detect() -> Keys {
+            let post = CGPreflightPostEventAccess();
+            // SAFETY: a HIServices function with no arguments and no
+            // preconditions, in the framework the attribute links.
+            let trusted = unsafe { AXIsProcessTrusted() } != 0;
+            println!(
+                "  post-event access: CGPreflightPostEventAccess() = {post}, \
+                 AXIsProcessTrusted() = {trusted}"
+            );
+            let keys = match (post, trusted) {
+                (true, _) => Keys::Typed,
+                (false, true) => Keys::Tried,
+                (false, false) => Keys::InApp,
+            };
+            match keys {
+                Keys::Typed => println!(
+                    "  keys are typed through the window server (CGEventPost at the HID tap), \
+                     as a keyboard types them: every step is checked strictly"
+                ),
+                Keys::Tried => note(
+                    "CGPreflightPostEventAccess() says this process may not post events, but \
+                     it is trusted with Accessibility: keys are typed through the window \
+                     server all the same, and a step they do not complete is left unverified, \
+                     not failed",
+                ),
+                Keys::InApp => note(
+                    "this process may not post events through the window server: neither \
+                     post-event access (CGPreflightPostEventAccess) nor Accessibility \
+                     (AXIsProcessTrusted) is granted to it, as TCC sees it (the process \
+                     responsible for it). Not asked for: CGRequestPostEventAccess would put a \
+                     system prompt over the panels that nobody answers here. Escape is posted \
+                     to the app's own queue instead (a panel it does not close is closed with \
+                     cancel:), and NO panel's accept is verified on this run",
+                ),
+            }
+            keys
+        }
+
+        /// How an Escape is sent, for the checks' wording.
+        fn how(self) -> &'static str {
+            match self {
+                Keys::Typed | Keys::Tried => "typed",
+                Keys::InApp => "posted to the app",
+            }
         }
     }
 
@@ -407,7 +658,7 @@ mod macos {
         println!("  {what}: {seen:?}");
         if !seen.key {
             note(format!(
-                "the {what} is not the key window (level {}): a posted key may miss it",
+                "the {what} is not the key window (level {}): a key may miss it",
                 seen.level
             ));
         }
@@ -419,8 +670,8 @@ mod macos {
         on_main(|mtm| find_panel(&NSApplication::sharedApplication(mtm)).is_none())
     }
 
-    /// Posts `chars` to the panel up now as typed (each a keyDown and a
-    /// keyUp with key code `code`).
+    /// Posts `chars` to the panel up now as typed, to the app's own queue
+    /// (each a keyDown and a keyUp with key code `code`).
     fn type_into_panel(chars: &str, code: u16) {
         let chars = chars.to_string();
         on_main(move |mtm| {
@@ -487,33 +738,66 @@ mod macos {
         None
     }
 
-    /// Sends the panel up now its OK button's action, `ok:`. Whether AppKit
-    /// took it without raising.
-    fn press_ok() -> bool {
-        on_main(|mtm| {
-            let Some((panel, _)) = find_panel(&NSApplication::sharedApplication(mtm)) else {
-                return true;
-            };
-            // SAFETY: `-[NSSavePanel ok:]`, an action method; a nil sender
-            // is what a programmatic press sends.
-            guarded("ok:", || unsafe { panel.ok(None) }).is_some()
-        })
+    /// Makes sure typed keys go to the panel up now: the app active (asked
+    /// for if not), the panel its key window (asked for if not), then a
+    /// moment for the panel's remote UI to settle. `Err` says why not: the
+    /// panel is gone, or the app cannot be made active (typed keys would go
+    /// to another app). A panel that stays not key is said, and typed to
+    /// all the same (its remote UI may hold the keyboard regardless).
+    fn front(what: &str) -> Result<(), String> {
+        let mut last_ask: Option<Instant> = None;
+        let mut state = None;
+        wait_until(FRONT_WAIT, || {
+            let ask = last_ask.is_none_or(|at| at.elapsed() > Duration::from_millis(500));
+            if ask {
+                last_ask = Some(Instant::now());
+            }
+            state = on_main(move |mtm| {
+                let app = NSApplication::sharedApplication(mtm);
+                let (panel, _) = find_panel(&app)?;
+                let (active, key) = (app.isActive(), panel.isKeyWindow());
+                if ask && !active {
+                    activate(&app);
+                }
+                if ask && !key {
+                    guarded("makeKeyWindow", || panel.makeKeyWindow());
+                }
+                Some((active, key))
+            });
+            state.is_none_or(|(active, key)| active && key)
+        });
+        match state {
+            None => Err(format!("the {what} went away before a key was typed")),
+            Some((false, _)) => Err(format!(
+                "the app is not active after {}s of asking: typed keys would go to another \
+                 app, so none were typed",
+                FRONT_WAIT.as_secs()
+            )),
+            Some((true, key)) => {
+                if !key {
+                    note(format!(
+                        "the {what} is not the key window: typing to it all the same"
+                    ));
+                }
+                thread::sleep(SETTLE);
+                Ok(())
+            }
+        }
     }
 
-    /// Closes the panel up now as a cancel: Escape, posted as typed, else
-    /// its Cancel button's action (`cancel:`), said so. Fails the run if it
-    /// stays up.
-    fn cancel(checks: &mut Checks, what: &str) {
-        type_into_panel("\u{1b}", ESCAPE_KEY);
-        if wait_until(ESCAPE_WAIT, closed) {
-            checks.check(true, format!("Escape closes the {what}"));
-            return;
+    /// Escape, as `keys` sends it; whether the panel closed within
+    /// `ESCAPE_WAIT`.
+    fn escape(keys: Keys) -> bool {
+        match keys {
+            Keys::Typed | Keys::Tried => typed::press(typed::ESCAPE),
+            Keys::InApp => type_into_panel("\u{1b}", ESCAPE_KEY),
         }
-        note(format!(
-            "the posted Escape did not close the {what} in {}s; \
-             closing it with cancel:, its Cancel button's action",
-            ESCAPE_WAIT.as_secs()
-        ));
+        wait_until(ESCAPE_WAIT, closed)
+    }
+
+    /// Closes the panel up now with its Cancel button's action, `cancel:`;
+    /// fails the run if it stays up.
+    fn close_with_cancel(what: &str) {
         on_main(|mtm| {
             if let Some((panel, _)) = find_panel(&NSApplication::sharedApplication(mtm)) {
                 // SAFETY: `-[NSSavePanel cancel:]`, an action method; a nil
@@ -526,6 +810,53 @@ mod macos {
         }
     }
 
+    /// The Escape step: Escape, as `keys` sends it, closes the panel up now
+    /// as a cancel. Typed with post-event access, a panel it does not close
+    /// fails the check; otherwise that is said. Either way a panel still up
+    /// is then closed with `cancel:`.
+    fn cancel(checks: &mut Checks, keys: Keys, what: &str) {
+        let ready = match keys {
+            Keys::InApp => Ok(()),
+            Keys::Typed | Keys::Tried => front(what),
+        };
+        let missed = match ready {
+            Ok(()) if escape(keys) => {
+                checks.check(true, format!("Escape, {}, closes the {what}", keys.how()));
+                return;
+            }
+            Ok(()) => format!(
+                "Escape, {}, did not close the {what} in {}s",
+                keys.how(),
+                ESCAPE_WAIT.as_secs()
+            ),
+            Err(why) => format!("Escape could not be typed to the {what}: {why}"),
+        };
+        if keys == Keys::Typed {
+            checks.check(false, missed);
+        } else {
+            note(format!(
+                "{missed}; closing it with cancel:, its Cancel button's action"
+            ));
+        }
+        close_with_cancel(what);
+    }
+
+    /// Closes a panel a step left up, so the run goes on: typed Escapes
+    /// (the first may only close a Go to Folder sheet), then `cancel:`.
+    fn dismiss(keys: Keys, what: &str) {
+        if keys != Keys::InApp {
+            for _ in 0..2 {
+                if closed() || escape(keys) {
+                    return;
+                }
+            }
+        }
+        if !closed() {
+            note(format!("closing the {what} with cancel:"));
+            close_with_cancel(what);
+        }
+    }
+
     /// Whether `a` and `b` name the same existing file.
     fn same_file(a: &Path, b: &Path) -> bool {
         match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
@@ -534,7 +865,7 @@ mod macos {
         }
     }
 
-    /// The open panel up now's selection, as paths.
+    /// The open panel up now's selection, as its object reports it.
     fn selection() -> Vec<PathBuf> {
         on_main(|mtm| {
             let app = NSApplication::sharedApplication(mtm);
@@ -556,46 +887,201 @@ mod macos {
         })
     }
 
-    /// Chooses `file` in the open panel up now and presses OK: pointed at
-    /// the file, the panel selects it once it has listed its folder; if it
-    /// does not, the file's name is typed into its list (the list's
-    /// type-select). OK is pressed only once the panel reports the file
-    /// chosen: an open panel with nothing chosen raises an Objective-C
-    /// exception on `ok:` (macOS 26), which no Rust frame can catch. Whether
-    /// it closed on the file; `false` leaves the panel up for the caller to
-    /// cancel, its accept unverified (said so).
-    fn accept_open(file: &Path) -> bool {
-        let target = file.to_path_buf();
-        on_main(move |mtm| {
+    /// The folder the panel up now's object reports it shows.
+    fn shown_folder() -> Option<PathBuf> {
+        on_main(|mtm| {
             let app = NSApplication::sharedApplication(mtm);
-            if let (Some((panel, _)), Some(url)) =
-                (find_panel(&app), NSURL::from_file_path(&target))
-            {
-                guarded("setDirectoryURL:", || panel.setDirectoryURL(Some(&url)));
-            }
+            find_panel(&app)
+                .and_then(|(panel, _)| guarded("directoryURL", || panel.directoryURL()))
+                .flatten()
+                .and_then(|url| url.to_file_path())
+        })
+    }
+
+    /// Prints what the panel up now's object reports (its folder, its
+    /// selection, its name field, whether it is key): for the run's log, as
+    /// on recent macOS that object fronts a remote UI it may not follow.
+    fn report(what: &str) {
+        let seen = on_main(|mtm| {
+            let app = NSApplication::sharedApplication(mtm);
+            let (panel, _) = find_panel(&app)?;
+            let folder = guarded("directoryURL", || panel.directoryURL())
+                .flatten()
+                .and_then(|url| url.to_file_path());
+            let name = guarded("nameFieldStringValue", || {
+                panel.nameFieldStringValue().to_string()
+            });
+            Some((folder, name, panel.isKeyWindow()))
         });
+        match seen {
+            None => println!("  the {what} is closed"),
+            Some((folder, name, key)) => println!(
+                "  the {what} reports: folder {folder:?}, chosen {:?}, name field {name:?}, \
+                 key {key}",
+                selection()
+            ),
+        }
+    }
+
+    /// Brings up the panel's Go to Folder sheet (⌘⇧G), replaces the path it
+    /// shows with `path` (⌘A, then typed) and types Return. `Err` if the
+    /// panel closed before Return.
+    fn go_to(what: &str, path: &str) -> Result<(), String> {
+        println!("  typing ⌘⇧G (Go to Folder) to the {what}");
+        typed::command(typed::G, true);
+        thread::sleep(SHEET_WAIT);
+        if closed() {
+            return Err(format!("the {what} closed on ⌘⇧G"));
+        }
+        println!("  typing ⌘A, then {path:?}");
+        typed::command(typed::A, false);
+        typed::text(path);
+        thread::sleep(TYPED_WAIT);
+        if closed() {
+            return Err(format!("the {what} closed while a path was typed to it"));
+        }
+        println!("  typing Return");
+        typed::press(typed::RETURN);
+        Ok(())
+    }
+
+    /// Types Return to the panel up now, at most `times` times while it
+    /// stays up; whether it closed.
+    fn returns_close(what: &str, times: usize) -> bool {
+        for _ in 0..times {
+            if closed() {
+                return true;
+            }
+            println!("  typing Return");
+            typed::press(typed::RETURN);
+            if wait_until(RETURN_WAIT, closed) {
+                return true;
+            }
+            report(what);
+        }
+        closed()
+    }
+
+    /// Chooses `file` in the open panel up now as a user does from the
+    /// keyboard, and opens it: its full path in the Go to Folder sheet,
+    /// whose Return takes the panel to the file's folder with the file
+    /// selected, then Return to open it. A second Return is typed if the
+    /// first leaves the panel up (the sheet's first Return may only have
+    /// taken the path it completed); if the panel is still up then, the
+    /// file's name is typed to the list (its type-select) and Return once
+    /// more. `Ok` once the panel closed (what it handed the call site is
+    /// the caller's check); `Err` says how it stayed up.
+    fn accept_open(what: &str, file: &Path) -> Result<(), String> {
+        let path = file.to_string_lossy().into_owned();
+        go_to(what, &path)?;
         let chosen = || selection().iter().any(|chosen| same_file(chosen, file));
-        let mut selected = wait_until(SELECT_WAIT, chosen);
-        if !selected {
+        let shown = wait_until(GO_WAIT, || closed() || chosen());
+        report(what);
+        if closed() {
             note(format!(
-                "pointed at {}, the open panel chose nothing: typing its name into the list",
+                "the {what} closed on Go to Folder's Return, with the file's path"
+            ));
+            return Ok(());
+        }
+        if !shown {
+            note(format!(
+                "the {what}'s object does not report {} chosen (its UI may still have it)",
                 file.display()
             ));
-            let name = file
-                .file_stem()
-                .map(|stem| stem.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            type_into_panel(&name, 0);
-            selected = wait_until(SELECT_WAIT, chosen);
         }
-        if !selected {
+        if returns_close(what, 2) {
+            return Ok(());
+        }
+        let name = file
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        note(format!(
+            "the {what} is still up: typing {name:?} to its list, then Return"
+        ));
+        typed::text(&name);
+        thread::sleep(TYPED_WAIT);
+        report(what);
+        if returns_close(what, 1) {
+            return Ok(());
+        }
+        Err(format!(
+            "it stayed up after ⌘⇧G, {path:?}, Return, two more Returns, then {name:?} \
+             and Return"
+        ))
+    }
+
+    /// Saves as `name` in `folder` in the save panel up now as a user does
+    /// from the keyboard: the name typed over the one suggested (⌘A, then
+    /// the name: the name field has the keyboard when the panel opens),
+    /// the folder through the Go to Folder sheet, then Return to save (a
+    /// second Return if the first leaves the panel up: the sheet's first
+    /// Return may only have taken the path it completed). `Ok` once the
+    /// panel closed (what it answered is the caller's check); `Err` says
+    /// how it stayed up.
+    fn accept_save(what: &str, folder: &Path, name: &str) -> Result<(), String> {
+        println!("  typing ⌘A, then {name:?} to the {what}'s name field");
+        typed::command(typed::A, false);
+        typed::text(name);
+        thread::sleep(TYPED_WAIT);
+        report(what);
+        let path = format!("{}/", folder.display());
+        go_to(what, &path)?;
+        let there = wait_until(GO_WAIT, || {
+            closed() || shown_folder().is_some_and(|shown| same_file(&shown, folder))
+        });
+        report(what);
+        if closed() {
+            note(format!("the {what} closed on Go to Folder's Return"));
+            return Ok(());
+        }
+        if !there {
             note(format!(
-                "the open panel reports no selection of {}: OK is not pressed",
-                file.display()
+                "the {what}'s object does not report {} as its folder (its UI may still \
+                 show it)",
+                folder.display()
             ));
-            return false;
         }
-        press_ok() && wait_until(CLOSE, closed)
+        if returns_close(what, 2) {
+            return Ok(());
+        }
+        Err(format!(
+            "it stayed up after {name:?}, ⌘⇧G, {path:?}, Return and two more Returns"
+        ))
+    }
+
+    /// A panel's accept, typed by `accept` as `keys` allow: whether the
+    /// panel closed on it, and so whether the call site's answer is to be
+    /// checked. One that cannot be typed (no post-event access) or that
+    /// leaves the panel up fails the run with post-event access, and is
+    /// otherwise left unverified (listed in `unverified`), said so; a panel
+    /// left up is closed.
+    fn accepted(
+        checks: &mut Checks,
+        unverified: &mut Vec<String>,
+        keys: Keys,
+        what: &str,
+        accept: impl FnOnce() -> Result<(), String>,
+    ) -> bool {
+        let outcome = match keys {
+            Keys::InApp => Err("this process may not type to it (no post-event access)".into()),
+            Keys::Typed | Keys::Tried => front(what).and_then(|()| accept()),
+        };
+        let why = match outcome {
+            Ok(()) => return true,
+            Err(why) => why,
+        };
+        if keys == Keys::Typed {
+            checks.check(
+                false,
+                format!("the {what} takes a file chosen from the keyboard: {why}"),
+            );
+        } else {
+            note(format!("the {what}'s accept is NOT verified here: {why}"));
+            unverified.push(format!("the {what}'s accept: {why}"));
+        }
+        dismiss(keys, what);
+        false
     }
 
     /// Checks that the main window is key again once a panel has gone.
@@ -702,6 +1188,9 @@ mod macos {
 
     fn drive(root: tempfile::TempDir) {
         let mut checks = Checks::default();
+        // The steps left unverified (without post-event access), said again
+        // at the end.
+        let mut unverified: Vec<String> = Vec::new();
 
         step("making the main window key");
         make_key();
@@ -712,6 +1201,9 @@ mod macos {
             "NSApp is running, as under iced: open panels are sheets",
         );
 
+        step("how keys reach the panels");
+        let keys = Keys::detect();
+
         let lyrics_types: Vec<String> = LYRICS_FILE_EXTENSIONS.map(String::from).to_vec();
         let lyrics = "lyrics import's open panel";
 
@@ -719,7 +1211,7 @@ mod macos {
         let done = run_task(on_main(|_| lyrics_panel::browse_lyrics_file()));
         let seen = wait_for_panel(lyrics);
         check_open_panel(&mut checks, lyrics, &seen, false, &lyrics_types);
-        cancel(&mut checks, lyrics);
+        cancel(&mut checks, keys, lyrics);
         let out = done.recv_timeout(RESULT_WAIT);
         checks.check(
             matches!(&out, Ok(messages) if messages.is_empty()),
@@ -727,11 +1219,13 @@ mod macos {
         );
         main_window_key_again(&mut checks, lyrics);
 
-        step("the lyrics import's open panel, a file chosen");
+        step("the lyrics import's open panel, a file chosen from the keyboard");
         let verse = file_in(root.path(), "lyrics", "verse.lrc");
         let done = run_task(on_main(|_| lyrics_panel::browse_lyrics_file()));
         wait_for_panel(lyrics);
-        if accept_open(&verse) {
+        if accepted(&mut checks, &mut unverified, keys, lyrics, || {
+            accept_open(lyrics, &verse)
+        }) {
             let out = done.recv_timeout(RESULT_WAIT);
             checks.check(
                 matches!(
@@ -747,10 +1241,6 @@ mod macos {
                 ),
             );
         } else {
-            note(format!(
-                "the {lyrics} could not be made to choose a file here: its accept is NOT verified"
-            ));
-            cancel(&mut checks, lyrics);
             let _ = done.recv_timeout(RESULT_WAIT);
         }
         main_window_key_again(&mut checks, lyrics);
@@ -762,7 +1252,7 @@ mod macos {
         let done = run_task(on_main(|_| media_section::browse()));
         let seen = wait_for_panel(media);
         check_open_panel(&mut checks, media, &seen, true, &media_types);
-        cancel(&mut checks, media);
+        cancel(&mut checks, keys, media);
         let out = done.recv_timeout(RESULT_WAIT);
         checks.check(
             matches!(&out, Ok(messages) if matches!(
@@ -773,11 +1263,13 @@ mod macos {
         );
         main_window_key_again(&mut checks, media);
 
-        step("the technique examples' open panel, a clip chosen");
+        step("the technique examples' open panel, a clip chosen from the keyboard");
         let clip = file_in(root.path(), "clips", "clip.wav");
         let done = run_task(on_main(|_| media_section::browse()));
         wait_for_panel(media);
-        if accept_open(&clip) {
+        if accepted(&mut checks, &mut unverified, keys, media, || {
+            accept_open(media, &clip)
+        }) {
             let out = done.recv_timeout(RESULT_WAIT);
             checks.check(
                 matches!(&out, Ok(messages) if matches!(
@@ -786,15 +1278,11 @@ mod macos {
                         if matches!(paths.as_slice(), [path] if same_file(Path::new(path), &clip))
                 )),
                 format!(
-                    "the chosen {} comes back as the examples' pick (got {out:?})",
+                    "the chosen {} comes back as the examples' pick, alone (got {out:?})",
                     clip.display()
                 ),
             );
         } else {
-            note(format!(
-                "the {media} could not be made to choose a file here: its accept is NOT verified"
-            ));
-            cancel(&mut checks, media);
             let _ = done.recv_timeout(RESULT_WAIT);
         }
         main_window_key_again(&mut checks, media);
@@ -838,7 +1326,7 @@ mod macos {
             seen.message.is_empty(),
             format!("the {save} shows no message (it shows {:?})", seen.message),
         );
-        cancel(&mut checks, save);
+        cancel(&mut checks, keys, save);
         let out = answer.recv_timeout(RESULT_WAIT);
         checks.check(
             matches!(out, Ok(Ok(None))),
@@ -846,42 +1334,16 @@ mod macos {
         );
         main_window_key_again(&mut checks, save);
 
-        step("the diagnostics export's save panel, a folder and a name chosen");
+        step("the diagnostics export's save panel, a name and a folder chosen from the keyboard");
         let exports = root.path().join("exports");
         std::fs::create_dir_all(&exports)
             .unwrap_or_else(|e| fatal(&format!("cannot make {}: {e}", exports.display())));
         let chosen = "chosen.zip";
         let answer = ask_save(Arc::clone(&pick), suggested);
         wait_for_panel(save);
-        let folder = exports.clone();
-        on_main(move |mtm| {
-            let app = NSApplication::sharedApplication(mtm);
-            if let (Some((panel, _)), Some(url)) =
-                (find_panel(&app), NSURL::from_directory_path(&folder))
-            {
-                guarded("setDirectoryURL:", || panel.setDirectoryURL(Some(&url)));
-                guarded("setNameFieldStringValue:", || {
-                    panel.setNameFieldStringValue(&NSString::from_str(chosen));
-                });
-            }
-        });
-        let shows_folder = wait_until(SELECT_WAIT, || {
-            let folder = on_main(|mtm| {
-                let app = NSApplication::sharedApplication(mtm);
-                find_panel(&app)
-                    .and_then(|(panel, _)| guarded("directoryURL", || panel.directoryURL()))
-                    .flatten()
-                    .and_then(|url| url.to_file_path())
-            });
-            folder.is_some_and(|folder| same_file(&folder, &exports))
-        });
-        if !shows_folder {
-            note(format!(
-                "the {save} does not report {} as its folder yet; pressing OK all the same",
-                exports.display()
-            ));
-        }
-        if press_ok() && wait_until(CLOSE, closed) {
+        if accepted(&mut checks, &mut unverified, keys, save, || {
+            accept_save(save, &exports, chosen)
+        }) {
             let out = answer.recv_timeout(RESULT_WAIT);
             let lands = |path: &str| {
                 let path = Path::new(path);
@@ -893,15 +1355,11 @@ mod macos {
             checks.check(
                 matches!(&out, Ok(Ok(Some(path))) if lands(path)),
                 format!(
-                    "OK answers the chosen {} (got {out:?})",
+                    "Return answers the chosen {} (got {out:?})",
                     exports.join(chosen).display()
                 ),
             );
         } else {
-            note(format!(
-                "OK left the {save} up: its accept is NOT verified here"
-            ));
-            cancel(&mut checks, save);
             let _ = answer.recv_timeout(RESULT_WAIT);
         }
         main_window_key_again(&mut checks, save);
@@ -912,6 +1370,13 @@ mod macos {
             after == policy,
             format!("the activation policy is as it was ({policy:?}, now {after:?})"),
         );
+        if unverified.is_empty() {
+            println!("  no step was left unverified (keys: {keys:?})");
+        } else {
+            for what in &unverified {
+                note(format!("NOT verified on this run: {what}"));
+            }
+        }
         drop(root);
         on_main(move |_| {
             checks.finish();

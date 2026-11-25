@@ -102,11 +102,15 @@ objc2-core-foundation = { version = "0.3", default-features = false, features = 
     "CFRunLoop",
     "CFString",
 ] }
-# The scroll-phases test makes its scroll events with Core Graphics.
+# The scroll-phases test makes its scroll events with Core Graphics; the
+# panels test types its keys with it, through the window server
+# (`CGEventCreateKeyboardEvent` is behind `CGRemoteOperation`, which only
+# turns on features of crates the build already has).
 objc2-core-graphics = { version = "0.3", default-features = false, features = [
     "std",
     "CGEvent",
     "CGEventTypes",
+    "CGRemoteOperation",
 ] }
 dispatch2 = { version = "0.3", default-features = false, features = ["std"] }
 # The panels test reads a filter back as AppKit may report it (macOS 11+
