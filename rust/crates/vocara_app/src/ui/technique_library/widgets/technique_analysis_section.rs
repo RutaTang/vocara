@@ -31,12 +31,10 @@
 //! meter's 8 px, as intended — as in the examples section's record row.
 
 use crate::ui::core::text;
+use crate::ui::core::widgets::fading_scrollbar::scrollable;
 use iced::alignment::{Horizontal, Vertical};
 use iced::widget::canvas::{self, Frame, Geometry, Path};
-use iced::widget::scrollable::{Direction, Scrollbar};
-use iced::widget::{
-    button, canvas as canvas_widget, column, container, row, scrollable, Row, Space,
-};
+use iced::widget::{button, canvas as canvas_widget, column, container, row, Row, Space};
 use iced::{mouse, Element, Length, Padding, Point, Rectangle, Renderer, Size, Theme};
 use vocara_model::models::technique_analysis::TechniqueAnalysis;
 use vocara_model::models::voice_metrics::VoiceMetrics;
@@ -525,7 +523,7 @@ fn dimension_bar<'a>(active: usize) -> Element<'a, Message> {
         );
     }
     scrollable(chips)
-        .direction(Direction::Horizontal(Scrollbar::hidden()))
+        .horizontal()
         .width(Length::Fill)
         .height(28)
         .into()

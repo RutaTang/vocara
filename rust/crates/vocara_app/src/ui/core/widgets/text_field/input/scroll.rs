@@ -34,11 +34,13 @@
 //!   within the range.
 //! - **A trackpad's two-finger swipe** (a pan-zoom gesture, `pan_zoom`)
 //!   starting on it reaches the `Scrollable`'s horizontal drag recognizer,
-//!   which holds the offset where it is (a run stops). Alone in the
-//!   gesture's arena it drags at once; in a scroll view, whose vertical
-//!   drag is in the arena too, the first of the two to be moved past
-//!   `kTouchSlop` (18 px) along its axis wins, the field first on a tie,
-//!   and neither moves before (`DragStartBehavior.start`). Won, the
+//!   there while the text can scroll (`setCanDrag`: a range, or an offset
+//!   off the start), which holds the offset where it is (a run stops).
+//!   Alone in the gesture's arena it drags at once; in a scroll view that
+//!   can scroll, whose drag is in the arena too (`pan_zoom::enter`), the
+//!   first of the two to be moved past `kTouchSlop` (18 px) along its axis
+//!   wins, the field first on a tie (a horizontal view's drag never wins
+//!   it), and neither moves before (`DragStartBehavior.start`). Won, the
 //!   offset follows the pan across within the range, and the fingers
 //!   lifting fling it (`MacOSScrollViewFlingVelocityTracker`,
 //!   `ClampingScrollSimulation`, `scroll_fling`) until it stops or meets

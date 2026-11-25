@@ -49,8 +49,7 @@ use std::time::{Duration, Instant};
 use crate::ui::core::text;
 use iced::alignment::{Horizontal, Vertical};
 use iced::widget::{
-    button, center, column, container, hover, responsive, row, scrollable, stack, Column, Row,
-    Space,
+    button, center, column, container, hover, responsive, row, stack, Column, Row, Space,
 };
 use iced::{Background, Border, Element, Length, Padding, Shadow, Task, Theme};
 use vocara_model::models::technique::Technique;
@@ -70,7 +69,7 @@ use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::theme::{self, alpha, bare_button, font, Studio};
 use crate::ui::core::widgets::animated::{animated_container, ink_hover, Decoration};
 use crate::ui::core::widgets::confirm_dialog::ConfirmDialog;
-use crate::ui::core::widgets::fading_scrollbar::{no_scrollbar, Fading};
+use crate::ui::core::widgets::fading_scrollbar::{no_scrollbar, scrollable, Fading};
 use crate::ui::core::widgets::studio_button::{studio_button, StudioButtonVariant};
 use crate::ui::core::widgets::studio_hint::spinner;
 use crate::ui::core::widgets::studio_text::studio_text;

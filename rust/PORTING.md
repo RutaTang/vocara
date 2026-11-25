@@ -272,10 +272,19 @@ structure every screen follows, so screens ported by different hands fit:
   widgets that Flutter's gestures told apart follow them: a snack bar's
   swipe, the license sheet's drag and fling, a single-line field's
   horizontal drag and fling, the timeline's pan, the scrollbar's track,
-  the video's volume wheel and the EQ's Q wheel. iced's own scroll views
-  still take every wheel event, the momentum too, as their inertia, where
-  Flutter's scroll views flung on `ClampingScrollSimulation` and got no
-  momentum. Off macOS no phases are known: every wheel event is a signal.
+  the video's volume wheel and the EQ's Q wheel, and every scroll view
+  (`widgets::fading_scrollbar`'s `scrollable`, which all of the app's
+  are made with): a swipe that starts over one drags it 1:1 along its
+  axis (alone in the gesture's arena at once, else past 18 px before the
+  other drags its start reached, the innermost first on a tie:
+  `pan_zoom::enter`), the fingers lifting fling it on
+  `ClampingScrollSimulation`, the momentum reaches nothing, a scroll
+  signal scrolls the innermost view it would move by its delta (40 px a
+  line, as the embedder sent it) at once, and a new swipe on the view or
+  a signal that moves it stops a fling. iced's own scrollable inside
+  never scrolls by a wheel event: its content is a probe that keeps the
+  event from it once the content has seen it. Off macOS no phases are
+  known: every wheel event is a signal.
 - **Text**: every text is shaped fully and kerned, as Flutter set it: the
   workspace enables iced's `advanced-shaping` feature, which makes
   `Shaping::Advanced` every text's default (iced's own default shapes ASCII
@@ -310,7 +319,8 @@ structure every screen follows, so screens ported by different hands fit:
   macOS (`scrollToBeginningOfDocument:`), a scroll signal's horizontal
   delta scrolls it, and a trackpad's two-finger swipe across drags and
   flings it (past 18 px, before a scroll view's vertical drag around it
-  takes the swipe down). As a field reveals its caret, the scroll
+  takes the swipe down; the field's drag is there only while its text
+  can scroll). As a field reveals its caret, the scroll
   view around it (a `.fading()` one) shows the caret too
   (`text_field::show_on_screen`, `RenderObject.showOnScreen`): with the
   field's 20 px `scrollPadding` (24 below) over the same 100 ms after an
@@ -372,12 +382,13 @@ structure every screen follows, so screens ported by different hands fit:
   its own, not the content's: a mouse wheel there scrolls the view and
   never the content under it, a trackpad's swipe that starts there
   scrolls nothing (Flutter's pan-zoom never reached the view's drag; one
-  that starts on the content stays the content's), and the bar notices
+  that starts on the content stays the view's), and the bar notices
   after each frame, not only on a move, that the view left a still
-  pointer. A horizontal scrollable (Material gave none)
-  and a `ScrollConfiguration(scrollbars: false)` one have no scrollbar
-  (`Scrollbar::hidden()`, `fading_scrollbar::no_scrollbar`): nothing is
-  drawn and nothing takes the pointer at their edge.
+  pointer. A horizontal scrollable (`.horizontal()`: Material gave it
+  none) and a `ScrollConfiguration(scrollbars: false)` one
+  (`fading_scrollbar::no_scrollbar`) have no scrollbar: nothing is drawn
+  and nothing takes the pointer at their edge; they drag, fling and take
+  the wheel as any scroll view.
 - **Tests**: view models are unit-tested directly (the Dart widget tests
   mostly assert view-model behavior; port those assertions); screens get
   `iced_test` simulator tests where a Dart widget test checked what is on
@@ -440,6 +451,11 @@ small and written down in the module that has it:
   waited out the gesture arena (to the release, or 100 ms) when a
   recognizer above the view wanted the press too: iced has no arena
   (`fading_scrollbar`).
+- A finger touching the trackpad within 50 ms of macOS's momentum does
+  not stop a scroll view's fling, where the embedder sent a
+  `PointerScrollInertiaCancelEvent` from `touchesBeganWithEvent:`: winit
+  reads no touches. Two fingers landing (a pan-zoom start) stop it, as
+  in Flutter (`fading_scrollbar`).
 - A text field's right-click toolbar (`text_field::toolbar`, its
   superellipse corners, its shadow's spread and its blurred and saturated
   backdrop Flutter's) fills and strokes its box antialiased, where

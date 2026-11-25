@@ -71,7 +71,7 @@ use crate::ui::core::text;
 use iced::alignment::{Horizontal, Vertical};
 use iced::border::Radius;
 use iced::widget::canvas::{self, Frame, Geometry, Path, Stroke};
-use iced::widget::{canvas as canvas_widget, column, container, row, scrollable, Space};
+use iced::widget::{canvas as canvas_widget, column, container, row, Space};
 use iced::{
     mouse, window, Color, Element, Length, Padding, Point, Rectangle, Renderer, Size, Theme,
 };
@@ -88,7 +88,7 @@ use crate::ui::core::motion::Curve;
 use crate::ui::core::theme::{self, boxed, font, Studio};
 use crate::ui::core::widgets::animated::{animated_align, animated_container, Decoration};
 use crate::ui::core::widgets::cap_label::cap_label;
-use crate::ui::core::widgets::fading_scrollbar::no_scrollbar;
+use crate::ui::core::widgets::fading_scrollbar::{no_scrollbar, scrollable};
 use crate::ui::core::widgets::painter::KeyedCache;
 use crate::ui::core::widgets::studio_controls::fixed_width_readout;
 use crate::ui::core::widgets::studio_text::studio_text;

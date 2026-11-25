@@ -24,7 +24,7 @@
 //! which the faders' and knobs' drags (`kPointerDragDevices`) left to the
 //! desk's scroll; iced hands it over as wheel events (with their phases,
 //! `widgets::pan_zoom`), which the faders and knobs take none of, and the
-//! desk scrolls.
+//! desk's horizontal view drags and flings with it (`fading_scrollbar`).
 //!
 //! # Differences from Flutter
 //!
@@ -54,10 +54,8 @@ use crate::ui::core::text;
 use iced::alignment::{Horizontal, Vertical};
 use iced::border::Radius;
 use iced::widget::canvas::{self, Frame, Geometry, LineCap, Path, Stroke};
-use iced::widget::scrollable::{Direction, Scrollbar};
 use iced::widget::{
-    button, canvas as canvas_widget, center, column, container, responsive, row, scrollable,
-    Column, Space,
+    button, canvas as canvas_widget, center, column, container, responsive, row, Column, Space,
 };
 use iced::{mouse, Color, Element, Length, Padding, Point, Rectangle, Renderer, Size, Theme};
 use vocara_model::models::audio_track::AudioTrack;
@@ -67,7 +65,7 @@ use vocara_services::app_settings_service::AppSettingsService;
 use super::mixer_shared::{argb, keyed_row, tap, MenuItem, Opens, PopupMenu};
 use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::theme::{self, alpha, bare_button, boxed, font, Studio};
-use crate::ui::core::widgets::fading_scrollbar::Fading;
+use crate::ui::core::widgets::fading_scrollbar::{scrollable, Fading};
 use crate::ui::core::widgets::material_tooltip::material_tooltip;
 use crate::ui::core::widgets::opacity_layer::opacity_layer;
 use crate::ui::core::widgets::painter::{color_key, KeyedCache};
@@ -284,7 +282,7 @@ impl<'a> MixerStrip<'a> {
         // The horizontal `ListView`: Material's scroll behavior gave a
         // horizontal scrollable no scrollbar.
         scrollable(desk)
-            .direction(Direction::Horizontal(Scrollbar::hidden()))
+            .horizontal()
             .width(Length::Fill)
             .height(Length::Fill)
             .into()

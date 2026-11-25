@@ -24,9 +24,7 @@
 
 use crate::ui::core::text;
 use iced::alignment::{Horizontal, Vertical};
-use iced::widget::{
-    button, center, column, container, opaque, row, scrollable, stack, Column, Space,
-};
+use iced::widget::{button, center, column, container, opaque, row, stack, Column, Space};
 use iced::{keyboard, widget, Element, Event, Length, Padding, Task};
 use vocara_model::models::technique::Technique;
 use vocara_model::util::dart_string;
@@ -34,7 +32,7 @@ use vocara_model::util::dart_string;
 use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::theme::{self, font, Studio};
 use crate::ui::core::widgets::confirm_dialog::{barrier, Fade};
-use crate::ui::core::widgets::fading_scrollbar::Fading;
+use crate::ui::core::widgets::fading_scrollbar::{scrollable, Fading};
 use crate::ui::core::widgets::focus_traversal::focus_scope;
 use crate::ui::core::widgets::studio_hint::spinner;
 use crate::ui::core::widgets::studio_text::studio_text;

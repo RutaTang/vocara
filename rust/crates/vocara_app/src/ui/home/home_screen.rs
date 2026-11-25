@@ -41,9 +41,7 @@ use std::time::{Duration, Instant};
 use crate::ui::core::text;
 use iced::alignment::{Horizontal, Vertical};
 use iced::futures::{stream, Stream, StreamExt};
-use iced::widget::{
-    button, center, column, container, opaque, responsive, row, scrollable, stack, Space,
-};
+use iced::widget::{button, center, column, container, opaque, responsive, row, stack, Space};
 use iced::{Color, Element, Length, Padding, Shadow, Subscription, Task, Theme, Vector};
 use vocara_model::models::practice_summary::PracticeSummary;
 use vocara_services::recording_finalizer::RecordingFinalizer;
@@ -61,7 +59,7 @@ use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::motion;
 use crate::ui::core::theme::{self, alpha, bare_button, boxed, font, Studio};
 use crate::ui::core::widgets::confirm_dialog::{barrier, ConfirmDialog, DialogMotion, Fade};
-use crate::ui::core::widgets::fading_scrollbar::Fading;
+use crate::ui::core::widgets::fading_scrollbar::{scrollable, Fading};
 use crate::ui::core::widgets::material_tooltip::material_tooltip;
 use crate::ui::core::widgets::slide::inert;
 use crate::ui::core::widgets::studio_button::{studio_button, StudioButtonVariant};

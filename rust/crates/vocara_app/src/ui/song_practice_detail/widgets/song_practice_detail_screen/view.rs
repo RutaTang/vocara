@@ -14,8 +14,8 @@ use iced::advanced::{overlay, renderer, Clipboard, Shell, Widget};
 use iced::alignment::{Horizontal, Vertical};
 use iced::widget::canvas::{self, gradient, Frame, Geometry, Path};
 use iced::widget::{
-    button, canvas as canvas_widget, column, container, mouse_area, opaque, responsive, row,
-    scrollable, stack, Space,
+    button, canvas as canvas_widget, column, container, mouse_area, opaque, responsive, row, stack,
+    Space,
 };
 use iced::{
     keyboard, mouse, Color, Element, Event, Length, Padding, Point, Rectangle, Renderer, Shadow,
@@ -35,7 +35,7 @@ use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::motion::Curve;
 use crate::ui::core::theme::{self, alpha, bare_button, boxed, fill, font, Studio};
 use crate::ui::core::widgets::animated::{animated, animated_container, Decoration};
-use crate::ui::core::widgets::fading_scrollbar::Fading;
+use crate::ui::core::widgets::fading_scrollbar::{scrollable, Fading};
 use crate::ui::core::widgets::holds_keyboard::holds_keyboard;
 use crate::ui::core::widgets::pan_zoom::{self, Held, Scroll};
 use crate::ui::core::widgets::slide::inert;
@@ -78,8 +78,9 @@ use crate::ui::song_practice_detail::widgets::track_row::{
 /// What `vm.lyricsAsText()` gives a view (only the update side reads it).
 static NO_TEXT: fn() -> String = String::new;
 
-/// The scroll a wheel's line moves (iced's own scrollable's).
-const LINE_PX: f32 = 60.0;
+/// The scroll a wheel's line moves (the embedder's 40 px, as the lane
+/// list's `pointerScroll` takes it too).
+const LINE_PX: f32 = pan_zoom::PIXELS_PER_LINE;
 
 /// A lane of the timeline list, by what it shows (Dart's keys: the take and
 /// bus rows by id, the master by name).

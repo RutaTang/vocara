@@ -50,7 +50,7 @@ use iced::alignment::Vertical;
 use iced::widget::canvas::{self, Frame, Geometry, Path, Stroke};
 use iced::widget::text::Wrapping;
 use iced::widget::{
-    button, canvas as canvas_widget, column, container, responsive, row, scrollable, stack, Space,
+    button, canvas as canvas_widget, column, container, responsive, row, stack, Space,
 };
 use iced::{
     mouse, window, Border, Color, Element, Event, Length, Padding, Point, Rectangle, Renderer,
@@ -65,6 +65,7 @@ use super::pitch_lane::{lane_visible_frames, pitch_lane, LANE_MARGIN_PX, PITCH_L
 use super::track_row::TRACK_HEADER_W;
 use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::theme::{alpha, boxed, fill, font, Studio};
+use crate::ui::core::widgets::fading_scrollbar::scrollable;
 use crate::ui::core::widgets::painter::{KeyedCache, Same};
 use crate::ui::core::widgets::spectrogram_painter::{
     FrequencyGridPainter, PowerSpectrumPainter, RenderRequest, Rendered, SpectrogramImage,
@@ -511,9 +512,7 @@ pub fn lane_toolbar<'a>(active: &BTreeSet<AnalysisLane>, track_id: &str) -> Elem
             .height(Length::Fill)
             .align_y(Vertical::Center),
     )
-    .direction(scrollable::Direction::Horizontal(
-        scrollable::Scrollbar::new().width(0).scroller_width(0),
-    ))
+    .horizontal()
     .width(Length::Fill)
     .height(Length::Fill);
     column![

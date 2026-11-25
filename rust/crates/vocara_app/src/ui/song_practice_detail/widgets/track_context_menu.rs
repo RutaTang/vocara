@@ -33,7 +33,7 @@ use iced::advanced::layout::{self, Layout};
 use iced::advanced::widget::{tree, Operation, Tree};
 use iced::advanced::{overlay, renderer, Clipboard, Shell, Widget};
 use iced::alignment::Vertical;
-use iced::widget::{button, column, container, row, scrollable, Column, Row, Space};
+use iced::widget::{button, column, container, row, Column, Row, Space};
 use iced::{
     keyboard, mouse, touch, Border, Color, Element, Event, Length, Padding, Point, Rectangle,
     Renderer, Size, Theme, Vector,
@@ -43,7 +43,7 @@ use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::theme::{self, bare_button, font, Studio};
 use crate::ui::core::widgets::animated::ink_hover;
 use crate::ui::core::widgets::confirm_dialog::{ConfirmDialog, StudioPrompt};
-use crate::ui::core::widgets::fading_scrollbar::no_scrollbar;
+use crate::ui::core::widgets::fading_scrollbar::{no_scrollbar, scrollable};
 use crate::ui::core::widgets::gesture::{any_tap_event, AnyTap};
 use crate::ui::core::widgets::studio_text::studio_text;
 

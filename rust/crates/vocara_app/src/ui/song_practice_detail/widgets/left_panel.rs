@@ -50,8 +50,7 @@ use iced::border::Radius;
 use iced::widget::canvas::{self, Frame, Geometry, Path};
 use iced::widget::text::{Alignment, Wrapping};
 use iced::widget::{
-    button, canvas as canvas_widget, center, column, container, responsive, row, scrollable,
-    Column, Space,
+    button, canvas as canvas_widget, center, column, container, responsive, row, Column, Space,
 };
 use iced::{
     mouse, Color, Element, Event, Length, Padding, Pixels, Point, Rectangle, Renderer, Size, Theme,
@@ -75,7 +74,7 @@ use super::track_context_menu::{
 use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::theme::{alpha, bare_button, boxed, fill, font, Studio};
 use crate::ui::core::widgets::cap_label::cap_label;
-use crate::ui::core::widgets::fading_scrollbar::Fading;
+use crate::ui::core::widgets::fading_scrollbar::{scrollable, Fading};
 use crate::ui::core::widgets::studio_controls::{fader_db_readout, studio_fader, studio_pan_knob};
 use crate::ui::core::widgets::studio_hint::spinner;
 use crate::ui::core::widgets::studio_text::{fill_spaced_text, studio_text};
