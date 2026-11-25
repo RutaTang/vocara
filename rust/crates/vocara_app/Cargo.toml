@@ -35,5 +35,64 @@ unicode-segmentation.workspace = true
 iced_test.workspace = true
 tempfile.workspace = true
 
+# The app's AppKit paths on a real Mac (the open and save panels, Cmd+Q
+# while a take is armed): AppKit wants the main thread, so `main` is each
+# test's own (see the files).
+[[test]]
+name = "macos_file_panels"
+harness = false
+
+[[test]]
+name = "macos_quit"
+harness = false
+
+# What those tests drive AppKit with (the versions vocara_services uses).
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+objc2 = "0.6"
+block2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSApplication",
+    "NSEvent",
+    # NSEvent's key-event constructor.
+    "NSGraphicsContext",
+    "NSGraphics",
+    "NSMenu",
+    "NSMenuItem",
+    "NSOpenPanel",
+    "NSPanel",
+    "NSResponder",
+    "NSRunningApplication",
+    "NSSavePanel",
+    "NSView",
+    "NSWindow",
+] }
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSArray",
+    "NSDate",
+    "NSDictionary",
+    "NSObject",
+    "NSProcessInfo",
+    "NSRunLoop",
+    "NSString",
+    "NSURL",
+    "NSUserDefaults",
+] }
+# The panels test hands its steps to the main run loop in its common modes.
+objc2-core-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "block2",
+    "CFRunLoop",
+    "CFString",
+] }
+# The panels test reads a filter back as AppKit may report it (macOS 11+
+# may give `allowedFileTypes` as type identifiers). Test-only: the app never
+# links UniformTypeIdentifiers, which macOS 10.15 lacks.
+objc2-uniform-type-identifiers = { version = "0.3", default-features = false, features = [
+    "std",
+    "UTType",
+] }
+
 [lints]
 workspace = true
