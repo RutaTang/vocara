@@ -504,9 +504,13 @@ mod macos {
     }
 
     /// Chooses `file` in the open panel up now and presses OK: pointed at
-    /// the file, the panel selects it once it has listed its folder; if OK
-    /// leaves it up all the same, the file's name is typed into it (the
-    /// file list's type-select) and OK pressed again. Whether it closed.
+    /// the file, the panel selects it once it has listed its folder; if it
+    /// does not, the file's name is typed into its list (the list's
+    /// type-select). OK is pressed only once the panel reports the file
+    /// chosen: an open panel with nothing chosen raises an Objective-C
+    /// exception on `ok:` (macOS 26), which no Rust frame can catch. Whether
+    /// it closed on the file; `false` leaves the panel up for the caller to
+    /// cancel, its accept unverified (said so).
     fn accept_open(file: &Path) -> bool {
         let target = file.to_path_buf();
         on_main(move |mtm| {
@@ -517,26 +521,27 @@ mod macos {
                 panel.setDirectoryURL(Some(&url));
             }
         });
-        let selected = wait_until(SELECT_WAIT, || {
-            selection().iter().any(|chosen| same_file(chosen, file))
-        });
+        let chosen = || selection().iter().any(|chosen| same_file(chosen, file));
+        let mut selected = wait_until(SELECT_WAIT, chosen);
         if !selected {
             note(format!(
-                "the open panel reports no selection of {} yet; pressing OK all the same",
+                "pointed at {}, the open panel chose nothing: typing its name into the list",
                 file.display()
             ));
+            let name = file
+                .file_stem()
+                .map(|stem| stem.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            type_into_panel(&name, 0);
+            selected = wait_until(SELECT_WAIT, chosen);
         }
-        press_ok();
-        if wait_until(CLOSE, closed) {
-            return true;
+        if !selected {
+            note(format!(
+                "the open panel reports no selection of {}: OK is not pressed",
+                file.display()
+            ));
+            return false;
         }
-        note("OK left the open panel up: typing the file's name into its list");
-        let name = file
-            .file_stem()
-            .map(|stem| stem.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        type_into_panel(&name, 0);
-        thread::sleep(Duration::from_secs(1));
         press_ok();
         wait_until(CLOSE, closed)
     }
