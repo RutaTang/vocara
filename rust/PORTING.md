@@ -145,11 +145,23 @@ wrong. Port the behavior, not the shape:
     panel comes up as a sheet on the main window, the save panel
     application-modal, each with the call site's file types, selection
     mode and suggested name; Escape cancels it (the call site gets
-    nothing), and a file chosen through OK comes back to the call site;
-    the main window is key again after. A panel the posted Escape does not
-    reach is cancelled with `cancel:`, and an open panel that cannot be
-    made to select a file programmatically is cancelled instead of
-    accepted: the run says so;
+    nothing), and a file chosen from the keyboard comes back to the call
+    site exactly (an open panel: ⌘⇧G, the file's full path and Return in
+    its Go to Folder sheet, then Return to open it; the save panel: a name
+    typed over the suggested one, the folder through ⌘⇧G, Return); the
+    main window is key again after. On macOS 26 a panel's UI is a remote
+    view another process serves (`NSSavePanelService`), which neither the
+    events the app posts to its own queue nor `ok:` (it raises "not
+    implemented") reach, so the keys are typed through the window server
+    (`CGEventPost` at the HID tap), as a keyboard's. That takes post-event
+    access (TCC: Accessibility or PostEvent, asked of the process
+    responsible for the test; GitHub's runner image grants Accessibility
+    to the agent jobs run under): the run checks it first
+    (`CGPreflightPostEventAccess`, never asking for it: the prompt would
+    sit over the panels unanswered) and with it checks every step
+    strictly. Without it the run says so, types nothing, closes each panel
+    with an Escape posted in-app or `cancel:`, and lists every accept as
+    NOT verified instead of failing;
   - ⌘Q with a take armed (`crates/vocara_app/tests/macos_quit.rs`): the
     hook `main` installs, the app's own quit guard (`App` with the real
     `ServiceQuitHooks` and `RecordingFinalizer::instance`) and a stand-in
