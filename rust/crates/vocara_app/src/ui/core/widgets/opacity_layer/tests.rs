@@ -221,6 +221,84 @@ fn what_it_draws_past_its_box_fades_with_it() {
     ));
 }
 
+/// Draws `content` moved right by `dx`: a transformation, not a layout.
+struct Shifted<'a> {
+    content: Element<'a, ()>,
+    dx: f32,
+}
+
+impl Widget<(), Theme, Renderer> for Shifted<'_> {
+    fn size(&self) -> Size<Length> {
+        self.content.as_widget().size()
+    }
+
+    fn children(&self) -> Vec<Tree> {
+        vec![Tree::new(&self.content)]
+    }
+
+    fn diff(&self, tree: &mut Tree) {
+        tree.diff_children(std::slice::from_ref(&self.content));
+    }
+
+    fn layout(
+        &mut self,
+        tree: &mut Tree,
+        renderer: &Renderer,
+        limits: &layout::Limits,
+    ) -> layout::Node {
+        self.content
+            .as_widget_mut()
+            .layout(&mut tree.children[0], renderer, limits)
+    }
+
+    fn draw(
+        &self,
+        tree: &Tree,
+        renderer: &mut Renderer,
+        theme: &Theme,
+        style: &renderer::Style,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        viewport: &Rectangle,
+    ) {
+        use iced::advanced::Renderer as _;
+        renderer.with_translation(Vector::new(self.dx, 0.0), |renderer| {
+            self.content.as_widget().draw(
+                &tree.children[0],
+                renderer,
+                theme,
+                style,
+                layout,
+                cursor,
+                viewport,
+            );
+        });
+    }
+}
+
+#[test]
+fn transformations_go_on_working_around_and_inside_a_layer() {
+    let around = Element::new(Shifted {
+        content: opacity_layer(0.5, block(RED, 40.0, 40.0)).into(),
+        dx: 40.0,
+    });
+    let inside: Element<'_, ()> = opacity_layer(
+        0.5,
+        Element::new(Shifted {
+            content: block(RED, 40.0, 40.0),
+            dx: 40.0,
+        }),
+    )
+    .into();
+    for view in [around, inside] {
+        let mut window = Frames::new(WINDOW);
+        window.frame(view, &[], Instant::now());
+        assert_eq!(window.pixel(Point::new(20.0, 20.0)), BACKGROUND);
+        assert!(near(window.pixel(Point::new(60.0, 20.0)), faded(RED, 0.5)));
+        assert_eq!(window.pixel(Point::new(100.0, 20.0)), BACKGROUND);
+    }
+}
+
 #[test]
 fn a_layer_inside_a_clip_stays_inside_it() {
     // A page half slid out of its 60-wide box, which clips it in a layer

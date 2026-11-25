@@ -295,10 +295,14 @@ impl Pipeline {
         let texture = target.texture();
 
         if !texture.usage().contains(wgpu::TextureUsages::COPY_SRC) {
-            log::warn!(
-                "A backdrop filter needs a target it can copy from; \
-                 nothing was drawn"
-            );
+            static WARNED: std::sync::Once = std::sync::Once::new();
+
+            WARNED.call_once(|| {
+                log::warn!(
+                    "A backdrop filter needs a target it can copy from; \
+                     none is drawn"
+                );
+            });
             return;
         }
 

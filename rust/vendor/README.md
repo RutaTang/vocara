@@ -44,7 +44,9 @@ Flutter did:
   transformations, all as at the top level), which goes into the
   enclosing stack as one layer: drawn offscreen (a texture, a pixmap)
   cleared to transparent, then over what lies behind it at the opacity
-  (premultiplied source over).
+  (premultiplied source over), inside its bounds and the clip of the
+  layer it was started in (iced's layers do not clip each other, but a
+  group stands for what that layer would have drawn).
 - A **backdrop filter** (Flutter's `BackdropFilter` in a `Clip.hardEdge`):
   a layer that blurs what was drawn before it under a shape (a Gaussian,
   each pixel beyond the target's edge the nearest one inside, as a composed
