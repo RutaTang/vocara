@@ -498,34 +498,90 @@ pub(crate) fn line_clusters(
 /// `frame.fill_text(text)` with `spacing` px after every glyph
 /// (`TextStyle.letterSpacing` on a `TextPainter`): see [`fill_canvas_text`].
 pub fn fill_spaced_text(frame: &mut iced::widget::canvas::Frame, text: Text, spacing: f32) {
-    fill_canvas_text(frame, text, spacing, false);
+    fill_canvas_text(frame, text, spacing);
 }
 
 /// `frame.fill_text(text)` with tabular figures (`fontFeatures:
-/// [FontFeature.tabularFigures()]` on a `TextPainter`): see
-/// [`fill_canvas_text`].
+/// [FontFeature.tabularFigures()]` on a `TextPainter`). A canvas's text
+/// carries no OpenType features, so it is set in a copy of its face whose
+/// every run takes `tnum` ([`tabular_font`]): the font's own tabular
+/// figures, shaped as HarfBuzz shaped them for SkParagraph.
 pub fn fill_tabular_text(frame: &mut iced::widget::canvas::Frame, text: Text) {
-    fill_canvas_text(frame, text, 0.0, true);
+    let font = tabular_font(text.font);
+    frame.fill_text(Text { font, ..text });
+}
+
+/// A font that sets text as `font` does, with tabular figures: a copy of
+/// the face `font` resolves to, added to the font system under a family of
+/// its own, at the face's instance with the `tnum` feature on every run
+/// (cosmic-text's `FaceInstance::features`). One copy per font, made the
+/// first time it is asked for; `font` itself if it names no family or the
+/// font system has no face for it. Takes the font system's lock: never call
+/// it with that lock held.
+pub fn tabular_font(font: Font) -> Font {
+    use std::sync::Mutex;
+    static COPIES: Mutex<Vec<(Font, Font)>> = Mutex::new(Vec::new());
+
+    let mut copies = COPIES.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((_, copy)) = copies.iter().find(|(of, _)| *of == font) {
+        return *copy;
+    }
+    let mut fonts = font_system().write().expect("Write font system");
+    let copy = tabular_copy(fonts.raw(), font, copies.len()).unwrap_or(font);
+    copies.push((font, copy));
+    copy
+}
+
+/// [`tabular_font`]'s copy of `font`'s face, the `index`th made.
+fn tabular_copy(fonts: &mut FontSystem, font: Font, index: usize) -> Option<Font> {
+    use cosmic_text::fontdb::{self, FaceInfo, Language, Query};
+    use cosmic_text::FaceInstance;
+
+    let iced::font::Family::Name(name) = font.family else {
+        return None;
+    };
+    let weight = fontdb::Weight(crate::ui::core::system_font::weight_value(font.weight));
+    let id = fonts.db().query(&Query {
+        families: &[fontdb::Family::Name(name)],
+        weight,
+        stretch: fontdb::Stretch::Normal,
+        style: fontdb::Style::Normal,
+    })?;
+    let info = fonts.db().face(id)?.clone();
+    let family: &'static str =
+        Box::leak(format!(".Vocara tabular {index} {name}").into_boxed_str());
+    let instance = fonts.face_instance(id).cloned().unwrap_or(FaceInstance {
+        coords: Vec::new(),
+        untracked: false,
+        features: Vec::new(),
+    });
+    let copy = fonts.db_mut().push_face_info(FaceInfo {
+        families: vec![(family.to_string(), Language::English_UnitedStates)],
+        ..info
+    });
+    fonts.set_face_instance(
+        copy,
+        Some(FaceInstance {
+            features: vec![(*b"tnum", 1)],
+            ..instance
+        }),
+    );
+    Some(Font {
+        family: iced::font::Family::Name(family),
+        ..font
+    })
 }
 
 /// `frame.fill_text(text)` set as [`StudioText`] sets it, with `spacing` px
-/// after every glyph and, when `tabular`, tabular figures. A canvas draws
-/// its own text, which takes no letter spacing and no OpenType features, so
-/// the line is laid out here and each cluster drawn where it landed; a
-/// figure whose tabular advance differs from its own is centred in it (as
-/// the font's `tnum` figures sit in theirs). The alignment is the laid-out
-/// line's.
-pub fn fill_canvas_text(
-    frame: &mut iced::widget::canvas::Frame,
-    text: Text,
-    spacing: f32,
-    tabular: bool,
-) {
-    if (spacing == 0.0 && !tabular) || text.content.is_empty() {
+/// after every glyph. A canvas draws its own text, which takes no letter
+/// spacing, so the line is laid out here and each cluster drawn where it
+/// landed. The alignment is the laid-out line's.
+pub fn fill_canvas_text(frame: &mut iced::widget::canvas::Frame, text: Text, spacing: f32) {
+    if spacing == 0.0 || text.content.is_empty() {
         frame.fill_text(text);
         return;
     }
-    let (clusters, width, own_advances) = {
+    let (clusters, width) = {
         let mut font_system = font_system().write().expect("Write font system");
         let spec = Spec {
             content: &text.content,
@@ -535,39 +591,20 @@ pub fn fill_canvas_text(
             align_x: Alignment::Default,
             wrapping: Wrapping::None,
             letter_spacing: spacing,
-            tabular,
+            tabular: false,
             max_lines: None,
         };
-        let (clusters, width) = line_clusters(font_system.raw(), &spec);
-        // What each cluster advances as the canvas draws it: without the
-        // features.
-        let own_advances = if tabular {
-            let (own, _) = line_clusters(
-                font_system.raw(),
-                &Spec {
-                    tabular: false,
-                    ..spec.clone()
-                },
-            );
-            Some(own)
-        } else {
-            None
-        };
-        (clusters, width, own_advances)
+        line_clusters(font_system.raw(), &spec)
     };
     let left = match text.align_x {
         Alignment::Center => text.position.x - width / 2.0,
         Alignment::Right => text.position.x - width,
         Alignment::Default | Alignment::Left | Alignment::Justified => text.position.x,
     };
-    for (range, x, advance) in clusters {
-        let own = own_advances
-            .as_ref()
-            .and_then(|own| own.iter().find(|c| c.0 == range))
-            .map_or(advance, |c| c.2);
+    for (range, x, _) in clusters {
         frame.fill_text(Text {
             content: text.content[range].to_string(),
-            position: Point::new(left + x + (advance - own) / 2.0, text.position.y),
+            position: Point::new(left + x, text.position.y),
             align_x: Alignment::Left,
             ..text.clone()
         });

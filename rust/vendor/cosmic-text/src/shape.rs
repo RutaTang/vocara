@@ -163,6 +163,16 @@ fn shape_fallback(
     let attrs = attrs_list.get_span(start_run);
     let mut rb_font_features = Vec::new();
 
+    // vocara: the face's instance's features first, so that the run's own
+    // (later in the list) win where both set one.
+    for (tag, value) in font.instance_features() {
+        rb_font_features.push(harfrust::Feature::new(
+            harfrust::Tag::new(tag),
+            *value,
+            0..usize::MAX,
+        ));
+    }
+
     // Convert attrs::Feature to harfrust::Feature
     for feature in &attrs.font_features.features {
         rb_font_features.push(harfrust::Feature::new(

@@ -602,6 +602,7 @@ pub(crate) fn check_against_core_text(style: &LabelStyle) -> Face {
                         .map(|(t, v)| (t.to_be_bytes(), *v))
                         .collect(),
                     untracked: true,
+                    features: Vec::new(),
                 }),
             );
             Some(Font {

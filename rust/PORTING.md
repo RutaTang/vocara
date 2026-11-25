@@ -383,8 +383,9 @@ structure every screen follows, so screens ported by different hands fit:
   (`ui::core::system_font`: on macOS that face at the instance Skia drew
   each weight at, its glyphs, advances and line checked against CoreText
   on a Mac; off macOS Inter at the weight); the time ruler's tabular
-  figures are each the font's own figure centred in its `tnum` advance
-  (`studio_text::fill_canvas_text`, as for Inter), not the `tnum` glyph.
+  figures are the font's own `tnum` figures, set in a copy of the face
+  whose every run takes the feature (`studio_text::tabular_font`), as a
+  canvas's text carries no OpenType features.
 - **Text fields** (`widgets::text_field`): iced's `text_input` and
   `text_editor` keep their caret, focus and blink in private state and draw
   a 1 px square caret in the text's color, under the text, so the app forks
@@ -559,8 +560,7 @@ small and written down in the module that has it:
   macOS system UI font at the instance Skia drew each weight at
   (`ui::core::system_font`), on SkParagraph's line, rasterized by swash,
   not CoreText; the time ruler's tabular figures are the font's own
-  figures centred in their `tnum` advances, as a canvas draws no OpenType
-  features (`studio_text::fill_canvas_text`).
+  `tnum` figures (`studio_text::tabular_font`).
 
 ## Tracking
 

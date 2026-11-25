@@ -50,6 +50,11 @@ pub struct FaceInstance {
     /// Whether the shaper leaves the face's `trak` table unapplied (harfrust
     /// applies it to a face with a `STAT` table, at 12 pt).
     pub untracked: bool,
+    /// OpenType features (tag, value) every run shaped in the face takes,
+    /// before its attributes' own ([`crate::Attrs::font_features`]): for a
+    /// text whose features cannot be given with it (a canvas's, iced's
+    /// `Text` carries none), set in a copy of a face that has them.
+    pub features: Vec<([u8; 4], u32)>,
 }
 
 /// vocara: the table directory of `font` without its `trak` record, if it
@@ -119,6 +124,8 @@ pub struct Font {
     instance_coords: Option<Vec<i16>>,
     // vocara: its line gap, in its units ([`Font::line_gap`]).
     line_gap: f32,
+    // vocara: its `FaceInstance`'s features ([`Font::instance_features`]).
+    instance_features: Vec<([u8; 4], u32)>,
 }
 
 impl fmt::Debug for Font {
@@ -179,6 +186,12 @@ impl Font {
     /// line gap there is 90 units, `hhea`'s 0).
     pub fn line_gap(&self) -> f32 {
         self.line_gap
+    }
+
+    /// vocara: the OpenType features of the face's [`FaceInstance`], which
+    /// every run shaped in it takes.
+    pub fn instance_features(&self) -> &[([u8; 4], u32)] {
+        &self.instance_features
     }
 
     #[cfg(feature = "peniko")]
@@ -355,6 +368,9 @@ impl Font {
             data: FontData::new(Blob::new(data), info.index),
             instance_coords,
             line_gap,
+            instance_features: instance
+                .map(|instance| instance.features.clone())
+                .unwrap_or_default(),
         })
     }
 }

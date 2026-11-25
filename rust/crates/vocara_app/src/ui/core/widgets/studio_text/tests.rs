@@ -301,3 +301,43 @@ fn the_widget_reports_its_text_and_what_it_shows() {
     assert!(title.starts_with(shown.0.trim_end_matches(ELLIPSIS)));
     assert_eq!(shown.1.bounds(), full.bounds());
 }
+
+/// Each glyph `spec` lays out: its glyph id and its x.
+fn glyphs_of(spec: &Spec<'_>) -> Vec<(u16, f32)> {
+    let laid = laid(spec, f32::INFINITY);
+    laid.buffer
+        .layout_runs()
+        .flat_map(|run| run.glyphs.iter().map(|g| (g.glyph_id, g.x)))
+        .collect()
+}
+
+// A `TextPainter` with `FontFeature.tabularFigures()` shaped the font's own
+// `tnum` figures; a canvas's text takes no features, so `fill_tabular_text`
+// sets it in a copy of its face whose every run takes `tnum`.
+#[test]
+fn a_tabular_copy_of_a_face_shapes_its_own_tabular_figures() {
+    super::testing::load_fonts();
+    let content = "1:11 -4.0";
+    for font in [font::REGULAR, font::SEMIBOLD] {
+        let copy = tabular_font(font);
+        assert_ne!(copy, font, "a copy under a family of its own");
+        assert_eq!(tabular_font(font), copy, "one copy per font");
+        let with_feature = glyphs_of(&Spec {
+            tabular: true,
+            ..spec(content, 10.0, font)
+        });
+        let in_copy = glyphs_of(&spec(content, 10.0, copy));
+        let without = glyphs_of(&spec(content, 10.0, font));
+        assert_eq!(
+            in_copy, with_feature,
+            "the copy shapes the figures `tnum` gives"
+        );
+        assert_ne!(
+            in_copy, without,
+            "which are not the proportional figures (Inter's tabular 1 is its own glyph, wider)"
+        );
+    }
+    // A font naming no family is left as it is.
+    let generic = Font::DEFAULT;
+    assert_eq!(tabular_font(generic), generic);
+}

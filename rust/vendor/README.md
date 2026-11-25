@@ -51,7 +51,10 @@ comments) and the files named below; `LICENSE` is the upstream project's
   a face's `trak` table at 12 pt when the face has a `STAT` table.
   `FontSystem::set_face_instance` (`src/font/system.rs`) gives one face a
   `FaceInstance` (`src/font/mod.rs`): user coordinates on its axes, set
-  after the weight's, and whether it is untracked; every `Font` of that
+  after the weight's, whether it is untracked, and OpenType features every
+  run shaped in it takes before its attributes' own (`src/shape.rs`,
+  `shape_fallback`: for a canvas's text, which carries none, set in a copy
+  of a face with `tnum`: `studio_text::tabular_font`); every `Font` of that
   face then takes them, in `Font::new_with_instance`: its metrics, the
   shaper's instance (advances, positioning, substitutions), the outlines
   swash draws (`src/swash.rs`: the same normalized coordinates, for the

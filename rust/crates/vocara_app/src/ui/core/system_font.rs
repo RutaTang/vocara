@@ -326,6 +326,7 @@ pub fn register(fonts: &mut FontSystem, id: ID, weight: Weight) -> Option<Face> 
                 .map(|(tag, value)| (tag.to_be_bytes(), *value))
                 .collect(),
             untracked: true,
+            features: Vec::new(),
         }),
     );
     Some(Face {
