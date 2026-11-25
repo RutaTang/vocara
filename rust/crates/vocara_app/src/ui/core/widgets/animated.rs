@@ -171,8 +171,6 @@ pub struct AnimatedContainer<'a, M> {
     /// Whether the border is drawn over the child (see
     /// [`AnimatedContainer::border_above`]).
     border_above: bool,
-    /// Scales the decoration's alpha, not animated (an `Opacity` around it).
-    opacity: f32,
     padding: Padding,
     align: (f32, f32),
     width: Length,
@@ -193,7 +191,6 @@ pub fn animated_container<'a, M>(
         content,
         style: Box::new(|_| None),
         border_above: false,
-        opacity: 1.0,
         padding: Padding::ZERO,
         align: (-1.0, -1.0),
         width: size.width.fluid(),
@@ -506,13 +503,6 @@ impl<'a, M> AnimatedContainer<'a, M> {
         self
     }
 
-    /// Draws the decoration at `opacity` (an `Opacity` widget around the
-    /// Dart `AnimatedContainer`): it applies at once, whatever animates.
-    pub fn opacity(mut self, opacity: f32) -> Self {
-        self.opacity = opacity;
-        self
-    }
-
     pub fn padding(mut self, padding: impl Into<Padding>) -> Self {
         self.padding = padding.into();
         self
@@ -670,18 +660,7 @@ impl<M> Widget<M, Theme, Renderer> for AnimatedContainer<'_, M> {
         viewport: &Rectangle,
     ) {
         let state = tree.state.downcast_ref::<State<Look>>();
-        let opacity = self.opacity;
-        let decoration = state.shown().decoration.map(|d| Decoration {
-            background: Color {
-                a: d.background.a * opacity,
-                ..d.background
-            },
-            border: Color {
-                a: d.border.a * opacity,
-                ..d.border
-            },
-            ..d
-        });
+        let decoration = state.shown().decoration;
         let bounds = layout.bounds();
         let quad = |renderer: &mut Renderer, background: Color, border: Border| {
             if background.a > 0.0 || (border.width > 0.0 && border.color.a > 0.0) {

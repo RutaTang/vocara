@@ -90,6 +90,7 @@ use vocara_model::util::dart_num::round_to_i64;
 use super::track_context_menu::{argb, default_take_color, selected_lane_color};
 use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::theme::{alpha, bare_button, boxed, fill, font, Studio};
+use crate::ui::core::widgets::opacity_layer::Effects as _;
 use crate::ui::core::widgets::studio_controls::{studio_fader, studio_mini_button};
 use crate::ui::core::widgets::studio_text::studio_text;
 use crate::ui::core::widgets::waveform_painter::{
@@ -1334,9 +1335,9 @@ impl LaneDragState {
     }
 }
 
-/// The veil over a dragged lane: the screen's background at 65 %, so the
-/// row reads at 35 % (`childWhenDragging: Opacity(opacity: 0.35)`) over it.
-const DRAGGED_VEIL: Color = alpha(Studio::BACKGROUND, 0.65);
+/// A dragged lane's row, as one layer (`childWhenDragging: Opacity(opacity:
+/// 0.35)`).
+const DRAGGED_OPACITY: f32 = 0.35;
 
 impl Widget<Message, Theme, Renderer> for LaneDrag<'_> {
     fn size(&self) -> Size<Length> {
@@ -1386,24 +1387,21 @@ impl Widget<Message, Theme, Renderer> for LaneDrag<'_> {
         cursor: mouse::Cursor,
         viewport: &Rectangle,
     ) {
-        self.content.as_widget().draw(
-            &tree.children[0],
-            renderer,
-            theme,
-            style,
-            layout,
-            cursor,
-            viewport,
-        );
-        if tree.state.downcast_ref::<LaneDragState>().dragging {
-            use iced::advanced::Renderer as _;
-            renderer.fill_quad(
-                renderer::Quad {
-                    bounds: layout.bounds(),
-                    ..renderer::Quad::default()
-                },
-                DRAGGED_VEIL,
+        let draw = |renderer: &mut Renderer| {
+            self.content.as_widget().draw(
+                &tree.children[0],
+                renderer,
+                theme,
+                style,
+                layout,
+                cursor,
+                viewport,
             );
+        };
+        if tree.state.downcast_ref::<LaneDragState>().dragging {
+            renderer.with_opacity_layer(*viewport, DRAGGED_OPACITY, draw);
+        } else {
+            draw(renderer);
         }
     }
 

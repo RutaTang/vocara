@@ -20,8 +20,8 @@
 //!
 //! It comes in and goes as a dialog route did: the screen keeps its
 //! `confirm_dialog::DialogMotion` and draws it with
-//! [`view_at`](NoteEditor::view_at), every color of the card at the fade's
-//! opacity (iced has no subtree opacity), and keeps a closed one drawn,
+//! [`view_at`](NoteEditor::view_at), the card as one layer at the fade's
+//! opacity (the route's `FadeTransition`), and keeps a closed one drawn,
 //! taking no input, until it has faded out.
 //!
 //! The field is the app's multi-line text field (`widgets::text_field`):
@@ -40,7 +40,6 @@ use vocara_model::util::dart_string;
 use vocara_model::util::format::format_clock_ms;
 
 use crate::ui::core::icons::{self, Icon};
-use crate::ui::core::theme::faded;
 use crate::ui::core::theme::{self, alpha, font, Studio, Zinc};
 use crate::ui::core::widgets::confirm_dialog::{barrier, Fade};
 use crate::ui::core::widgets::focus_traversal::focus_scope;
@@ -239,12 +238,12 @@ impl NoteEditor {
     /// its `DialogMotion`).
     pub fn view_at(&self, fade: Fade) -> Element<'_, Message> {
         let heading = row![
-            icons::icon(Icon::StickyNote, 16.0, fade.color(Studio::ACCENT)),
+            icons::icon(Icon::StickyNote, 16.0, Studio::ACCENT),
             Space::new().width(8),
             text(self.title.as_str())
                 .size(15)
                 .font(font::BOLD)
-                .color(fade.color(Studio::TEXT_PRIMARY)),
+                .color(Studio::TEXT_PRIMARY),
         ]
         .align_y(Vertical::Center);
 
@@ -261,27 +260,25 @@ impl NoteEditor {
             // padding goes on the maximum so the text may fill six lines.
             .min_height(FIELD_SIZE * FIELD_LINE_HEIGHT * MIN_LINES)
             .max_height(FIELD_SIZE * FIELD_LINE_HEIGHT * MAX_LINES + theme::FIELD_PADDING.y())
-            .caret_color(fade.color(Studio::ACCENT))
-            .style(move |t, s| faded_field(field_style(t, s), fade.card));
+            .caret_color(Studio::ACCENT)
+            .style(field_style);
 
         let mut actions = row![].align_y(Vertical::Center);
         if self.editing {
             actions = actions.push(
                 studio_button("Delete", Message::Delete)
                     .icon(Icon::Trash2)
-                    .variant(StudioButtonVariant::Danger)
-                    .opacity(fade.card),
+                    .variant(StudioButtonVariant::Danger),
             );
         }
         actions = actions
             .push(Space::new().width(Length::Fill))
-            .push(studio_button("Cancel", Message::Cancel).opacity(fade.card))
+            .push(studio_button("Cancel", Message::Cancel))
             .push(Space::new().width(8))
             .push(
                 studio_button(if self.editing { "Save" } else { "Add" }, Message::Save)
                     .variant(StudioButtonVariant::Accent)
-                    .enabled(self.can_save())
-                    .opacity(fade.card),
+                    .enabled(self.can_save()),
             );
 
         let card = container(
@@ -293,7 +290,7 @@ impl NoteEditor {
                 container(field)
                     .width(Length::Fill)
                     .padding([11, 13])
-                    .style(fade.style(theme::inset(8.0))),
+                    .style(theme::inset(8.0)),
                 Space::new().height(18),
                 actions,
             ]
@@ -303,7 +300,7 @@ impl NoteEditor {
         .max_width(CARD_MAX_WIDTH)
         // 20, and the card's 1 px border.
         .padding(21)
-        .style(fade.style(card_style));
+        .style(card_style);
         modal(
             container(card)
                 .width(Length::Fill)
@@ -341,23 +338,16 @@ fn field_style(_: &iced::Theme, _: text_editor::Status) -> text_editor::Style {
     }
 }
 
-/// The field's look at `opacity`.
-fn faded_field(style: text_editor::Style, opacity: f32) -> text_editor::Style {
-    text_editor::Style {
-        background: Background::Color(Color::TRANSPARENT),
-        border: Border::default(),
-        placeholder: faded(style.placeholder, opacity),
-        value: faded(style.value, opacity),
-        selection: faded(style.selection, opacity),
-    }
-}
-
 /// `content` centred over a dismissible [`BARRIER`] covering everything,
-/// both at `fade`: a tap on the barrier cancels, the card takes its own
-/// taps, Escape cancels and no key reaches what lies beneath.
+/// both at `fade` (the card as one layer): a tap on the barrier cancels,
+/// the card takes its own taps, Escape cancels and no key reaches what
+/// lies beneath.
 fn modal(content: Element<'_, Message>, fade: Fade) -> Element<'_, Message> {
     let barrier = barrier(BARRIER, fade.barrier, Some(Message::Cancel));
-    let layers = stack![barrier, center(opaque(content)).align_x(Horizontal::Center)];
+    let layers = stack![
+        barrier,
+        center(opaque(fade.card(content))).align_x(Horizontal::Center)
+    ];
     Wrap::<Message, ()>::new(
         // A dialog route's scope: Tab goes round its fields.
         focus_scope(layers),

@@ -43,9 +43,9 @@
 //! The hover icons fade (120 ms), the zone's padding and drag highlight
 //! move (120 ms) and the chevron turns (150 ms), all linear, as the Dart
 //! implicit animations did; the turned chevron at rest is the up chevron
-//! (the same glyph turned half a turn). iced has no subtree opacity: the
-//! faded zone fades each of its colors instead, and the hover icons their
-//! glyphs'. No italic Inter face is bundled, so "Empty content"
+//! (the same glyph turned half a turn); the faded zone and the hover icons
+//! fade as one layer each (`Opacity`, `AnimatedOpacity`:
+//! `widgets::opacity_layer`). No italic Inter face is bundled, so "Empty content"
 //! asks for italic and draws upright. The Dart level meter's fill had no
 //! height (a childless `ColoredBox` under `Align` takes the smallest size),
 //! so it never showed; here it fills the meter's 8 px, as intended.
@@ -79,6 +79,7 @@ use crate::ui::core::theme::{self, alpha, bare_button, boxed, font, Studio};
 use crate::ui::core::widgets::animated::{animated, animated_container, Decoration};
 use crate::ui::core::widgets::confirm_dialog::{self, modal, DialogResult, Fade};
 use crate::ui::core::widgets::material_tooltip::material_tooltip;
+use crate::ui::core::widgets::opacity_layer::opacity_layer;
 use crate::ui::core::widgets::studio_hint::spinner;
 use crate::ui::core::widgets::studio_text::studio_text;
 use crate::ui::core::widgets::text_field::text_input;
@@ -484,11 +485,6 @@ fn card_key(id: &str) -> u64 {
     hasher.finish()
 }
 
-/// `color` with its alpha scaled by `opacity` (the faded zone).
-fn fade(color: Color, opacity: f32) -> Color {
-    alpha(color, color.a * opacity)
-}
-
 impl<'a> TechniqueMediaSection<'a> {
     /// The section: the caption, a card per example, then — editing — the
     /// add zone, the record row and the live preview; or, read-only with no
@@ -690,15 +686,11 @@ impl<'a> TechniqueMediaSection<'a> {
         let enabled = self.zone_enabled();
         let dense = !self.media.is_empty();
         let dragging = state.dragging() && enabled;
-        let opacity = if enabled { 1.0 } else { 0.5 };
-        let fg = fade(
-            if dragging {
-                Studio::ACCENT
-            } else {
-                Studio::TEXT_SECONDARY
-            },
-            opacity,
-        );
+        let fg = if dragging {
+            Studio::ACCENT
+        } else {
+            Studio::TEXT_SECONDARY
+        };
         let (fill, border) = if dragging {
             (alpha(Studio::ACCENT, 0.08), alpha(Studio::ACCENT, 0.6))
         } else {
@@ -716,14 +708,14 @@ impl<'a> TechniqueMediaSection<'a> {
         .align_y(Vertical::Center);
         // 16 across and 12 (dense) or 22 down, inside the 1 px border. The
         // padding and the drag's tint move over 120 ms, linear (the Dart
-        // `AnimatedContainer`); the faded zone's opacity applies at once.
+        // `AnimatedContainer`), inside the `Opacity` that fades a disabled
+        // zone to half at once, as one layer.
         let zone = animated_container(content, ZONE_ANIMATION)
             .width(Length::Fill)
             .align((0.0, -1.0))
             .padding([if dense { 13.0 } else { 23.0 }, 17.0])
-            .decoration(Decoration::boxed(fill, 10.0, border, 1.0))
-            .opacity(opacity);
-        let tap = button(zone)
+            .decoration(Decoration::boxed(fill, 10.0, border, 1.0));
+        let tap = button(opacity_layer(if enabled { 1.0 } else { 0.5 }, zone))
             .width(Length::Fill)
             .padding(0)
             .style(bare_button)
@@ -800,8 +792,9 @@ fn divider<'a, M: 'a>() -> Element<'a, M> {
 
 /// A card's hover icons — Export (when `exportable`), then Rename and
 /// Remove (when `editable`) — faded in while the card is `hovered` and out
-/// when it is not, over 120 ms (`AnimatedOpacity`); there, and tappable,
-/// either way (a faded widget keeps its place and its taps).
+/// when it is not, over 120 ms (`AnimatedOpacity`, the row as one layer);
+/// there, and tappable, either way (a faded widget keeps its place and its
+/// taps).
 fn hover_actions<'a>(
     hovered: bool,
     exportable: bool,
@@ -816,7 +809,6 @@ fn hover_actions<'a>(
                 Icon::Download,
                 "Export",
                 Message::Export(id.clone()),
-                opacity,
             ));
             if editable {
                 actions = actions.push(Space::new().width(4));
@@ -831,27 +823,23 @@ fn hover_actions<'a>(
                         id: id.clone(),
                         current: label.clone(),
                     },
-                    opacity,
                 ))
                 .push(Space::new().width(4))
                 .push(hover_icon(
                     Icon::Trash2,
                     "Remove",
                     Message::Remove(id.clone()),
-                    opacity,
                 ));
         }
-        actions.into()
+        opacity_layer(opacity, actions).into()
     };
     let target = if hovered { 1.0 } else { 0.0 };
     animated(target, HOVER_ANIMATION, Curve::Linear, actions).into()
 }
 
-/// `_HoverIcon`: a 14 px faint glyph with a click cursor and a tooltip,
-/// drawn at `opacity`.
-fn hover_icon<'a>(icon: Icon, tip: &'a str, on_tap: Message, opacity: f32) -> Element<'a, Message> {
-    let color = alpha(Studio::TEXT_FAINT, opacity);
-    let target = button(icons::icon(icon, 14.0, color))
+/// `_HoverIcon`: a 14 px faint glyph with a click cursor and a tooltip.
+fn hover_icon<'a>(icon: Icon, tip: &'a str, on_tap: Message) -> Element<'a, Message> {
+    let target = button(icons::icon(icon, 14.0, Studio::TEXT_FAINT))
         .padding(0)
         .style(bare_button)
         .on_press(on_tap);
@@ -1089,26 +1077,26 @@ impl RenameExampleDialog {
             .size(14)
             .line_height(1.0)
             .padding(theme::FIELD_PADDING)
-            .caret_color(fade.color(Studio::ACCENT))
-            .style(fade.input(theme::studio_input));
+            .caret_color(Studio::ACCENT)
+            .style(theme::studio_input);
         let card = container(
             column![
                 text("Rename example")
                     .size(15)
                     .font(font::BOLD)
-                    .color(fade.color(Studio::TEXT_PRIMARY)),
+                    .color(Studio::TEXT_PRIMARY),
                 Space::new().height(14),
                 // 12 by 10 inside the well's 1 px border.
                 container(field)
                     .width(Length::Fill)
                     .padding([11, 13])
-                    .style(fade.style(theme::inset(8.0))),
+                    .style(theme::inset(8.0)),
                 Space::new().height(18),
                 row![
                     Space::new().width(Length::Fill),
-                    dialog_button("Cancel", Message::Cancel, false, fade),
+                    dialog_button("Cancel", Message::Cancel, false),
                     Space::new().width(8),
-                    dialog_button("Save", Message::Confirm, true, fade),
+                    dialog_button("Save", Message::Confirm, true),
                 ],
             ]
             .width(Length::Fill),
@@ -1116,18 +1104,16 @@ impl RenameExampleDialog {
         .width(380)
         // 20 inside the 1 px border.
         .padding(21)
-        .style(fade.style(|_| boxed(Some(Studio::SURFACE_RAISED), 16.0, Some(Studio::BORDER))));
+        .style(|_| boxed(Some(Studio::SURFACE_RAISED), 16.0, Some(Studio::BORDER)));
         modal(container(card).padding(24).into(), fade)
     }
 }
 
-/// `_DialogButton`: the rename dialog's flat buttons (no hover change), at
-/// the dialog's `fade`.
+/// `_DialogButton`: the rename dialog's flat buttons (no hover change).
 fn dialog_button<'a>(
     label: &'a str,
     on_tap: confirm_dialog::Message,
     accent: bool,
-    fade: Fade,
 ) -> Element<'a, confirm_dialog::Message> {
     let (fill, border, fg) = if accent {
         (
@@ -1138,7 +1124,6 @@ fn dialog_button<'a>(
     } else {
         (Studio::SURFACE_RAISED, Studio::BORDER, Studio::TEXT_PRIMARY)
     };
-    let (fill, border, fg) = (fade.color(fill), fade.color(border), fade.color(fg));
     // 14 by 8 inside the 1 px border.
     let face = container(text(label).size(13).font(font::SEMIBOLD).color(fg))
         .padding([9, 15])

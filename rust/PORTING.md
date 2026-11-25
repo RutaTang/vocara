@@ -199,8 +199,15 @@ structure every screen follows, so screens ported by different hands fit:
   border over its fill, as Flutter's `BoxDecoration` (and iced's
   tiny-skia renderer, which the Linux tests draw with) do: upstream drew it
   in place of the fill, so a translucent border (a hovered card's coral at
-  60 %) showed the page behind the card. Text always uses the bundled
-  Inter (`theme::font::install`), never a copy installed on the machine.
+  60 %) showed the page behind the card. Both renderers (`rust/vendor`'s
+  `iced_wgpu` and `iced_tiny_skia`, reached through `iced_renderer`'s
+  `Effects`, which `iced::Renderer` implements) composite what iced has no
+  primitive for, as Flutter's layers did: a subtree drawn offscreen and
+  composited at an opacity (`widgets::opacity_layer`, Flutter's `Opacity`
+  and `FadeTransition`), and a backdrop blurred and color-filtered inside a
+  hard-edged clip (`BackdropFilter`), in the same arithmetic, so both draw
+  the same pixels. Text always uses the bundled Inter
+  (`theme::font::install`), never a copy installed on the machine.
 - **Text**: every text is shaped fully and kerned, as Flutter set it: the
   workspace enables iced's `advanced-shaping` feature, which makes
   `Shaping::Advanced` every text's default (iced's own default shapes ASCII
@@ -275,9 +282,13 @@ structure every screen follows, so screens ported by different hands fit:
   pages' that draw their own; the license page; a lyrics list's scroll)
   subscribes to `motion::frames(animating)`, the window's frames only
   while something moves: an idle app does not redraw. The state never
-  waits for an animation; only its drawing does. iced has no subtree
-  opacity: what fades (a dialog card, a snack bar, a tooltip) takes every
-  color it draws at the fade's opacity. A sliding page moves its layout
+  waits for an animation; only its drawing does. What Flutter faded as a
+  layer (a dialog card, a floating snack bar, a tooltip, a toolbar item, a
+  license detail, the video controls, a disabled drop zone, fader or play
+  disc, a dragged lane) fades as one (`widgets::opacity_layer`): where its
+  parts overlap, the topmost shows at the fade's opacity; what Flutter
+  painted with a faded color (a barrier, a scrollbar, an ink highlight)
+  fades its color. A sliding page moves its layout
   with its drawing (`widgets::slide`), so a tap lands where it is drawn.
 - **Scrollbars**: a vertical scrollable that Material's desktop scroll
   behavior gave a scrollbar takes `.fading()` (`widgets::fading_scrollbar`),
@@ -359,10 +370,10 @@ small and written down in the module that has it:
   recognizer above the view wanted the press too: iced has no arena
   (`fading_scrollbar`).
 - A text field's right-click toolbar (`text_field::toolbar`, its
-  superellipse corners and its shadow's spread Flutter's) shows what lies
-  behind it unblurred and unsaturated (Flutter's `BackdropFilter`; iced
-  has no backdrop filter), its shadow faded on iced's curve, not a
-  Gaussian, and its labels in Inter at Inter's natural line height, where
+  superellipse corners, its shadow's spread and its blurred and saturated
+  backdrop Flutter's) fills and strokes its box antialiased, where
+  Flutter's hard-edged clip cut them, its shadow faded on iced's curve,
+  not a Gaussian, and its labels in Inter at Inter's natural line height, where
   Flutter set them in the macOS system UI font: the font system reaches
   that face by its hidden family name, but cosmic-text varies a face
   along its weight axis alone, so it would draw the variable system font
@@ -495,7 +506,7 @@ behavior and its tests are ported and the gates pass.
 | `ui/technique_library/view_model/technique_library_view_model.dart` | 280 | `vocara_app::ui::technique_library::view_model::technique_library_view_model` | done |
 | `ui/technique_library/widgets/media/technique_audio_player.dart` | 417 | `vocara_app::ui::technique_library::widgets::media::technique_audio_player` (media_kit's `Player` → `vocara_services::media_player`, polled: AVFoundation on macOS with `device`, the null player elsewhere, a fake in tests; the keyed players a technique page keeps → `media::example_players`) | done (the AVFoundation backend type-checked for macOS; its pure parts tested everywhere) |
 | `ui/technique_library/widgets/media/technique_media_section.dart` | 898 | `vocara_app::ui::technique_library::widgets::media::technique_media_section` (plain data in — `TechniqueMediaSection`, the constructor's parameters — and `Message`s out, which `MediaSectionState::update` turns into the callbacks' `Event`s; the page keeps that state (hover, drag) and the `ExamplePlayers`; the picker is `vocara_services::file_panels`' (`browse`), the rename dialog goes through the app's dialog stack (`Dialog::RenameExample`)) | done |
-| `ui/technique_library/widgets/media/technique_video_player.dart` | 190 | `vocara_app::ui::technique_library::widgets::media::technique_video_player` (the controls `AdaptiveVideoControls` gave it on macOS, media_kit_video 2.0.1's `MaterialDesktopVideoControls` with `modifyVolumeOnScroll: false` → `media::video_controls`, one widget drawing and handling them all; its fullscreen route → the page's `Screen::overlay` plus the window's native fullscreen; the controls' keyboard → the first video started, through `ExamplePlayers::shortcuts`) | done (what iced cannot do the same — group opacity, focus scopes, rounded clips, scroll phases — is listed in `video_controls`' and the player's module docs) |
+| `ui/technique_library/widgets/media/technique_video_player.dart` | 190 | `vocara_app::ui::technique_library::widgets::media::technique_video_player` (the controls `AdaptiveVideoControls` gave it on macOS, media_kit_video 2.0.1's `MaterialDesktopVideoControls` with `modifyVolumeOnScroll: false` → `media::video_controls`, one widget drawing and handling them all; its fullscreen route → the page's `Screen::overlay` plus the window's native fullscreen; the controls' keyboard → the first video started, through `ExamplePlayers::shortcuts`) | done (what iced cannot do the same — focus scopes, rounded clips, scroll phases — is listed in `video_controls`' and the player's module docs) |
 | `ui/technique_library/widgets/studio_field.dart` | 96 | `vocara_app::ui::technique_library::widgets::studio_field` | done |
 | `ui/technique_library/widgets/technique_analysis_section.dart` | 690 | `vocara_app::ui::technique_library::widgets::technique_analysis_section` (`view` reads the view model, `update` makes the call the Dart tap made where the control was live; the page keeps the Spectrogram tab's `VoiceprintState` and asks `ensureReferenceAnalysis` while the panel is built; the Dart level meter's fill had no height, here it shows) | done (the Range and Dynamics tabs are placeholders until `voice_profile_view` lands) |
 | `ui/technique_library/widgets/technique_detail_screen.dart` | 825 | `vocara_app::ui::technique_library::widgets::technique_detail_screen` (the router's `technique_library::detail`; the screen owns the view model, the `ExamplePlayers`, the `MediaSectionState` and the analysis card's `VoiceprintState`; each `Job` runs off the UI thread and lands as `Message::Landed`, each `Answer` is a Dart `await` resuming; the recorder's ticks — and a quit's `quitFinalize` — and the players' poll are subscriptions; the dialogs go through `Update::dialog`; the header's double-tap settle drops its buttons' messages; the snack bars are the page's while it is on top (queued, timed by a subscription), the app's `messenger`'s once it leaves; exports use `file_panels`' save panel, the players `SystemMediaPlayers` — `with_deps` takes a test's) | done |

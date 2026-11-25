@@ -220,3 +220,19 @@ fn what_it_draws_past_its_box_fades_with_it() {
         faded(Color::WHITE, 0.5)
     ));
 }
+
+#[test]
+fn a_layer_inside_a_clip_stays_inside_it() {
+    // A page half slid out of its 60-wide box, which clips it in a layer
+    // of its own (handing its content the window as viewport): the faded
+    // block inside goes no further than the box.
+    let mut window = Frames::new(WINDOW);
+    let page = crate::ui::core::widgets::slide::slide(
+        container(opacity_layer(0.5, block(RED, 60.0, 40.0))).width(60),
+        0.5,
+    );
+    window.frame(page, &[], Instant::now());
+    assert_eq!(window.pixel(Point::new(10.0, 20.0)), BACKGROUND);
+    assert!(near(window.pixel(Point::new(45.0, 20.0)), faded(RED, 0.5)));
+    assert_eq!(window.pixel(Point::new(75.0, 20.0)), BACKGROUND);
+}

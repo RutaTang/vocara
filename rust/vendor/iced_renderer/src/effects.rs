@@ -65,8 +65,9 @@ pub trait Effects {
     /// as one layer at `opacity` inside `bounds`: where parts of it
     /// overlap, the topmost shows, at `opacity`, not a blend of each part
     /// at `opacity`. Text, images, quads, meshes and canvases inside it all
-    /// go into the group; clips and transformations go on working. Like a
-    /// layer, it is drawn over what was drawn before it.
+    /// go into the group; clips and transformations go on working, and the
+    /// clip of the layer it is started in clips it too. Like a layer, it is
+    /// drawn over what was drawn before it.
     fn start_opacity_layer(&mut self, bounds: Rectangle, opacity: f32);
 
     /// Ends the group [`start_opacity_layer`](Self::start_opacity_layer)

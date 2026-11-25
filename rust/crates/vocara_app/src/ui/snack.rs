@@ -16,8 +16,9 @@
 //! entrance (`Interval(0.4, 0.6, curve: Curves.easeInCirc)`) while it grows
 //! up from its bottom edge (`Curves.easeInOutQuart`, clipped), and leaves by
 //! the same fade alone; a fixed one slides up from the page's bottom edge
-//! (`Curves.fastOutSlowIn`, clipped) and back down. Flutter's `Hero`
-//! between the pages' scaffolds has no counterpart.
+//! (`Curves.fastOutSlowIn`, clipped) and back down. A floating one fades as
+//! one layer (the `FadeTransition` around it: `widgets::opacity_layer`).
+//! Flutter's `Hero` between the pages' scaffolds has no counterpart.
 //!
 //! A snack bar can be swiped away: `SnackBar` wraps itself in a
 //! `Dismissible` that dismisses downward (`widgets::dismissible`), so
@@ -50,6 +51,7 @@ use iced::{
 use crate::ui::core::motion::{self, Controller, Curve};
 use crate::ui::core::theme;
 use crate::ui::core::widgets::dismissible::{Behavior, Dismissible};
+use crate::ui::core::widgets::opacity_layer::opacity_layer;
 
 /// How long a snack bar takes to enter, and to leave
 /// (`_snackBarTransitionDuration`).
@@ -65,11 +67,10 @@ pub enum SnackStyle {
     Fixed,
 }
 
-/// Draws a snack bar's text, at an opacity, as its page does: the bar's
-/// `Material` alone (`SnackBar` reports nothing: no Dart snack bar had an
-/// action). The queue sets a floating one in its margin
-/// ([`FLOATING_MARGIN`]).
-pub type SnackLook = for<'a> fn(&'a str, f32) -> Element<'a, Infallible>;
+/// Draws a snack bar's text as its page does: the bar's `Material` alone
+/// (`SnackBar` reports nothing: no Dart snack bar had an action). The queue
+/// sets a floating one in its margin ([`FLOATING_MARGIN`]) and fades it.
+pub type SnackLook = for<'a> fn(&'a str) -> Element<'a, Infallible>;
 
 /// A floating snack bar's margin around its `Material`: every Dart
 /// floating snack bar's `margin: EdgeInsets.all(16)`.
@@ -426,8 +427,8 @@ fn timer_stream(timer: &SnackTimer) -> impl iced::futures::Stream<Item = SnackEv
 /// with no shape, color or padding of its own drew it under forui's theme:
 /// the inverse surface, forui's rounded shape ([`theme::SNACK_BAR_RADIUS`]),
 /// 14 px text, 24 / 14 of padding, elevation 6. It slides rather than
-/// fades, so it is always opaque.
-pub fn fixed_bar(message: &str, _opacity: f32) -> Element<'_, Infallible> {
+/// fades.
+pub fn fixed_bar(message: &str) -> Element<'_, Infallible> {
     container(
         crate::ui::core::text(message)
             .size(14)
@@ -473,7 +474,8 @@ fn transition<'a>(
     now: Instant,
 ) -> Element<'a, SnackEvent> {
     let (opacity, height) = progress(bar.style, controller, now);
-    let look = (bar.look)(&bar.text, opacity).map(|never| match never {});
+    let look =
+        Element::from(opacity_layer(opacity, (bar.look)(&bar.text))).map(|never| match never {});
     let (anchor, content, behavior) = match bar.style {
         SnackStyle::Floating => (
             Anchor::Bottom,

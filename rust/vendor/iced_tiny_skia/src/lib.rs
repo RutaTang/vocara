@@ -59,7 +59,7 @@ pub struct Renderer {
 struct OpenGroup {
     /// The stack the group's layer goes into when it ends.
     parent: layer::Stack,
-    /// The group's clip, as given.
+    /// The group's clip, transformed and inside the layer it is in.
     bounds: Rectangle,
     /// The opacity it is composited at.
     opacity: f32,
@@ -80,12 +80,16 @@ impl Renderer {
     /// [`end_opacity_layer`](Self::end_opacity_layer) ends it, composited
     /// as one layer at `opacity` inside `bounds` (Flutter's `Opacity`):
     /// what overlaps inside it shows the topmost part, not a blend of
-    /// translucent parts. Clips and transformations go on working inside.
+    /// translucent parts. Clips and transformations go on working inside,
+    /// and the clip of the layer it is drawn in clips it too.
     pub fn start_opacity_layer(&mut self, bounds: Rectangle, opacity: f32) {
-        let transformation = self.layers.transformation();
+        let (layer, transformation) = self.layers.current_mut();
+        let bounds = (bounds * transformation)
+            .intersection(&layer.bounds)
+            .unwrap_or_default();
         let mut group = layer::Stack::new();
 
-        group.reset(bounds * transformation);
+        group.reset(bounds);
         group.push_transformation(transformation);
 
         let parent = std::mem::replace(&mut self.layers, group);
@@ -110,7 +114,8 @@ impl Renderer {
         let mut group = std::mem::replace(&mut self.layers, open.parent);
         group.flush();
 
-        self.layers.push_clip(open.bounds);
+        self.layers.push_clip(Rectangle::default());
+        self.layers.current_mut().0.bounds = open.bounds;
         self.layers.current_mut().0.effect =
             Some(layer::Effect::Group(std::sync::Arc::new(layer::Group {
                 opacity: open.opacity,
@@ -138,14 +143,18 @@ impl Renderer {
         };
 
         let shape = path.bounds();
-        let transformation = self.layers.transformation();
-
-        self.layers.push_clip(Rectangle {
+        let (layer, transformation) = self.layers.current_mut();
+        let bounds = (Rectangle {
             x: shape.x(),
             y: shape.y(),
             width: shape.width(),
             height: shape.height(),
-        });
+        } * transformation)
+            .intersection(&layer.bounds)
+            .unwrap_or_default();
+
+        self.layers.push_clip(Rectangle::default());
+        self.layers.current_mut().0.bounds = bounds;
         self.layers.current_mut().0.effect =
             Some(layer::Effect::Backdrop(std::sync::Arc::new(layer::Backdrop {
                 clip: path,

@@ -217,7 +217,7 @@ impl UpdateDownloadDialog {
         let mut content = column![text(format!("Vocara {} is available", info.version))
             .size(15)
             .font(font::BOLD)
-            .color(fade.color(Studio::TEXT_PRIMARY))];
+            .color(Studio::TEXT_PRIMARY)];
         if !info.notes.is_empty() {
             content = content.push(Space::new().height(12)).push(
                 container(
@@ -225,7 +225,7 @@ impl UpdateDownloadDialog {
                         text(info.notes.as_str())
                             .size(12.5)
                             .line_height(1.5)
-                            .color(fade.color(Studio::TEXT_SECONDARY))
+                            .color(Studio::TEXT_SECONDARY)
                             .width(Length::Fill),
                     )
                     .fading(),
@@ -241,7 +241,7 @@ impl UpdateDownloadDialog {
             .line_height(1.0)
             .padding(0)
             .wrapping(Wrapping::WordOrGlyph)
-            .style(move |t, s| faded_url(url_style(t, s), fade.card));
+            .style(url_style);
         content = content
             .push(Space::new().height(14))
             .push(
@@ -250,23 +250,22 @@ impl UpdateDownloadDialog {
                 container(url)
                     .width(Length::Fill)
                     .padding(Padding::from([11, 13]))
-                    .style(fade.style(theme::inset(8.0))),
+                    .style(theme::inset(8.0)),
             )
             .push(Space::new().height(22))
             .push(row![
                 Space::new().width(Length::Fill),
-                studio_button("Later", DialogMessage::Cancel).opacity(fade.card),
+                studio_button("Later", DialogMessage::Cancel),
                 Space::new().width(10),
                 studio_button("Open Download Page", DialogMessage::Confirm)
                     .icon(Icon::Download)
-                    .variant(StudioButtonVariant::Accent)
-                    .opacity(fade.card),
+                    .variant(StudioButtonVariant::Accent),
             ]);
         let card = container(content.width(Length::Fill))
             .width(480)
             // 22 inside the card's 1 px border.
             .padding(23)
-            .style(fade.style(theme::dialog_card));
+            .style(theme::dialog_card);
         modal(container(card).padding(24).into(), fade)
     }
 }
@@ -280,16 +279,6 @@ fn url_style(_: &Theme, _: text_editor::Status) -> text_editor::Style {
         placeholder: Studio::TEXT_FAINT,
         value: Studio::TEXT_SECONDARY,
         selection: alpha(Zinc::PRIMARY, 0.40),
-    }
-}
-
-/// The URL's look at `opacity` (the dialog's fade).
-fn faded_url(style: text_editor::Style, opacity: f32) -> text_editor::Style {
-    text_editor::Style {
-        placeholder: theme::faded(style.placeholder, opacity),
-        value: theme::faded(style.value, opacity),
-        selection: theme::faded(style.selection, opacity),
-        ..style
     }
 }
 

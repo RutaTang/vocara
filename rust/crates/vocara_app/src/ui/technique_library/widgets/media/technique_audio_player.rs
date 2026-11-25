@@ -45,6 +45,7 @@ use vocara_store::db::asset_store::AssetStore;
 use super::video_controls::Playback;
 use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::theme::{alpha, bare_button, boxed, Studio};
+use crate::ui::core::widgets::opacity_layer::opacity_layer;
 use crate::ui::core::widgets::studio_text::studio_text;
 use crate::ui::core::widgets::wrap::Wrap;
 
@@ -544,27 +545,23 @@ pub fn unavailable_clip<'a, M: 'a>() -> Element<'a, M> {
 const DISC: f32 = 30.0;
 
 /// `_RoundIconButton`: a small coral play/pause disc; `on_tap: None` shows
-/// it off (40% opacity, no click cursor).
+/// it off (at 40% opacity, as one layer; no click cursor).
 pub(super) fn round_icon_button<'a, M: Clone + 'a>(
     icon: Icon,
     on_tap: Option<M>,
 ) -> Element<'a, M> {
     let opacity = if on_tap.is_some() { 1.0 } else { 0.4 };
-    let face = container(icons::icon(
-        icon,
-        15.0,
-        alpha(Studio::ACCENT_BRIGHT, opacity),
-    ))
-    .center_x(DISC)
-    .center_y(DISC)
-    .style(move |_| {
-        boxed(
-            Some(alpha(Studio::ACCENT, 0.16 * opacity)),
-            DISC / 2.0,
-            Some(alpha(Studio::ACCENT, 0.45 * opacity)),
-        )
-    });
-    button(face)
+    let face = container(icons::icon(icon, 15.0, Studio::ACCENT_BRIGHT))
+        .center_x(DISC)
+        .center_y(DISC)
+        .style(|_| {
+            boxed(
+                Some(alpha(Studio::ACCENT, 0.16)),
+                DISC / 2.0,
+                Some(alpha(Studio::ACCENT, 0.45)),
+            )
+        });
+    button(opacity_layer(opacity, face))
         .padding(0)
         .style(bare_button)
         .on_press_maybe(on_tap)

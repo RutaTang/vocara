@@ -6,7 +6,7 @@ use crate::ui::core::widgets::animated::testing::{near, Frames, MS};
 
 const DURATION: Duration = Duration::from_millis(4000);
 
-fn look(text: &str, _: f32) -> Element<'_, Infallible> {
+fn look(text: &str) -> Element<'_, Infallible> {
     crate::ui::core::text(text).into()
 }
 
@@ -85,6 +85,69 @@ fn a_floating_snack_bar_fades_in_while_it_grows_then_fades_out() {
     assert_eq!(out(t1 + 150 * MS).0, 0.0, "gone at 60 %");
     q.frame(t1 + TRANSITION);
     assert!(q.leaving.is_none(), "dropped once it has left");
+}
+
+/// A snack bar's `Material` with its text on it: black on white.
+fn labelled_material(text: &str) -> Element<'_, Infallible> {
+    iced::widget::container(
+        crate::ui::core::text(text)
+            .size(24)
+            .color(iced::Color::BLACK),
+    )
+    .width(Length::Fill)
+    .padding(8)
+    .style(|_| crate::ui::core::theme::boxed(Some(iced::Color::WHITE), 0.0, None))
+    .into()
+}
+
+#[test]
+fn a_floating_snack_bar_fades_as_one_layer() {
+    use crate::ui::core::widgets::animated::testing::{over, BACKGROUND};
+    let size = Size::new(200.0, 120.0);
+    let pixels = |window: &Frames| -> Vec<iced::Color> {
+        (0..size.height as u32)
+            .flat_map(|y| (0..size.width as u32).map(move |x| (x, y)))
+            .map(|(x, y)| window.pixel(Point::new(x as f32, y as f32)))
+            .collect()
+    };
+    let t0 = Instant::now();
+    let mut q = SnackQueue::new();
+    q.show(
+        SnackBar::new(
+            "Hg",
+            DURATION,
+            false,
+            SnackStyle::Floating,
+            labelled_material,
+        ),
+        t0 - TRANSITION,
+    );
+    q.frame(t0);
+    let mut window = Frames::new(size);
+    window.frame(q.view().expect("drawn"), &[], t0);
+    let full = pixels(&window);
+    // Leaving, halfway through its fade at its full height: each pixel, its
+    // text's on its fill too, the bar's at the fade's opacity.
+    let t1 = q.timer().expect("its timer").deadline;
+    q.expired(q.current_seq().expect("a seq"), t1);
+    let half = t1 + 125 * MS;
+    q.frame(half);
+    let (opacity, _) = progress(SnackStyle::Floating, leaving(&q), half);
+    assert!(opacity > 0.1 && opacity < 0.9, "{opacity}");
+    window.frame(q.view().expect("drawn"), &[], half);
+    let mut text = 0;
+    for (full, faded) in full.iter().zip(pixels(&window)) {
+        let layer = over(
+            iced::Color {
+                a: opacity,
+                ..*full
+            },
+            BACKGROUND,
+        );
+        assert!(near(faded, layer), "{faded:?}, not {layer:?}");
+        text += usize::from(full.r < 0.5 && full.r > 0.0);
+    }
+    assert!(text > 10, "its text on the fill ({text} pixels)");
 }
 
 #[test]
@@ -225,7 +288,7 @@ fn the_frames_run_only_while_one_enters_or_leaves() {
 }
 
 /// What the fixed bar draws: a 40 tall white bar at the window's bottom.
-fn white_bar(_: &str, _: f32) -> Element<'_, Infallible> {
+fn white_bar(_: &str) -> Element<'_, Infallible> {
     iced::widget::container(iced::widget::Space::new().width(Length::Fill).height(40))
         .style(|_| crate::ui::core::theme::boxed(Some(iced::Color::WHITE), 0.0, None))
         .into()
@@ -261,7 +324,7 @@ fn a_fixed_snack_bar_has_forui_s_rounded_corners() {
     use crate::ui::core::widgets::animated::testing::BACKGROUND;
     // forui's snackBarTheme shape: radius 8, no border side.
     let mut window = Frames::new(Size::new(200.0, 60.0));
-    window.frame(fixed_bar("Saved", 1.0), &[], Instant::now());
+    window.frame(fixed_bar("Saved"), &[], Instant::now());
     let bar = theme::SNACK_BAR_DEFAULT_BACKGROUND;
     let at = |x: f32, y: f32| window.pixel(Point::new(x, y));
     // The corners' 8 px arcs leave their outermost pixels unpainted...
@@ -318,7 +381,7 @@ fn one_swiped_while_it_leaves_lets_the_next_enter_now() {
 
 /// What the test window draws as a snack bar's `Material`: a 40 tall white
 /// bar.
-fn white_material(_: &str, _: f32) -> Element<'_, Infallible> {
+fn white_material(_: &str) -> Element<'_, Infallible> {
     iced::widget::container(iced::widget::Space::new().width(Length::Fill).height(40))
         .style(|_| crate::ui::core::theme::boxed(Some(iced::Color::WHITE), 0.0, None))
         .into()
