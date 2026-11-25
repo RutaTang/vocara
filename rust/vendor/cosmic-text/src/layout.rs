@@ -122,42 +122,52 @@ pub struct LayoutLine {
 const NEARLY_ZERO: f32 = 1.0 / 4096.0;
 
 /// vocara: a font's ascent and descent above and below the baseline
-/// (positive) and its units per em, in its units, as it is shaped with
-/// (`hhea`'s for the app's faces, which CoreText gave Skia too).
+/// (positive), its line gap and its units per em, in its units: its
+/// ascent and descent as it is shaped with (`hhea`'s, with their `MVAR`
+/// deltas at its instance, for the app's faces), its line gap as CoreText
+/// takes it ([`crate::Font::line_gap`]), which is what CoreText gave Skia
+/// (`CTFontGetAscent`, `CTFontGetDescent`, `CTFontGetLeading`).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct FontVerticals {
     pub ascent: f32,
     pub descent: f32,
+    /// Its line gap, which SkParagraph splits above and below a run's
+    /// glyphs ([`RunMetrics::skparagraph`]).
+    pub leading: f32,
     pub units_per_em: f32,
 }
 
 impl FontVerticals {
-    /// The verticals of a font's metrics (`Font::metrics`).
-    pub fn of(metrics: &skrifa::metrics::Metrics) -> Self {
+    /// The verticals of a font (`Font::metrics`, `Font::line_gap`).
+    pub fn of(font: &crate::Font) -> Self {
+        let metrics = font.metrics();
         Self {
             ascent: metrics.ascent,
             descent: -metrics.descent,
+            leading: font.line_gap(),
             units_per_em: f32::from(metrics.units_per_em),
         }
     }
 
-    /// The ascent and descent at `size` pixels as CoreText gave them to
-    /// Skia (`CTFontGetAscent`, `CTFontGetDescent`): scaled in `double`,
-    /// then made `float`s. (Scaled in `f32` from a ratio, their last bit
-    /// can differ, which decides which way SkParagraph rounds a line whose
-    /// ascent and descent add up to exactly half a pixel.)
-    pub fn at(&self, size: f32) -> (f32, f32) {
+    /// The ascent, descent and line gap at `size` pixels as CoreText gave
+    /// them to Skia (`CTFontGetAscent`, `CTFontGetDescent`,
+    /// `CTFontGetLeading`): scaled in `double`, then made `float`s.
+    /// (Scaled in `f32` from a ratio, their last bit can differ, which
+    /// decides which way SkParagraph rounds a line whose ascent and
+    /// descent add up to exactly half a pixel.)
+    pub fn at(&self, size: f32) -> (f32, f32, f32) {
         let scale =
             |units: f32| (f64::from(units) * f64::from(size) / f64::from(self.units_per_em)) as f32;
-        (scale(self.ascent), scale(self.descent))
+        (scale(self.ascent), scale(self.descent), scale(self.leading))
     }
 }
 
 /// vocara: one run of a line as SkParagraph (the text layout of Flutter's
-/// engine) measures it: its font's ascent and descent at its size, and the
-/// line height its style asks for. A run of the buffer's line height with a
-/// height of zero (or nearly: `SK_ScalarNearlyZero` times its size) asks
-/// for none: SkParagraph's text style without a `height`.
+/// engine) measures it: its font's ascent, descent and line gap at its
+/// size, and the line height its style asks for. A run of the buffer's
+/// line height with a height of zero (or nearly: `SK_ScalarNearlyZero`
+/// times its size) asks for none: SkParagraph's text style without a
+/// `height`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RunMetrics {
     /// The run's font size, in pixels.
@@ -166,6 +176,8 @@ pub struct RunMetrics {
     pub ascent: f32,
     /// Its font's descent below the baseline at that size, in pixels.
     pub descent: f32,
+    /// Its font's line gap at that size, in pixels.
+    pub leading: f32,
     /// The line height its attributes set ([`crate::Attrs::metrics`]),
     /// if any; else the buffer's.
     pub line_height_opt: Option<f32>,
@@ -174,13 +186,18 @@ pub struct RunMetrics {
 impl RunMetrics {
     /// The run's ascent and descent in a line `line_height` pixels tall
     /// (positive), as SkParagraph's `Run::calculateMetrics` makes them:
-    /// the font's own without a height, else scaled together until they
-    /// add up to it (`TextLeadingDistribution.proportional`, Flutter's
-    /// default). The font's line gap, which it would split above and
-    /// below, is taken as zero.
+    /// the font's own, half its line gap above them and half below,
+    /// without a height; else those scaled together until they add up to
+    /// it (`TextLeadingDistribution.proportional`, Flutter's default).
     pub fn skparagraph(&self, line_height: f32) -> (f32, f32) {
-        // `fCorrectAscent`, `fCorrectDescent` (an ascent is negative).
-        let (mut ascent, mut descent) = (-self.ascent, self.descent);
+        // `fCorrectAscent = fAscent - fLeading * 0.5`, `fCorrectDescent =
+        // fDescent + fLeading * 0.5` (an ascent is negative; the half in
+        // `double`, the result a `float`).
+        let half = f64::from(self.leading) * 0.5;
+        let (mut ascent, mut descent) = (
+            (f64::from(-self.ascent) - half) as f32,
+            (f64::from(self.descent) + half) as f32,
+        );
         // `fHeightMultiplier * fFont.getSize()` is the line height.
         let multiplier = line_height / self.font_size;
         if !(multiplier.abs() > NEARLY_ZERO) {
@@ -195,19 +212,21 @@ impl RunMetrics {
 
     /// The line an empty paragraph of this run's font lays out as, in a
     /// line height of `line_height`: SkParagraph's empty metrics
-    /// (`ParagraphImpl::computeEmptyMetrics`), the font's own scaled by
-    /// the height over their sum *rounded*, where a run scales them by the
-    /// height over their sum.
+    /// (`ParagraphImpl::computeEmptyMetrics`), the font's own ascent,
+    /// descent and line gap (`InternalLineMetrics(const SkFont&, bool)`)
+    /// scaled by the height over their sum *rounded*, where a run scales
+    /// them by the height over their sum.
     pub fn skparagraph_empty(&self, line_height: f32) -> LineBox {
-        let (mut ascent, mut descent) = (-self.ascent, self.descent);
+        let (mut ascent, mut descent, mut leading) = (-self.ascent, self.descent, self.leading);
         let multiplier = line_height / self.font_size;
         if multiplier.abs() > NEARLY_ZERO {
-            let intrinsic = LineBox::rounded(ascent, descent);
+            let intrinsic = LineBox::rounded(ascent, descent, leading);
             let scale = line_height / intrinsic;
             ascent *= scale;
             descent *= scale;
+            leading *= scale;
         }
-        LineBox::of(-ascent, descent)
+        LineBox::with_leading(-ascent, descent, leading)
     }
 }
 
@@ -234,18 +253,34 @@ impl LineBox {
     /// A line of the given ascent and descent (positive).
     pub fn of(ascent: f32, descent: f32) -> Self {
         Self {
-            height: Self::rounded(-ascent, descent),
+            height: Self::rounded(-ascent, descent, 0.0),
             baseline: (f64::from(ascent) + 0.5).floor() as f32,
             ascent,
             descent,
         }
     }
 
+    /// A line of the given ascent and descent (positive) and `leading`
+    /// besides (an empty paragraph's metrics, whose leading is its font's
+    /// line gap): its baseline `fLeading / 2 - fAscent` below its top
+    /// (`InternalLineMetrics::baseline`), rounded as a line's. Its ascent
+    /// and descent take half the leading each, as a run's do.
+    fn with_leading(ascent: f32, descent: f32, leading: f32) -> Self {
+        let baseline = leading / 2.0 + ascent;
+        Self {
+            height: Self::rounded(-ascent, descent, leading),
+            baseline: (f64::from(baseline) + 0.5).floor() as f32,
+            ascent: baseline,
+            descent: descent + leading / 2.0,
+        }
+    }
+
     /// `InternalLineMetrics::height` of a line whose ascent is `ascent`
-    /// (negative) and descent `descent`: `::round((double)fDescent -
-    /// fAscent + fLeading)`, its leading zero.
-    fn rounded(ascent: f32, descent: f32) -> f32 {
-        (f64::from(descent) - f64::from(ascent)).round() as f32
+    /// (negative), descent `descent` and leading `leading`:
+    /// `::round((double)fDescent - fAscent + fLeading)`. (A line of text
+    /// has none: its runs' line gaps are in their ascents and descents.)
+    fn rounded(ascent: f32, descent: f32, leading: f32) -> f32 {
+        (f64::from(descent) - f64::from(ascent) + f64::from(leading)).round() as f32
     }
 }
 

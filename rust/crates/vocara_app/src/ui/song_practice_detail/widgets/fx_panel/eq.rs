@@ -26,6 +26,7 @@ use std::time::{Duration, Instant};
 use iced::advanced::text::{self as core_text, Paragraph as _};
 use iced::alignment::Vertical;
 use iced::border::Radius;
+use iced::font::Weight;
 use iced::widget::canvas::{self, Frame, Geometry, LineJoin, Path, Stroke};
 use iced::widget::text::Alignment;
 use iced::{keyboard, mouse, window, Color, Pixels, Point, Rectangle, Renderer, Size, Theme};
@@ -33,6 +34,7 @@ use vocara_model::models::audio_fx::{EqBand, EqBandKind};
 use vocara_model::util::dart_num::{clamp_f64, floor_to_i64, pow_f64};
 
 use super::Message;
+use crate::ui::core::system_font;
 use crate::ui::core::theme::{alpha, font, Studio};
 use crate::ui::core::widgets::gesture::{Gesture, PanDoubleTap};
 use crate::ui::core::widgets::painter::KeyedCache;
@@ -603,14 +605,15 @@ fn draw_grid(frame: &mut Frame, size: Size) {
     for (f, label) in DECADES {
         let x = freq_to_x(f, w) as f32;
         frame.stroke(&Path::line(Point::new(x, 0.0), Point::new(x, h)), major);
-        // `_decadeLabels`' `TextPainter`s: no height, the font's own line.
+        // `_decadeLabels`' `TextPainter`s: no height, the font's own line;
+        // no family, the system UI font.
         frame.fill_text(canvas::Text {
             content: label.to_string(),
             position: Point::new(x + 3.0, h - 2.0),
             color: Studio::TEXT_FAINT,
             size: Pixels(8.5),
             line_height: crate::ui::core::text::NATURAL,
-            font: font::REGULAR,
+            font: system_font::font(Weight::Normal),
             align_x: Alignment::Left,
             align_y: Vertical::Bottom,
             ..canvas::Text::default()

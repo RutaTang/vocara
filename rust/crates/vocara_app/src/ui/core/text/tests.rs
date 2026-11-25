@@ -170,6 +170,30 @@ fn the_reference_takes_the_bundled_faces_metrics() {
 }
 
 #[test]
+fn a_line_takes_hheas_line_gap_whatever_os2_asks_for() {
+    // Lucide asks for its typographic metrics (`USE_TYPO_METRICS`), whose
+    // line gap is 90 units; CoreText's leading is `hhea`'s, 0, and so is
+    // the line gap cosmic-text lays its lines out with (an icon's line its
+    // size tall: `a_line_is_skparagraphs_for_every_size_and_height`).
+    load_fonts();
+    let mut fonts = font_system().write().expect("the font system");
+    let fonts = fonts.raw();
+    for (family, typographic) in [("lucide", 90.0), (font::FAMILY, 0.0)] {
+        let id = fonts
+            .db()
+            .faces()
+            .find(|face| face.families.iter().any(|(name, _)| name == family))
+            .map(|face| face.id)
+            .expect("the face");
+        let face = fonts
+            .get_font(id, cosmic_text::fontdb::Weight::NORMAL)
+            .expect("its font");
+        assert_eq!(face.metrics().leading, typographic, "{family}: skrifa's");
+        assert_eq!(face.line_gap(), 0.0, "{family}: hhea's");
+    }
+}
+
+#[test]
 fn a_line_is_skparagraphs_for_every_size_and_height() {
     load_fonts();
     for (font, verticals) in [

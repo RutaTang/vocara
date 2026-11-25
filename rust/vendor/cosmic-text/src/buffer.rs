@@ -251,8 +251,8 @@ impl Buffer {
     /// If you have a [`FontSystem`] in scope, you should use [`Buffer::new`] instead.
     ///
     /// vocara: a line height of zero is SkParagraph's line without a
-    /// height (the font's own ascent and descent: [`crate::RunMetrics`]),
-    /// where upstream panics.
+    /// height (the font's own ascent, descent and line gap:
+    /// [`crate::RunMetrics`]), where upstream panics.
     pub fn new_empty(metrics: Metrics) -> Self {
         Self {
             lines: Vec::new(),

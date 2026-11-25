@@ -117,6 +117,8 @@ pub struct Font {
     // vocara: the normalized coordinates of its `FaceInstance`, if it has
     // one, for the rasterizer.
     instance_coords: Option<Vec<i16>>,
+    // vocara: its line gap, in its units ([`Font::line_gap`]).
+    line_gap: f32,
 }
 
 impl fmt::Debug for Font {
@@ -168,6 +170,15 @@ impl Font {
     /// [`FaceInstance`], if it has one.
     pub fn instance_coords(&self) -> Option<&[i16]> {
         self.instance_coords.as_deref()
+    }
+
+    /// vocara: its line gap, in its units, as CoreText gives it
+    /// (`CTFontGetLeading`): `hhea`'s `lineGap` with its `MVAR` delta
+    /// (`hlgp`) at its instance, whether or not its `OS/2` table asks for
+    /// its typographic metrics (which [`Font::metrics`] then takes: Lucide's
+    /// line gap there is 90 units, `hhea`'s 0).
+    pub fn line_gap(&self) -> f32 {
+        self.line_gap
     }
 
     #[cfg(feature = "peniko")]
@@ -230,6 +241,16 @@ impl Font {
             .filter(|instance| instance.untracked)
             .and_then(|_| untracked_directory(&font_ref));
         let metrics = font_ref.metrics(Size::unscaled(), &location);
+        // vocara: `hhea`'s line gap there, as CoreText takes it.
+        let line_gap = font_ref.hhea().map_or(0.0, |hhea| {
+            let delta = font_ref
+                .mvar()
+                .ok()
+                .filter(|_| !location.coords().is_empty())
+                .and_then(|mvar| mvar.metric_delta(Tag::new(b"hlgp"), location.coords()).ok())
+                .map_or(0.0, |delta| delta.to_f64() as f32);
+            f32::from(hhea.line_gap().to_i16()) + delta
+        });
 
         let monospace_fallback = if cfg!(feature = "monospace_fallback") {
             (|| {
@@ -333,6 +354,7 @@ impl Font {
             .ok()?,
             data: FontData::new(Blob::new(data), info.index),
             instance_coords,
+            line_gap,
         })
     }
 }

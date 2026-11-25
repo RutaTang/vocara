@@ -195,17 +195,23 @@ wrong. Port the behavior, not the shape:
     volume). An audio item's clock needs an output device: on a Mac with
     none, the tone's transport is skipped, said so; the movie's runs on
     the host clock either way;
-  - the text toolbar's label face (`text_field::toolbar_face`, its macOS
-    test): asks CoreText (linked by the test alone) for the fonts Flutter's
-    Skia made for the labels, step for step (the family of
-    `CTFontCreateUIFontForLanguage(kCTFontUIFontSystem, 14)`, the regular
-    one of its matching descriptors made at size 0, Skia's exact copy of it
-    at 14 pt with its optical size and no tracking), prints their sizes,
-    files and variations, and checks the labels against them: the same
-    file (`SFNS.ttf`), every axis of the instance they are drawn at, each
-    glyph's advance, what the shaper adds to it against HarfBuzz at the
-    typeface's own variation, and the line (CoreText's ascent, descent and
-    leading).
+  - the system UI font's faces (`ui::core::system_font`, its macOS test
+    for every canvas label's style, and `text_field::toolbar_face`'s for
+    the text toolbar's labels): asks CoreText and AppKit (linked by the
+    tests alone) for the fonts Flutter's Skia made for each label style,
+    step for step (the family of
+    `CTFontCreateUIFontForLanguage(kCTFontUIFontSystem, 14)`, its matching
+    descriptors and Skia's style of each from their traits through AppKit's
+    `NSFontWeight` constants, the one Skia matched to the style's weight
+    made at size 0, Skia's exact copy of it at the style's size with its
+    optical size and no tracking), prints every descriptor, the sizes,
+    files and variations, and checks the labels against them: the named
+    instance's weight the port took is Skia's of the descriptor matched, no
+    fake bold, the same file (`SFNS.ttf`), every axis of the instance they
+    are drawn at, each glyph's advance and face (no fallback), what the
+    shaper adds to it against HarfBuzz at the typeface's own variation, and
+    the line (CoreText's ascent, descent and leading, and SkParagraph's
+    line from them against the one cosmic-text lays the labels out on).
 - **Commits**: small and frequent, on the working branch, with the session's
   trailer lines. CI is not run until the whole port is done.
 
@@ -284,12 +290,15 @@ structure every screen follows, so screens ported by different hands fit:
   by a clip (both take them from `iced_tiny_skia::HardClip`), so both draw
   the same pixels. Text always uses the bundled Inter
   (`theme::font::install`), never a copy installed on the machine; only
-  the text toolbar's labels, which Flutter set in the system UI font, take
-  that face on macOS, drawn at the instance of its variation axes Flutter's
-  Skia drew (`text_field::toolbar_face`; cosmic-text is vendored for it,
-  and for SkParagraph's lines, `rust/vendor/README.md`). The canvas
-  labels, which Flutter's `TextPainter`s set in that face too, are in
-  Inter (see **Text**).
+  the labels Flutter set in the system UI font (each `TextPainter`'s,
+  whose style named no family and which inherits no theme: the text
+  toolbar's and the canvas labels) take that face on macOS, each weight
+  drawn at the instance of its variation axes Flutter's Skia drew
+  (`ui::core::system_font`: the named instance Skia matched to the weight,
+  w600 Semibold at `wght` 590, at the 12 pt optical size, untracked;
+  cosmic-text is vendored for it, and for SkParagraph's lines,
+  `rust/vendor/README.md`), and in Inter at their weight off macOS (see
+  **Text**).
 - **Wheel and trackpad** (`widgets::pan_zoom`): Flutter's macOS embedder
   delivered a scroll with gesture phases (a trackpad's two fingers, a Magic
   Mouse's) as a pan-zoom gesture, hit-tested at its start, which drag
@@ -362,16 +371,20 @@ structure every screen follows, so screens ported by different hands fit:
   faders' readouts had iced's 1.3 or a natural 1.21 before); a
   `TextPainter`'s style has none, so its labels are `text::NATURAL` (a
   line height of zero, as SkParagraph takes a multiplier of zero: the
-  font's own ascent and descent). Not identical: a face's line gap is
-  taken as zero (Inter's and Lucide's are; the toolbar's system font sets
-  its line itself), a line whose ascent and descent add up to exactly
-  half a pixel rounds the way their last bit says, which cosmic-text
-  computes as CoreText did (font units scaled in `double`, made
-  `float`s) but cannot check against CoreText off a Mac, and a field's
-  empty text is a line tall where `RenderEditable` took an empty
-  paragraph's height or its hint's (the same for every field the app has).
-  The `TextPainter` labels are set in Inter, where Flutter (no family, no
-  theme) set them in the system UI font.
+  font's own ascent and descent, its line gap split above and below:
+  `hhea`'s, as CoreText's leading, whatever `OS/2` asks for). Not
+  identical: a line whose ascent and descent add up to exactly half a
+  pixel rounds the way their last bit says, which cosmic-text computes as
+  CoreText did (font units scaled in `double`, made `float`s) but cannot
+  check against CoreText off a Mac, and a field's empty text is a line
+  tall where `RenderEditable` took an empty paragraph's height or its
+  hint's (the same for every field the app has). The `TextPainter` labels
+  (no family, no theme) are set as Flutter set them, in the system UI font
+  (`ui::core::system_font`: on macOS that face at the instance Skia drew
+  each weight at, its glyphs, advances and line checked against CoreText
+  on a Mac; off macOS Inter at the weight); the time ruler's tabular
+  figures are each the font's own figure centred in its `tnum` advance
+  (`studio_text::fill_canvas_text`, as for Inter), not the `tnum` glyph.
 - **Text fields** (`widgets::text_field`): iced's `text_input` and
   `text_editor` keep their caret, focus and blink in private state and draw
   a 1 px square caret in the text's color, under the text, so the app forks
@@ -540,6 +553,14 @@ small and written down in the module that has it:
   12 pt optical size, weight 400, no tracking) on SkParagraph's
   whole-pixel line, the same outlines at the same places to within
   0.01 px, but rasterized by swash, not CoreText (`text_field::toolbar_face`).
+- The canvas labels (every `TextPainter`'s: the time ruler, the EQ's
+  decades, the pitch lane's, the vowel chart's, the formant markers, the
+  voiceprint's frequency axis, the voice profile's range bar) are in the
+  macOS system UI font at the instance Skia drew each weight at
+  (`ui::core::system_font`), on SkParagraph's line, rasterized by swash,
+  not CoreText; the time ruler's tabular figures are the font's own
+  figures centred in their `tnum` advances, as a canvas draws no OpenType
+  features (`studio_text::fill_canvas_text`).
 
 ## Tracking
 
