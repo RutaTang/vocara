@@ -892,7 +892,11 @@ fn typing_past_the_edge_scrolls_only_as_far_as_shows_the_caret_over_100_ms() {
     caret::set_scale_factor(1.0);
     let mut window = window();
     let at = Point::new(150.0, MIDDLE);
-    let t0 = Instant::now() + 1000 * MS;
+    // The frames' clock starts now: the field stamps an edit with the real
+    // clock (its caret's blink restarts there), so frames ahead of it would
+    // find the caret in whichever half of its blink the time the test took
+    // to type put it. Behind it, the blink is at its start: shown.
+    let t0 = Instant::now();
     let text = type_past_the_end(&mut window, "WW", t0);
     // The frame that showed it, still unscrolled; then the run's first
     // frame...
