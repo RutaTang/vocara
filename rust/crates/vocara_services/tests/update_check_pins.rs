@@ -39,43 +39,6 @@ fn manifest_url_names_the_manifest_release_yml_publishes() {
     assert!(workflow.contains("latest.json"));
 }
 
-/// The manual setup checks (`release-setup-check.yml`, and CI's
-/// `release_setup_only` run) check the repo the release publishes to, and
-/// all run the same check.
-#[test]
-fn the_setup_check_checks_the_repo_release_yml_publishes_to() {
-    let releases_repo = |path: &str| {
-        repo_file(path)
-            .lines()
-            .find_map(|l| {
-                l.trim()
-                    .strip_prefix("RELEASES_REPO:")
-                    .map(|r| r.trim().to_string())
-            })
-            .unwrap_or_else(|| panic!("{path} must set RELEASES_REPO"))
-    };
-    for path in [
-        ".github/workflows/release-setup-check.yml",
-        ".github/workflows/ci.yml",
-    ] {
-        assert_eq!(
-            releases_repo(path),
-            releases_repo(".github/workflows/release.yml"),
-            "{path}"
-        );
-    }
-    for path in [
-        ".github/workflows/release.yml",
-        ".github/workflows/release-setup-check.yml",
-        ".github/workflows/ci.yml",
-    ] {
-        assert!(
-            repo_file(path).contains("run: .github/scripts/releases-repo-check.sh"),
-            "{path} runs the shared check"
-        );
-    }
-}
-
 /// Replays `verification/vectors/version.json`, computed by the Lean model
 /// that `verification/VocaraVerify/Version.lean` proves is a strict order.
 #[test]

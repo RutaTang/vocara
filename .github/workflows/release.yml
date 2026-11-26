@@ -12,8 +12,7 @@
 #                  -> notarize -> staple -> Gatekeeper assessment
 #                  -> launch the app from the DMG, inside its sandbox
 #   3  Publish   - the DMG + SHA256SUMS + latest.json (the in-app update
-#                  check's manifest) on the public releases repo, then the
-#                  DMG + SHA256SUMS as this repo's GitHub release
+#                  check's manifest) as this public repo's GitHub release
 #
 # There is no backend deploy phase yet: sync is local-only P0 today. When the
 # self-hosted sync server lands (P1, see docs/sync-protocol.md), its deploy
@@ -26,8 +25,7 @@
 #   APPLE_ID                    Apple ID email of the developer account
 #   APPLE_TEAM_ID               TP7LCYW3NY
 #   APPLE_APP_SPECIFIC_PASSWORD app-specific password from account.apple.com
-#   RELEASES_TOKEN              fine-grained token with Contents: write on
-#                               RELEASES_REPO (below)
+# The release itself is published with the workflow's own GITHUB_TOKEN.
 name: Release
 
 on:
@@ -39,9 +37,9 @@ env:
   CARGO_INCREMENTAL: "0"
   # The public repo users download from and the app's update check reads
   # (UpdateCheckService::MANIFEST_URL, pinned to this by
-  # rust/crates/vocara_services/tests/update_check_pins.rs). This repo is private, so its own
-  # releases are reachable only with a login.
-  RELEASES_REPO: RutaTang/vocara-releases
+  # rust/crates/vocara_services/tests/update_check_pins.rs): this one. The
+  # guard checks that it is the repo the workflow runs in, and public.
+  RELEASES_REPO: RutaTang/vocara
 
 # Least privilege by default; only the release job (which creates the GitHub
 # release) is granted contents: write. Third-party actions are pinned to
@@ -81,13 +79,23 @@ jobs:
             exit 1
           fi
 
-      # Publishing to the public releases repo comes after the whole build
-      # and notarization, so a missing or under-scoped token, or an unusable
-      # repo, would otherwise surface only then.
-      - name: Verify the public releases repo
+      # Publishing comes after the whole build and notarization, so a repo
+      # the app cannot read its updates from would otherwise surface only
+      # then: the app reads the manifest without a login (and v0.1.0 reads
+      # this repo's releases API), so the repo must be public.
+      - name: Verify the releases repo is this public repo
         env:
-          GH_TOKEN: ${{ secrets.RELEASES_TOKEN }}
-        run: .github/scripts/releases-repo-check.sh
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "$RELEASES_REPO" != "$GITHUB_REPOSITORY" ]; then
+            echo "::error::RELEASES_REPO ($RELEASES_REPO) is not this repository ($GITHUB_REPOSITORY)."
+            exit 1
+          fi
+          PRIVATE="$(gh api "repos/$GITHUB_REPOSITORY" --jq .private)"
+          if [ "$PRIVATE" != "false" ]; then
+            echo "::error::$GITHUB_REPOSITORY must be public: the app reads its update manifest without a login."
+            exit 1
+          fi
 
   # ============================================================
   # Phase 1: Validate - nothing ships that CI would not pass
@@ -385,7 +393,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   # ============================================================
-  # Phase 3: Publish - GitHub releases with DMG + checksums
+  # Phase 3: Publish - the GitHub release with DMG + checksums + manifest
   # ============================================================
   release:
     name: Create GitHub Release
@@ -405,10 +413,10 @@ jobs:
           name: macos-dmg
           path: artifacts
 
-      # The public notes are the tag's own message (`git tag -a`), empty for
-      # a lightweight tag: the generated notes of this repo's release (below)
-      # list its private pull requests. latest.json links the public release
-      # page.
+      # The notes are the tag's own message (`git tag -a`), empty for a
+      # lightweight tag: the release's body, which v0.1.0's update check
+      # shows (it reads this repo's releases API), and latest.json's notes.
+      # latest.json links the release page.
       - name: Write the update manifest
         run: |
           set -euo pipefail
@@ -425,14 +433,12 @@ jobs:
             '{latest: $latest, url: $url, notes: $notes}' > artifacts/latest.json
           cat artifacts/latest.json
 
-      # GitHub serves releases/latest/download/latest.json from the newest
-      # release here that is not a prerelease, so a `-` tag never reaches
-      # the update check.
-      - name: Publish to the public releases repo
+      # GitHub serves releases/latest/download/latest.json (and the
+      # releases/latest API v0.1.0 reads) from the newest release that is
+      # not a prerelease, so a `-` tag never reaches the update check.
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
-          repository: ${{ env.RELEASES_REPO }}
-          token: ${{ secrets.RELEASES_TOKEN }}
           tag_name: ${{ github.ref_name }}
           name: Vocara ${{ github.ref_name }}
           draft: false
@@ -443,25 +449,12 @@ jobs:
             artifacts/SHA256SUMS
             artifacts/latest.json
 
-      # This repo's own record of the release, after the public one: a
-      # failure there leaves no half-published release behind this one.
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
-        with:
-          name: Vocara ${{ github.ref_name }}
-          draft: false
-          prerelease: ${{ contains(github.ref_name, '-') }}
-          generate_release_notes: true
-          files: |
-            artifacts/*.dmg
-            artifacts/SHA256SUMS
-
       - name: Summary
         run: |
           {
             echo "## GitHub Release Created"
             echo "- **Version**: $GITHUB_REF_NAME"
-            echo "- **Public**: https://github.com/$RELEASES_REPO/releases/tag/$GITHUB_REF_NAME"
+            echo "- **Release**: https://github.com/$RELEASES_REPO/releases/tag/$GITHUB_REF_NAME"
             echo "- **DMG**: ${{ needs.build-macos.outputs.dmg_name }}"
             echo "- **SHA256**: ${{ needs.build-macos.outputs.sha256 }}"
           } >> "$GITHUB_STEP_SUMMARY"

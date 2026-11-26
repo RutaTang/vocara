@@ -4,9 +4,10 @@ How to cut a Vocara macOS release. Releases go through GitHub Actions ONLY
 (the `Release` workflow, `.github/workflows/release.yml`); there is no local
 release script. The artifact is a signed, notarized, stapled universal
 (arm64 + x86_64) DMG attached to a GitHub release: `Vocara-<version>.dmg`.
-This repository is private, so the release users download, and the
-`latest.json` the app's update check reads, are published to the public
-releases repo `RutaTang/vocara-releases` (`RELEASES_REPO` in the workflow).
+The release users download, and the `latest.json` the app's update check
+reads, are this public repository's (`RELEASES_REPO` in the workflow; its
+guard checks that it is this repository and that it is public), published
+with the workflow's own token: no other repository or token is needed.
 
 ## Bundle-id freeze warning
 
@@ -31,20 +32,6 @@ either works; this repo standardizes on the former).
 | `APPLE_ID` | the Apple ID email of the developer account |
 | `APPLE_TEAM_ID` | `TP7LCYW3NY` (shown on the certificate and at <https://developer.apple.com/account> → Membership) |
 | `APPLE_APP_SPECIFIC_PASSWORD` | <https://account.apple.com> → Sign-In and Security → App-Specific Passwords → generate one (e.g. named `vocara-ci`) |
-| `RELEASES_TOKEN` | <https://github.com/settings/personal-access-tokens> → Generate new token (fine-grained) → Repository access: only `RutaTang/vocara-releases` → Permissions: Contents: Read and write. It expires: renew it before then, or the next release stops at its guard. |
-
-Then create the public releases repo itself: <https://github.com/new>, name
-`vocara-releases`, **Public**, with a README (a release needs a commit to
-tag, and an empty repo has none). The workflow's guard checks all of it
-(token set and allowed to create releases there, repo public, repo not
-empty) before it builds anything; its write check creates a draft release
-and deletes it at once. To check the setup without cutting a release (after
-creating the repo and the token, or renewing the token), run the **Release
-setup check** workflow by hand (Actions → Release setup check → Run
-workflow): it runs the same check (`.github/scripts/releases-repo-check.sh`)
-and nothing else. The CI workflow runs it too when started by hand with
-**release_setup_only** checked (then it builds and tests nothing), which
-works from any branch.
 
 ## Cutting a release
 
@@ -58,7 +45,9 @@ works from any branch.
    — the tag's message becomes the public release notes and the notes the
    app's update dialog shows (a lightweight `git tag` publishes none). The
    `Release` workflow runs the full pipeline:
-   - **Guard**: the tag must sit on master HEAD and match the workspace version.
+   - **Guard**: the tag must sit on master HEAD and match the workspace
+     version, and this repository must be public (the app reads its updates
+     without a login).
    - **Validate**: fmt, clippy and the tests of the whole Rust workspace in
      both feature modes (the app's journeys run as headless iced tests), and
      the Lean proofs with their vectors (the same as `just check` and
@@ -66,11 +55,10 @@ works from any branch.
    - **Build**: universal prod build → deep re-sign → DMG → notarize →
      staple → Gatekeeper assessment → launch the app from the DMG and check
      it boots inside its sandbox (`.github/scripts/launch-check.sh`).
-   - **Publish**: the DMG, a `SHA256SUMS` file and `latest.json` as a
-     release of the public releases repo, then the DMG and `SHA256SUMS` as
-     this repo's GitHub release. A tag
-     containing a `-` (e.g. `v1.0.0-rc.1`) publishes as a prerelease, which
-     the update check never offers.
+   - **Publish**: the DMG, a `SHA256SUMS` file and `latest.json` as this
+     repository's GitHub release. A tag containing a `-` (e.g.
+     `v1.0.0-rc.1`) publishes as a prerelease, which the update check never
+     offers.
 3. **Verify on a second machine** (or at minimum a different user account):
    download the DMG through a browser so it is quarantined, then:
 
@@ -111,19 +99,21 @@ All of these live as steps of the `build-macos` job in
 ## In-app update check
 
 `UpdateCheckService` reads
-`https://github.com/RutaTang/vocara-releases/releases/latest/download/latest.json`
+`https://github.com/RutaTang/vocara/releases/latest/download/latest.json`
 (once per run, and from Settings) and shows a notify-only banner (no
-auto-install). GitHub serves that path from the newest release of the public
-repo that is not a prerelease; the release workflow writes the file:
+auto-install). GitHub serves that path from the newest release of this
+repository that is not a prerelease; the release workflow writes the file:
 
 ```json
-{"latest": "1.2.0", "url": "https://github.com/RutaTang/vocara-releases/releases/tag/v1.2.0", "notes": "..."}
+{"latest": "1.2.0", "url": "https://github.com/RutaTang/vocara/releases/tag/v1.2.0", "notes": "..."}
 ```
 
 `rust/crates/vocara_services/tests/update_check_pins.rs` fails if `MANIFEST_URL` and the
-workflow's `RELEASES_REPO` stop naming the same repo. v0.1.0 read this
-private repo's releases API instead, which answers 404 without a login, so
-v0.1.0 installs never see an update: their users need the next DMG by hand.
+workflow's `RELEASES_REPO` stop naming the same repo. v0.1.0 reads this
+repository's releases API (`api.github.com/repos/RutaTang/vocara/releases/latest`:
+the release's tag, page and body, which is the tag's message), which
+answers without a login now that the repository is public, so v0.1.0
+installs are offered the next release too.
 Auto-update via Sparkle was considered and deliberately deferred.
 
 ## Troubleshooting

@@ -90,11 +90,10 @@ impl Default for UpdateCheckService {
 
 impl UpdateCheckService {
     /// Where the version manifest lives: the `latest.json` the release
-    /// workflow attaches to each release of the public releases repo
-    /// (release.yml's RELEASES_REPO; the vocara repo itself is private, so
-    /// neither its releases API nor its downloads are reachable without a
-    /// login). GitHub redirects `releases/latest/download/` to that file on
-    /// the newest release that is not a prerelease. It holds
+    /// workflow attaches to each release of this public repo (release.yml's
+    /// RELEASES_REPO), read without a login. GitHub redirects
+    /// `releases/latest/download/` to that file on the newest release that
+    /// is not a prerelease. It holds
     ///
     /// ```json
     /// {"latest": "1.1.0", "url": "https://...", "notes": "..."}
@@ -105,7 +104,7 @@ impl UpdateCheckService {
     /// releases/latest API instead without code changes. A test pins this to
     /// RELEASES_REPO.
     pub const MANIFEST_URL: &'static str =
-        "https://github.com/RutaTang/vocara-releases/releases/latest/download/latest.json";
+        "https://github.com/RutaTang/vocara/releases/latest/download/latest.json";
 
     /// The running app's version. A test pins it to the workspace package
     /// version and to `client/pubspec.yaml` (the part before `+`), so a
