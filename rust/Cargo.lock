@@ -4511,7 +4511,7 @@ dependencies = [
 
 [[package]]
 name = "vocara_app"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "block2 0.6.2",
  "bytes",
@@ -4558,7 +4558,7 @@ dependencies = [
 
 [[package]]
 name = "vocara_model"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "hex",
  "libc",
@@ -4572,7 +4572,7 @@ dependencies = [
 
 [[package]]
 name = "vocara_services"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "block2 0.6.2",
  "dirs",
@@ -4606,7 +4606,7 @@ dependencies = [
 
 [[package]]
 name = "vocara_store"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "dirs",
  "hex",

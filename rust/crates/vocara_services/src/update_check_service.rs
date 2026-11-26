@@ -107,13 +107,14 @@ impl UpdateCheckService {
         "https://github.com/RutaTang/vocara/releases/latest/download/latest.json";
 
     /// The running app's version. A test pins it to the workspace package
-    /// version and to `client/pubspec.yaml` (the part before `+`), so a
-    /// release with a stale constant fails the test gate instead of shipping
-    /// an app that mis-identifies its own version.
-    pub const APP_VERSION: &'static str = "0.1.0";
+    /// version (which the release tag must match), so a release with a
+    /// stale constant fails the test gate instead of shipping an app that
+    /// mis-identifies its own version.
+    pub const APP_VERSION: &'static str = "0.2.0";
 
-    /// The running app's build number (pubspec.yaml's part after `+`).
-    pub const APP_BUILD_NUMBER: &'static str = "1";
+    /// The running app's build number: the bundle's `CFBundleVersion`
+    /// (`packaging/macos/bundle.sh` reads it here), one more each release.
+    pub const APP_BUILD_NUMBER: &'static str = "2";
 
     /// The production service: HTTP fetch, this build's version.
     pub fn new() -> Self {
