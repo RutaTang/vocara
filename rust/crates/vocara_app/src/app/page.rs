@@ -4,14 +4,15 @@
 
 use crate::ui::core::text;
 use iced::alignment::Horizontal;
-use iced::widget::{center, column};
-use iced::{Element, Subscription, Task};
+use iced::widget::{center, column, container, Space};
+use iced::{Element, Length, Pixels, Subscription, Task};
 
 use super::Message;
 use crate::router::{Navigation, PageId, Route, RouteError};
 use crate::services::Services;
-use crate::ui::core::theme::{font, Studio};
-use crate::ui::core::widgets::studio_button::studio_button;
+use crate::ui::core::theme::{self, font, type_scale, Studio};
+use crate::ui::core::widgets::controls::secondary_button;
+use crate::ui::core::widgets::toolbar;
 use crate::ui::home::HomeScreen;
 use crate::ui::settings::SettingsScreen;
 use crate::ui::song_practice_detail::SongPracticeDetailScreen;
@@ -204,20 +205,36 @@ pub fn erase<M: Send + 'static>(
     }
 }
 
-/// go_router's `MaterialErrorScreen`: "Page Not Found", the error, and a
-/// Home button that goes to `/`.
+/// go_router's `MaterialErrorScreen`: "Page not found", the error, and a
+/// Home button that goes to `/`; drawn as the app's other pages are
+/// (`DESIGN.md`): under the unified toolbar, the 15 px heading, the error
+/// in 12 px `TEXT_SECONDARY`, a secondary button.
 fn not_found(error: &str) -> Element<'_, Message> {
-    center(
-        column![
-            text("Page Not Found")
-                .size(22)
-                .font(font::BOLD)
-                .color(Studio::TEXT_PRIMARY),
-            text(error).size(14).color(Studio::TEXT_SECONDARY),
-            studio_button("Home", Message::Navigate(Navigation::Go(Route::Home))),
-        ]
-        .spacing(16)
-        .align_x(Horizontal::Center),
-    )
+    let content = column![
+        text("Page not found")
+            .size(type_scale::HEADING)
+            .line_height(Pixels(20.0))
+            .font(font::SEMIBOLD)
+            .color(Studio::TEXT_PRIMARY),
+        Space::new().height(6),
+        text(error)
+            .size(type_scale::BODY)
+            .line_height(Pixels(18.0))
+            .color(Studio::TEXT_SECONDARY),
+        Space::new().height(18),
+        secondary_button("Home", Some(Message::Navigate(Navigation::Go(Route::Home)))),
+    ]
+    .align_x(Horizontal::Center);
+    container(column![
+        // The app's name where Home's sits, 12 past the toolbar's inset.
+        toolbar::page_toolbar(container(toolbar::title("Vocara")).padding(iced::Padding {
+            left: 12.0,
+            ..iced::Padding::ZERO
+        })),
+        center(content),
+    ])
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .style(theme::page)
     .into()
 }

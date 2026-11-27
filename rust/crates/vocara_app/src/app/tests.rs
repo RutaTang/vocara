@@ -115,7 +115,7 @@ fn the_deep_linked_library_and_settings_go_back_home() {
 fn a_deep_link_to_nowhere_shows_the_error_page_with_a_way_home() {
     let mut app = boot(Some("/nope"));
     assert_eq!(app.routes(), vec![None]);
-    assert!(shows(&app, "Page Not Found"));
+    assert!(shows(&app, "Page not found"));
     assert!(shows(&app, "GoException: no routes for location: /nope"));
     click(&mut app, "Home");
     assert_eq!(app.routes(), vec![Some(Route::Home)]);

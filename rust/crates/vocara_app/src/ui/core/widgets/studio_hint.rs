@@ -3,6 +3,10 @@
 //! analysis is running; and [`lane_hint`], the inset empty / loading state
 //! that fills a full-width analysis lane.
 //!
+//! Drawn in the design system (`DESIGN.md`): the hint 12 px `TEXT_FAINT`
+//! on 18 px lines, its spinner neutral (`TEXT_SECONDARY`: the accent is
+//! for meaning, and a running analysis is none).
+//!
 //! [`spinner`] is Material's indeterminate `CircularProgressIndicator` (the
 //! same head/tail/offset/rotation curves), drawn on a canvas that asks for
 //! the next frame while it is shown. As Material 3's 2023 indicator (the
@@ -32,12 +36,12 @@ pub struct StudioHint {
     padding: Padding,
 }
 
-/// A hint with no spinner, 13 px, no padding.
+/// A hint with no spinner, 12 px (the body size), no padding.
 pub fn studio_hint(text: impl Into<String>) -> StudioHint {
     StudioHint {
         text: text.into(),
         spinner: false,
-        font_size: 13.0,
+        font_size: crate::ui::core::theme::type_scale::BODY,
         padding: Padding::ZERO,
     }
 }
@@ -64,13 +68,13 @@ impl<'a, M: 'a> From<StudioHint> for Element<'a, M> {
         let mut col = column![].align_x(Horizontal::Center);
         if hint.spinner {
             col = col
-                .push(spinner(18.0, 2.0, Studio::ACCENT))
-                .push(Space::new().height(14));
+                .push(spinner(16.0, 1.8, Studio::TEXT_SECONDARY))
+                .push(Space::new().height(12));
         }
         col = col.push(
             text(hint.text)
                 .size(hint.font_size)
-                .line_height(1.4)
+                .line_height(iced::Pixels(18.0))
                 .align_x(Horizontal::Center)
                 .color(Studio::TEXT_FAINT),
         );

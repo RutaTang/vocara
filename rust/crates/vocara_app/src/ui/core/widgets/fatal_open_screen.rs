@@ -6,13 +6,21 @@
 //! shows it in place of everything else (Dart's `FatalOpenApp`), and its
 //! window is visible from the start, so a fatal open never looks like the app
 //! simply never launched.
+//!
+//! Drawn as the design system's dialogs are (`DESIGN.md`), on the page's
+//! background: a centred column at most 460 wide, the title 15 px
+//! semibold, the message 12 px `TEXT_SECONDARY` on 18 px lines, the error
+//! detail in a well (11 px tabular, selectable through Copy details), and
+//! the actions as dialog buttons: the secondary ones outlined, Quit Vocara
+//! the one filled primary action.
 
 use crate::ui::core::text;
 use iced::alignment::Horizontal;
-use iced::widget::{button, center, column, container, row, Space};
-use iced::{Background, Border, Element, Length, Shadow, Theme};
+use iced::widget::{center, column, container, row, Space};
+use iced::{Element, Length, Pixels};
 
-use crate::ui::core::theme::{self, alpha, font, Studio};
+use crate::ui::core::theme::{self, font, radius, type_scale, Studio};
+use crate::ui::core::widgets::controls::{primary_button, secondary_button};
 use crate::ui::core::widgets::fading_scrollbar::{scrollable, Fading};
 
 /// What the user can do on the fatal window.
@@ -118,16 +126,16 @@ impl FatalOpenScreen {
     pub fn view(&self) -> Element<'_, Message> {
         let mut content = column![
             text(self.title.as_str())
-                .size(15)
+                .size(type_scale::HEADING)
                 .font(font::SEMIBOLD)
+                .line_height(Pixels(20.0))
                 .align_x(Horizontal::Center)
                 .width(Length::Fill)
                 .color(Studio::TEXT_PRIMARY),
-            Space::new().height(10),
+            Space::new().height(8),
             text(self.message.as_str())
-                .size(13)
-                .font(font::REGULAR)
-                .line_height(1.4)
+                .size(type_scale::BODY)
+                .line_height(Pixels(18.0))
                 .align_x(Horizontal::Center)
                 .width(Length::Fill)
                 .color(Studio::TEXT_SECONDARY),
@@ -138,36 +146,35 @@ impl FatalOpenScreen {
                     scrollable(
                         container(
                             text(detail.as_str())
-                                .size(11)
-                                .line_height(1.5)
+                                .size(type_scale::LABEL)
+                                .line_height(Pixels(type_scale::LINE))
                                 .color(Studio::TEXT_SECONDARY),
                         )
-                        .padding(12)
+                        .padding([8, 10])
                         .width(Length::Fill),
                     )
                     .fading(),
                 )
                 .max_height(140)
                 .width(Length::Fill)
-                .style(|_| theme::boxed(Some(Studio::INSET), 6.0, Some(Studio::BORDER))),
+                .style(theme::well(radius::WELL)),
             );
         }
         // Wrapping, not a plain row: the window can be resized narrow, and
         // the actions must stay visible at any width.
-        let mut actions = row![].spacing(12);
+        let mut actions = row![].spacing(8);
         if self.detail.is_some() {
-            actions = actions.push(fatal_button("Copy Details", false, Message::CopyDetails));
+            actions = actions.push(secondary_button(COPY_DETAILS, Some(Message::CopyDetails)));
         }
         if self.reveal_library {
-            actions = actions.push(fatal_button(
-                "Reveal Library Folder",
-                false,
-                Message::RevealLibrary,
+            actions = actions.push(secondary_button(
+                REVEAL_LIBRARY,
+                Some(Message::RevealLibrary),
             ));
         }
-        actions = actions.push(fatal_button("Quit Vocara", true, Message::Quit));
+        actions = actions.push(primary_button(QUIT, Some(Message::Quit)));
         content = content
-            .push(Space::new().height(24))
+            .push(Space::new().height(20))
             .push(container(actions.wrap().vertical_spacing(8)).center_x(Length::Fill));
         container(center(container(content).max_width(460).padding(32)))
             .width(Length::Fill)
@@ -177,43 +184,10 @@ impl FatalOpenScreen {
     }
 }
 
-/// A plain button (hover + click cursor), enough for the fatal-window
-/// actions: the same restrained palette as the studio button's accent
-/// (`primary`) and subtle variants, radius 6, 12.5 px w600 labels.
-fn fatal_button(label: &str, primary: bool, on_press: Message) -> Element<'_, Message> {
-    button(text(label).size(12.5).font(font::SEMIBOLD))
-        .padding([7, 14])
-        .on_press(on_press)
-        .style(move |_: &Theme, status| {
-            let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
-            let (bg, border) = if primary {
-                (
-                    alpha(Studio::ACCENT, if hovered { 0.24 } else { 0.16 }),
-                    alpha(Studio::ACCENT, if hovered { 0.7 } else { 0.45 }),
-                )
-            } else if hovered {
-                (Studio::HOVER, alpha(Studio::ACCENT, 0.55))
-            } else {
-                (Studio::SURFACE_RAISED, Studio::BORDER)
-            };
-            button::Style {
-                background: Some(Background::Color(bg)),
-                text_color: if primary {
-                    Studio::ACCENT_BRIGHT
-                } else {
-                    Studio::TEXT_PRIMARY
-                },
-                border: Border {
-                    color: border,
-                    width: 1.0,
-                    radius: 6.0.into(),
-                },
-                shadow: Shadow::default(),
-                snap: false,
-            }
-        })
-        .into()
-}
+/// The actions' labels (sentence case, `DESIGN.md`).
+pub const COPY_DETAILS: &str = "Copy details";
+pub const REVEAL_LIBRARY: &str = "Reveal library folder";
+pub const QUIT: &str = "Quit Vocara";
 
 #[cfg(test)]
 mod tests {
@@ -236,8 +210,8 @@ mod tests {
             .is_ok());
         assert!(ui.find("Please update Vocara to open it.").is_ok());
         // The data is fine and no folder action is offered, only quitting.
-        assert!(ui.find("Reveal Library Folder").is_err());
-        assert_eq!(clicks(&screen, &["Quit Vocara"]), vec![Message::Quit]);
+        assert!(ui.find(REVEAL_LIBRARY).is_err());
+        assert_eq!(clicks(&screen, &[QUIT]), vec![Message::Quit]);
         assert_eq!(screen.update(Message::Quit), Some(Action::Quit));
     }
 
@@ -250,8 +224,8 @@ mod tests {
         let mut ui = iced_test::simulator(screen.view());
         assert!(ui.find("Another Vocara is using this library.").is_ok());
         assert!(ui.find(screen.message.as_str()).is_ok());
-        assert!(ui.find("Reveal Library Folder").is_err());
-        assert_eq!(clicks(&screen, &["Quit Vocara"]), vec![Message::Quit]);
+        assert!(ui.find(REVEAL_LIBRARY).is_err());
+        assert_eq!(clicks(&screen, &[QUIT]), vec![Message::Quit]);
     }
 
     #[test]
@@ -261,8 +235,8 @@ mod tests {
         assert!(ui
             .find("Waiting for another Vocara to finish starting up…")
             .is_ok());
-        assert!(ui.find("Reveal Library Folder").is_err());
-        assert_eq!(clicks(&screen, &["Quit Vocara"]), vec![Message::Quit]);
+        assert!(ui.find(REVEAL_LIBRARY).is_err());
+        assert_eq!(clicks(&screen, &[QUIT]), vec![Message::Quit]);
     }
 
     #[test]
@@ -273,10 +247,7 @@ mod tests {
         assert!(ui.find("Vocara could not open its library.").is_ok());
         assert!(ui.find(detail).is_ok());
         assert_eq!(
-            clicks(
-                &screen,
-                &["Reveal Library Folder", "Quit Vocara", "Copy Details"]
-            ),
+            clicks(&screen, &[REVEAL_LIBRARY, QUIT, COPY_DETAILS]),
             vec![Message::RevealLibrary, Message::Quit, Message::CopyDetails]
         );
         assert_eq!(
