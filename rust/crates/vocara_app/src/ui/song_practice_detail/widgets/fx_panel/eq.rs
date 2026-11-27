@@ -26,15 +26,15 @@ use std::time::{Duration, Instant};
 use iced::advanced::text::{self as core_text, Paragraph as _};
 use iced::alignment::Vertical;
 use iced::border::Radius;
-use iced::font::Weight;
 use iced::widget::canvas::{self, Frame, Geometry, LineJoin, Path, Stroke};
 use iced::widget::text::Alignment;
-use iced::{keyboard, mouse, window, Color, Pixels, Point, Rectangle, Renderer, Size, Theme};
+use iced::{
+    keyboard, mouse, window, Color, Pixels, Point, Rectangle, Renderer, Size, Theme, Vector,
+};
 use vocara_model::models::audio_fx::{EqBand, EqBandKind};
 use vocara_model::util::dart_num::{clamp_f64, floor_to_i64, pow_f64};
 
 use super::Message;
-use crate::ui::core::system_font;
 use crate::ui::core::theme::{alpha, font, Studio};
 use crate::ui::core::widgets::gesture::{Gesture, PanDoubleTap};
 use crate::ui::core::widgets::painter::KeyedCache;
@@ -46,8 +46,8 @@ pub const EQ_MAX_HZ: f64 = 18000.0;
 pub const EQ_MAX_DB: f64 = 15.0;
 pub const GRAPH_SR: f64 = 48000.0;
 
-/// The graph's height.
-pub const EQ_HEIGHT: f32 = 120.0;
+/// The graph's height: the effect module's 92 px well (`DESIGN.md`).
+pub const EQ_HEIGHT: f32 = 92.0;
 
 /// The wheel's Q debounce: a wheel edit persists this long after its last
 /// tick.
@@ -577,51 +577,75 @@ impl canvas::Program<Message> for EqGraph<'_> {
     }
 }
 
-/// The decade labels of the analyzer's grid.
+/// The decade lines of the graph and their labels (the 20 Hz label sits at
+/// the left edge with no line).
 const DECADES: [(f64, &str); 3] = [(100.0, "100"), (1000.0, "1k"), (10000.0, "10k")];
 
-/// Background + log frequency grid (behind the spectrum): faint minor
-/// lines, brighter labeled decades.
+/// The well's inset outline (`#222228`).
+const WELL_OUTLINE: Color = Color::from_rgb8(0x22, 0x22, 0x28);
+/// The decade lines (`#1C1C22`).
+const DECADE_LINE: Color = Color::from_rgb8(0x1C, 0x1C, 0x22);
+/// The 0 dB line (`#24242B`).
+const ZERO_LINE: Color = Color::from_rgb8(0x24, 0x24, 0x2B);
+/// The response curve (`#E3A094`) and its fill (the coral track colour at
+/// 10 %).
+const CURVE: Color = Color::from_rgb8(0xE3, 0xA0, 0x94);
+const CURVE_FILL: Color = Color {
+    a: 0.10,
+    ..Studio::TRACK_CORAL
+};
+/// The axis labels' size.
+const AXIS_LABEL: f32 = 9.0;
+/// The axis labels' inset from the well's sides and its bottom.
+const AXIS_INSET: f32 = 6.0;
+
+/// The well (`DESIGN.md`, Effect module: `#0F0F12`, radius 6, an inset
+/// outline) and its grid (behind the spectrum): the decade lines and the
+/// axis labels at the bottom ("20" at the left edge, "100" and "1k" on
+/// their lines, "10k" against the right edge).
 fn draw_grid(frame: &mut Frame, size: Size) {
     let (w, h) = (f64::from(size.width), size.height);
     frame.fill(
-        &Path::rounded_rectangle(Point::ORIGIN, size, Radius::from(8.0)),
-        Studio::INSET,
+        &Path::rounded_rectangle(Point::ORIGIN, size, Radius::from(6.0)),
+        Studio::WELL,
     );
-    let minor = Stroke::default()
-        .with_color(alpha(Studio::BORDER, 0.28))
-        .with_width(1.0);
-    for f in [
-        30.0, 50.0, 200.0, 300.0, 500.0, 2000.0, 3000.0, 5000.0, 20000.0,
-    ] {
-        let x = freq_to_x(f, w) as f32;
-        if x <= size.width {
-            frame.stroke(&Path::line(Point::new(x, 0.0), Point::new(x, h)), minor);
-        }
-    }
-    let major = Stroke::default()
-        .with_color(alpha(Studio::BORDER, 0.6))
-        .with_width(1.0);
-    for (f, label) in DECADES {
-        let x = freq_to_x(f, w) as f32;
-        frame.stroke(&Path::line(Point::new(x, 0.0), Point::new(x, h)), major);
-        // `_decadeLabels`' `TextPainter`s: no height, the font's own line;
-        // no family, the system UI font.
-        frame.fill_text(canvas::Text {
-            content: label.to_string(),
-            position: Point::new(x + 3.0, h - 2.0),
-            color: Studio::TEXT_FAINT,
-            size: Pixels(8.5),
-            line_height: crate::ui::core::text::NATURAL,
-            font: system_font::font(Weight::Normal),
-            align_x: Alignment::Left,
-            align_y: Vertical::Bottom,
-            ..canvas::Text::default()
+    frame.stroke(
+        &Path::rounded_rectangle(
+            Point::new(0.5, 0.5),
+            Size::new(size.width - 1.0, size.height - 1.0),
+            Radius::from(5.5),
+        ),
+        Stroke::default().with_color(WELL_OUTLINE).with_width(1.0),
+    );
+    let line = Stroke::default().with_color(DECADE_LINE).with_width(1.0);
+    let label = |content: &str, x: f32, align_x: Alignment| canvas::Text {
+        content: content.to_string(),
+        position: Point::new(x, h - 3.0),
+        color: Studio::TEXT_DISABLED,
+        size: Pixels(AXIS_LABEL),
+        line_height: Pixels(12.0).into(),
+        font: font::REGULAR,
+        align_x,
+        align_y: Vertical::Bottom,
+        ..canvas::Text::default()
+    };
+    frame.fill_text(label("20", AXIS_INSET, Alignment::Left));
+    for (f, text) in DECADES {
+        let x = (freq_to_x(f, w) as f32).round() + 0.5;
+        frame.stroke(
+            &Path::line(Point::new(x, 1.0), Point::new(x, h - 1.0)),
+            line,
+        );
+        frame.fill_text(if f >= 10000.0 {
+            label(text, size.width - AXIS_INSET, Alignment::Right)
+        } else {
+            label(text, x, Alignment::Center)
         });
     }
 }
 
-/// The input (pre) and output (post = input + response) spectra.
+/// The input (pre) and output (post = input + response) spectra, drawn
+/// faintly behind the curve.
 fn draw_spectrum(frame: &mut Frame, size: Size, data: &SpectrumData, response: Option<&[f64]>) {
     let (w, h) = (f64::from(size.width), f64::from(size.height));
     // The ceiling maps near the top of the box; 80 dB shown vertically.
@@ -663,14 +687,20 @@ fn draw_spectrum(frame: &mut Frame, size: Size, data: &SpectrumData, response: O
                 .with_line_join(LineJoin::Round),
         );
     };
-    // The box's rounded corners clip the fills (a rectangle here).
-    frame.with_clip(Rectangle::with_size(size), |frame| {
-        // Input (pre): dim grey fill + faint line. Output (post): brighter.
-        fill_under(frame, &pre, alpha(Color::WHITE, 0.045));
-        stroke(frame, &pre, alpha(Color::WHITE, 0.12), 1.0);
-        fill_under(frame, &post, alpha(Color::WHITE, 0.10));
-        stroke(frame, &post, alpha(Color::WHITE, 0.42), 1.2);
-    });
+    // Inside the well's outline.
+    frame.with_clip(
+        Rectangle::new(
+            Point::new(1.0, 1.0),
+            Size::new(size.width - 2.0, size.height - 2.0),
+        ),
+        |frame| {
+            // Input (pre): the faintest; output (post): a touch brighter.
+            fill_under(frame, &pre, alpha(Color::WHITE, 0.02));
+            stroke(frame, &pre, alpha(Color::WHITE, 0.07), 1.0);
+            fill_under(frame, &post, alpha(Color::WHITE, 0.035));
+            stroke(frame, &post, alpha(Color::WHITE, 0.16), 1.0);
+        },
+    );
 }
 
 fn polyline(pts: &[Point]) -> Path {
@@ -701,15 +731,15 @@ pub fn curve_points(bands: &[EqBand], on: bool, size: Size) -> Vec<Point> {
     pts
 }
 
-/// The 0 dB reference line, the response curve (and its soft fill to the
-/// 0 dB line) and the band handles. (Background, grid and spectrum are
-/// drawn behind this.)
+/// The 0 dB line, the response curve (1.5 px `#E3A094` over its 10 % fill
+/// to the 0 dB line) and the band nodes (7 px `TEXT_PRIMARY` discs with a
+/// dark ring). (The well, its grid and the spectrum are drawn behind this.)
 fn draw_curve(frame: &mut Frame, size: Size, bands: &[EqBand], on: bool) {
     let (w, h) = (size.width, size.height);
-    let cy = h / 2.0;
+    let cy = (h / 2.0).round() + 0.5;
     frame.stroke(
-        &Path::line(Point::new(0.0, cy), Point::new(w, cy)),
-        Stroke::default().with_color(Studio::BORDER).with_width(1.0),
+        &Path::line(Point::new(1.0, cy), Point::new(w - 1.0, cy)),
+        Stroke::default().with_color(ZERO_LINE).with_width(1.0),
     );
     let pts = curve_points(bands, on, size);
     if pts.is_empty() {
@@ -721,60 +751,54 @@ fn draw_curve(frame: &mut Frame, size: Size, bands: &[EqBand], on: bool) {
             for p in &pts[1..] {
                 b.line_to(*p);
             }
-            b.line_to(Point::new(w, cy));
-            b.line_to(Point::new(0.0, cy));
+            b.line_to(Point::new(w, h / 2.0));
+            b.line_to(Point::new(0.0, h / 2.0));
             b.close();
         });
-        frame.fill(&fill, alpha(Studio::ACCENT, 0.12));
+        frame.fill(&fill, CURVE_FILL);
     }
     frame.stroke(
         &polyline(&pts),
         Stroke::default()
             .with_color(if on {
-                Studio::ACCENT
+                CURVE
             } else {
                 alpha(Studio::TEXT_FAINT, 0.5)
             })
-            .with_width(2.5)
+            .with_width(1.5)
             .with_line_join(LineJoin::Round),
     );
-    // Band handles.
+    // Band nodes.
     for b in bands {
         let x = freq_to_x(clamp_f64(b.freq, EQ_MIN_HZ, EQ_MAX_HZ), f64::from(w)) as f32;
         let y = db_to_y(b.gain_db, f64::from(h)) as f32;
-        let c = Point::new(x, y);
-        let dot = Path::circle(c, 6.0);
+        let dot = Path::circle(Point::new(x, y), 3.5);
         frame.fill(
             &dot,
             if on {
-                Studio::ACCENT
+                Studio::TEXT_PRIMARY
             } else {
                 Studio::TEXT_FAINT
             },
         );
         frame.stroke(
             &dot,
-            Stroke::default()
-                .with_color(Studio::SURFACE)
-                .with_width(2.0),
-        );
-        frame.fill(
-            &Path::circle(c, 2.4),
-            alpha(Color::WHITE, if on { 0.9 } else { 0.35 }),
+            Stroke::default().with_color(Studio::WELL).with_width(1.5),
         );
     }
 }
 
-/// `_ReadoutPill` at (8, 6): the text on a raised, bordered pill. The text
-/// is a `Text` under the panel's `Material`: its line the theme's height 1.
+/// `_ReadoutPill` at (8, 6): the dragged band's reading on a tooltip's
+/// look (`SURFACE`, radius 5, an inset `BORDER_STRONG` outline), 10 px
+/// medium tabular `TEXT_PRIMARY`.
 fn draw_readout_pill(frame: &mut Frame, label: &str) {
-    let line_height = core_text::LineHeight::Relative(1.0);
+    let line_height = core_text::LineHeight::Absolute(Pixels(14.0));
     let measured = <Renderer as core_text::Renderer>::Paragraph::with_text(core_text::Text {
         content: label,
         bounds: Size::INFINITE,
         size: Pixels(10.0),
         line_height,
-        font: font::SEMIBOLD,
+        font: font::MEDIUM,
         align_x: core_text::Alignment::Left,
         align_y: Vertical::Top,
         shaping: core_text::Shaping::Advanced,
@@ -782,20 +806,26 @@ fn draw_readout_pill(frame: &mut Frame, label: &str) {
     })
     .min_bounds();
     let origin = Point::new(8.0, 6.0);
-    let pill = Size::new(measured.width + 14.0, measured.height + 6.0);
+    let pill = Size::new(measured.width + 12.0, measured.height + 4.0);
     let shape = Path::rounded_rectangle(origin, pill, Radius::from(5.0));
-    frame.fill(&shape, alpha(Studio::SURFACE_RAISED, 0.92));
+    frame.fill(&shape, Studio::SURFACE);
     frame.stroke(
-        &shape,
-        Stroke::default().with_color(Studio::BORDER).with_width(1.0),
+        &Path::rounded_rectangle(
+            origin + Vector::new(0.5, 0.5),
+            Size::new(pill.width - 1.0, pill.height - 1.0),
+            Radius::from(4.5),
+        ),
+        Stroke::default()
+            .with_color(Studio::BORDER_STRONG)
+            .with_width(1.0),
     );
     frame.fill_text(canvas::Text {
         content: label.to_string(),
-        position: Point::new(origin.x + 7.0, origin.y + 3.0),
-        color: Studio::TEXT_SECONDARY,
+        position: Point::new(origin.x + 6.0, origin.y + 2.0),
+        color: Studio::TEXT_PRIMARY,
         size: Pixels(10.0),
         line_height,
-        font: font::SEMIBOLD,
+        font: font::MEDIUM,
         ..canvas::Text::default()
     });
 }

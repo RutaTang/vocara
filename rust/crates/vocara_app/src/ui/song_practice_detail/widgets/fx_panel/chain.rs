@@ -66,10 +66,11 @@ use crate::ui::song_practice_detail::widgets::mixer_shared::diff_keyed;
 /// (`_ReorderableItemState`'s and `_DragInfo`'s 250 ms).
 pub const CARD_MOTION: Duration = Duration::from_millis(250);
 
-/// The handle's hit area: the 16 px grip and its 6 px gap, as wide as the
-/// header is tall.
-pub const HANDLE_WIDTH: f32 = 22.0;
-pub const HEADER_HEIGHT: f32 = 18.0;
+/// The handle's hit area, from a module's top-left: its left padding, the
+/// 6 px dots and most of the gap before the power button, down through the
+/// header row (the module's 8 px top padding and its 24 px header).
+pub const HANDLE_WIDTH: f32 = 26.0;
+pub const HEADER_HEIGHT: f32 = super::MODULE_PADDING.top + super::MODULE_HEADER;
 
 /// The index a dragged card lands at, its top at `proxy_top` (from the
 /// chain's top): every other card whose middle, where it is laid out, lies

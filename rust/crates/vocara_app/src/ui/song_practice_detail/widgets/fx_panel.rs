@@ -1,9 +1,20 @@
 //! Port of `ui/song_practice_detail/widgets/fx_panel.dart`: the FX detail
-//! for the selected vocal take or FX bus — presets, the insert chain
-//! (equalizer with its analyzer, compressor with its gain-reduction meter,
-//! de-esser, gate, delay, saturation, doubler, limiter, reverb), each insert
-//! a card with a drag handle and an on/off toggle that collapses it to its
-//! header when off, reordered by dragging the handles.
+//! for the selected vocal take or FX bus — the preset pop-up, then the
+//! insert chain (equalizer with its analyzer, compressor with its
+//! gain-reduction reading, de-esser, gate, delay, saturation, doubler,
+//! limiter, reverb), each insert an effect module with a drag handle and a
+//! power button that collapses it to its header when off, reordered by
+//! dragging the handles.
+//!
+//! Drawn as `DESIGN.md`'s effect module and the approved workspace mockup
+//! draw it: a 24 px header (the handle's dots, the power button, the name
+//! in 12 px medium, a right-aligned 11 px `TEXT_FAINT` badge: "4 bands",
+//! "GR −2.1 dB", "Bypassed"), then its parameter rows (`controls::
+//! parameter_row`: a 62 px label, a thin slider, a 54 px tabular value);
+//! 8 / 14 / 12 px of padding and a hairline under each module. A bypassed
+//! module is its header alone, at 55 %. The EQ graph is a 92 px well with
+//! its decade lines, the 0 dB line, the curve over a soft fill, its band
+//! nodes and its axis labels, the live analyzer drawn faintly behind.
 //!
 //! # Plain data in, messages out
 //!
@@ -21,10 +32,10 @@
 //! | [`Message::ReorderTrackInserts`] | `vm.mixer.reorderTrackInserts(track.id, order)` |
 //! | [`Message::ReorderBusInserts`] | `vm.mixer.reorderBusInserts(bus.id, order)` |
 //!
-//! A committed edit (a toggle, a preset) reports its live edit and then
-//! `CommitFx`, as `_setFx(fx, commit: true)` called both; a slider or EQ
-//! drag reports live edits on every move and `CommitFx` once on release; a
-//! wheel Q edit commits 400 ms after its last tick.
+//! A committed edit (a power button, a preset) reports its live edit and
+//! then `CommitFx`, as `_setFx(fx, commit: true)` called both; a slider or
+//! EQ drag reports live edits on every move and `CommitFx` once on release;
+//! a wheel Q edit commits 400 ms after its last tick.
 //!
 //! The panel keys itself by its target, so another take or bus gets fresh
 //! state (the analyzer's smoothed spectrum, a held slider), as Dart's
@@ -51,7 +62,8 @@
 //!   mouse control, so those Dart cases have no counterpart.
 //! - The gain-reduction meter's reading is the one the host passed at its
 //!   last view (Dart polled the engine itself); the meter keeps Dart's 50 ms
-//!   poll cadence, peak falloff and idle stop over it.
+//!   poll cadence, peak falloff and idle stop over it. It reads in the
+//!   compressor's badge, a short bar before it.
 //! - A reorder reaches the model (and so the engine's chain) at the drop,
 //!   250 ms before Flutter's did: `SliverReorderableList` called
 //!   `onReorder` only once the dropped card had glided in (`_dropCompleted`,
@@ -67,11 +79,10 @@ mod tests;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use crate::ui::core::text;
-use iced::alignment::{Horizontal, Vertical};
+use iced::alignment::Vertical;
 use iced::border::Radius;
-use iced::widget::canvas::{self, Frame, Geometry, Path, Stroke};
-use iced::widget::{canvas as canvas_widget, column, container, row, Space};
+use iced::widget::canvas::{self, Frame, Geometry, Path};
+use iced::widget::{canvas as canvas_widget, column, container, row, Column, Space};
 use iced::{
     mouse, window, Color, Element, Length, Padding, Point, Rectangle, Renderer, Size, Theme,
 };
@@ -82,17 +93,40 @@ pub use eq::EqInput;
 
 use self::chain::InsertChain;
 use self::eq::{EqGraph, EQ_HEIGHT};
-use super::mixer_shared::{keyed_row, tap, MenuItem, Opens, PopupMenu};
-use crate::ui::core::icons::{self, Icon};
-use crate::ui::core::motion::Curve;
-use crate::ui::core::theme::{self, boxed, font, Studio};
-use crate::ui::core::widgets::animated::{animated_align, animated_container, Decoration};
-use crate::ui::core::widgets::cap_label::cap_label;
+use super::mixer_shared::{keyed_row, popup_face, tap, MenuItem, Opens, PopupMenu};
+use crate::ui::core::theme::{self, font, type_scale, Studio};
+use crate::ui::core::widgets::animated::{animated_container, Decoration};
+use crate::ui::core::widgets::controls::{
+    draw_thin_slider, parameter_row, power_colors, KNOB, POWER_SIZE, SLIDER_FILL,
+};
 use crate::ui::core::widgets::fading_scrollbar::{no_scrollbar, scrollable};
+use crate::ui::core::widgets::line_icon::{glyphs, line_icon};
+use crate::ui::core::widgets::opacity_layer::opacity_layer;
 use crate::ui::core::widgets::painter::KeyedCache;
-use crate::ui::core::widgets::studio_controls::fixed_width_readout;
 use crate::ui::core::widgets::studio_text::studio_text;
 use crate::util::to_string_as_fixed;
+
+/// The hairline under the preset row (`#222228`, the inspector's).
+const BLOCK_LINE: Color = Color::from_rgb8(0x22, 0x22, 0x28);
+/// The hairline under each module (`#1F1F25`).
+pub const MODULE_LINE: Color = Color::from_rgb8(0x1F, 0x1F, 0x25);
+/// The handle's dots (`#4A4A54`).
+const HANDLE_DOT: Color = Color::from_rgb8(0x4A, 0x4A, 0x54);
+/// A bypassed module's opacity.
+pub const BYPASSED_OPACITY: f32 = 0.55;
+
+/// A module's padding: 8 above, 14 at the sides, 12 below.
+pub const MODULE_PADDING: Padding = Padding {
+    top: 8.0,
+    right: 14.0,
+    bottom: 12.0,
+    left: 14.0,
+};
+/// A module's header row.
+pub const MODULE_HEADER: f32 = 24.0;
+/// The gap above the EQ's well, and above the parameter rows.
+pub const EQ_GAP: f32 = 6.0;
+pub const PARAMS_GAP: f32 = 4.0;
 
 /// What the panel edits: exactly one of a vocal take's insert chain or an FX
 /// bus's chain.
@@ -210,6 +244,35 @@ fn target_key(target: &FxTarget<'_>) -> u64 {
     h.finish()
 }
 
+/// The preset the chain is (its tone; the plugin order aside), if any.
+pub fn current_preset(fx: &TrackFx) -> Option<&'static str> {
+    FxPresets::vocal()
+        .into_iter()
+        .find(|p| {
+            TrackFx {
+                order: fx.order.clone(),
+                ..p.fx.clone()
+            } == *fx
+        })
+        .map(|p| p.name)
+}
+
+/// The equalizer's badge: its enabled bands ("4 bands", "1 band").
+pub fn bands_badge(bands: &[EqBand]) -> String {
+    match bands.iter().filter(|b| b.enabled).count() {
+        1 => "1 band".to_string(),
+        n => format!("{n} bands"),
+    }
+}
+
+/// A bypassed module's badge.
+pub const BYPASSED: &str = "Bypassed";
+
+/// The compressor's badge: "GR −2.1 dB", "GR 0.0 dB".
+pub fn gr_badge(gr: f64) -> String {
+    format!("GR {} dB", gr_readout(gr)).replace('-', "\u{2212}")
+}
+
 impl<'a> FxPanel<'a> {
     /// The panel for `target`, with no input spectrum and no gain reduction.
     pub fn new(target: FxTarget<'a>) -> Self {
@@ -230,8 +293,8 @@ impl<'a> FxPanel<'a> {
         }
     }
 
-    /// The panel: the preset row, then the insert chain, in a scroll view
-    /// with no scrollbar.
+    /// The panel: the preset row (under the inspector's identity block),
+    /// then the insert chain in a scroll view with no scrollbar.
     pub fn view(self) -> Element<'a, Message> {
         let fx = Rc::new(self.target.fx());
         let set = Rc::new(Setter {
@@ -244,33 +307,30 @@ impl<'a> FxPanel<'a> {
             .map(|&kind| (kind, self.insert_card(kind, &fx, &set)))
             .collect();
         let reorder = Rc::clone(&set);
-        let body = column![
-            preset_row(&fx, &set),
-            Space::new().height(14),
-            // Insert chain — drag a handle to reorder the signal flow; each
-            // insert collapses to its header when off.
+        // Insert chain — drag a handle to reorder the signal flow; each
+        // insert collapses to its header when off.
+        let chain = column![
             InsertChain::new(cards, move |order| reorder.reorder(order)),
-            Space::new().height(4),
+            Space::new().height(12),
+        ]
+        .width(Length::Fill);
+        let panel = column![
+            preset_row(&fx, &set),
+            no_scrollbar(scrollable(chain))
+                .width(Length::Fill)
+                .height(Length::Fill),
         ]
         .width(Length::Fill)
-        .padding(Padding {
-            top: 4.0,
-            right: 2.0,
-            bottom: 16.0,
-            left: 2.0,
-        });
-        let panel = no_scrollbar(scrollable(body))
-            .width(Length::Fill)
-            .height(Length::Fill);
+        .height(Length::Fill);
         keyed_row()
             .push(target_key(&self.target), panel)
             .height(Length::Fill)
             .into()
     }
 
-    /// One insert card in the chain: a header (drag handle + on/off) plus,
-    /// when enabled, the plugin's editor. Opaque in the panel color, so a
-    /// dragged card fully occludes the others.
+    /// One insert's module in the chain: a header (drag handle, power,
+    /// name, badge) plus, when enabled, the plugin's editor. Opaque in the
+    /// panel colour, so a dragged module fully occludes the others.
     fn insert_card(
         &self,
         kind: FxKind,
@@ -292,81 +352,76 @@ impl<'a> FxPanel<'a> {
                 set.live(with(&fx, v))
             })
         };
-        // The header toggle's committed edit.
+        // The power button's committed edit.
         let toggle = |on: bool, with: fn(&TrackFx, bool) -> TrackFx| set.committed(with(f, !on));
-        let body: Element<'a, Message> = match kind {
+        match kind {
             FxKind::Eq => {
-                let mut card = column![insert_header(
-                    "Equalizer",
-                    f.eq_on,
-                    toggle(f.eq_on, |fx, v| TrackFx {
-                        eq_on: v,
-                        ..fx.clone()
-                    })
-                )];
+                let badge = Badge::Text(bands_badge(&f.eq));
+                let mut body = Vec::new();
                 if f.eq_on {
                     let fx_c = Rc::clone(fx);
                     let set_c = Rc::clone(set);
                     let input = self.analyzer_input();
-                    card = card.push(Space::new().height(8)).push(eq_graph(
-                        Rc::clone(fx),
-                        input,
-                        move |i, band| {
+                    body.push(
+                        container(eq_graph(Rc::clone(fx), input, move |i, band| {
                             set_c.live(TrackFx {
                                 eq_on: true,
                                 ..fx_c.with_band(i, band)
                             })
-                        },
-                    ));
-                }
-                card.into()
-            }
-            FxKind::Comp => {
-                let mut card = column![insert_header(
-                    "Compressor",
-                    f.comp_on,
-                    toggle(f.comp_on, |fx, v| TrackFx {
-                        comp_on: v,
-                        ..fx.clone()
-                    })
-                )];
-                if f.comp_on {
-                    card = card
-                        .push(Space::new().height(6))
-                        .push(slider(
-                            "Threshold",
-                            f.comp.threshold_db,
-                            -48.0,
-                            0.0,
-                            "dB",
-                            |fx, v| {
-                                let mut n = fx.clone();
-                                n.comp.threshold_db = v;
-                                n
-                            },
-                        ))
-                        .push(slider("Ratio", f.comp.ratio, 1.0, 12.0, ":1", |fx, v| {
-                            let mut n = fx.clone();
-                            n.comp.ratio = v;
-                            n
                         }))
-                        .push(slider(
-                            "Makeup",
-                            f.comp.makeup_db,
-                            0.0,
-                            18.0,
-                            "dB",
-                            |fx, v| {
-                                let mut n = fx.clone();
-                                n.comp.makeup_db = v;
-                                n
-                            },
-                        ))
-                        .push(Space::new().height(2))
-                        .push(gr_meter(self.gain_reduction_db));
+                        .padding(Padding {
+                            top: EQ_GAP,
+                            ..Padding::ZERO
+                        })
+                        .into(),
+                    );
                 }
-                card.into()
+                module(
+                    "Equalizer",
+                    f.eq_on,
+                    badge,
+                    toggle(f.eq_on, |fx, v| TrackFx {
+                        eq_on: v,
+                        ..fx.clone()
+                    }),
+                    Vec::new(),
+                    body,
+                )
             }
+            FxKind::Comp => module(
+                "Compressor",
+                f.comp_on,
+                Badge::Reduction(self.gain_reduction_db),
+                toggle(f.comp_on, |fx, v| TrackFx {
+                    comp_on: v,
+                    ..fx.clone()
+                }),
+                vec![
+                    slider(
+                        "Threshold",
+                        f.comp.threshold_db,
+                        -48.0,
+                        0.0,
+                        "dB",
+                        |fx, v| {
+                            let mut n = fx.clone();
+                            n.comp.threshold_db = v;
+                            n
+                        },
+                    ),
+                    slider("Ratio", f.comp.ratio, 1.0, 12.0, ":1", |fx, v| {
+                        let mut n = fx.clone();
+                        n.comp.ratio = v;
+                        n
+                    }),
+                    slider("Makeup", f.comp.makeup_db, 0.0, 18.0, "dB", |fx, v| {
+                        let mut n = fx.clone();
+                        n.comp.makeup_db = v;
+                        n
+                    }),
+                ],
+                Vec::new(),
+            ),
             FxKind::DeEsser => simple_insert(
                 "De-esser",
                 f.de_esser_on,
@@ -375,11 +430,18 @@ impl<'a> FxPanel<'a> {
                     ..fx.clone()
                 }),
                 vec![
-                    slider("Freq", f.de_esser.freq, 2000.0, 16000.0, "Hz", |fx, v| {
-                        let mut n = fx.clone();
-                        n.de_esser.freq = v;
-                        n
-                    }),
+                    slider(
+                        "Frequency",
+                        f.de_esser.freq,
+                        2000.0,
+                        16000.0,
+                        "Hz",
+                        |fx, v| {
+                            let mut n = fx.clone();
+                            n.de_esser.freq = v;
+                            n
+                        },
+                    ),
                     slider(
                         "Threshold",
                         f.de_esser.threshold_db,
@@ -555,31 +617,28 @@ impl<'a> FxPanel<'a> {
                     ..fx.clone()
                 }),
                 vec![
-                    container(
-                        row![
-                            cap_label("Space"),
-                            Space::new().width(Length::Fill),
-                            dropdown(
-                                "Space…",
-                                DROPDOWN_MENU_WIDTH,
-                                FxPresets::reverb()
-                                    .into_iter()
-                                    .map(|p| {
-                                        MenuItem::new(
-                                            p.name,
-                                            set.committed(TrackFx {
-                                                reverb: p.reverb,
-                                                ..f.clone()
-                                            }),
-                                        )
-                                    })
-                                    .collect(),
-                            ),
-                        ]
-                        .align_y(Vertical::Center),
-                    )
-                    .padding([4, 0])
-                    .into(),
+                    parameter_row(
+                        "Space",
+                        dropdown(
+                            "Space…",
+                            true,
+                            Length::Fill,
+                            DROPDOWN_MENU_WIDTH,
+                            FxPresets::reverb()
+                                .into_iter()
+                                .map(|p| {
+                                    MenuItem::new(
+                                        p.name,
+                                        set.committed(TrackFx {
+                                            reverb: p.reverb,
+                                            ..f.clone()
+                                        }),
+                                    )
+                                })
+                                .collect(),
+                        ),
+                        "",
+                    ),
                     slider("Size", f.reverb.room_size, 0.0, 1.0, "", |fx, v| {
                         let mut n = fx.clone();
                         n.reverb.room_size = v;
@@ -597,15 +656,7 @@ impl<'a> FxPanel<'a> {
                     }),
                 ],
             ),
-        };
-        container(body)
-            .width(Length::Fill)
-            .padding(Padding {
-                bottom: 18.0,
-                ..Padding::ZERO
-            })
-            .style(theme::fill(Studio::SURFACE))
-            .into()
+        }
     }
 }
 
@@ -614,6 +665,8 @@ impl<'a> FxPanel<'a> {
 /// reverb send, reset to off: nothing else in the UI sets or clears it, so
 /// an old take's audible send goes with a preset rather than staying for
 /// good. Aux sends / output routing live on the track, so they're untouched.
+/// Its pop-up reads the preset the chain is, else "None"; a hairline closes
+/// the inspector's identity block under it.
 fn preset_row<'a>(fx: &TrackFx, set: &Setter) -> Element<'a, Message> {
     let items = FxPresets::vocal()
         .into_iter()
@@ -628,119 +681,242 @@ fn preset_row<'a>(fx: &TrackFx, set: &Setter) -> Element<'a, Message> {
             .subtitle(Some(p.description.to_string()))
         })
         .collect();
-    row![
-        cap_label("Preset"),
+    let current = current_preset(fx);
+    let row = row![
+        studio_text("Preset")
+            .size(type_scale::LABEL)
+            .line_height(iced::Pixels(type_scale::LINE))
+            .color(Studio::TEXT_SECONDARY),
         Space::new().width(Length::Fill),
-        dropdown("Choose…", PRESET_MENU_WIDTH, items),
+        dropdown(
+            current.unwrap_or(NO_PRESET),
+            current.is_none(),
+            Length::Fixed(PRESET_POPUP_WIDTH),
+            PRESET_MENU_WIDTH,
+            items,
+        ),
     ]
-    .align_y(Vertical::Center)
+    .align_y(Vertical::Center);
+    column![
+        container(row).width(Length::Fill).padding(Padding {
+            top: 10.0,
+            right: 14.0,
+            bottom: 12.0,
+            left: 14.0,
+        }),
+        container(Space::new())
+            .width(Length::Fill)
+            .height(1)
+            .style(theme::fill(BLOCK_LINE)),
+    ]
     .into()
 }
 
+/// The preset pop-up's text for a chain no preset is.
+pub const NO_PRESET: &str = "None";
+
+/// The preset pop-up's width (the mockup's 118 px minimum).
+const PRESET_POPUP_WIDTH: f32 = 118.0;
 /// The preset menu's width.
 const PRESET_MENU_WIDTH: f32 = 280.0;
 /// `_Dropdown`'s default menu width.
 const DROPDOWN_MENU_WIDTH: f32 = 184.0;
 
-/// `_Dropdown`: an inset box reading `hint` with a chevron, opening a
-/// studio menu of `items` just below it.
+/// `_Dropdown`: a pop-up button reading `label` (a placeholder in
+/// `TEXT_SECONDARY`), opening a studio menu of `items` just below it.
 fn dropdown<'a>(
-    hint: &'static str,
+    label: &'static str,
+    placeholder: bool,
+    width: Length,
     menu_width: f32,
     items: Vec<MenuItem<Message>>,
 ) -> Element<'a, Message> {
-    let face = container(
-        row![
-            text(hint).size(11).color(Studio::TEXT_SECONDARY),
-            Space::new().width(4),
-            icons::icon(Icon::ChevronDown, 14.0, Studio::TEXT_FAINT),
-        ]
-        .align_y(Vertical::Center),
+    PopupMenu::new(
+        popup_face(label, placeholder, width),
+        items,
+        menu_width,
+        Opens::BelowOnTap,
     )
-    .padding([5, 10])
-    .style(|_| boxed(Some(Studio::INSET), 6.0, Some(Studio::BORDER)));
-    PopupMenu::new(face, items, menu_width, Opens::BelowOnTap).into()
+    .into()
 }
 
-/// A generic insert card: header + (when on) a list of param sliders.
+/// A module's badge.
+enum Badge {
+    None,
+    Text(String),
+    /// The compressor's live gain reduction (its meter's reading).
+    Reduction(f64),
+}
+
+/// A generic insert's module: its header and (when on) a list of
+/// parameter rows.
 fn simple_insert<'a>(
     title: &'static str,
     on: bool,
     on_toggle: Vec<Message>,
-    body: Vec<Element<'a, Message>>,
+    params: Vec<Element<'a, Message>>,
 ) -> Element<'a, Message> {
-    let mut card = column![insert_header(title, on, on_toggle)];
-    if on {
-        card = card.push(Space::new().height(6)).extend(body);
-    }
-    card.into()
+    module(title, on, Badge::None, on_toggle, params, Vec::new())
 }
 
-/// An insert header: a drag handle, the title, and an on/off toggle. (The
-/// handle's drag is the chain's: see `chain`.)
-fn insert_header<'a>(title: &str, on: bool, on_toggle: Vec<Message>) -> Element<'a, Message> {
-    row![
-        container(icons::icon(Icon::GripVertical, 16.0, Studio::TEXT_FAINT)).padding(Padding {
-            right: 6.0,
-            ..Padding::ZERO
-        }),
-        studio_text(title.to_uppercase())
-            .size(10.5)
-            .font(font::BOLD)
-            .letter_spacing(0.8)
-            .color(if on {
-                Studio::TEXT_PRIMARY
-            } else {
-                Studio::TEXT_SECONDARY
-            }),
-        Space::new().width(Length::Fill),
-        fx_toggle(on, on_toggle),
+/// An effect module (`DESIGN.md`): the header, then (when on) `above` (the
+/// EQ's well) and the parameter rows 2 px apart; its padding, the panel's
+/// opaque fill and a hairline under it. Off, the header alone at 55 % with
+/// the "Bypassed" badge.
+fn module<'a>(
+    title: &'static str,
+    on: bool,
+    badge: Badge,
+    on_toggle: Vec<Message>,
+    params: Vec<Element<'a, Message>>,
+    above: Vec<Element<'a, Message>>,
+) -> Element<'a, Message> {
+    let badge = if on {
+        badge
+    } else {
+        Badge::Text(BYPASSED.into())
+    };
+    let header = module_header(title, on, badge, on_toggle);
+    let mut content = Column::new().width(Length::Fill).push(if on {
+        header
+    } else {
+        opacity_layer(BYPASSED_OPACITY, header).into()
+    });
+    if on {
+        content = content.extend(above);
+        if !params.is_empty() {
+            content = content.push(Column::with_children(params).spacing(2).padding(Padding {
+                top: PARAMS_GAP,
+                ..Padding::ZERO
+            }));
+        }
+    }
+    column![
+        container(content)
+            .width(Length::Fill)
+            .padding(MODULE_PADDING),
+        container(Space::new())
+            .width(Length::Fill)
+            .height(1)
+            .style(theme::fill(MODULE_LINE)),
     ]
-    .height(chain::HEADER_HEIGHT)
+    .width(Length::Fill)
+    .into()
+}
+
+/// A module's header: the drag handle's dots, the power button, the name
+/// (12 px medium) and the badge (11 px `TEXT_FAINT`, tabular). (The
+/// handle's drag is the chain's: see `chain`.)
+fn module_header<'a>(
+    title: &'static str,
+    on: bool,
+    badge: Badge,
+    on_toggle: Vec<Message>,
+) -> Element<'a, Message> {
+    let badge_text = |text: String| {
+        studio_text(text)
+            .size(type_scale::LABEL)
+            .line_height(iced::Pixels(type_scale::LINE))
+            .tabular()
+            .color(Studio::TEXT_FAINT)
+    };
+    let badge: Element<'a, Message> = match badge {
+        Badge::None => Space::new().into(),
+        Badge::Text(text) => badge_text(text).into(),
+        Badge::Reduction(gr) => row![
+            canvas_widget(GrBar { gr_db: gr }).width(18).height(6),
+            badge_text(gr_badge(gr)),
+        ]
+        .spacing(6)
+        .align_y(Vertical::Center)
+        .into(),
+    };
+    row![
+        canvas_widget(HandleDots).width(6).height(10),
+        power_toggle(on, on_toggle),
+        studio_text(title)
+            .size(type_scale::BODY)
+            .font(font::MEDIUM)
+            .line_height(iced::Pixels(type_scale::LINE))
+            .color(Studio::TEXT_PRIMARY)
+            .width(Length::Fill),
+        badge,
+    ]
+    .spacing(8)
+    .height(MODULE_HEADER)
     .align_y(Vertical::Center)
     .into()
 }
 
-/// How long [`fx_toggle`]'s color and thumb take to change.
-pub const TOGGLE_ANIMATION: Duration = Duration::from_millis(130);
+/// The drag handle's dots: two columns of three, `#4A4A54`.
+struct HandleDots;
 
-/// `_Toggle`: a compact studio-style on/off switch, 34 × 18 — the accent
-/// with a white thumb on the right when on, the border color with a grey
-/// thumb on the left when off. A tap reports `on_tap`. The color changes
-/// over 130 ms, linear (`AnimatedContainer`), and the thumb slides over
-/// 130 ms, easing out (`AnimatedAlign`); its own color changes at once.
-fn fx_toggle<'a>(on: bool, on_tap: Vec<Message>) -> Element<'a, Message> {
-    let thumb = container(Space::new().width(13).height(13)).style(move |_| {
-        boxed(
-            Some(if on {
-                Color::WHITE
-            } else {
-                Studio::TEXT_SECONDARY
-            }),
-            6.5,
-            None,
-        )
-    });
-    let knob = animated_align(
-        container(thumb).padding(2.5),
-        (if on { 1.0 } else { -1.0 }, 0.0),
-        TOGGLE_ANIMATION,
-        Curve::EaseOut,
-    );
-    let track = animated_container(knob, TOGGLE_ANIMATION)
-        .width(34)
-        .height(18)
-        .decoration(Decoration::fill(
-            if on { Studio::ACCENT } else { Studio::BORDER },
-            9.0,
-        ));
-    tap(track, on_tap, None)
+impl canvas::Program<Message> for HandleDots {
+    type State = ();
+
+    fn draw(
+        &self,
+        _: &(),
+        renderer: &Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Vec<Geometry> {
+        let mut frame = Frame::new(renderer, bounds.size());
+        for col in 0..2 {
+            for r in 0..3 {
+                frame.fill(
+                    &Path::circle(
+                        Point::new(1.5 + col as f32 * 3.0, 1.7 + r as f32 * 3.4),
+                        1.0,
+                    ),
+                    HANDLE_DOT,
+                );
+            }
+        }
+        vec![frame.into_geometry()]
+    }
+
+    fn mouse_interaction(
+        &self,
+        _: &(),
+        bounds: Rectangle,
+        cursor: mouse::Cursor,
+    ) -> mouse::Interaction {
+        if cursor.is_over(bounds) {
+            mouse::Interaction::Grab
+        } else {
+            mouse::Interaction::default()
+        }
+    }
 }
 
-/// An FX parameter's readout. Below 10 Hz or 10 ms it keeps a decimal: the
-/// doubler's rate (0.05–8 Hz) read its 0.6 Hz default as "1 Hz", and
-/// anything under 0.5 as "0 Hz"; the gate's attack (from 0.1 ms) likewise
-/// "0 ms".
+/// How long the power button's fill takes to change (the toggle it
+/// replaced kept this time, linear).
+pub const TOGGLE_ANIMATION: Duration = Duration::from_millis(130);
+
+/// An effect's power button (`DESIGN.md`, `controls::power_button`'s look:
+/// an 18 px circle with the power glyph; on, `ACCENT` at 16 % behind
+/// `ACCENT_BRIGHT`; off, `CONTROL` behind `TEXT_DISABLED`). A press
+/// reports `on_tap` (the live edit and its commit). The fill changes over
+/// 130 ms, linear (`AnimatedContainer`); the glyph's colour at once.
+fn power_toggle<'a>(on: bool, on_tap: Vec<Message>) -> Element<'a, Message> {
+    let (_, glyph) = power_colors(on, false);
+    let face = animated_container(
+        line_icon(glyphs::POWER, 9.0, glyph).stroke(1.2),
+        TOGGLE_ANIMATION,
+    )
+    .width(POWER_SIZE)
+    .height(POWER_SIZE)
+    .align((0.0, 0.0))
+    .style(move |hovered| Decoration::fill(power_colors(on, hovered).0, POWER_SIZE / 2.0));
+    tap(face, on_tap, Some(mouse::Interaction::Pointer))
+}
+
+/// An FX parameter's readout, with a true minus sign. Below 10 Hz or 10 ms
+/// it keeps a decimal: the doubler's rate (0.05–8 Hz) read its 0.6 Hz
+/// default as "1 Hz", and anything under 0.5 as "0 Hz"; the gate's attack
+/// (from 0.1 ms) likewise "0 ms".
 pub fn fx_value_label(v: f64, unit: &str) -> String {
     let fine = |x: f64| {
         if x < 10.0 {
@@ -749,23 +925,24 @@ pub fn fx_value_label(v: f64, unit: &str) -> String {
             (x.round() as i64).to_string()
         }
     };
-    match unit {
-        ":1" => format!("{}:1", to_string_as_fixed(v, 1)),
+    let label = match unit {
+        ":1" => format!("{} : 1", to_string_as_fixed(v, 1)),
         "dB" => format!("{} dB", v.round() as i64),
         "Hz" => {
             if v >= 1000.0 {
-                format!("{}k", to_string_as_fixed(v / 1000.0, 1))
+                format!("{} kHz", to_string_as_fixed(v / 1000.0, 1))
             } else {
                 format!("{} Hz", fine(v))
             }
         }
         "ms" => format!("{} ms", fine(v)),
         _ => format!("{}%", (v * 100.0).round() as i64),
-    }
+    };
+    label.replace('-', "\u{2212}")
 }
 
-/// `_slider`: a labelled parameter row — the 64 px label, the slider, and
-/// the value in a 42 px box.
+/// `_slider`: a parameter row (`controls::parameter_row`) — the 62 px
+/// label, the thin slider, the value in its 54 px column.
 fn fx_slider<'a>(
     label: &'static str,
     value: f64,
@@ -774,29 +951,23 @@ fn fx_slider<'a>(
     unit: &'static str,
     on_changed: impl Fn(f64) -> Message + 'a,
 ) -> Element<'a, Message> {
-    container(
-        row![
-            container(text(label).size(10.5).color(Studio::TEXT_FAINT)).width(64),
-            canvas_widget(FxSlider {
-                value,
-                min,
-                max,
-                on_changed: Box::new(on_changed),
-                on_commit: Message::CommitFx,
-            })
-            .width(Length::Fill)
-            .height(SLIDER_HEIGHT),
-            Space::new().width(8),
-            fixed_width_readout(fx_value_label(value, unit), 42.0, 10.5),
-        ]
-        .align_y(Vertical::Center),
+    parameter_row(
+        label,
+        canvas_widget(FxSlider {
+            value,
+            min,
+            max,
+            on_changed: Box::new(on_changed),
+            on_commit: Message::CommitFx,
+        })
+        .width(Length::Fill)
+        .height(SLIDER_HEIGHT),
+        fx_value_label(value, unit),
     )
-    .padding([4, 0])
-    .into()
 }
 
-/// The slider's height.
-pub const SLIDER_HEIGHT: f32 = 20.0;
+/// The slider's hit row (`controls::SLIDER_HEIGHT`).
+pub const SLIDER_HEIGHT: f32 = crate::ui::core::widgets::controls::SLIDER_HEIGHT;
 
 /// The value a slider `width` wide from `min` to `max` sets at `dx` from
 /// its left edge.
@@ -804,10 +975,10 @@ pub fn fx_slider_value(dx: f32, width: f32, min: f64, max: f64) -> f64 {
     min + (f64::from(dx) / f64::from(width)).clamp(0.0, 1.0) * (max - min)
 }
 
-/// `_FxSlider`: a clean minimal slider — a thin track with an accent fill
-/// and a small thumb; press or drag anywhere on it to set the value. Every
-/// press and every move while held sets the value from the pointer's x;
-/// the release commits it once.
+/// `_FxSlider`: the design's thin slider (`controls::draw_thin_slider`: a
+/// 2 px track, the neutral fill, a 10 px knob); press or drag anywhere on
+/// it to set the value. Every press and every move while held sets the
+/// value from the pointer's x; the release commits it once.
 struct FxSlider<'a> {
     value: f64,
     min: f64,
@@ -868,8 +1039,21 @@ impl canvas::Program<Message> for FxSlider<'_> {
             renderer,
             size,
             (t.to_bits(), size.width.to_bits(), size.height.to_bits()),
-            |frame| draw_slider(frame, size, t as f32),
+            |frame| draw_thin_slider(frame, size, t as f32, KNOB, SLIDER_FILL),
         )]
+    }
+
+    fn mouse_interaction(
+        &self,
+        state: &SliderState,
+        bounds: Rectangle,
+        cursor: mouse::Cursor,
+    ) -> mouse::Interaction {
+        if state.active || cursor.is_over(bounds) {
+            mouse::Interaction::Pointer
+        } else {
+            mouse::Interaction::default()
+        }
     }
 }
 
@@ -882,33 +1066,7 @@ fn held_pointer(cursor: mouse::Cursor) -> Option<Point> {
     }
 }
 
-/// `_SliderPainter`.
-fn draw_slider(frame: &mut Frame, size: Size, t: f32) {
-    let cy = size.height / 2.0;
-    let r = Radius::from(1.5);
-    frame.fill(
-        &Path::rounded_rectangle(Point::new(0.0, cy - 1.5), Size::new(size.width, 3.0), r),
-        Studio::BORDER,
-    );
-    let fill_w = (size.width * t).clamp(0.0, size.width);
-    if fill_w > 0.0 {
-        frame.fill(
-            &Path::rounded_rectangle(Point::new(0.0, cy - 1.5), Size::new(fill_w, 3.0), r),
-            Studio::ACCENT,
-        );
-    }
-    let thumb_x = (size.width * t).min(size.width - 6.0).max(6.0);
-    let thumb = Path::circle(Point::new(thumb_x, cy), 6.0);
-    frame.fill(&thumb, Studio::ACCENT);
-    frame.stroke(
-        &thumb,
-        Stroke::default()
-            .with_color(Studio::SURFACE)
-            .with_width(2.0),
-    );
-}
-
-/// The interactive EQ, as wide as the panel and [`EQ_HEIGHT`] tall.
+/// The interactive EQ, as wide as the module and [`EQ_HEIGHT`] tall.
 fn eq_graph<'a>(
     fx: Rc<TrackFx>,
     input: Option<EqInput<'a>>,
@@ -1034,28 +1192,9 @@ pub fn gr_readout(gr: f64) -> String {
     }
 }
 
-/// `_GrMeter`: a live gain-reduction meter for the compressor — the
-/// reduction as a bar (accent → red as it deepens) with a falling peak tick,
-/// and its reading.
-fn gr_meter<'a>(gr_db: f64) -> Element<'a, Message> {
-    container(
-        row![
-            container(text("GR").size(10.5).color(Studio::TEXT_FAINT)).width(64),
-            canvas_widget(GrBar { gr_db }).width(Length::Fill).height(8),
-            Space::new().width(8),
-            text(gr_readout(gr_db))
-                .size(10.5)
-                .color(Studio::TEXT_SECONDARY)
-                .width(42)
-                .align_x(Horizontal::Right),
-        ]
-        .align_y(Vertical::Center),
-    )
-    .padding([4, 0])
-    .into()
-}
-
-/// The meter's bar, polling the reading the host passed in.
+/// `_GrMeter`'s bar, polling the reading the host passed in: a short 2 px
+/// bar before the compressor's badge, the reduction filling it (the accent
+/// deepening to red as it deepens) under a falling peak tick.
 struct GrBar {
     gr_db: f64,
 }
@@ -1149,20 +1288,21 @@ pub fn gr_color(t: f64) -> Color {
     )
 }
 
-/// `_GrPainter`.
+/// `_GrPainter`: a 2 px track (`CONTROL_ACTIVE`), the reduction's fill and
+/// a 1 px peak tick the box's height.
 fn draw_gr(frame: &mut Frame, size: Size, t: f64, peak: f64) {
-    let cy = size.height / 2.0;
-    let r = Radius::from(1.5);
+    let cy = (size.height / 2.0).round();
+    let r = Radius::from(1.0);
     frame.fill(
-        &Path::rounded_rectangle(Point::new(0.0, cy - 1.5), Size::new(size.width, 3.0), r),
-        Studio::BORDER,
+        &Path::rounded_rectangle(Point::new(0.0, cy - 1.0), Size::new(size.width, 2.0), r),
+        Studio::CONTROL_ACTIVE,
     );
     let tc = t.clamp(0.0, 1.0);
     if tc > 0.0 {
         frame.fill(
             &Path::rounded_rectangle(
-                Point::new(0.0, cy - 1.5),
-                Size::new(size.width * tc as f32, 3.0),
+                Point::new(0.0, cy - 1.0),
+                Size::new(size.width * tc as f32, 2.0),
                 r,
             ),
             gr_color(tc),
@@ -1172,8 +1312,8 @@ fn draw_gr(frame: &mut Frame, size: Size, t: f64, peak: f64) {
     if pc > 0.01 {
         let x = (size.width * pc as f32).min(size.width - 1.0).max(1.0);
         frame.fill_rectangle(
-            Point::new(x - 1.0, cy - 3.5),
-            Size::new(2.0, 7.0),
+            Point::new(x - 0.5, 0.0),
+            Size::new(1.0, size.height),
             Studio::TEXT_SECONDARY,
         );
     }

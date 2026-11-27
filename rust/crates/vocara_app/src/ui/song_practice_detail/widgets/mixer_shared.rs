@@ -35,13 +35,74 @@ use iced::{
 };
 
 use crate::ui::core::icons::{self, Icon};
-use crate::ui::core::theme::{self, Studio};
+use crate::ui::core::theme::{self, height, radius, type_scale, Studio};
+use crate::ui::core::widgets::animated::{animated_container, Decoration};
 use crate::ui::core::widgets::fading_scrollbar::{no_scrollbar, scrollable};
 use crate::ui::core::widgets::gesture::{any_tap_event, AnyTap};
+use crate::ui::core::widgets::line_icon::{glyphs, line_icon_stroked};
+use crate::ui::core::widgets::studio_text::studio_text;
 use crate::ui::core::widgets::wrap::Wrap;
 
 /// A model color (`colorValue`, ARGB) as Flutter's `Color(value)`.
 pub use super::track_context_menu::argb;
+
+// ------------------------------------------------------------- pop-up face
+
+/// A pop-up button's face (`DESIGN.md`, Pop-up button: the look of
+/// `controls::popup_button`) for a [`PopupMenu`]'s trigger, which takes the
+/// press itself (a button would capture it): 22 px, radius 5,
+/// `SURFACE_RAISED` (`CONTROL_ACTIVE` under the pointer) with an inset
+/// `BORDER_STRONG` outline, the label in 11 px (`TEXT_SECONDARY` when it is
+/// a placeholder, else `TEXT_PRIMARY`) and an up-down chevron in
+/// `TEXT_FAINT` at the right. `width`: `Shrink` hugs the label.
+pub fn popup_face<'a, M: 'a>(
+    label: impl Into<std::borrow::Cow<'a, str>>,
+    placeholder: bool,
+    width: Length,
+) -> Element<'a, M> {
+    let label = studio_text(label.into())
+        .size(type_scale::LABEL)
+        .line_height(iced::Pixels(type_scale::LINE))
+        .color(if placeholder {
+            Studio::TEXT_SECONDARY
+        } else {
+            Studio::TEXT_PRIMARY
+        })
+        .ellipsis(1);
+    let content = row![
+        container(label).width(if width == Length::Shrink {
+            Length::Shrink
+        } else {
+            Length::Fill
+        }),
+        line_icon_stroked(glyphs::UP_DOWN, 10.0, Studio::TEXT_FAINT, 1.0),
+    ]
+    .spacing(8)
+    .align_y(Vertical::Center);
+    animated_container(content, std::time::Duration::ZERO)
+        .width(width)
+        .height(height::CONTROL)
+        .padding(Padding {
+            top: 0.0,
+            right: 6.0,
+            bottom: 0.0,
+            left: 8.0,
+        })
+        .align((-1.0, 0.0))
+        .style(|hovered| {
+            Decoration::boxed(
+                if hovered {
+                    Studio::CONTROL_ACTIVE
+                } else {
+                    Studio::SURFACE_RAISED
+                },
+                radius::CONTROL,
+                Studio::BORDER_STRONG,
+                1.0,
+            )
+        })
+        .into()
+}
 
 // ------------------------------------------------------------------- tap
 
