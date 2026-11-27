@@ -23,6 +23,7 @@ use super::*;
 use crate::ui::core::icons;
 use crate::ui::core::theme::{app_theme, font, DEFAULT_TEXT_SIZE};
 use crate::ui::core::widgets::animated::testing::{near, over};
+use crate::ui::core::widgets::animated::INK_HIGHLIGHT;
 use crate::ui::core::widgets::pan_zoom::testing::{set_event_time, Sent, Trackpad};
 use crate::ui::home::testing::run_task;
 
@@ -42,11 +43,15 @@ fn card_top() -> f32 {
 const CARD_LEFT: f32 = 320.0;
 const CARD_RIGHT: f32 = 1440.0 - 28.0;
 
-/// The about block's height: 24 + 20 + 14 + 18 + 12 + 18 + 14 + 24.
-const ABOUT: f32 = 144.0;
+/// The about block's height: 24 + 20 + 16 + 12 + 16 + 12 + 16 + 24.
+const ABOUT: f32 = 140.0;
 
 /// The app bar's height: the page's toolbar and the 56 px action row.
 const APP_BAR: f32 = crate::ui::core::widgets::toolbar::HEIGHT + 56.0;
+
+/// Where the detail header's package name sits under the card's top: its
+/// 18 px line over the 16 px count, centred in the 56 px header.
+const HEADER_TOP: f32 = (56.0 - 18.0 - 16.0) / 2.0;
 
 /// "first" (three licenses, the first long enough to scroll), "second"
 /// (two) and enough more packages (one each) to scroll the list.
@@ -298,15 +303,16 @@ fn the_toolbar_and_the_detail_header_place_their_titles() {
         (name.x + column / 2.0 - card_centre).abs() < 0.5,
         "{name:?}"
     );
-    assert!(close(name.y, card_top() + 12.0), "{name:?}");
+    // The 18 px name over the 16 px count, centred in the 56 px header.
+    assert!(close(name.y, card_top() + HEADER_TOP), "{name:?}");
     assert!(close(count.y, name.y + 18.0), "{count:?}");
 }
 
 // --------------------------------------------------------------- divider
 
-// `Divider()` takes forui's `dividerTheme` color, `secondary`.
+// A license's divider is the design's `BORDER` hairline.
 #[test]
-fn the_divider_is_forui_secondary() {
+fn the_divider_is_the_border_hairline() {
     let mut window = Window::new();
     let (mut page, t) = settled(&mut window);
     window.frame(&mut page, &[], t + 16 * MS);
@@ -316,7 +322,7 @@ fn the_divider_is_forui_secondary() {
     let drawn = window.pixel(Point::new(800.0, row));
     let [r, g, b, _] = drawn.into_rgba8();
     let [sr, sg, sb, _] = Studio::SURFACE.into_rgba8();
-    let [lr, lg, lb, _] = Zinc::SECONDARY.into_rgba8();
+    let [lr, lg, lb, _] = Studio::BORDER.into_rgba8();
     for (c, s, l) in [(r, sr, lr), (g, sg, lg), (b, sb, lb)] {
         assert!(
             c >= s.min(l) && c <= s.max(l),
@@ -385,7 +391,7 @@ fn a_row_lights_under_the_pointer_in_a_rounded_rectangle() {
     window.point_at(on_selected);
     window.frame(&mut page, &[], t + 100 * MS);
     window.frame(&mut page, &[], t + 150 * MS);
-    let under = over(INK_HIGHLIGHT, Studio::SURFACE);
+    let under = TILE_SELECTED;
     assert!(near(window.pixel(on_selected), over(TILE_HOVER, under)));
     assert!(
         near(window.pixel(inside), Studio::SURFACE),
@@ -426,7 +432,7 @@ fn a_pressed_row_highlights_and_lets_go_once_picked() {
     assert_eq!(page.selected(), 1);
     // Selected now: its highlight under the hover, the press fading out.
     window.frame(&mut page, &[], t2 + 200 * MS);
-    let selected = over(TILE_HOVER, over(INK_HIGHLIGHT, Studio::SURFACE));
+    let selected = over(TILE_HOVER, TILE_SELECTED);
     assert!(
         near(window.pixel(inside), selected),
         "{:?}",
@@ -505,7 +511,7 @@ fn the_registry_loads_under_a_spinner_then_the_first_detail_comes_in() {
         Point::new(142.0, APP_BAR + ABOUT),
         Point::new(178.0, APP_BAR + ABOUT + 36.0),
     );
-    assert!(spinner >= 0xD0, "the spinner: {spinner:#x}");
+    assert!(spinner >= 0x90, "the neutral spinner: {spinner:#x}");
 
     // Gathered off the UI thread.
     let gathered = run_task(LicensesPage::load());
@@ -564,7 +570,7 @@ fn a_trackpad_grows_the_sheet_first_and_a_wheel_only_scrolls() {
     let mut window = Window::new();
     let (mut page, t) = settled(&mut window);
     window.point_at(Point::new(800.0, 500.0));
-    let rest = card_top() + 12.0;
+    let rest = card_top() + HEADER_TOP;
     assert!(close(header(&mut window, &page), rest));
     // Slow moves (no fling at the end) 20 ms apart.
     let mut pad = Trackpad::new();
@@ -582,12 +588,12 @@ fn a_trackpad_grows_the_sheet_first_and_a_wheel_only_scrolls() {
         pad.changed(0.0, -100.0, t + 40 * MS),
     );
     assert!(
-        close(header(&mut window, &page), 12.0),
+        close(header(&mut window, &page), HEADER_TOP),
         "to the page's height"
     );
     let p0 = paragraph(&mut window, &page);
     step(&mut window, &mut page, pad.changed(0.0, -30.0, t + 60 * MS));
-    assert!(close(header(&mut window, &page), 12.0));
+    assert!(close(header(&mut window, &page), HEADER_TOP));
     assert!(
         close(paragraph(&mut window, &page), p0 - 30.0),
         "then the list scrolls"
@@ -596,22 +602,25 @@ fn a_trackpad_grows_the_sheet_first_and_a_wheel_only_scrolls() {
     // then the sheet.
     step(&mut window, &mut page, pad.changed(0.0, 40.0, t + 80 * MS));
     assert!(close(paragraph(&mut window, &page), p0));
-    assert!(close(header(&mut window, &page), 12.0));
+    assert!(close(header(&mut window, &page), HEADER_TOP));
     step(&mut window, &mut page, pad.changed(0.0, 10.0, t + 100 * MS));
-    assert!(close(header(&mut window, &page), 22.0), "shrinks");
+    assert!(
+        close(header(&mut window, &page), HEADER_TOP + 10.0),
+        "shrinks"
+    );
     // Still a while, then the fingers lift: no fling.
     at += 100 * MS;
     window.frame_sent(&mut page, &[pad.ended(at)], at);
     window.frame(&mut page, &[], at + 16 * MS);
-    assert!(close(header(&mut window, &page), 22.0));
+    assert!(close(header(&mut window, &page), HEADER_TOP + 10.0));
     // A wheel's lines, and a precise device's points without phases, are
     // scroll signals: they scroll the list, the sheet stays.
     window.frame_sent(&mut page, &[pad.lines(0.0, -1.0, at)], at + 32 * MS);
-    assert!(close(header(&mut window, &page), 22.0));
+    assert!(close(header(&mut window, &page), HEADER_TOP + 10.0));
     let p1 = paragraph(&mut window, &page);
     assert!(p1 < p0 + 10.0 - 1.0, "the list moved");
     window.frame_sent(&mut page, &[pad.pixels(0.0, -25.0, at)], at + 48 * MS);
-    assert!(close(header(&mut window, &page), 22.0));
+    assert!(close(header(&mut window, &page), HEADER_TOP + 10.0));
     assert!(close(paragraph(&mut window, &page), p1 - 25.0));
     // Not over the card: nothing.
     window.point_at(Point::new(CARD_LEFT - 30.0, 30.0));
@@ -619,7 +628,7 @@ fn a_trackpad_grows_the_sheet_first_and_a_wheel_only_scrolls() {
     window.frame_sent(&mut page, &[pad.began(off)], off);
     window.frame_sent(&mut page, &[pad.changed(0.0, 5.0, off)], off);
     window.frame_sent(&mut page, &[pad.ended(off)], off);
-    assert!(close(header(&mut window, &page), 22.0));
+    assert!(close(header(&mut window, &page), HEADER_TOP + 10.0));
 }
 
 // Flutter's own fling, not macOS's momentum: the fingers lift fast, the
@@ -630,7 +639,7 @@ fn a_trackpad_flick_flings_the_sheet_then_the_list_and_its_momentum_moves_nothin
     let mut window = Window::new();
     let (mut page, t) = settled(&mut window);
     window.point_at(Point::new(800.0, 500.0));
-    let rest = card_top() + 12.0;
+    let rest = card_top() + HEADER_TOP;
     let mut pad = Trackpad::new();
     // Up 6 px each 8 ms (750 px/s), 30 px in all.
     window.frame_sent(&mut page, &[pad.began(t)], t);
@@ -670,7 +679,7 @@ fn a_trackpad_flick_flings_the_sheet_then_the_list_and_its_momentum_moves_nothin
         window.frame(&mut page, &[], now);
         now += 32 * MS;
     }
-    assert!(close(header(&mut window, &page), 12.0), "full height");
+    assert!(close(header(&mut window, &page), HEADER_TOP), "full height");
     let scrolled = g0 - gap(&mut window, &page);
     assert!(
         scrolled > 70.0 && scrolled < 110.0,
@@ -695,7 +704,7 @@ fn a_new_swipe_stops_a_fling() {
         &[pad.began(t), pad.changed(0.0, -100.0, t), pad.ended(t)],
         t,
     );
-    assert!(close(header(&mut window, &page), 12.0));
+    assert!(close(header(&mut window, &page), HEADER_TOP));
     // A flick of the list: 1000 px/s.
     let t1 = t + 100 * MS;
     window.frame_sent(&mut page, &[pad.began(t1)], t1);
@@ -728,7 +737,7 @@ fn a_finger_on_the_trackpad_stops_the_sheets_fling_over_the_card_alone() {
     let mut window = Window::new();
     let (mut page, t) = settled(&mut window);
     window.point_at(Point::new(800.0, 500.0));
-    let rest = card_top() + 12.0;
+    let rest = card_top() + HEADER_TOP;
     let mut pad = Trackpad::new();
     // The flick that flings the sheet (750 px/s, 30 px), lifted.
     window.frame_sent(&mut page, &[pad.began(t)], t);
@@ -754,7 +763,7 @@ fn a_finger_on_the_trackpad_stops_the_sheets_fling_over_the_card_alone() {
     );
     let grown = header(&mut window, &page);
     assert!(
-        grown < rest - 30.0 - 1.0 && grown > 12.0 + 1.0,
+        grown < rest - 30.0 - 1.0 && grown > HEADER_TOP + 1.0,
         "the sheet's own fling: {grown}"
     );
     // A finger lands, the pointer over the card: the sheet stays where
@@ -774,7 +783,7 @@ fn a_finger_on_the_trackpad_stops_the_sheets_fling_over_the_card_alone() {
         &[pad.began(t1), pad.changed(0.0, -100.0, t1), pad.ended(t1)],
         t1,
     );
-    assert!(close(header(&mut window, &page), 12.0));
+    assert!(close(header(&mut window, &page), HEADER_TOP));
     let t2 = t1 + 100 * MS;
     window.frame_sent(&mut page, &[pad.began(t2)], t2);
     let mut at = t2;
@@ -919,11 +928,17 @@ fn a_detail_going_keeps_its_sheet_and_the_next_comes_up_a_quarter_page() {
     assert!(grown_header(&window) >= 0xD0, "going, still grown");
     let coming = window.find(&page, "second", 1);
     let quarter = 0.25 * SIZE.height;
-    assert!(close(coming.y, card_top() + 12.0 + quarter), "{coming:?}");
+    assert!(
+        close(coming.y, card_top() + HEADER_TOP + quarter),
+        "{coming:?}"
+    );
 
     window.frame(&mut page, &[], t1 + DETAIL_TRANSITION);
     window.frame(&mut page, &[], t1 + DETAIL_TRANSITION + 16 * MS);
     assert!(grown_header(&window) < 0x60, "gone");
     let coming = window.find(&page, "second", 1);
-    assert!(close(coming.y, card_top() + 12.0), "afresh, at its least");
+    assert!(
+        close(coming.y, card_top() + HEADER_TOP),
+        "afresh, at its least"
+    );
 }

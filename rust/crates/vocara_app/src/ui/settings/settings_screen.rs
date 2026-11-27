@@ -36,14 +36,19 @@
 //! snack bar did, its 3.5 s counted from the end of its entrance
 //! (`ui::snack`).
 //!
-//! Flutter's Material slider and switch are drawn here as Material 3 drew
-//! them: the slider's track, overlay and shadowed thumb over iced's slider,
-//! which takes the input (`material_slider`: the overlay grows over 100 ms
-//! under the pointer on the thumb or a drag), and the switch as forui
-//! themed it (`material_switch`: its 300 ms toggle, stretching thumb, hover
-//! and press rings, and drag); the switch's semantics label has no
-//! counterpart. The cards' tappable rows (Dart's `InkWell`s) show no hover
-//! or press highlight, as in Dart: their ink went on the `Scaffold`'s
+//! The page is drawn as `DESIGN.md`'s grouped settings, as macOS sets them
+//! out: a readable column at most [`CONTENT_WIDTH`] wide, centred; each
+//! section a sentence-case title over a rounded `SURFACE` group whose
+//! 36 px rows are split by inset 1 px separators; labels at 13 px,
+//! explanations at 11 px; a check at the right of the chosen device
+//! (`ACCENT_BRIGHT`, the selection), a chevron at the right of a row that
+//! opens or runs something; line icons in `TEXT_SECONDARY`. The monitor
+//! reverb is the design's thin slider with its tabular percentage, the
+//! input channel a segmented control, the headphones mark the design's
+//! switch (`controls::toggle_switch`, in place of Material's), and the
+//! warnings calm notices in the warning colour. The rows (Dart's
+//! `InkWell`s) show no hover or press highlight, as macOS settings rows
+//! show none and as in Dart: their ink went on the `Scaffold`'s
 //! `Material`, under the opaque card (`tappable`).
 
 use std::collections::VecDeque;
@@ -58,8 +63,8 @@ use crate::ui::core::text;
 use iced::alignment::{Horizontal, Vertical};
 use iced::futures::channel::mpsc;
 use iced::futures::{Stream, StreamExt};
-use iced::widget::{button, column, container, row, slider, stack, Column, Space};
-use iced::{Color, Element, Length, Padding, Shadow, Subscription, Task, Theme, Vector};
+use iced::widget::{button, column, container, row, stack, Column, Space};
+use iced::{Color, Element, Length, Padding, Pixels, Subscription, Task, Theme};
 use vocara_model::diagnostics::DiagnosticsLog;
 use vocara_model::models::audio_device::AudioDevice;
 use vocara_model::util::export_copy::{export_copy, exports_into};
@@ -75,11 +80,11 @@ use crate::router::Route;
 use crate::services::Services;
 use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::motion::{self, Controller};
-use crate::ui::core::theme::{self, alpha, bare_button, boxed, font, Studio};
+use crate::ui::core::theme::{self, alpha, bare_button, boxed, font, radius, type_scale, Studio};
 use crate::ui::core::widgets::confirm_dialog::ConfirmDialog;
+use crate::ui::core::widgets::controls::{segmented, thin_slider, toggle_switch};
 use crate::ui::core::widgets::fading_scrollbar::{scrollable, Fading};
-use crate::ui::core::widgets::material_slider::{clear_style, material_slider, SliderLook};
-use crate::ui::core::widgets::material_switch::material_switch;
+use crate::ui::core::widgets::line_icon::{glyphs, line_icon};
 use crate::ui::core::widgets::slide::{cupertino, slide, PAGE_TRANSITION};
 use crate::ui::core::widgets::studio_hint::spinner;
 use crate::ui::core::widgets::studio_text::studio_text;
@@ -124,8 +129,28 @@ const BLUETOOTH_CONFLICT: &str = "The microphone is a Bluetooth headset. Bluetoo
      high-quality sound and a microphone at once, so recording drops the headset to call \
      quality. Pick a different microphone (e.g. the built-in mic).";
 
-/// The radius of the raised cards.
-const CARD_RADIUS: f32 = 10.0;
+/// The readable column's widest, centred in the page.
+pub const CONTENT_WIDTH: f32 = 680.0;
+/// The page's padding around the column.
+const PAGE_PADDING: Padding = Padding {
+    top: 28.0,
+    right: 32.0,
+    bottom: 40.0,
+    left: 32.0,
+};
+/// The space between two sections, and between two groups of a section.
+const GROUP_GAP: f32 = 28.0;
+const GROUP_INNER_GAP: f32 = 12.0;
+/// The space after a row's icon, and where the rows' text starts in a
+/// group with icons (its separators start there).
+const ICON_GAP: f32 = 10.0;
+const ICON_ROW_INSET: f32 = 12.0 + 14.0 + ICON_GAP;
+/// The reverb row's label column, and its value's.
+const LABEL_WIDTH: f32 = 80.0;
+const VALUE_WIDTH: f32 = 44.0;
+
+/// The device groups' first row: the device the system picks.
+pub const SYSTEM_DEFAULT: &str = "System default";
 
 /// The repair result as one plain sentence with the report's numbers.
 ///
@@ -347,6 +372,9 @@ pub enum Message {
     /// A device row, the input channel, the reverb slider or the headphones
     /// switch.
     Choose(Choice),
+    /// The reverb slider was let go: nothing more to do (each move already
+    /// chose).
+    ReverbReleased,
     /// The choice in flight was applied.
     Chosen,
     /// "Check for updates".
@@ -785,9 +813,10 @@ impl Screen for SettingsScreen {
                 Update::none()
             }
             // The state changed; iced redraws.
-            Message::SettingsChanged | Message::UpdateWatch | Message::DownloadDialogClosed => {
-                Update::none()
-            }
+            Message::SettingsChanged
+            | Message::UpdateWatch
+            | Message::DownloadDialogClosed
+            | Message::ReverbReleased => Update::none(),
             Message::Choose(choice) => self.choose(choice).into(),
             Message::Chosen => {
                 self.applying = None;
@@ -1014,23 +1043,20 @@ impl SettingsScreen {
         let mut content = Column::new().width(Length::Fill);
         if s.persist_failed() {
             content = content
-                .push(warning_banner(PERSIST_FAILED))
-                .push(Space::new().height(20));
+                .push(notice(PERSIST_FAILED))
+                .push(Space::new().height(GROUP_GAP));
         }
 
         // Audio output, and the headphones mark for it. Only an output no
         // name can tell takes the mark: earbuds need none, speakers take
         // none.
-        content = content
-            .push(section_label("Audio Output"))
-            .push(Space::new().height(10))
-            .push(device_card(
-                &s.output_devices(),
-                s.output_device_uid().as_deref(),
-                s.output_device_name().as_deref(),
-                "Follow the macOS output device",
-                Choice::OutputDevice,
-            ));
+        content = content.push(group_title("Audio output")).push(device_group(
+            &s.output_devices(),
+            s.output_device_uid().as_deref(),
+            s.output_device_name().as_deref(),
+            "Follow the macOS output device",
+            Choice::OutputDevice,
+        ));
         let to_mark = if s.output_markable() {
             s.output_to_mark()
         } else {
@@ -1038,16 +1064,18 @@ impl SettingsScreen {
         };
         if let Some(device) = to_mark {
             content = content
-                .push(Space::new().height(12))
-                .push(headphones_card(device, s.output_marked_headphones()));
+                .push(Space::new().height(GROUP_INNER_GAP))
+                .push(group(vec![headphones_row(
+                    device,
+                    s.output_marked_headphones(),
+                )]));
         }
 
         // Audio input, its channel choice and the Bluetooth warning.
         content = content
-            .push(Space::new().height(24))
-            .push(section_label("Audio Input"))
-            .push(Space::new().height(10))
-            .push(device_card(
+            .push(Space::new().height(GROUP_GAP))
+            .push(group_title("Audio input"))
+            .push(device_group(
                 &s.input_devices(),
                 s.input_device_uid().as_deref(),
                 s.input_device_name().as_deref(),
@@ -1057,42 +1085,34 @@ impl SettingsScreen {
         // Only a device with more than one input has a choice to make.
         if s.input_channel_count() >= 2 {
             content = content
-                .push(Space::new().height(12))
-                .push(input_channel_card(
+                .push(Space::new().height(GROUP_INNER_GAP))
+                .push(group(vec![input_channel_row(
                     &s.input_channel_device_name(),
                     s.input_channel(),
-                ));
+                )]));
         }
         if s.bluetooth_in_out_conflict() {
             content = content
-                .push(Space::new().height(12))
-                .push(warning_banner(BLUETOOTH_CONFLICT));
+                .push(Space::new().height(GROUP_INNER_GAP))
+                .push(notice(BLUETOOTH_CONFLICT));
         }
 
         // Monitoring.
         content = content
-            .push(Space::new().height(24))
-            .push(section_label("Monitoring"))
-            .push(Space::new().height(10))
-            .push(reverb_card(self.reverb_shown()))
-            .push(Space::new().height(14))
-            .push(
-                text(format!(
-                    "The engine runs at {} kHz; devices are resampled to/from this rate \
-                     automatically. The input device is used for recording and live monitoring.",
-                    to_string_as_fixed(s.engine_sample_rate() / 1000.0, 1)
-                ))
-                .size(12)
-                .line_height(1.45)
-                .color(Studio::TEXT_FAINT),
-            );
+            .push(Space::new().height(GROUP_GAP))
+            .push(group_title("Monitoring"))
+            .push(group(vec![reverb_row(self.reverb_shown())]))
+            .push(footnote(format!(
+                "The engine runs at {} kHz; devices are resampled to/from this rate \
+                 automatically. The input device is used for recording and live monitoring.",
+                to_string_as_fixed(s.engine_sample_rate() / 1000.0, 1)
+            )));
 
         // Maintenance.
         content = content
-            .push(Space::new().height(24))
-            .push(section_label("Maintenance"))
-            .push(Space::new().height(10))
-            .push(card(vec![
+            .push(Space::new().height(GROUP_GAP))
+            .push(group_title("Maintenance"))
+            .push(group(vec![
                 action_row(
                     Icon::Wrench,
                     "Repair library",
@@ -1104,7 +1124,7 @@ impl SettingsScreen {
                     (!self.repairing).then_some(Message::RepairLibrary),
                     self.repairing,
                 ),
-                divider(),
+                separator(ICON_ROW_INSET),
                 action_row(
                     Icon::FileDown,
                     "Export diagnostics…",
@@ -1122,12 +1142,11 @@ impl SettingsScreen {
         // About.
         let checking = self.update_checking();
         content = content
-            .push(Space::new().height(24))
-            .push(section_label("About"))
-            .push(Space::new().height(10))
-            .push(card(vec![
+            .push(Space::new().height(GROUP_GAP))
+            .push(group_title("About"))
+            .push(group(vec![
                 info_row(Icon::Info, "Vocara", version_line()),
-                divider(),
+                separator(ICON_ROW_INSET),
                 action_row(
                     Icon::RefreshCw,
                     "Check for updates",
@@ -1135,7 +1154,7 @@ impl SettingsScreen {
                     (!checking).then_some(Message::CheckForUpdates),
                     checking,
                 ),
-                divider(),
+                separator(ICON_ROW_INSET),
                 action_row(
                     Icon::ScrollText,
                     "Licenses",
@@ -1145,15 +1164,15 @@ impl SettingsScreen {
                 ),
             ]));
 
-        container(content)
-            .width(Length::Fill)
-            .padding(Padding {
-                top: 20.0,
-                right: 24.0,
-                bottom: 24.0,
-                left: 24.0,
-            })
-            .into()
+        // The readable column, centred.
+        container(
+            container(content)
+                .width(Length::Fill)
+                .max_width(CONTENT_WIDTH),
+        )
+        .center_x(Length::Fill)
+        .padding(PAGE_PADDING)
+        .into()
     }
 }
 
@@ -1163,48 +1182,72 @@ fn header<'a>() -> Element<'a, Message> {
     toolbar::page_toolbar(
         row![
             toolbar::back_button(Message::Back),
-            Space::new().width(8),
+            Space::new().width(4),
             toolbar::title("Settings"),
         ]
         .align_y(Vertical::Center),
     )
 }
 
-/// A full-width 1 px line in `Studio.border`.
-fn rule<'a>() -> Element<'a, Message> {
-    container(Space::new())
-        .width(Length::Fill)
-        .height(1)
-        .style(theme::fill(Studio::BORDER))
-        .into()
+/// A group's title over its box: sentence case, 13 px semibold
+/// `TEXT_PRIMARY`, 8 above the box, 2 in from its edge.
+fn group_title<'a>(label: &'a str) -> Element<'a, Message> {
+    container(
+        studio_text(label)
+            .size(type_scale::TITLE)
+            .font(font::SEMIBOLD)
+            .line_height(Pixels(18.0))
+            .color(Studio::TEXT_PRIMARY),
+    )
+    .padding(Padding {
+        bottom: 8.0,
+        left: 2.0,
+        ..Padding::ZERO
+    })
+    .into()
 }
 
-/// `Divider(height: 1, color: Studio.border)` between a card's rows.
-fn divider<'a>() -> Element<'a, Message> {
-    rule()
+/// A footnote under a group: 11 px `TEXT_FAINT` on 16 px lines, 8 under
+/// the box, as macOS sets one.
+fn footnote<'a>(line: String) -> Element<'a, Message> {
+    container(
+        text(line)
+            .size(type_scale::LABEL)
+            .line_height(Pixels(type_scale::LINE))
+            .color(Studio::TEXT_FAINT),
+    )
+    .padding(Padding {
+        top: 8.0,
+        left: 2.0,
+        right: 2.0,
+        ..Padding::ZERO
+    })
+    .into()
 }
 
-/// `_SectionLabel`: the text in capitals, 11 px bold, 1.2 letter spacing,
-/// `Studio.textSecondary`.
-fn section_label<'a>(label: &str) -> Element<'a, Message> {
-    studio_text(label.to_uppercase())
-        .size(11)
-        .font(font::BOLD)
-        .letter_spacing(1.2)
-        .color(Studio::TEXT_SECONDARY)
-        .into()
+/// A 1 px `BORDER` separator between a group's rows, `inset` in from its
+/// left (under the rows' text, as macOS insets them).
+fn separator<'a>(inset: f32) -> Element<'a, Message> {
+    container(
+        container(Space::new())
+            .width(Length::Fill)
+            .height(1)
+            .style(theme::fill(Studio::BORDER)),
+    )
+    .padding(Padding {
+        left: inset,
+        ..Padding::ZERO
+    })
+    .into()
 }
 
-/// A tappable row of a card (`InkWell(onTap: ..., hoverColor:
-/// Studio.hover)`): `on_tap` `None` disables it. A tap on an enabled row
-/// reports `on_tap`, and the pointer over it is the click cursor
-/// (`WidgetStateMouseCursor.clickable`; the basic one on a disabled row).
+/// A tappable row of a group: `on_tap` `None` disables it. A tap on an
+/// enabled row reports `on_tap`, and the pointer over it is the click
+/// cursor (the basic one on a disabled row).
 ///
-/// It shows no hover or press highlight. Dart's rows were `InkWell`s inside
-/// the cards' opaque `Studio.surfaceRaised` `Container`s with no `Material`
-/// between: an `InkWell` paints its ink on the nearest `Material` beneath
-/// it (here the `Scaffold`'s), which paints its ink features before its
-/// children, so the card covered every highlight.
+/// It shows no hover or press highlight, as macOS settings rows show
+/// none, and as in Dart: its rows were `InkWell`s inside the cards' opaque
+/// `Container`s with no `Material` between, so the card covered their ink.
 fn tappable<'a>(
     content: impl Into<Element<'a, Message>>,
     on_tap: Option<Message>,
@@ -1217,19 +1260,46 @@ fn tappable<'a>(
         .into()
 }
 
-/// `_Card`: the raised card the rows sit in — `Studio.surfaceRaised`, radius
-/// 10, `Studio.border` — its rows inside the border.
-fn card(rows: Vec<Element<'_, Message>>) -> Element<'_, Message> {
+/// A group (`DESIGN.md`: a rounded box): `Studio::SURFACE`, radius 8, an
+/// inset `BORDER` outline, its rows inside it.
+fn group(rows: Vec<Element<'_, Message>>) -> Element<'_, Message> {
     container(Column::with_children(rows).width(Length::Fill))
         .width(Length::Fill)
-        .padding(1)
-        .style(theme::card(CARD_RADIUS))
+        .style(|_: &Theme| boxed(Some(Studio::SURFACE), radius::CARD, Some(Studio::BORDER)))
         .into()
 }
 
-/// The device card: "System Default", every device, the unplugged persisted
-/// device when there is one, and "Refresh devices".
-fn device_card<'a>(
+/// A row's padding: 12 at the sides, 9 above and below a 18 px line (a
+/// 36 px row).
+const ROW_PADDING: Padding = Padding {
+    top: 9.0,
+    right: 12.0,
+    bottom: 9.0,
+    left: 12.0,
+};
+
+/// A row's title (13 px, `color`) and, when there is one, its subtitle
+/// (11 px `TEXT_FAINT`) under it.
+fn titled<'a>(title: String, subtitle: String, color: Color) -> Column<'a, Message> {
+    let mut label = column![studio_text(title)
+        .size(type_scale::TITLE)
+        .line_height(Pixels(18.0))
+        .color(color)
+        .ellipsis(1)];
+    if !subtitle.is_empty() {
+        label = label.push(
+            text(subtitle)
+                .size(type_scale::LABEL)
+                .line_height(Pixels(type_scale::LINE))
+                .color(Studio::TEXT_FAINT),
+        );
+    }
+    label.width(Length::Fill)
+}
+
+/// The device group: "System default", every device, the unplugged
+/// persisted device when there is one, and "Refresh devices".
+fn device_group<'a>(
     devices: &[AudioDevice],
     selected_uid: Option<&str>,
     last_known_name: Option<&str>,
@@ -1242,10 +1312,10 @@ fn device_card<'a>(
     let missing = explicit.filter(|uid| !devices.iter().any(|d| d.uid == *uid));
 
     let mut rows: Vec<Element<'a, Message>> = Vec::new();
-    // "System Default" follows whatever the OS picks. While the selected
+    // "System default" follows whatever the OS picks. While the selected
     // device is unplugged it is the effective route, so say so.
     rows.push(device_row(
-        "System Default".to_string(),
+        SYSTEM_DEFAULT.to_string(),
         if missing.is_some() {
             format!("{default_subtitle} · currently active")
         } else {
@@ -1255,7 +1325,7 @@ fn device_card<'a>(
         Some(Message::Choose(choose(None))),
     ));
     for d in devices {
-        rows.push(divider());
+        rows.push(separator(ROW_PADDING.left));
         rows.push(device_row(
             d.name.clone(),
             device_subtitle(d),
@@ -1267,7 +1337,7 @@ fn device_card<'a>(
         // The unplugged persisted selection: still the checked choice, but
         // disabled (not tappable) and marked as unavailable. Labelled by its
         // last-known name, else its raw uid.
-        rows.push(divider());
+        rows.push(separator(ROW_PADDING.left));
         rows.push(device_row(
             last_known_name
                 .filter(|n| !n.is_empty())
@@ -1278,14 +1348,14 @@ fn device_card<'a>(
             None,
         ));
     }
-    rows.push(divider());
+    rows.push(separator(ROW_PADDING.left));
     rows.push(refresh_row());
-    card(rows)
+    group(rows)
 }
 
-/// `_DeviceRow`: the speaker, the name and its subtitle, and a check when
-/// selected. A row with no tap is the unplugged persisted selection: dimmed,
-/// its selection accents included.
+/// `_DeviceRow`: the name and its subtitle, and a check at the right when
+/// selected (`ACCENT_BRIGHT`: the selection). A row with no tap is the
+/// unplugged persisted selection: dimmed, its check included.
 fn device_row<'a>(
     title: String,
     subtitle: String,
@@ -1293,136 +1363,117 @@ fn device_row<'a>(
     on_tap: Option<Message>,
 ) -> Element<'a, Message> {
     let enabled = on_tap.is_some();
-    let accent = if enabled {
-        Studio::ACCENT
-    } else {
-        Studio::TEXT_FAINT
-    };
-    let title_color = if !enabled {
-        Studio::TEXT_FAINT
-    } else if selected {
-        Studio::TEXT_PRIMARY
-    } else {
-        Studio::TEXT_SECONDARY
-    };
-    let mut label = column![studio_text(title)
-        .size(13.5)
-        .font(if selected {
-            font::SEMIBOLD
+    let mut content = row![titled(
+        title,
+        subtitle,
+        if enabled {
+            Studio::TEXT_PRIMARY
         } else {
-            font::MEDIUM
-        })
-        .color(title_color)
-        .ellipsis(1)];
-    if !subtitle.is_empty() {
-        label = label
-            .push(Space::new().height(2))
-            .push(text(subtitle).size(11).color(Studio::TEXT_FAINT));
-    }
-    let mut content = row![
-        icons::icon(
-            Icon::Speaker,
-            16.0,
-            if selected { accent } else { Studio::TEXT_FAINT }
-        ),
-        Space::new().width(12),
-        label.width(Length::Fill),
-    ]
+            Studio::TEXT_FAINT
+        },
+    )]
+    .spacing(12)
     .align_y(Vertical::Center);
     if selected {
-        content = content.push(icons::icon(Icon::Check, 16.0, accent));
+        content = content.push(icons::icon(
+            Icon::Check,
+            14.0,
+            if enabled {
+                Studio::ACCENT_BRIGHT
+            } else {
+                Studio::TEXT_FAINT
+            },
+        ));
     }
-    tappable(container(content).padding(Padding::from([12, 14])), on_tap)
+    tappable(container(content).padding(ROW_PADDING), on_tap)
 }
 
-/// `_RefreshRow`: "Refresh devices".
+/// `_RefreshRow`: "Refresh devices", its glyph at the right.
 fn refresh_row<'a>() -> Element<'a, Message> {
     tappable(
         container(
             row![
-                icons::icon(Icon::RotateCw, 14.0, Studio::TEXT_SECONDARY),
-                Space::new().width(12),
-                text("Refresh devices")
-                    .size(12.5)
-                    .color(Studio::TEXT_SECONDARY),
+                studio_text("Refresh devices")
+                    .size(type_scale::TITLE)
+                    .line_height(Pixels(18.0))
+                    .color(Studio::TEXT_SECONDARY)
+                    .width(Length::Fill),
+                icons::icon(Icon::RotateCw, 13.0, Studio::TEXT_FAINT),
             ]
             .align_y(Vertical::Center),
         )
-        .padding(Padding::from([11, 14])),
+        .padding(ROW_PADDING),
         Some(Message::RefreshDevices),
     )
 }
 
-/// `_WarningBanner`: the record colour at 10 % with a 40 % border, a warning
-/// glyph and the text.
-fn warning_banner<'a>(message: &'a str) -> Element<'a, Message> {
+/// A calm notice (a setting not saved, a Bluetooth headset mic): the
+/// warning glyph in `WARN_TEXT` and the text in `TEXT_SECONDARY`, on the
+/// warning colour at 6 % with a faint outline of it.
+fn notice<'a>(message: &'a str) -> Element<'a, Message> {
     container(
         row![
-            icons::icon(Icon::TriangleAlert, 16.0, Studio::RECORD),
-            Space::new().width(10),
+            icons::icon(Icon::TriangleAlert, 14.0, Studio::WARN_TEXT),
             text(message)
-                .size(12)
-                .line_height(1.4)
+                .size(type_scale::BODY)
+                .line_height(Pixels(18.0))
                 .color(Studio::TEXT_SECONDARY)
                 .width(Length::Fill),
         ]
+        .spacing(10)
         .align_y(Vertical::Top),
     )
     .width(Length::Fill)
-    // 14 / 12 inside the 1 px border (a decoration's border pads its child;
-    // an iced border does not).
-    .padding(Padding::from([13, 15]))
+    .padding(Padding::from([10, 12]))
     .style(|_: &Theme| {
         boxed(
-            Some(alpha(Studio::RECORD, 0.10)),
-            CARD_RADIUS,
-            Some(alpha(Studio::RECORD, 0.4)),
+            Some(alpha(Studio::WARN, 0.06)),
+            radius::CARD,
+            Some(alpha(Studio::WARN, 0.22)),
         )
     })
     .into()
 }
 
-/// `_MonitorReverbCard`: the waves, "Reverb", the slider and its
-/// percentage.
-fn reverb_card<'a>(wet: f64) -> Element<'a, Message> {
+/// The monitor reverb row: "Reverb", the thin slider (`DESIGN.md`, Slider)
+/// and its percentage, tabular, right-aligned. The slider's values are
+/// whole percents, as the Material slider's 0.01 steps were.
+fn reverb_row<'a>(wet: f64) -> Element<'a, Message> {
     let value = wet.clamp(0.0, 1.0);
-    // The design's thin slider (`DESIGN.md`, Slider): its track runs edge
-    // to edge with the knob's centre a radius (5) in; the 24 px row keeps
-    // its hit area.
-    let reverb = container(material_slider(
-        slider(0.0..=1.0, value, |wet| {
-            Message::Choose(Choice::MonitorReverb(wet))
-        })
-        .step(0.01)
-        .height(24)
-        .style(clear_style(SliderLook::STUDIO.thumb_radius)),
+    let reverb = container(thin_slider(
         value as f32,
-        SliderLook::STUDIO,
+        |wet| {
+            Message::Choose(Choice::MonitorReverb(
+                (f64::from(wet) * 100.0).round() / 100.0,
+            ))
+        },
+        Message::ReverbReleased,
     ))
     .id(REVERB_SLIDER)
-    .padding(Padding::from([0, 6]))
     .width(Length::Fill);
     container(
         row![
-            icons::icon(Icon::Waves, 16.0, Studio::TEXT_FAINT),
-            Space::new().width(12),
-            container(text("Reverb").size(13).color(Studio::TEXT_SECONDARY)).width(52),
-            reverb,
             container(
-                text(format!("{}%", (wet * 100.0).round() as i64))
-                    .size(12)
-                    .color(Studio::TEXT_FAINT)
-                    .width(Length::Fill)
-                    .align_x(Horizontal::Right),
+                studio_text("Reverb")
+                    .size(type_scale::TITLE)
+                    .line_height(Pixels(18.0))
+                    .color(Studio::TEXT_PRIMARY),
             )
-            .width(38),
+            .width(LABEL_WIDTH),
+            reverb,
+            studio_text(format!("{}%", (wet * 100.0).round() as i64))
+                .size(type_scale::BODY)
+                .line_height(Pixels(18.0))
+                .tabular()
+                .color(Studio::TEXT_SECONDARY)
+                .width(VALUE_WIDTH)
+                .align_x(Horizontal::Right),
         ]
+        .spacing(12)
         .align_y(Vertical::Center),
     )
     .width(Length::Fill)
-    // 14 / 8 inside the 1 px border.
-    .padding(Padding::from([9, 15]))
-    .style(theme::card(CARD_RADIUS))
+    .padding(ROW_PADDING)
     .into()
 }
 
@@ -1432,138 +1483,91 @@ fn reverb_card<'a>(wet: f64) -> Element<'a, Message> {
 /// echo the mic never heard) and the monitor is allowed. Offered only for a
 /// device that can be headphones of its own (see
 /// `AppSettingsService::output_markable`), and plain about what goes wrong
-/// on speakers. Same chrome as the input-channel card.
-fn headphones_card<'a>(device: AudioDevice, marked: bool) -> Element<'a, Message> {
+/// on speakers. A row with the explanation under its title and the switch
+/// at its right.
+fn headphones_row<'a>(device: AudioDevice, marked: bool) -> Element<'a, Message> {
     let label = column![
-        text("Headphones only")
-            .size(13)
-            .color(Studio::TEXT_SECONDARY),
-        Space::new().height(2),
+        studio_text("Headphones only")
+            .size(type_scale::TITLE)
+            .line_height(Pixels(18.0))
+            .color(Studio::TEXT_PRIMARY),
         text(format!(
             "{} — turn on if you always listen on headphones here. Recordings then skip echo \
              cancelling, which keeps long notes clear, and hearing yourself is allowed. \
              Remembered for this output.",
             device.name
         ))
-        .size(11)
+        .size(type_scale::LABEL)
+        .line_height(Pixels(type_scale::LINE))
         .color(Studio::TEXT_FAINT),
         Space::new().height(2),
         text(
             "Leave it off if speakers ever play from it: takes would pick up the backing track, \
              and hearing yourself could howl."
         )
-        .size(11)
+        .size(type_scale::LABEL)
+        .line_height(Pixels(type_scale::LINE))
         .color(Studio::TEXT_SECONDARY),
     ]
     .width(Length::Fill);
-    // The device this card shows, not whatever renders when the tap lands.
+    // The device this row shows, not whatever renders when the tap lands.
     let toggle = Message::Choose(Choice::Headphones {
         uid: device.uid,
         on: !marked,
     });
     container(
         row![
-            icons::icon(Icon::Headphones, 16.0, Studio::TEXT_FAINT),
-            Space::new().width(12),
             label,
-            Space::new().width(12),
-            container(material_switch(
-                marked,
-                toggle,
-                Studio::ACCENT,
-                Studio::INSET
-            ))
-            .id(HEADPHONES_SWITCH),
+            container(toggle_switch(marked, Some(toggle))).id(HEADPHONES_SWITCH),
         ]
+        .spacing(16)
         .align_y(Vertical::Center),
     )
     .width(Length::Fill)
-    // 14 / 10 / 10 / 10 inside the 1 px border.
-    .padding(Padding {
-        top: 11.0,
-        right: 11.0,
-        bottom: 11.0,
-        left: 15.0,
-    })
-    .style(theme::card(CARD_RADIUS))
+    .padding(ROW_PADDING)
     .into()
 }
 
 /// Which input(s) of a multi-input device (an audio interface) are the
 /// voice: Auto follows the live one — a mic on either input records at full
 /// level, two live inputs blend — while Input 1 or Input 2 keeps the other
-/// out (say, a guitar DI on input 2). Same chrome as the reverb card; the
-/// segmented control matches the backing-track toggle.
+/// out (say, a guitar DI on input 2). A row with the segmented control
+/// (`DESIGN.md`) at its right.
 ///
 /// `device` is the device the choice applies to ("" when unknown): the one
 /// recording, which is the system default while the chosen device is
 /// unplugged.
-fn input_channel_card<'a>(device: &str, mode: u32) -> Element<'a, Message> {
+fn input_channel_row<'a>(device: &str, mode: u32) -> Element<'a, Message> {
     let named = if device.is_empty() {
         String::new()
     } else {
         format!("{device} — ")
     };
-    let label = column![
-        text("Input channel").size(13).color(Studio::TEXT_SECONDARY),
-        Space::new().height(2),
-        text(format!(
+    let label = titled(
+        "Input channel".to_string(),
+        format!(
             "{named}Auto follows the input you sing into. Pick one to keep a second source out."
-        ))
-        .size(11)
-        .color(Studio::TEXT_FAINT),
-    ]
-    .width(Length::Fill);
-    let segments = container(row![
-        segment("Auto", GraphAudioPlaybackService::INPUT_CHANNEL_AUTO, mode),
-        segment("Input 1", GraphAudioPlaybackService::INPUT_CHANNEL_1, mode),
-        segment("Input 2", GraphAudioPlaybackService::INPUT_CHANNEL_2, mode),
-    ])
-    // 2 inside the 1 px border.
-    .padding(3)
-    .style(|_: &Theme| boxed(Some(Studio::INSET), 7.0, Some(Studio::BORDER)));
-    container(
-        row![
-            icons::icon(Icon::Mic, 16.0, Studio::TEXT_FAINT),
-            Space::new().width(12),
-            label,
-            segments,
-        ]
-        .align_y(Vertical::Center),
-    )
-    .width(Length::Fill)
-    // 14 / 10 inside the 1 px border.
-    .padding(Padding::from([11, 15]))
-    .style(theme::card(CARD_RADIUS))
-    .into()
-}
-
-/// One segment of the input-channel control.
-fn segment<'a>(label: &'a str, value: u32, mode: u32) -> Element<'a, Message> {
-    let active = mode == value;
-    let face = container(
-        studio_text(label)
-            .size(11)
-            .font(font::BOLD)
-            .letter_spacing(0.3)
-            .color(if active {
-                Studio::ACCENT_BRIGHT
-            } else {
-                Studio::TEXT_SECONDARY
-            }),
-    )
-    .padding(Padding::from([4, 12]))
-    .style(move |_: &Theme| boxed(active.then(|| alpha(Studio::ACCENT, 0.18)), 5.0, None));
-    button(face)
-        .padding(0)
-        .style(bare_button)
-        .on_press(Message::Choose(Choice::InputChannel(value)))
+        ),
+        Studio::TEXT_PRIMARY,
+    );
+    let segments = segmented(
+        &[
+            (GraphAudioPlaybackService::INPUT_CHANNEL_AUTO, "Auto"),
+            (GraphAudioPlaybackService::INPUT_CHANNEL_1, "Input 1"),
+            (GraphAudioPlaybackService::INPUT_CHANNEL_2, "Input 2"),
+        ],
+        mode,
+        |value| Message::Choose(Choice::InputChannel(value)),
+    );
+    container(row![label, segments].spacing(16).align_y(Vertical::Center))
+        .width(Length::Fill)
+        .padding(ROW_PADDING)
         .into()
 }
 
-/// `_ActionRow`: an icon, the title, its explanatory subtitle, and a small
-/// spinner while its action runs (a chevron otherwise). `on_tap` `None`
-/// disables the row.
+/// `_ActionRow`: a 14 px line icon in `TEXT_SECONDARY`, the title, its
+/// explanatory subtitle, and a small spinner while its action runs (a
+/// chevron otherwise). `on_tap` `None` disables the row.
 fn action_row<'a>(
     icon: Icon,
     title: &'a str,
@@ -1573,66 +1577,60 @@ fn action_row<'a>(
 ) -> Element<'a, Message> {
     let enabled = on_tap.is_some();
     let trailing: Element<'a, Message> = if busy {
-        spinner(14.0, 2.0, Studio::TEXT_SECONDARY)
+        spinner(12.0, 1.6, Studio::TEXT_SECONDARY)
     } else {
-        icons::icon(Icon::ChevronRight, 14.0, Studio::TEXT_FAINT).into()
+        line_icon(glyphs::CHEVRON_RIGHT, 12.0, Studio::TEXT_FAINT).into()
     };
     let content = row![
         icons::icon(
             icon,
-            16.0,
+            14.0,
             if enabled {
-                Studio::ACCENT
+                Studio::TEXT_SECONDARY
             } else {
-                Studio::TEXT_FAINT
+                Studio::TEXT_DISABLED
             }
         ),
-        Space::new().width(12),
-        column![
-            text(title)
-                .size(13.5)
-                .font(font::SEMIBOLD)
-                .color(if enabled {
-                    Studio::TEXT_PRIMARY
-                } else {
-                    Studio::TEXT_FAINT
-                }),
-            Space::new().height(2),
-            text(subtitle.into())
-                .size(11)
-                .line_height(1.35)
-                .color(Studio::TEXT_FAINT),
-        ]
-        .width(Length::Fill),
+        titled(
+            title.to_string(),
+            subtitle.into(),
+            if enabled {
+                Studio::TEXT_PRIMARY
+            } else {
+                Studio::TEXT_FAINT
+            },
+        ),
         trailing,
     ]
+    .spacing(ICON_GAP)
     .align_y(Vertical::Center);
-    tappable(container(content).padding(Padding::from([12, 14])), on_tap)
+    tappable(container(content).padding(ROW_PADDING), on_tap)
 }
 
-/// `_InfoRow`: a row that takes no taps (the About block's version line).
-fn info_row<'a>(icon: Icon, title: &'a str, subtitle: String) -> Element<'a, Message> {
+/// `_InfoRow`: a row that takes no taps (the About block's version line):
+/// its icon, its title and, at the right, its value in `TEXT_SECONDARY`.
+fn info_row<'a>(icon: Icon, title: &'a str, value: String) -> Element<'a, Message> {
     container(
         row![
-            icons::icon(icon, 16.0, Studio::TEXT_FAINT),
-            Space::new().width(12),
-            column![
-                text(title)
-                    .size(13.5)
-                    .font(font::SEMIBOLD)
-                    .color(Studio::TEXT_PRIMARY),
-                Space::new().height(2),
-                text(subtitle).size(11).color(Studio::TEXT_FAINT),
-            ]
-            .width(Length::Fill),
+            icons::icon(icon, 14.0, Studio::TEXT_SECONDARY),
+            studio_text(title)
+                .size(type_scale::TITLE)
+                .line_height(Pixels(18.0))
+                .color(Studio::TEXT_PRIMARY)
+                .width(Length::Fill),
+            studio_text(value)
+                .size(type_scale::BODY)
+                .line_height(Pixels(18.0))
+                .tabular()
+                .color(Studio::TEXT_SECONDARY),
         ]
+        .spacing(ICON_GAP)
         .align_y(Vertical::Center),
     )
     .width(Length::Fill)
-    .padding(Padding::from([12, 14]))
+    .padding(ROW_PADDING)
     .into()
 }
-
 /// The page's message for what its toasts report.
 fn toast_message(event: SnackEvent) -> Message {
     match event {
@@ -1642,23 +1640,12 @@ fn toast_message(event: SnackEvent) -> Message {
     }
 }
 
-/// The result toast (home's SnackBar pattern): floating (set 16 in from the
-/// page's edges at its bottom by the queue, `snack::FLOATING_MARGIN`),
-/// `Studio.surfaceRaised`, radius 8, `Studio.border`, 13 px text. (The
-/// app draws it too, once the page has handed it over.)
+/// The result toast: the shared floating snack bar
+/// (`snack::floating_bar`, set 16 in from the page's edges at its bottom
+/// by the queue, `snack::FLOATING_MARGIN`), as Home's. (The app draws it
+/// too, once the page has handed it over.)
 fn toast_bar(message: &str) -> Element<'_, Infallible> {
-    let bar = container(text(message).size(13).color(Studio::TEXT_PRIMARY))
-        .width(Length::Fill)
-        .padding(Padding::from([14, 16]))
-        .style(|_: &Theme| container::Style {
-            shadow: Shadow {
-                color: alpha(Color::BLACK, 0.4),
-                offset: Vector::new(0.0, 3.0),
-                blur_radius: 8.0,
-            },
-            ..boxed(Some(Studio::SURFACE_RAISED), 8.0, Some(Studio::BORDER))
-        });
-    bar.into()
+    crate::ui::snack::floating_bar(message)
 }
 
 #[cfg(test)]

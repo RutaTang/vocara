@@ -103,10 +103,10 @@ fn home_to_settings_and_back_round_trips_through_the_settings_screen() {
     // The settings surface lays out its device + monitoring sections.
     // Device lists depend on the machine, so only the always-present rows.
     assert!(shows(&app, "Settings"));
-    assert!(shows(&app, "AUDIO OUTPUT"));
-    assert!(shows(&app, "AUDIO INPUT"));
-    assert!(shows(&app, "MONITORING"));
-    assert!(shows(&app, "System Default"));
+    assert!(shows(&app, "Audio output"));
+    assert!(shows(&app, "Audio input"));
+    assert!(shows(&app, "Monitoring"));
+    assert!(shows(&app, SYSTEM_DEFAULT));
     assert!(ui(&app).find(REVERB_SLIDER).is_ok(), "the reverb slider");
     assert!(!shows(&app, "New practice"), "Home is covered");
 
@@ -125,7 +125,7 @@ fn a_reverb_drag_changes_its_percentage_readout() {
     let mut app = boot(Some("/settings"), Services::detached);
     assert_eq!(app.routes(), [Some(Route::Settings)]);
     assert!(shows(&app, "Settings"));
-    assert!(shows(&app, "MONITORING"));
+    assert!(shows(&app, "Monitoring"));
 
     let before = reverb_percent(&app);
     let messages: Vec<app::Message> = {

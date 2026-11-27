@@ -1,6 +1,7 @@
 //! A two-line `ListTile`'s layout (`_RenderListTile._computeSizes`) at the
-//! desktop's `VisualDensity.compact`, for a title in `bodyLarge` (16 px)
-//! over a subtitle in `bodyMedium` (14 px), both at forui's line height 1.
+//! desktop's `VisualDensity.compact`, for a title at the design's list-row
+//! size (13 px, where Flutter's was `bodyLarge`) over a subtitle at its
+//! label size (11 px, where it was `bodyMedium`), both at line height 1.
 //!
 //! The tile is `72 + baseSizeAdjustment.dy` = 64 tall. The title's
 //! baseline sits 32 down and the subtitle's `52 + density.vertical · 2` =
@@ -22,9 +23,10 @@ use iced::{mouse, Element, Event, Length, Point, Rectangle, Renderer, Size, Them
 /// proportional leading).
 pub const INTER_ASCENT: f32 = 2728.0 / 3408.0;
 
-/// The title's and the subtitle's font sizes (`bodyLarge`, `bodyMedium`).
-pub const TITLE_SIZE: f32 = 16.0;
-pub const SUBTITLE_SIZE: f32 = 14.0;
+/// The title's and the subtitle's font sizes (`DESIGN.md`'s list row and
+/// label).
+pub const TITLE_SIZE: f32 = 13.0;
+pub const SUBTITLE_SIZE: f32 = 11.0;
 
 /// `contentPadding`: `EdgeInsetsDirectional.only(start: 16, end: 24)`.
 const START: f32 = 16.0;
@@ -200,18 +202,18 @@ mod tests {
     fn a_two_line_tile_is_64_tall_its_baselines_at_32_and_48() {
         let (title, subtitle, height) = two_line(TITLE_SIZE, SUBTITLE_SIZE);
         assert_eq!(height, 64.0);
-        assert!((title - 19.193).abs() < 1e-3, "{title}");
-        assert!((subtitle - 36.793).abs() < 1e-3, "{subtitle}");
+        assert!((title - 21.594).abs() < 1e-3, "{title}");
+        assert!((subtitle - 39.195).abs() < 1e-3, "{subtitle}");
         assert!((title + TITLE_SIZE * INTER_ASCENT - 32.0).abs() < 1e-4);
         assert!((subtitle + SUBTITLE_SIZE * INTER_ASCENT - 48.0).abs() < 1e-4);
     }
 
     #[test]
     fn a_wrapped_title_puts_the_tile_in_compact_mode() {
-        // Two lines of title: moved apart, the subtitle would end under the
-        // tile's bottom padding, so both sit 8 from the edges.
-        let (title, subtitle, height) = two_line(2.0 * TITLE_SIZE, SUBTITLE_SIZE);
-        assert_eq!((title, subtitle), (8.0, 40.0));
-        assert_eq!(height, 8.0 + 32.0 + 14.0 + 8.0);
+        // Three lines of title: moved apart, the subtitle would end under
+        // the tile's bottom padding, so both sit 8 from the edges.
+        let (title, subtitle, height) = two_line(3.0 * TITLE_SIZE, SUBTITLE_SIZE);
+        assert_eq!((title, subtitle), (8.0, 8.0 + 3.0 * TITLE_SIZE));
+        assert_eq!(height, 8.0 + 3.0 * TITLE_SIZE + SUBTITLE_SIZE + 8.0);
     }
 }
