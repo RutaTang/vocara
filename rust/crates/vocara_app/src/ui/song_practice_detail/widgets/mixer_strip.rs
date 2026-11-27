@@ -104,7 +104,7 @@ pub struct MixerStrip<'a> {
     /// `vm.mixer.fxBuses`.
     pub buses: &'a [Arc<FxBus>],
     /// `vm.mixer.supportsEffects`: the mic-input strip, the bus section and
-    /// "+ Bus" are only meaningful on the native engine (device I/O,
+    /// the add-bus tile are only meaningful on the native engine (device I/O,
     /// monitoring, effects).
     pub supports_effects: bool,
     /// `vm.selectedTrackId`.
@@ -128,7 +128,7 @@ pub struct MicInput {
     /// `settings.monitorAllowed`: hearing yourself is possible on this
     /// output (not a speaker that would feed back).
     pub monitor_allowed: bool,
-    /// `settings.suggestHeadphonesMark`: a locked MON can be unlocked by
+    /// `settings.suggestHeadphonesMark`: a locked monitor can be unlocked by
     /// marking the output as headphones in Settings.
     pub suggest_headphones_mark: bool,
     /// `vm.recording.inputLevel` (0..1).
@@ -1013,7 +1013,7 @@ fn master_channel<'a>(value: f64) -> Element<'a, Message> {
 /// The master's destination.
 pub const STEREO_OUT: &str = "Stereo Out";
 
-/// The REC fader's position for a record gain (dB).
+/// The record-gain fader's position for a record gain (dB).
 pub fn record_gain_position(db: f64) -> f64 {
     let (min, max) = (
         AppSettingsService::RECORD_GAIN_MIN_DB,
@@ -1022,7 +1022,7 @@ pub fn record_gain_position(db: f64) -> f64 {
     ((db - min) / (max - min)).clamp(0.0, 1.0)
 }
 
-/// The record gain (dB) at a REC fader position.
+/// The record gain (dB) at a record-gain fader position.
 pub fn record_gain_at(position: f64) -> f64 {
     let (min, max) = (
         AppSettingsService::RECORD_GAIN_MIN_DB,

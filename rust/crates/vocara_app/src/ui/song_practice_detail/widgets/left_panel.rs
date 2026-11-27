@@ -151,11 +151,11 @@ pub enum Channel {
 /// Which of the strip's menus is open.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InspectorMenu {
-    /// The OUTPUT chip's destinations.
+    /// The Output pop-up's destinations.
     Output(Channel),
-    /// "+ Send"'s buses no slot feeds yet.
+    /// The empty send slot's buses: those no slot feeds yet.
     AddSend(Channel),
-    /// A send slot's target chip: its own target plus the unused ones.
+    /// A send slot's target pop-up: its own target plus the unused ones.
     RetargetSend(Channel, usize),
 }
 
@@ -164,7 +164,7 @@ pub enum InspectorMenu {
 pub enum Message {
     /// The rail, or the header's collapse button (`vm.toggleInspectorPanel`).
     ToggleInspectorPanel,
-    /// A chip was tapped: open its menu (`showStudioMenu`).
+    /// A pop-up button was pressed: open its menu (`showStudioMenu`).
     OpenMenu(InspectorMenu),
     /// A tap outside the open menu, or Escape.
     DismissMenu,
@@ -492,7 +492,7 @@ pub fn short_clock(ms: i64) -> String {
     format!("{}:{:02}", s / 60, s % 60)
 }
 
-/// The OUTPUT chip's label: the destination bus's name, else
+/// The Output pop-up's label: the destination bus's name, else
 /// [`STEREO_OUT`].
 pub fn output_name(dest: Option<&str>, buses: &[Arc<FxBus>]) -> String {
     let mut name = STEREO_OUT.to_string();
@@ -538,9 +538,9 @@ pub fn send_fader_value(level_db: f64) -> f64 {
     ((level_db + 48.0) / 48.0).clamp(0.0, 1.0)
 }
 
-/// The buses "+ Send" offers: those no slot already feeds. Two sends into
-/// one bus feed it twice, so the bus hears the sum and neither fader reads
-/// what you hear.
+/// The buses the empty send slot offers: those no slot already feeds. Two
+/// sends into one bus feed it twice, so the bus hears the sum and neither
+/// fader reads what you hear.
 pub fn addable_targets<'b>(sends: &[TrackSend], targets: &[&'b FxBus]) -> Vec<&'b FxBus> {
     targets
         .iter()
@@ -549,12 +549,12 @@ pub fn addable_targets<'b>(sends: &[TrackSend], targets: &[&'b FxBus]) -> Vec<&'
         .collect()
 }
 
-/// Whether "+ Send" shows: a bus left to feed, and a free slot.
+/// Whether the empty send slot shows: a bus left to feed, and a free slot.
 pub fn can_add_send(sends: &[TrackSend], targets: &[&FxBus]) -> bool {
     !addable_targets(sends, targets).is_empty() && sends.len() < MAX_SENDS
 }
 
-/// The buses a slot's target chip offers: its own target, plus the ones no
+/// The buses a slot's target pop-up offers: its own target, plus the ones no
 /// slot feeds.
 pub fn retarget_options<'b>(
     sends: &[TrackSend],
