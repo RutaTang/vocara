@@ -35,7 +35,7 @@ pub fn transfer_function(
     let mut mag = vec![0.0; freqs.len()];
     let mut pdb = vec![0.0; freqs.len()];
     for (f, &freq) in freqs.iter().enumerate() {
-        let (m, p) = solver.eval(el, freq);
+        let (m, p) = solver.eval(freq);
         mag[f] = m;
         pdb[f] = p;
     }
@@ -52,17 +52,37 @@ const UNVISITED: isize = -2;
 /// injection node over the open branches ([`TransferSolver::prepare`]), then one solve per
 /// frequency ([`TransferSolver::eval`]). Its buffers are kept, so a solver used again for the
 /// same network allocates nothing.
+///
+/// `prepare` copies each reached node's elements (and those of its branch to its parent) into
+/// arrays in the tree's breadth-first order, so a solve walks them in sequence. The arithmetic
+/// is CHIMERA's, operation for operation, on the same values: only where they are read from
+/// differs.
 #[derive(Clone, Debug, Default)]
 pub struct TransferSolver {
-    inject: usize,
     adj_start: Vec<usize>,
     adj: Vec<usize>,
     fill: Vec<usize>,
-    /// BFS order from the injection node
+    /// BFS order from the injection node (node indices)
     order: Vec<usize>,
     parent: Vec<isize>,
     parent_branch: Vec<usize>,
-    rad_of: Vec<Option<usize>>,
+    /// a node's position in `order`
+    pos: Vec<usize>,
+    // the reached nodes' elements, by position in `order`
+    /// the parent's position (0 at the root, unused)
+    up: Vec<usize>,
+    c: Vec<f64>,
+    wall_area: Vec<f64>,
+    wall_m: Vec<f64>,
+    wall_r: Vec<f64>,
+    wall_k: Vec<f64>,
+    wall_rad: Vec<f64>,
+    fixed: Vec<bool>,
+    /// the radiator's area, NaN where there is none
+    rad_area: Vec<f64>,
+    /// R and L of the branch to the parent (0 at the root, unused)
+    br: Vec<f64>,
+    bl: Vec<f64>,
     // per frequency
     yr: Vec<f64>,
     yi: Vec<f64>,
@@ -77,10 +97,10 @@ pub struct TransferSolver {
 }
 
 impl TransferSolver {
-    /// Builds the elimination tree for `el` from `inject`, without the branches in `cut`.
+    /// Builds the elimination tree for `el` from `inject`, without the branches in `cut`, and
+    /// takes the reached elements' values.
     pub fn prepare(&mut self, el: &LinearElements, inject: usize, cut: &[usize]) {
         let n = el.n_nodes;
-        self.inject = inject;
         // adjacency of open branches
         let adj_start = &mut self.adj_start;
         adj_start.clear();
@@ -132,11 +152,49 @@ impl TransferSolver {
             }
             q += 1;
         }
-        self.rad_of.clear();
-        self.rad_of.resize(n, None);
-        for (r, &node) in el.rad_nodes.iter().enumerate() {
-            self.rad_of[node] = Some(r);
+        // the reached nodes' elements, in order
+        self.pos.clear();
+        self.pos.resize(n, usize::MAX);
+        for (q, &k) in self.order.iter().enumerate() {
+            self.pos[k] = q;
         }
+        self.up.clear();
+        self.br.clear();
+        self.bl.clear();
+        self.c.clear();
+        self.wall_area.clear();
+        self.wall_m.clear();
+        self.wall_r.clear();
+        self.wall_k.clear();
+        self.wall_rad.clear();
+        self.fixed.clear();
+        self.rad_area.clear();
+        for (q, &k) in self.order.iter().enumerate() {
+            let (up, r, l) = if q == 0 {
+                (0, 0.0, 0.0)
+            } else {
+                let j = self.parent_branch[k];
+                (self.pos[self.parent[k] as usize], el.r[j], el.l[j])
+            };
+            self.up.push(up);
+            self.br.push(r);
+            self.bl.push(l);
+            self.c.push(el.c[k]);
+            self.wall_area.push(el.wall_area[k]);
+            self.wall_m.push(el.wall_m[k]);
+            self.wall_r.push(el.wall_r[k]);
+            self.wall_k.push(el.wall_k[k]);
+            self.wall_rad.push(el.wall_rad[k]);
+            self.fixed.push(el.fixed[k]);
+            self.rad_area.push(f64::NAN);
+        }
+        for (r, &node) in el.rad_nodes.iter().enumerate() {
+            let q = self.pos[node];
+            if q != usize::MAX {
+                self.rad_area[q] = el.rad_area[r];
+            }
+        }
+        let m = self.order.len();
         for v in [
             &mut self.yr,
             &mut self.yi,
@@ -150,103 +208,108 @@ impl TransferSolver {
             &mut self.w_yi,
         ] {
             v.clear();
-            v.resize(n, 0.0);
+            v.resize(m, 0.0);
         }
     }
 
-    /// |U_rad / U_in| and the radiated pressure (dB) at `freq`, for the elements the tree was
-    /// prepared for.
-    pub fn eval(&mut self, el: &LinearElements, freq: f64) -> (f64, f64) {
-        let inject = self.inject;
+    /// |U_rad / U_in| and the radiated pressure (dB) at `freq`, for the elements the solver was
+    /// prepared with.
+    pub fn eval(&mut self, freq: f64) -> (f64, f64) {
         let w = 2.0 * PI * js_max(freq, 1e-3);
-        let (yr, yi, er, ei) = (&mut self.yr, &mut self.yi, &mut self.er, &mut self.ei);
-        let (pr, pi) = (&mut self.pr, &mut self.pi);
-        let (rad_yr, rad_yi, w_yr, w_yi) = (
-            &mut self.rad_yr,
-            &mut self.rad_yi,
-            &mut self.w_yr,
-            &mut self.w_yi,
-        );
+        let mag = self.eval_mag(freq);
+        (mag, 20.0 * log10(mag * w + 1e-30))
+    }
+
+    /// |U_rad / U_in| at `freq` (see [`TransferSolver::eval`]).
+    pub fn eval_mag(&mut self, freq: f64) -> f64 {
+        let m = self.order.len();
+        let w = 2.0 * PI * js_max(freq, 1e-3);
+        let (yr, yi) = (&mut self.yr[..m], &mut self.yi[..m]);
+        let (er, ei) = (&mut self.er[..m], &mut self.ei[..m]);
+        let (pr, pi) = (&mut self.pr[..m], &mut self.pi[..m]);
+        let (rad_yr, rad_yi) = (&mut self.rad_yr[..m], &mut self.rad_yi[..m]);
+        let (w_yr, w_yi) = (&mut self.w_yr[..m], &mut self.w_yi[..m]);
+        let (c, wall_area) = (&self.c[..m], &self.wall_area[..m]);
+        let (wall_m, wall_r, wall_k) = (&self.wall_m[..m], &self.wall_r[..m], &self.wall_k[..m]);
+        let (wall_rad, fixed) = (&self.wall_rad[..m], &self.fixed[..m]);
+        let rad_area = &self.rad_area[..m];
+        let (up, br, bl) = (&self.up[..m], &self.br[..m], &self.bl[..m]);
         // shunt admittances
-        for &k in &self.order {
+        for q in 0..m {
             let mut gr = 0.0;
-            let mut gi = w * el.c[k];
-            w_yr[k] = 0.0;
-            w_yi[k] = 0.0;
-            if el.wall_area[k] > 0.0 {
+            let mut gi = w * c[q];
+            w_yr[q] = 0.0;
+            w_yi[q] = 0.0;
+            if wall_area[q] > 0.0 {
                 // Y = S / (r + j(ωm − k/ω))
-                let zr = el.wall_r[k];
-                let zi = w * el.wall_m[k] - el.wall_k[k] / w;
+                let zr = wall_r[q];
+                let zi = w * wall_m[q] - wall_k[q] / w;
                 let d = zr * zr + zi * zi;
-                w_yr[k] = (el.wall_area[k] * zr) / d;
-                w_yi[k] = (-el.wall_area[k] * zi) / d;
-                gr += w_yr[k];
-                gi += w_yi[k];
+                w_yr[q] = (wall_area[q] * zr) / d;
+                w_yi[q] = (-wall_area[q] * zi) / d;
+                gr += w_yr[q];
+                gi += w_yi[q];
             }
-            rad_yr[k] = 0.0;
-            rad_yi[k] = 0.0;
-            if let Some(r) = self.rad_of[k] {
-                let a = el.rad_area[r];
+            rad_yr[q] = 0.0;
+            rad_yi[q] = 0.0;
+            let a = rad_area[q];
+            if !a.is_nan() {
                 let lr = (8.0 * RHO) / (3.0 * PI * sqrt(PI * a));
                 let rr = (128.0 * RHO * C_SOUND) / (9.0 * PI * PI * a);
-                rad_yr[k] = 1.0 / rr;
-                rad_yi[k] = -1.0 / (w * lr);
-                gr += rad_yr[k];
-                gi += rad_yi[k];
+                rad_yr[q] = 1.0 / rr;
+                rad_yi[q] = -1.0 / (w * lr);
+                gr += rad_yr[q];
+                gi += rad_yi[q];
             }
-            if el.fixed[k] {
+            if fixed[q] {
                 gr += 1e30;
             }
-            yr[k] = gr;
-            yi[k] = gi;
+            yr[q] = gr;
+            yi[q] = gi;
         }
         // eliminate leaves → root
-        for q in (1..self.order.len()).rev() {
-            let k = self.order[q];
-            let j = self.parent_branch[k];
+        for q in (1..m).rev() {
             // Y_eq = Y / (1 + Z·Y), Z = R + jωL
-            let zr = el.r[j];
-            let zi = w * el.l[j];
-            let dr = 1.0 + zr * yr[k] - zi * yi[k];
-            let di = zr * yi[k] + zi * yr[k];
+            let zr = br[q];
+            let zi = w * bl[q];
+            let dr = 1.0 + zr * yr[q] - zi * yi[q];
+            let di = zr * yi[q] + zi * yr[q];
             let dd = dr * dr + di * di;
-            er[k] = (yr[k] * dr + yi[k] * di) / dd;
-            ei[k] = (yi[k] * dr - yr[k] * di) / dd;
-            let m = self.parent[k] as usize;
-            yr[m] += er[k];
-            yi[m] += ei[k];
+            er[q] = (yr[q] * dr + yi[q] * di) / dd;
+            ei[q] = (yi[q] * dr - yr[q] * di) / dd;
+            let p = up[q];
+            yr[p] += er[q];
+            yi[p] += ei[q];
         }
         // root pressure for unit injected flow
         {
-            let dd = yr[inject] * yr[inject] + yi[inject] * yi[inject];
-            pr[inject] = yr[inject] / dd;
-            pi[inject] = -yi[inject] / dd;
+            let dd = yr[0] * yr[0] + yi[0] * yi[0];
+            pr[0] = yr[0] / dd;
+            pi[0] = -yi[0] / dd;
         }
         // back-substitute root → leaves: I = p_m·Y_eq(k); p_k = p_m − Z·I
         let mut ur = 0.0;
         let mut ui = 0.0;
-        for (q, &k) in self.order.iter().enumerate() {
+        for q in 0..m {
             if q > 0 {
-                let m = self.parent[k] as usize;
-                let j = self.parent_branch[k];
-                let ir = pr[m] * er[k] - pi[m] * ei[k];
-                let ii = pr[m] * ei[k] + pi[m] * er[k];
-                let zr = el.r[j];
-                let zi = w * el.l[j];
-                pr[k] = pr[m] - (zr * ir - zi * ii);
-                pi[k] = pi[m] - (zr * ii + zi * ir);
+                let p = up[q];
+                let ir = pr[p] * er[q] - pi[p] * ei[q];
+                let ii = pr[p] * ei[q] + pi[p] * er[q];
+                let zr = br[q];
+                let zi = w * bl[q];
+                pr[q] = pr[p] - (zr * ir - zi * ii);
+                pi[q] = pi[p] - (zr * ii + zi * ir);
             }
-            if self.rad_of[k].is_some() {
-                ur += pr[k] * rad_yr[k] - pi[k] * rad_yi[k];
-                ui += pr[k] * rad_yi[k] + pi[k] * rad_yr[k];
+            if !rad_area[q].is_nan() {
+                ur += pr[q] * rad_yr[q] - pi[q] * rad_yi[q];
+                ui += pr[q] * rad_yi[q] + pi[q] * rad_yr[q];
             }
-            if el.wall_rad[k] > 0.0 && el.wall_area[k] > 0.0 {
-                ur += el.wall_rad[k] * (pr[k] * w_yr[k] - pi[k] * w_yi[k]);
-                ui += el.wall_rad[k] * (pr[k] * w_yi[k] + pi[k] * w_yr[k]);
+            if wall_rad[q] > 0.0 && wall_area[q] > 0.0 {
+                ur += wall_rad[q] * (pr[q] * w_yr[q] - pi[q] * w_yi[q]);
+                ui += wall_rad[q] * (pr[q] * w_yi[q] + pi[q] * w_yr[q]);
             }
         }
-        let mag = hypot(ur, ui);
-        (mag, 20.0 * log10(mag * w + 1e-30))
+        hypot(ur, ui)
     }
 }
 

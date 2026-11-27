@@ -17,6 +17,7 @@
 //! | [`airway::frequency`] | `crates/chimera/src/airway/frequency.rs` |
 //! | [`airway::human`] | `crates/chimera/src/voice/human_airway.rs` (the network and `apply`) |
 //! | [`optimize`] | `crates/chimera/src/util/optimize.rs` |
+//! | [`vowels`] | `crates/chimera/src/phonetics/vowelTargets.generated.json` (the table) |
 //!
 //! The physics and geometry are CHIMERA's operation for operation, with every transcendental
 //! function through `libm` as there, so its fixtures (`tests/golden/`, copied from
@@ -25,7 +26,9 @@
 
 pub mod airway;
 pub mod anatomy;
+pub mod forward;
 pub mod geom;
 mod math;
 pub mod optimize;
 pub mod physics;
+pub mod vowels;

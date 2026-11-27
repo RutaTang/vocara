@@ -18,6 +18,15 @@ pub fn cos(x: f64) -> f64 {
     libm::cos(x)
 }
 #[inline(always)]
+pub fn exp(x: f64) -> f64 {
+    libm::exp(x)
+}
+/// Natural logarithm (`Math.log`).
+#[inline(always)]
+pub fn ln(x: f64) -> f64 {
+    libm::log(x)
+}
+#[inline(always)]
 pub fn log10(x: f64) -> f64 {
     libm::log10(x)
 }

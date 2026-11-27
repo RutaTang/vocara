@@ -1600,7 +1600,15 @@ fn project_on(pl: &Polyline, cum: &[f64], px: f64, py: f64) -> Projection {
             t
         };
         let (qx, qy) = (ax + ex * t, ay + ey * t);
-        let d = hypot(px - qx, py - qy);
+        let (dx, dy) = (px - qx, py - qy);
+        // Not in CHIMERA: libm's hypot was half of a frame's geometry, and a segment whose
+        // squared distance is clearly past the best cannot win. The margin is far beyond hypot's
+        // rounding, so the same segment wins as without the shortcut and the result is bit for
+        // bit CHIMERA's.
+        if dx * dx + dy * dy > best * best * (1.0 + 1e-9) {
+            continue;
+        }
+        let d = hypot(dx, dy);
         if d < best {
             best = d;
             bs = cum[i] + t * sqrt(l2);
