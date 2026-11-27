@@ -13,7 +13,6 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use iced::alignment::Vertical;
-use iced::font::Weight;
 use iced::widget::canvas::{self, Frame, Geometry, Path, Stroke};
 use iced::widget::image::{FilterMethod, Handle};
 use iced::widget::{canvas as canvas_widget, Space};
@@ -22,7 +21,6 @@ use iced::{
 };
 
 use super::painter::{KeyedCache, Same};
-use crate::ui::core::system_font;
 use crate::ui::core::theme::{alpha, Studio};
 
 // ------------------------------------------------------------- model seam
@@ -79,17 +77,28 @@ impl FormantTracks for VoiceMetrics {
 
 // ------------------------------------------------------------------ colours
 
-/// Colors for the first three formants (F1 blue, F2 green, F3 amber) —
-/// matches the Estill Voiceprint convention and reads on the dark
-/// spectrogram.
+/// Colors for the first three formants (F1 blue, F2 green, F3 amber, the
+/// Estill Voiceprint convention) in the design's muted track colours
+/// (`DESIGN.md`): periwinkle, sage and ochre, of one lightness.
 pub const FORMANT_COLORS: [Color; 3] = [
-    Color::from_rgb8(0x5B, 0x8D, 0xEF),
-    Color::from_rgb8(0x52, 0xB7, 0x88),
-    Color::from_rgb8(0xE0, 0xA0, 0x50),
+    Studio::TRACK_PERIWINKLE,
+    Studio::TRACK_SAGE,
+    Studio::TRACK_OCHRE,
 ];
 
-/// The F0 (pitch) overlay color — bright white, distinct from the formants.
-pub const F0_COLOR: Color = Color::from_rgb8(0xF2, 0xF2, 0xF8);
+/// The F0 (pitch) overlay color — the primary text white, distinct from the
+/// formants.
+pub const F0_COLOR: Color = Studio::TEXT_PRIMARY;
+
+/// The power spectrum's filled area: a neutral wash.
+pub const SPECTRUM_FILL: Color = Color::from_rgba(0.655, 0.655, 0.702, 0.22);
+
+/// The power spectrum's smoothed envelope: the neutral data line.
+pub const SPECTRUM_ENVELOPE: Color = Color::from_rgb8(0xC4, 0xC4, 0xCE);
+
+/// The singer's-formant band (2.6–3.8 kHz) shaded on the spectra: a faint
+/// ochre (the band F3 and the ring cluster sit in).
+pub const SINGERS_FORMANT_BAND: Color = Color::from_rgba(0.788, 0.643, 0.431, 0.10);
 
 /// For the 2048-pt Hanning STFT used app-wide, a full-scale tone reads ~54 dB
 /// (20·log10(fftSize/4)). The color ceiling is clamped to at least this so an
@@ -99,14 +108,16 @@ pub const F0_COLOR: Color = Color::from_rgb8(0xF2, 0xF2, 0xF8);
 /// you speak" live startup artifact.
 pub const MIN_CEIL_DB: f64 = 48.0;
 
-/// Heat colormap stops (dark -> indigo -> purple -> coral -> amber -> white).
+/// Heat colormap stops (the well -> indigo -> plum -> muted coral -> muted
+/// amber -> warm white): from the plot wells' `WELL`, muted to sit with the
+/// design's track and status colours rather than glare.
 const STOPS: [[u8; 3]; 6] = [
-    [14, 14, 18],
-    [28, 26, 60],
-    [92, 40, 112],
-    [224, 122, 106],
-    [251, 191, 36],
-    [255, 255, 255],
+    [15, 15, 18],
+    [32, 28, 58],
+    [88, 46, 106],
+    [190, 96, 104],
+    [228, 166, 108],
+    [244, 234, 218],
 ];
 
 /// Writes the heat color for `t` ∈ [0, 1] at `px[idx..idx + 4]`.
@@ -820,10 +831,11 @@ impl<M> canvas::Program<M> for FrequencyGridPainter {
         frame.fill_rectangle(
             Point::new(0.0, top),
             Size::new(bounds.width, bottom - top),
-            alpha(Studio::ACCENT, 0.10),
+            SINGERS_FORMANT_BAND,
         );
+        // Faint over the image (the grid's `GRID` would vanish into it).
         let line = Stroke::default()
-            .with_color(alpha(Studio::TEXT_PRIMARY, 0.12))
+            .with_color(alpha(Studio::TEXT_PRIMARY, 0.07))
             .with_width(1.0);
         let mut hz = 1000.0;
         while hz < self.max_hz {
@@ -984,14 +996,14 @@ impl<M> canvas::Program<M> for PowerSpectrumPainter {
             frame.fill_rectangle(
                 Point::new(l as f32, 0.0),
                 Size::new((r - l) as f32, bounds.height),
-                alpha(Studio::ACCENT, 0.08),
+                SINGERS_FORMANT_BAND,
             );
-            frame.fill(&polyline(&shape.area, true), alpha(Studio::WAVEFORM, 0.35));
+            frame.fill(&polyline(&shape.area, true), SPECTRUM_FILL);
             frame.stroke(
                 &polyline(&shape.envelope, false),
                 Stroke::default()
-                    .with_color(alpha(Studio::ACCENT, 0.5))
-                    .with_width(1.5),
+                    .with_color(SPECTRUM_ENVELOPE)
+                    .with_width(1.2),
             );
             for (fx, i) in shape.markers {
                 let fx = fx as f32;
@@ -1000,17 +1012,17 @@ impl<M> canvas::Program<M> for PowerSpectrumPainter {
                     &Path::line(Point::new(fx, 0.0), Point::new(fx, bounds.height)),
                     Stroke::default()
                         .with_color(alpha(color, 0.85))
-                        .with_width(1.5),
+                        .with_width(1.2),
                 );
-                // A `TextPainter`'s line: no height, the font's own; no
-                // family, the system UI font, w700.
+                // The marker's label: 10 px Inter medium in its colour
+                // (`DESIGN.md`'s axis size).
                 frame.fill_text(canvas::Text {
                     content: format!("F{}", i + 1),
-                    position: Point::new(fx + 2.0, 2.0),
+                    position: Point::new(fx + 4.0, 4.0),
                     color,
-                    size: Pixels(9.0),
+                    size: Pixels(10.0),
                     line_height: crate::ui::core::text::NATURAL,
-                    font: system_font::font(Weight::Bold),
+                    font: crate::ui::core::theme::font::MEDIUM,
                     align_y: Vertical::Top,
                     ..canvas::Text::default()
                 });
@@ -1230,34 +1242,44 @@ impl<M> canvas::Program<M> for VowelSpacePainter {
     ) -> Vec<Geometry> {
         let size = bounds.size();
         let mut frame = Frame::new(renderer, size);
-        frame.stroke(
-            &Path::rectangle(Point::ORIGIN, size),
-            Stroke::default().with_color(Studio::BORDER).with_width(1.0),
-        );
+        // A faint quarter grid (`GRID`) to read positions by.
+        let grid = Stroke::default().with_color(Studio::GRID).with_width(1.0);
+        for k in 1..4 {
+            let x = (size.width * k as f32 / 4.0).round() + 0.5;
+            let y = (size.height * k as f32 / 4.0).round() + 0.5;
+            frame.stroke(
+                &Path::line(Point::new(x, 0.0), Point::new(x, size.height)),
+                grid,
+            );
+            frame.stroke(
+                &Path::line(Point::new(0.0, y), Point::new(size.width, y)),
+                grid,
+            );
+        }
         for (label, rf1, rf2) in VOWEL_REFS {
             let p = vowel_position(rf1, rf2, size);
-            frame.fill(&Path::circle(p, 2.0), alpha(Studio::TEXT_FAINT, 0.5));
-            // A `TextPainter`'s line: no height, the font's own; no
-            // family, the system UI font.
+            frame.fill(&Path::circle(p, 2.5), Studio::TEXT_DISABLED);
+            // The reference vowel: 11 px Inter, `TEXT_FAINT`.
             frame.fill_text(canvas::Text {
                 content: label.to_string(),
-                position: p + Vector::new(3.0, -4.0),
+                position: p + Vector::new(5.0, -7.0),
                 color: Studio::TEXT_FAINT,
-                size: Pixels(9.0),
+                size: Pixels(11.0),
                 line_height: crate::ui::core::text::NATURAL,
-                font: system_font::font(Weight::Normal),
+                font: crate::ui::core::theme::font::REGULAR,
                 align_y: Vertical::Top,
                 ..canvas::Text::default()
             });
         }
         if !self.f1.is_nan() && !self.f2.is_nan() && self.f1 > 0.0 && self.f2 > 0.0 {
-            let dot = Path::circle(vowel_position(self.f1, self.f2, size), 4.0);
-            frame.fill(&dot, Studio::ACCENT);
+            let at = vowel_position(self.f1, self.f2, size);
+            // A soft halo, then the dot ringed in the well's colour.
+            frame.fill(&Path::circle(at, 9.0), alpha(Studio::TEXT_PRIMARY, 0.10));
+            let dot = Path::circle(at, 4.5);
+            frame.fill(&dot, Studio::TEXT_PRIMARY);
             frame.stroke(
                 &dot,
-                Stroke::default()
-                    .with_color(Studio::BACKGROUND)
-                    .with_width(1.2),
+                Stroke::default().with_color(Studio::WELL).with_width(1.5),
             );
         }
         vec![frame.into_geometry()]

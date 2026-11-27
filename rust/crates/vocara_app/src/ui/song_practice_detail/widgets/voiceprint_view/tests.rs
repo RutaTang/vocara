@@ -493,10 +493,10 @@ fn the_ltas_tab_names_its_average_and_its_stats() {
     let state = synced(&src);
     let shown = texts(&mut simulator(ltas, &src, &state, DOCK));
     assert!(
-        shown.iter().any(|t| t == "LTAS · AVERAGE SPECTRUM"),
+        shown.iter().any(|t| t == "LTAS · average spectrum"),
         "{shown:?}"
     );
-    assert!(shown.iter().any(|t| t == "SINGER'S FORMANT  "));
+    assert!(shown.iter().any(|t| t == "Singer's formant"));
     assert!(shown.iter().any(|t| t.ends_with(" dB")));
 }
 
@@ -513,7 +513,7 @@ fn live_renders_a_fed_monitor() {
     pump_tabs(&src);
     let state = VoiceprintState::new();
     let shown = texts(&mut simulator(spectrogram, &src, &state, DOCK));
-    assert!(shown.iter().any(|t| t == "LIVE"), "{shown:?}");
+    assert!(shown.iter().any(|t| t == "Live"), "{shown:?}");
     assert!(!shown
         .iter()
         .any(|t| t
@@ -564,7 +564,7 @@ fn live_a_nan_inside_a_sustained_note_leaves_the_tabs_drawable() {
     let state = VoiceprintState::new();
     let shown = texts(&mut simulator(ltas, &src, &state, DOCK));
     assert!(
-        shown.iter().any(|t| t == "LTAS · RUNNING AVERAGE"),
+        shown.iter().any(|t| t == "LTAS · running average"),
         "{shown:?}"
     );
 }
@@ -618,12 +618,12 @@ fn centre_seconds(f: i64) -> f64 {
     (f * HOP + FFT / 2) as f64 / SR as f64
 }
 
-/// Where the take stack sits in a dock tab: past the tab's 16 px padding
-/// and the 46 px axis, to the 20 px right padding.
-const STACK_LEFT: f32 = 16.0 + AXIS_WIDTH;
+/// Where the take stack sits in a dock tab: past the tab's padding and the
+/// frequency axis, to the tab's right padding.
+const STACK_LEFT: f32 = TAB_PADDING.left + AXIS_WIDTH;
 
 fn stack_width(window: Size) -> f32 {
-    window.width - STACK_LEFT - 20.0
+    window.width - STACK_LEFT - TAB_PADDING.right
 }
 
 #[test]
@@ -1080,10 +1080,19 @@ fn the_live_spectrogram_panel_is_clipped_round() {
     let state = VoiceprintState::new();
     let mut window = Frames::new(DOCK);
     window.frame(spectrogram(&src, &state), &[], iced::time::Instant::now());
-    // The panel ends 20 in from the right and 16 up from the bottom: its
-    // corner pixel is the hosts' surface, a pixel in from it the well.
-    let corner = Point::new(DOCK.width - 21.0, DOCK.height - 17.0);
+    // The panel ends the tab's padding in from the right and the bottom:
+    // its corner pixel is the host's backdrop (the dock's), a few pixels in
+    // from it (past the outline) the well.
+    let corner = Point::new(
+        DOCK.width - TAB_PADDING.right - 1.0,
+        DOCK.height - TAB_PADDING.bottom - 1.0,
+    );
+    assert!(near(window.pixel(corner), BACKDROP));
+    let inside = Point::new(corner.x - 5.0, corner.y - 5.0);
+    assert!(near(window.pixel(inside), Studio::WELL));
+    // A host that lays a card behind the tabs shows it there.
+    let state = VoiceprintState::new().with_backdrop(Studio::SURFACE);
+    let mut window = Frames::new(DOCK);
+    window.frame(spectrogram(&src, &state), &[], iced::time::Instant::now());
     assert!(near(window.pixel(corner), Studio::SURFACE));
-    let inside = Point::new(DOCK.width - 26.0, DOCK.height - 22.0);
-    assert!(near(window.pixel(inside), Studio::INSET));
 }

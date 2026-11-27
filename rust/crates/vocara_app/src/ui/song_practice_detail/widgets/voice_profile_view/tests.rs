@@ -484,7 +484,7 @@ fn the_range_view_marks_the_passaggio() {
         "Passaggio",
         "E4",
         "abrupt shift",
-        "Range · tessitura highlighted, passaggio marked",
+        "Sung range on a pitch axis",
     ] {
         assert!(shown.iter().any(|t| t == label), "{label} in {shown:?}");
     }

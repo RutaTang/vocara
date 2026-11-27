@@ -60,8 +60,8 @@ fn rgb(px: &[u8], width: usize, x: usize, y: usize) -> [u8; 3] {
 }
 
 // With a 60 dB peak the 72 dB window runs from -12 (bottom colour) to 60.
-const BOTTOM: [u8; 3] = [14, 14, 18];
-const TOP: [u8; 3] = [255, 255, 255];
+const BOTTOM: [u8; 3] = [15, 15, 18];
+const TOP: [u8; 3] = [244, 234, 218];
 
 #[test]
 fn one_column_per_frame_paints_the_heat_map_low_frequency_at_the_bottom() {
@@ -71,7 +71,7 @@ fn one_column_per_frame_paints_the_heat_map_low_frequency_at_the_bottom() {
     assert_eq!((px.width, px.height), (2, 3));
     // Frame 0: bin 0 (bottom row) at the peak, bin 1 mid-scale, bin 2 floor.
     assert_eq!(rgb(&px.pixels, 2, 0, 2), TOP);
-    assert_eq!(rgb(&px.pixels, 2, 0, 1), [158, 81, 109]);
+    assert_eq!(rgb(&px.pixels, 2, 0, 1), [139, 71, 105]);
     assert_eq!(rgb(&px.pixels, 2, 0, 0), BOTTOM);
     // Frame 1: NaN and below-the-window read as the bottom colour.
     assert_eq!(rgb(&px.pixels, 2, 1, 2), BOTTOM);

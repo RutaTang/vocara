@@ -114,8 +114,8 @@ impl Studio {
     // darker, head cool and lighter (told apart by lightness as well as hue,
     // muted beside the track colours); mix is derived by lerping the two at
     // the usage site.
-    pub const REGISTER_CHEST: Color = Color::from_rgb8(0xC9, 0x80, 0x68);
-    pub const REGISTER_HEAD: Color = Color::from_rgb8(0xA8, 0xB9, 0xE6);
+    pub const REGISTER_CHEST: Color = Color::from_rgb8(0xBF, 0x6F, 0x55);
+    pub const REGISTER_HEAD: Color = Color::from_rgb8(0xAF, 0xC2, 0xEE);
     /// Pitch within tolerance / healthy: the sung pitch line.
     pub const IN_TUNE: Color = Color::from_rgb8(0x7C, 0xC4, 0xA6);
     /// Metric in the good range.

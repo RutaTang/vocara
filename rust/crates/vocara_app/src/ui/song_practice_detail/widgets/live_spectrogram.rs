@@ -57,7 +57,7 @@ pub fn live_spectrogram<'a, M: 'a>(monitor: &'a MonitorService) -> Element<'a, M
         container(Space::new())
             .width(Length::Fill)
             .height(Length::Fill)
-            .style(fill(Studio::INSET)),
+            .style(fill(Studio::WELL)),
         canvas_widget(LivePainter { monitor })
             .width(Length::Fill)
             .height(Length::Fill),
@@ -70,7 +70,7 @@ pub fn live_spectrogram<'a, M: 'a>(monitor: &'a MonitorService) -> Element<'a, M
     if empty {
         layers = layers.push(center(
             text(LIVE_SPECTROGRAM_HINT)
-                .size(13)
+                .size(crate::ui::core::theme::type_scale::BODY)
                 .color(Studio::TEXT_FAINT),
         ));
     }
