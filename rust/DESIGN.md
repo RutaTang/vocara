@@ -257,7 +257,10 @@ Line height 16 px for 11–12 px text unless noted.
   white) with a soft glow, tongue ribs `#E6A498`, the mandible
   `TEXT_SECONDARY`, the palate `TEXT_DISABLED`; a Side / ¾ / Front
   segmented control top-right. Resting (no voice), the figure holds its last
-  shape, dimmed. Beside it a 404 px readout panel: a card (radius 10,
+  shape, dimmed. Without an estimate the status says why, the figure
+  resting: "Getting ready" (Live, while the model sets up for the voice),
+  "Reading this take" (its shapes computing), "No analysis" (a take with
+  nothing to read), "No take selected". Beside it a 404 px readout panel: a card (radius 10,
   `#18181C`, inset `#24242B`) of 30 px component rows (26–24 px in a short
   dock) — a 12 px `#C4C4CE` label, a 2 px `CONTROL_ACTIVE` track with 9 px
   `#5E5E6B` range ends, a 6 px band `ACCENT` at 22 % over the last two

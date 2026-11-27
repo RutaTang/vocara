@@ -2339,6 +2339,14 @@ fn the_vocal_tract_track_follows_the_subjects_metrics() {
         suggested.female > 0.1 && suggested.female < 0.9,
         "{suggested:?}"
     );
+    // to a quarter, and followed once per subject (a body set after it
+    // stays)
+    assert_eq!((suggested.female * 4.0).fract(), 0.0, "{suggested:?}");
+    let e = cache.follow_suggested_vocal_tract_body(&host);
+    assert_eq!(cache.vocal_tract_body(), suggested);
+    d.go(&mut cache, &host, e);
+    assert_eq!(cache.selected_vocal_tract(&host).unwrap().body(), suggested);
+    assert!(cache.follow_suggested_vocal_tract_body(&host).is_empty());
 
     // another body: computed for it
     let e = cache.set_vocal_tract_body(BodyMix::MALE, &host);
@@ -2349,6 +2357,8 @@ fn the_vocal_tract_track_follows_the_subjects_metrics() {
         cache.selected_vocal_tract(&host).unwrap().body(),
         BodyMix::MALE
     );
+    assert!(cache.follow_suggested_vocal_tract_body(&host).is_empty());
+    assert_eq!(cache.vocal_tract_body(), BodyMix::MALE);
 
     // the source goes, the track with it
     cache.evict_analysis("c1.wav", false);

@@ -600,6 +600,8 @@ pub struct AnalysisCache {
     // --- The vocal tract (not Dart's) ---
     /// The body the tracks (and the live estimate) are for.
     vocal_tract_body: BodyMix,
+    /// The subject whose suggested body was last followed.
+    tract_body_followed: Option<String>,
     /// Subjects whose track computes, by job id.
     tract_in_flight: HashMap<String, u64>,
     /// Subjects (key and body) whose track's compute failed: not retried.
@@ -823,6 +825,7 @@ impl AnalysisCache {
             eq_spectro_loading: HashSet::new(),
             eq_spectro_unavailable: HashSet::new(),
             vocal_tract_body: DEFAULT_TRACT_BODY,
+            tract_body_followed: None,
             tract_in_flight: HashMap::new(),
             tract_failed: HashSet::new(),
             expanded_tracks: Vec::new(),
@@ -1449,10 +1452,38 @@ impl AnalysisCache {
     }
 
     /// A body to start from for the analysis subject (its metrics' F3, see
-    /// `vocara_services::vocal_tract::suggested_body`); `None` until its
-    /// metrics are in, or when too few of its frames are voiced.
+    /// `vocara_services::vocal_tract::suggested_body`), to the nearest
+    /// quarter of the way between the adult male, the adult female and the
+    /// child: a take's small differences from the singer's others keep their
+    /// body (and its track), and few bodies' codebooks are built. `None`
+    /// until its metrics are in, or when too few of its frames are voiced.
     pub fn suggested_vocal_tract_body(&self, host: &dyn AnalysisHost) -> Option<BodyMix> {
-        suggested_body(self.selected_metrics(host)?.as_ref())
+        let b = suggested_body(self.selected_metrics(host)?.as_ref())?;
+        let quarter = |x: f64| (x * 4.0).round() / 4.0;
+        Some(BodyMix::new(quarter(b.female), quarter(b.child)))
+    }
+
+    /// Moves the vocal tract (the tracks and the live estimate) to the body
+    /// the analysis subject's voice suggests, once per subject, when its
+    /// metrics are in: the view's way of fitting the singer without asking.
+    #[must_use]
+    pub fn follow_suggested_vocal_tract_body(
+        &mut self,
+        host: &dyn AnalysisHost,
+    ) -> Vec<AnalysisEffect> {
+        let Some(s) = self.analysis_subject(host) else {
+            return Vec::new();
+        };
+        if self.tract_body_followed.as_deref() == Some(s.key.as_str())
+            || self.selected_metrics(host).is_none()
+        {
+            return Vec::new();
+        }
+        self.tract_body_followed = Some(s.key);
+        match self.suggested_vocal_tract_body(host) {
+            Some(body) if body != self.vocal_tract_body => self.set_vocal_tract_body(body, host),
+            _ => Vec::new(),
+        }
     }
 
     /// The analysis subject's vocal-tract track for the current body, once
@@ -1471,6 +1502,15 @@ impl AnalysisCache {
     pub fn vocal_tract_loading(&self, host: &dyn AnalysisHost) -> bool {
         self.analysis_subject(host)
             .is_some_and(|s| self.tract_in_flight.contains_key(&s.key))
+    }
+
+    /// Whether the analysis subject's vocal-tract track failed to compute
+    /// for the current body.
+    pub fn vocal_tract_failed(&self, host: &dyn AnalysisHost) -> bool {
+        self.analysis_subject(host).is_some_and(|s| {
+            self.tract_failed
+                .contains(&tract_failure_key(self.vocal_tract_body, &s.key))
+        })
     }
 
     /// Asks for the analysis subject's vocal-tract track. Without its metrics
@@ -1542,6 +1582,12 @@ impl AnalysisCache {
         self.monitor
             .set_vocal_tract(on.then_some(self.vocal_tract_body));
         self.notify();
+    }
+
+    /// Whether the live vocal tract is being estimated (asked for by
+    /// [`AnalysisCache::set_live_vocal_tract`]).
+    pub fn live_vocal_tract_on(&self) -> bool {
+        self.monitor.read().vocal_tract_body().is_some()
     }
 
     /// The live vocal tract after the latest mic frame; `None` while it is

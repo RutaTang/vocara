@@ -131,7 +131,7 @@ pub struct Row {
 }
 
 /// What the panel says under the vowel map's side.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Status {
     /// A voice: how well the shape explains it, and its formants.
     Voiced { fit: Fit, formants: [f32; 3] },
@@ -139,6 +139,11 @@ pub enum Status {
     Resting,
     /// Take mode with no take to read.
     NoTake,
+    /// No estimate yet, being worked out: on Live (`live`) the engine
+    /// getting ready for the voice, on Take the take's shapes computing.
+    Preparing { live: bool },
+    /// A take with nothing to read: its voice could not be analyzed.
+    Unavailable,
 }
 
 /// Everything the panel shows.
@@ -613,6 +618,27 @@ fn status_column<'a>(status: &Status, gap: f32) -> Element<'a, Message> {
             Studio::TEXT_SECONDARY,
             false,
             "Select a recorded take, or switch to Live.".to_string(),
+        ),
+        Status::Preparing { live: true } => (
+            "Getting ready",
+            Studio::TEXT_FAINT,
+            Studio::TEXT_SECONDARY,
+            false,
+            "Setting up the model for your voice.".to_string(),
+        ),
+        Status::Preparing { live: false } => (
+            "Reading this take",
+            Studio::TEXT_FAINT,
+            Studio::TEXT_SECONDARY,
+            false,
+            "Working out the shapes from the take\u{2019}s voice.".to_string(),
+        ),
+        Status::Unavailable => (
+            "No analysis",
+            Studio::TEXT_FAINT,
+            Studio::TEXT_SECONDARY,
+            false,
+            "No analysis for this take, so no shape to show.".to_string(),
         ),
     };
     let dot_widget = stack![

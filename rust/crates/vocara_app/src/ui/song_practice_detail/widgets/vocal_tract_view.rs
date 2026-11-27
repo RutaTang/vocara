@@ -6,17 +6,17 @@
 //!
 //! The view draws a [`TractPose`] ([`pose`]) and nothing else: plain
 //! outlines in centimetres, the airway's rings, the components the panel
-//! reads, the formants, the fit and whether there was a voice. The engine
-//! (an articulatory model with an inversion from formants to articulators)
-//! is joined in ONE place, [`estimate`]: the screen calls it (only from its
-//! `feed_vocal_tract`, after every update while the tab is shown) with the
-//! analysis source, whether the dock is on Live and the clock (seconds
-//! since Live began, or the playhead in a take), and hands what it returns
-//! to [`VocalTractState::feed`]. Today `estimate`
-//! returns [`TractPose::demo`] (`demo`: a singer holding "ah", "ee", "oo"
-//! and resting); wiring the engine replaces that one line with the engine's
-//! estimate, converted to a `TractPose` by an adapter outside this module.
-//! Nothing here knows the engine's types.
+//! reads, the formants, the fit and whether there was a voice. The screen
+//! joins the engine in ONE place, its `feed_vocal_tract` (after every update
+//! while the tab is shown): it reads the engine's estimate (the live mic's
+//! on Live, the selected take's at the playhead on Take), converts it with
+//! the adapter (`super::vocal_tract_engine::pose_of`) and hands it to
+//! [`VocalTractState::feed`]; while there is none yet (the engine getting
+//! ready for the voice, a take's shapes computing) it calls
+//! [`VocalTractState::feed_preparing`], and with no take to read, `feed`
+//! with `None`. Nothing here knows the engine's types. The demo
+//! ([`TractPose::demo`]: a singer holding "ah", "ee", "oo" and resting)
+//! stays for the tests and the figure's resting shape.
 //!
 //! # What the tab shows
 //!
@@ -79,22 +79,8 @@ use self::spring::{PoseSpring, Spring};
 use crate::ui::core::theme::{alpha, boxed, font, type_scale, Studio};
 use crate::ui::core::widgets::controls::{labelled, segmented};
 use crate::ui::core::widgets::studio_text::studio_text;
-use crate::ui::song_practice_detail::view_model::analysis_source::AnalysisSource;
 
 pub use self::pose::TractPose;
-
-/// THE SEAM (see the module docs): the pose the tab shows for `src` at
-/// `clock` s — on Live, seconds since Live began; on Take, the playhead —
-/// or `None` when there is nothing to read (Take with no take selected).
-///
-/// Until the articulatory engine is wired this is the demo; wiring it
-/// replaces the `TractPose::demo` line with the engine's estimate.
-pub fn estimate(src: &dyn AnalysisSource, live: bool, clock: f64) -> Option<TractPose> {
-    if !live && src.selected_track().is_none() {
-        return None;
-    }
-    Some(TractPose::demo(clock))
-}
 
 /// The figure's two views.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -148,6 +134,8 @@ pub struct VocalTractState {
     history: VecDeque<Sample>,
     /// Whether the last feed had nothing to read (Take, no take).
     no_source: bool,
+    /// Why, when it was not that there is no take: the panel's status.
+    why_none: Option<Status>,
     /// When Live began (the live clock's zero).
     live_since: Option<Instant>,
     last_frame: Option<Instant>,
@@ -172,6 +160,7 @@ impl VocalTractState {
             pose: PoseSpring::default(),
             history: VecDeque::new(),
             no_source: false,
+            why_none: None,
             live_since: None,
             last_frame: None,
         }
@@ -259,12 +248,29 @@ impl VocalTractState {
         }
     }
 
-    /// Takes in what [`estimate`] returned for `clock`, at `now`.
+    /// Takes in that there is no estimate yet for `clock` because it is
+    /// being worked out: on Live (`live`) the engine getting ready for the
+    /// voice, on Take the take's shapes computing. The figure rests.
+    pub fn feed_preparing(&mut self, live: bool, clock: f64, now: Instant) {
+        self.feed(None, clock, now);
+        self.why_none = Some(Status::Preparing { live });
+    }
+
+    /// Takes in that the take has nothing to read (its voice could not be
+    /// analyzed). The figure rests.
+    pub fn feed_unavailable(&mut self, clock: f64, now: Instant) {
+        self.feed(None, clock, now);
+        self.why_none = Some(Status::Unavailable);
+    }
+
+    /// Takes in the estimate for `clock` (`None`: nothing to read, Take
+    /// with no take), at `now`.
     pub fn feed(&mut self, estimate: Option<TractPose>, clock: f64, now: Instant) {
         if self.last_frame.is_none() {
             self.last_frame = Some(now);
         }
         self.no_source = estimate.is_none();
+        self.why_none = None;
         let pose = estimate.unwrap_or_else(|| demo::articulate(&demo::AH, false, Fit::Uncertain));
         // The bands and the trail look back from this clock (a seek back
         // forgets what came after it).
@@ -372,7 +378,7 @@ impl VocalTractState {
             })
             .collect();
         let status = if self.no_source {
-            Status::NoTake
+            self.why_none.unwrap_or(Status::NoTake)
         } else if resting {
             Status::Resting
         } else {

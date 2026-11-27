@@ -4,14 +4,8 @@
 //! demo and the seam, and the labels a screen reader reads.
 
 use std::f32::consts::FRAC_PI_2;
-use std::sync::Arc;
 
 use iced::Size;
-use vocara_model::models::audio_track::{AudioTrack, AudioTrackKind};
-use vocara_model::models::spectrogram::Spectrogram;
-use vocara_model::models::voice_metrics::{Ltas, RegisterMap, VoiceMetrics, VoiceProfile};
-use vocara_model::util::dart_date_time::DateTime;
-use vocara_services::monitor_service::MonitorService;
 
 use super::callouts::{self, Side};
 use super::camera::{fitted_scale, Projection, P3, SCENE_CENTRE};
@@ -640,75 +634,28 @@ fn every_demo_pose_is_to_scale_and_of_one_layout() {
     }
 }
 
-/// An analysis source with or without a selected take.
-struct Src {
-    take: Option<Arc<AudioTrack>>,
-    monitor: MonitorService,
-}
-
-impl AnalysisSource for Src {
-    fn selected_track(&self) -> Option<Arc<AudioTrack>> {
-        self.take.clone()
-    }
-    fn analysis_start_ms(&self) -> i64 {
-        0
-    }
-    fn analysis_duration_ms(&self) -> i64 {
-        0
-    }
-    fn selected_metrics(&self) -> Option<Arc<VoiceMetrics>> {
-        None
-    }
-    fn selected_spectrogram(&self) -> Option<Arc<Spectrogram>> {
-        None
-    }
-    fn selected_profile(&self) -> Option<Arc<VoiceProfile>> {
-        None
-    }
-    fn selected_ltas(&self) -> Option<Arc<Ltas>> {
-        None
-    }
-    fn selected_register(&self) -> Option<Arc<RegisterMap>> {
-        None
-    }
-    fn spectrogram_loading(&self) -> bool {
-        false
-    }
-    fn metrics_loading(&self) -> bool {
-        false
-    }
-    fn live_monitor(&self) -> bool {
-        false
-    }
-    fn monitor(&self) -> &MonitorService {
-        &self.monitor
-    }
-    fn position(&self) -> Duration {
-        Duration::ZERO
-    }
-    fn revision(&self) -> u64 {
-        0
-    }
-}
-
 #[test]
-fn the_seam_gives_the_demo_until_the_engine_is_wired() {
-    let none = Src {
-        take: None,
-        monitor: MonitorService::default(),
-    };
-    assert_eq!(estimate(&none, true, 2.0), Some(TractPose::demo(2.0)));
-    assert_eq!(estimate(&none, false, 2.0), None, "Take with no take");
-    let take = Src {
-        take: Some(Arc::new(AudioTrack::new(
-            "t1",
-            AudioTrackKind::Vocal,
-            "Take 1",
-            DateTime::local_ymd(2026, 6, 20),
-        ))),
-        monitor: MonitorService::default(),
-    };
-    assert_eq!(estimate(&take, false, 4.9), Some(TractPose::demo(4.9)));
+fn the_panel_says_when_the_estimate_is_being_worked_out() {
+    let now = Instant::now();
+    let mut st = VocalTractState::new();
+    st.feed_preparing(false, 1.0, now);
+    assert!(st.resting());
+    assert_eq!(st.readouts().status, Status::Preparing { live: false });
+    {
+        let mut ui = iced_test::simulator(view_of(&st, false));
+        assert!(ui.find("Reading this take").is_ok());
+    }
+    st.feed_preparing(true, 1.0, now);
+    assert_eq!(st.readouts().status, Status::Preparing { live: true });
+    {
+        let mut ui = iced_test::simulator(view_of(&st, true));
+        assert!(ui.find("Getting ready").is_ok());
+    }
+    // The first estimate ends it; nothing to read is no take, not preparing.
+    st.feed(Some(TractPose::demo(1.0)), 1.1, now);
+    assert!(matches!(st.readouts().status, Status::Voiced { .. }));
+    st.feed(None, 1.2, now);
+    assert_eq!(st.readouts().status, Status::NoTake);
 }
 
 #[test]

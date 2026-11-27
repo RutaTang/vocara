@@ -1498,7 +1498,19 @@ fn the_vocal_tract_tab_shows_the_selected_take_and_its_shape() {
     }
     // The tab's own Take / Live control; none in the strip.
     assert!(h.find("Live").is_some());
-    assert!(h.screen.vocal_tract.shown().voiced, "the seam's pose fed");
+    // The tab asked for the take's track (its metrics, then the track, on
+    // workers). This harness's take has no audio to analyze: the panel says
+    // there is nothing to read rather than waiting on it.
+    h.settle();
+    h.send(Message::Dock(bottom_dock::Message::VocalTract(
+        vocal_tract_view::Message::SetView(vocal_tract_view::TractView::TwoD),
+    )));
+    assert_eq!(
+        h.screen.vocal_tract.readouts().status,
+        vocal_tract_view::readouts::Status::Unavailable
+    );
+    assert!(h.shows("No analysis for this take, so no shape to show."));
+    assert!(!h.screen.vocal_tract.shown().voiced);
     assert!(!h.screen.vocal_tract.animating(), "settled: no frames");
     h.send(Message::Dock(bottom_dock::Message::VocalTract(
         vocal_tract_view::Message::SetView(vocal_tract_view::TractView::ThreeD),

@@ -35,6 +35,7 @@ use crate::ui::song_practice_detail::widgets::track_context_menu::{
     confirm_delete_bus, rename_dialog, BusAction, ClipAction, TrackAction,
 };
 use crate::ui::song_practice_detail::widgets::track_row;
+use crate::ui::song_practice_detail::widgets::vocal_tract_engine;
 use crate::ui::song_practice_detail::widgets::vocal_tract_view;
 use crate::ui::song_practice_detail::widgets::voiceprint_view as voiceprint;
 use crate::ui::Update;
@@ -788,20 +789,71 @@ impl SongPracticeDetailScreen {
         a.dock_open() && a.dock_tab() == DockTab::VocalTract
     }
 
-    /// Feeds the Vocal tract tab the estimate for now, while it shows: on
-    /// Live for the time since Live began, else for the playhead in the
-    /// selected take. The one place the tab's poses come from
-    /// (`vocal_tract_view::estimate`, the seam with the articulatory
-    /// engine).
-    fn feed_vocal_tract(&mut self) {
-        if !self.vocal_tract_shown() {
+    /// Feeds the Vocal tract tab the engine's estimate for now, while it
+    /// shows: on Live the mic's (the monitor estimates it only while the tab
+    /// shows Live), else the selected take's at the playhead (its track asked
+    /// for as the tab shows it, computed once on a worker), both for the body
+    /// the selected take's voice suggests. The one place the
+    /// tab meets the engine: its estimates go through the adapter
+    /// (`vocal_tract_engine::pose_of`).
+    fn feed_vocal_tract(&mut self, step: &mut Step) {
+        let shown = self.vocal_tract_shown();
+        let live = self.vm.analysis().live_monitor();
+        if self.vm.analysis().live_vocal_tract_on() != (shown && live) {
+            let fx = self
+                .vm
+                .analysis_do(|a, _| a.set_live_vocal_tract(shown && live));
+            self.absorb(fx, step);
+        }
+        if !shown {
             return;
         }
+        // Fit the singer: the body the selected take's voice suggests (once
+        // per take, when its metrics are in), on Live as on Take.
+        if self.vm.selected_track().is_some() {
+            let fx = self
+                .vm
+                .analysis_do(|a, h| a.follow_suggested_vocal_tract_body(h));
+            self.absorb(fx, step);
+        }
         let now = Instant::now();
-        let live = self.vm.analysis().live_monitor();
         let clock = self.vocal_tract.clock(live, self.vm.position(), now);
-        let pose = vocal_tract_view::estimate(&*self.vm, live, clock);
-        self.vocal_tract.feed(pose, clock, now);
+        if live {
+            match self.vm.analysis().live_vocal_tract() {
+                Some(state) => {
+                    let pose = vocal_tract_engine::pose_of(&state);
+                    self.vocal_tract.feed(Some(pose), clock, now);
+                }
+                None => self.vocal_tract.feed_preparing(true, clock, now),
+            }
+            return;
+        }
+        if self.vm.selected_track().is_none() {
+            self.vocal_tract.feed(None, clock, now);
+            return;
+        }
+        let fx = self.vm.analysis_do(|a, h| a.ensure_vocal_tract(h));
+        self.absorb(fx, step);
+        let (track, state, unavailable) = self.vm.with_analysis(|a, h| {
+            (
+                a.selected_vocal_tract(h).is_some(),
+                a.vocal_tract_at_playhead(h),
+                a.selected_metrics_unavailable(h) || a.vocal_tract_failed(h),
+            )
+        });
+        match state {
+            Some(state) => {
+                let pose = vocal_tract_engine::pose_of(&state);
+                self.vocal_tract.feed(Some(pose), clock, now);
+            }
+            // The playhead outside the take: no voice there.
+            None if track => {
+                let rest = vocal_tract_engine::resting_pose();
+                self.vocal_tract.feed(Some(rest), clock, now);
+            }
+            None if unavailable => self.vocal_tract.feed_unavailable(clock, now),
+            None => self.vocal_tract.feed_preparing(false, clock, now),
+        }
     }
 
     fn lyrics_message(&mut self, m: lyrics_panel::Message, step: &mut Step) {
@@ -1613,7 +1665,7 @@ impl SongPracticeDetailScreen {
             self.absorb(fx, step);
         }
         self.shown.read(&self.vm);
-        self.feed_vocal_tract();
+        self.feed_vocal_tract(step);
         self.read_fx_panel(step);
         self.sync_images(step);
         self.sync_lyrics(step);
