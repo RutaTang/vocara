@@ -384,6 +384,61 @@ fn the_summary_read_reports_what_summarizing_the_full_list_would() {
     assert!(summarized.contains(&corrupt.id));
 }
 
+// The library cards' previews: the first take with audio (else the
+// backing), its cached peaks across the practice's length, read without
+// hydrating anything.
+#[test]
+fn previews_draw_the_first_take_else_the_backing_from_the_cache() {
+    use vocara_model::models::practice_summary::{PracticePreview, PreviewSource};
+
+    let f = Fixture::new();
+    let version = |p: &SongPractice| Some(p.versions[0].id.clone());
+    let backing = |name: &str, peaks: &[f64]| AudioTrack {
+        clips: vec![f.clip_with_peaks(name, &[1, 2, 3], peaks)],
+        ..lane(AudioTrackKind::Accompaniment, "Backing")
+    };
+    // A: a backing and a take a second in.
+    let a = f.create("A");
+    let take_a = AudioTrack {
+        clips: vec![AudioClip {
+            start_ms: 1000,
+            ..f.clip_with_peaks("take-a.wav", &[4, 5, 6], &[1.0; 10])
+        }],
+        ..take("Take 1", version(&a).as_deref())
+    };
+    let a = f.save(&SongPractice {
+        accompaniment: Some(Arc::new(backing("backing-a.wav", &[0.5; 10]))),
+        ..with_takes(&a, vec![take_a])
+    });
+    // B: a backing alone.
+    let b = f.create("B");
+    let b = f.save(&SongPractice {
+        accompaniment: Some(Arc::new(backing("backing-b.wav", &[0.25; 10]))),
+        ..b
+    });
+    // C: nothing recorded; D: gone.
+    let c = f.create("C");
+    let d = f.create("D");
+    f.songs.delete_practice(&d.id).unwrap();
+
+    let previews = f.songs.list_practice_previews().unwrap();
+    let of =
+        |id: &str| -> &PracticePreview { previews.iter().find(|p| p.id == id).expect("a preview") };
+    assert_eq!(previews.len(), 3, "the live practices");
+    let pa = of(&a.id);
+    assert_eq!(pa.source, Some(PreviewSource::Take));
+    assert_eq!(pa.length_ms, 6000, "the take's end");
+    assert_eq!(pa.peaks.len(), PracticePreview::BUCKETS);
+    // The take's peaks (1.0) from its second in; silence before.
+    assert_eq!(pa.peaks[0], 0.0);
+    assert!((pa.peaks[PracticePreview::BUCKETS - 1] - 1.0).abs() < 1e-6);
+    let pb = of(&b.id);
+    assert_eq!(pb.source, Some(PreviewSource::Backing));
+    assert!(pb.peaks.iter().any(|v| (v - 0.25).abs() < 1e-6));
+    let pc = of(&c.id);
+    assert_eq!((pc.source, pc.length_ms, pc.peaks.len()), (None, 0, 0));
+}
+
 #[test]
 fn delete_tombstones_the_practice_and_the_list_excludes_it() {
     let f = Fixture::new();

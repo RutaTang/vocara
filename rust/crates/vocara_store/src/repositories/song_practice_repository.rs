@@ -2,7 +2,7 @@
 //! `lib/data/repositories/song_practice_repository.dart`).
 
 use indexmap::IndexMap;
-use vocara_model::models::practice_summary::PracticeSummary;
+use vocara_model::models::practice_summary::{PracticePreview, PracticeSummary};
 use vocara_model::models::song_practice::SongPractice;
 
 use crate::error::Result;
@@ -33,6 +33,16 @@ pub trait SongPracticeRepository: Send + Sync {
     /// column) is still listed: Home can delete it, and opening it says it
     /// could not be loaded, where before it simply vanished from the list.
     fn list_practice_summaries(&self) -> Result<Vec<PracticeSummary>>;
+
+    /// What the library cards draw of every live practice besides its
+    /// summary (see [`PracticePreview`]): its length and the waveform of its
+    /// first vocal take with audio (else its backing), from the waveform
+    /// cache, without hydrating anything or decoding any audio. In no
+    /// particular order. A repository with no waveform cache lists none
+    /// (the default): the cards then draw their band without a waveform.
+    fn list_practice_previews(&self) -> Result<Vec<PracticePreview>> {
+        Ok(Vec::new())
+    }
 
     /// The live practice [id].
     fn get_practice(&self, id: &str) -> Result<SongPractice>;

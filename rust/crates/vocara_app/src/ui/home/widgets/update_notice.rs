@@ -1,5 +1,5 @@
 //! Port of `ui/home/widgets/update_notice.dart`: the dismissible "a newer
-//! Vocara exists" banner under the home header ([`update_notice_banner`]),
+//! Vocara exists" banner under the library's toolbar ([`update_notice_banner`]),
 //! the download dialog for a newer release ([`UpdateDownloadDialog`], which
 //! Settings opens too), and [`open_url_in_browser`].
 //!
@@ -28,16 +28,16 @@
 use crate::ui::core::text;
 use iced::alignment::Vertical;
 use iced::widget::text::Wrapping;
-use iced::widget::{button, column, container, row, Space};
+use iced::widget::{column, container, row, Space};
 use iced::{Background, Border, Color, Element, Length, Padding, Task, Theme};
 use vocara_services::update_check_service::{UpdateCheckService, UpdateInfo};
 
 use crate::ui::core::icons::{self, Icon};
-use crate::ui::core::theme::{self, alpha, bare_button, font, Studio, Zinc};
-use crate::ui::core::widgets::confirm_dialog::{modal, Fade};
+use crate::ui::core::theme::{self, alpha, font, type_scale, Studio};
+use crate::ui::core::widgets::confirm_dialog::{self, modal, Fade};
+use crate::ui::core::widgets::controls::{icon_button, DialogButton};
 use crate::ui::core::widgets::fading_scrollbar::{scrollable, Fading};
-use crate::ui::core::widgets::material_tooltip::material_tooltip;
-use crate::ui::core::widgets::studio_button::{studio_button, StudioButtonVariant};
+use crate::ui::core::widgets::studio_button::studio_button;
 use crate::ui::core::widgets::studio_text::studio_text;
 use crate::ui::core::widgets::text_field::editor::{self as text_editor, text_editor};
 
@@ -100,53 +100,48 @@ pub fn update(updates: &UpdateCheckService, message: Message) -> Option<UpdateDo
     }
 }
 
+/// The banner: the accent's arrow and the news (12 px medium), the
+/// secondary "Download" button and the dismiss icon button, on the accent
+/// at 8 % over the library's 32 px gutters, a hairline under it.
 fn banner<'a>(info: UpdateInfo) -> Element<'a, Message> {
     let content = row![
-        icons::icon(Icon::CircleArrowUp, 16.0, Studio::ACCENT),
+        icons::icon(Icon::CircleArrowUp, 14.0, Studio::ACCENT_BRIGHT),
         Space::new().width(10),
         // One line, ellipsized.
         studio_text(format!("Vocara {} is available.", info.version))
-            .size(13)
-            .font(font::SEMIBOLD)
+            .size(type_scale::BODY)
+            .line_height(iced::Pixels(type_scale::LINE))
+            .font(font::MEDIUM)
             .color(Studio::TEXT_PRIMARY)
             .width(Length::Fill)
             .ellipsis(1),
         Space::new().width(10),
-        studio_button("Download", Message::Download(info))
-            .icon(Icon::Download)
-            .variant(StudioButtonVariant::Accent),
-        Space::new().width(8),
+        studio_button("Download", Message::Download(info)).icon(Icon::Download),
+        Space::new().width(6),
         dismiss_button(),
     ]
     .align_y(Vertical::Center);
-    // Coral at 10 %, with `Border(bottom: Studio.border)`: the line sits
-    // under the padding.
+    // The accent at 8 %, with a hairline under the padding.
     container(column![
         container(content)
             .width(Length::Fill)
-            .padding(Padding::from([10, 24])),
+            .padding(Padding::from([8, 32])),
         container(Space::new())
             .width(Length::Fill)
             .height(1)
             .style(theme::fill(Studio::BORDER)),
     ])
     .width(Length::Fill)
-    .style(|_: &Theme| theme::boxed(Some(alpha(Studio::ACCENT, 0.10)), 0.0, None))
+    .style(|_: &Theme| theme::boxed(Some(alpha(Studio::ACCENT, 0.08)), 0.0, None))
     .into()
 }
 
-/// A 28 px square with a 15 px cross, a click cursor and a "Dismiss" tooltip.
+/// A 28 px icon button with a 14 px cross and a "Dismiss" tooltip.
 fn dismiss_button<'a>() -> Element<'a, Message> {
-    let target = button(
-        container(icons::icon(Icon::X, 15.0, Studio::TEXT_SECONDARY))
-            .center_x(28)
-            .center_y(28),
-    )
-    .padding(0)
-    .style(bare_button)
-    .on_press(Message::Dismiss);
-    // Material's tooltip sits 24 px below the target's centre.
-    material_tooltip(target, "Dismiss", 10.0).into()
+    icon_button(Icon::X, Message::Dismiss)
+        .icon_size(14.0)
+        .tooltip("Dismiss")
+        .into()
 }
 
 // -------------------------------------------------------------------- dialog
@@ -215,16 +210,17 @@ impl UpdateDownloadDialog {
     pub fn view_at(&self, fade: Fade) -> Element<'_, DialogMessage> {
         let info = &self.info;
         let mut content = column![text(format!("Vocara {} is available", info.version))
-            .size(15)
-            .font(font::BOLD)
+            .size(type_scale::TITLE)
+            .line_height(iced::Pixels(18.0))
+            .font(font::SEMIBOLD)
             .color(Studio::TEXT_PRIMARY)];
         if !info.notes.is_empty() {
-            content = content.push(Space::new().height(12)).push(
+            content = content.push(Space::new().height(8)).push(
                 container(
                     scrollable(
                         text(info.notes.as_str())
-                            .size(12.5)
-                            .line_height(1.5)
+                            .size(type_scale::BODY)
+                            .line_height(iced::Pixels(18.0))
                             .color(Studio::TEXT_SECONDARY)
                             .width(Length::Fill),
                     )
@@ -245,40 +241,41 @@ impl UpdateDownloadDialog {
         content = content
             .push(Space::new().height(14))
             .push(
-                // 10 by 12 inside the well's 1 px border (a Flutter
-                // `Container`'s padding includes its decoration's border).
+                // The text field's well, its text 10 in from its sides and
+                // 8 from its top and bottom.
                 container(url)
                     .width(Length::Fill)
-                    .padding(Padding::from([11, 13]))
-                    .style(theme::inset(8.0)),
+                    .padding(Padding::from([8, 10]))
+                    .style(theme::field_well(false)),
             )
-            .push(Space::new().height(22))
-            .push(row![
-                Space::new().width(Length::Fill),
-                studio_button("Later", DialogMessage::Cancel),
-                Space::new().width(10),
-                studio_button("Open Download Page", DialogMessage::Confirm)
-                    .icon(Icon::Download)
-                    .variant(StudioButtonVariant::Accent),
-            ]);
+            .push(Space::new().height(20))
+            .push(confirm_dialog::buttons(
+                "Later",
+                DialogMessage::Cancel,
+                "Open Download Page",
+                Some(DialogMessage::Confirm),
+                DialogButton::Primary,
+            ));
         let card = container(content.width(Length::Fill))
-            .width(480)
-            // 22 inside the card's 1 px border.
-            .padding(23)
+            .width(DIALOG_WIDTH)
+            .padding(confirm_dialog::CARD_PADDING)
             .style(theme::dialog_card);
         modal(container(card).padding(24).into(), fade)
     }
 }
 
-/// The URL: `Studio.textSecondary`, 12 px, on the inset well, with
-/// `SelectableText`'s selection color (the theme's primary at 40 %).
+/// The dialog's width.
+pub const DIALOG_WIDTH: f32 = 480.0;
+
+/// The URL: `Studio.textSecondary`, 12 px, on the field's well, with the
+/// fields' selection colour.
 fn url_style(_: &Theme, _: text_editor::Status) -> text_editor::Style {
     text_editor::Style {
         background: Background::Color(Color::TRANSPARENT),
         border: Border::default(),
         placeholder: Studio::TEXT_FAINT,
         value: Studio::TEXT_SECONDARY,
-        selection: alpha(Zinc::PRIMARY, 0.40),
+        selection: crate::ui::core::theme::SELECTION,
     }
 }
 
@@ -388,12 +385,13 @@ mod tests {
 
     #[test]
     fn the_url_wraps_in_its_well_inside_the_card() {
-        // The 480-wide card centred in the 1024-wide window, 22 inside its
-        // 1 px border; the well 12 by 10 inside its own; the text at its
-        // 12 px lines, as many as it takes.
+        // The 480-wide card centred in the 1024-wide window, 20 inside its
+        // inset outline; the well's text 10 in from its sides and 8 down;
+        // the text at its 12 px lines, as many as it takes.
+        use crate::ui::core::widgets::confirm_dialog::CARD_PADDING;
         crate::ui::core::widgets::studio_text::testing::load_fonts();
-        let card_left = (1024.0 - 480.0) / 2.0;
-        let width = 480.0 - 2.0 * 23.0 - 2.0 * 13.0;
+        let card_left = (1024.0 - DIALOG_WIDTH) / 2.0;
+        let width = DIALOG_WIDTH - 2.0 * CARD_PADDING - 2.0 * 10.0;
         let dialog = |url: &str| {
             UpdateDownloadDialog::new(UpdateInfo {
                 version: "2.0.0".into(),
@@ -405,13 +403,13 @@ mod tests {
         let mut ui = iced_test::simulator(short.view());
         let title = ui.find("Vocara 2.0.0 is available").expect("the title");
         let url = ui.find("https://example.com/2").expect("the URL").bounds();
-        assert_eq!(title.bounds().x, card_left + 23.0);
+        assert_eq!(title.bounds().x, card_left + CARD_PADDING);
         assert_eq!(
             (url.x, url.width, url.height),
-            (card_left + 36.0, width, 12.0)
+            (card_left + CARD_PADDING + 10.0, width, 12.0)
         );
-        // The title (15 px), 14, the well's border and padding.
-        assert_eq!(url.y, title.bounds().y + 15.0 + 14.0 + 11.0);
+        // The title (an 18 px line), 14, the well's padding.
+        assert_eq!(url.y, title.bounds().y + 18.0 + 14.0 + 8.0);
 
         let long = format!("https://example.com/releases/{}", "a".repeat(120));
         let long_dialog = dialog(&long);
