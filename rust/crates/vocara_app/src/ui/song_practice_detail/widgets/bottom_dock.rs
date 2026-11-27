@@ -1,9 +1,10 @@
 //! Port of `ui/song_practice_detail/widgets/bottom_dock.dart`: the
 //! collapsible bottom dock — one tab per analysis feature (spectrogram,
-//! power, vowel, pitch, timbre, range, dynamics) plus the mixer, sharing the
+//! power, vowel, pitch, timbre, range, dynamics), the vocal tract (new, not
+//! in the Dart app: `vocal_tract_view`) plus the mixer, sharing the
 //! timeline/playhead with the arrangement above. The spectral/pitch/timbre
-//! tabs also show the live mic via the Take/Live toggle. Collapsed by
-//! default.
+//! tabs and the vocal tract also show the live mic via the Take/Live toggle.
+//! Collapsed by default.
 //!
 //! Plain data in ([`BottomDock`]: what the Dart dock read off the view
 //! model, and the content the screen builds for the open tab with
@@ -35,10 +36,12 @@
 //!
 //! The look is `DESIGN.md`'s (Tabs, and the approved workspace and mixer
 //! mockups): a 32 px `PANEL` strip of sentence-case dock tabs in groups —
-//! Summary | Pitch · Vibrato · Range · Register | Spectrogram · Power ·
-//! LTAS · Timbre · Vowel · Dynamics ([`STRIP_GROUPS`]; `DockTab`'s own order
-//! is unchanged) — then the Take/Live toggle where the open tab has one, the
-//! Mixer tab with its glyph at the right end and the show/hide chevron. Open,
+//! Summary | Vocal tract | Pitch · Vibrato · Range · Register |
+//! Spectrogram · Power · LTAS · Timbre · Vowel · Dynamics ([`STRIP_GROUPS`];
+//! `DockTab`'s own order is unchanged) — then the Take/Live toggle where the
+//! open tab has one (the vocal tract carries its own in its header, as its
+//! mockup has it: [`strip_shows_source`]), the Mixer tab with its glyph at
+//! the right end and the show/hide chevron. Open,
 //! a quiet 6 px grabber sits above the strip and the content below it, on
 //! the dock's [`CONTENT_BACKGROUND`] under a 1 px rule.
 
@@ -53,6 +56,7 @@ use vocara_model::models::voice_metrics::{Ltas, RegisterMap, VoiceMetrics, Voice
 
 use super::left_panel::{self, voice_summary_view, VoiceSummary};
 use super::mixer_strip::{self, MixerStrip};
+use super::vocal_tract_view::{self, vocal_tract_view, VocalTract};
 use super::voice_profile_view::{dynamics_view, range_view};
 use super::voiceprint_view::{self as voiceprint, VoiceprintState};
 use crate::ui::core::theme::{boxed, fill, Studio};
@@ -80,9 +84,11 @@ pub const CONTENT_BACKGROUND: Color = Color::from_rgb8(0x13, 0x13, 0x16);
 const STRIP_RULE: Color = Color::from_rgb8(0x22, 0x22, 0x28);
 
 /// The analysis tabs as the strip shows them, group by group (`DESIGN.md`,
-/// Tabs); the Mixer tab sits apart at the strip's right end.
-pub const STRIP_GROUPS: [&[DockTab]; 3] = [
+/// Tabs; the vocal tract in a group of its own after Summary, as its mockup
+/// shows); the Mixer tab sits apart at the strip's right end.
+pub const STRIP_GROUPS: [&[DockTab]; 4] = [
     &[DockTab::AnalysisSummary],
+    &[DockTab::VocalTract],
     &[
         DockTab::Pitch,
         DockTab::Vibrato,
@@ -126,8 +132,16 @@ pub fn tab_label(t: DockTab) -> &'static str {
         DockTab::Registers => "Register",
         DockTab::Range => "Range",
         DockTab::Dynamics => "Dynamics",
+        DockTab::VocalTract => "Vocal tract",
         DockTab::Mixer => "Mixer",
     }
+}
+
+/// Whether the strip shows the Take/Live toggle for `tab` (while open, where
+/// the tab supports Live): every such tab but the vocal tract, which has the
+/// toggle in its own header.
+pub fn strip_shows_source(tab: DockTab, supports_live: bool) -> bool {
+    supports_live && tab != DockTab::VocalTract
 }
 
 /// The content height on screen (`_contentHeight`): as dragged
@@ -172,6 +186,8 @@ pub enum Message {
     Summary(left_panel::Message),
     /// The Mixer tab.
     Mixer(mixer_strip::Message),
+    /// The Vocal tract tab.
+    VocalTract(vocal_tract_view::Message),
 }
 
 /// What the dock shows: the view-model state `BottomDock` read.
@@ -231,7 +247,12 @@ pub fn bottom_dock(dock: BottomDock<'_>) -> Element<'_, Message> {
         .into(),
         _ => Space::new().into(),
     };
-    let tabs = tab_bar(open, dock.tab, open && dock.supports_live, dock.live);
+    let tabs = tab_bar(
+        open,
+        dock.tab,
+        open && strip_shows_source(dock.tab, dock.supports_live),
+        dock.live,
+    );
     column![
         container(Space::new())
             .width(Length::Fill)
@@ -247,13 +268,15 @@ pub fn bottom_dock(dock: BottomDock<'_>) -> Element<'_, Message> {
 
 /// The open tab's content, as `BottomDock` switched over `dockTab`: the
 /// voice summary, a voiceprint tab over `src` (the Spectrogram tab's take
-/// image is `voiceprint`'s), Range or Dynamics, or the mixer desk.
+/// image is `voiceprint`'s), Range or Dynamics, the vocal tract, or the
+/// mixer desk.
 pub fn dock_content<'a>(
     tab: DockTab,
     src: &'a dyn AnalysisSource,
     voiceprint_state: &'a VoiceprintState,
     summary: VoiceSummary<'a>,
     mixer: MixerStrip<'a>,
+    vocal_tract: VocalTract<'a>,
 ) -> Element<'a, Message> {
     let tab_view = |e: Element<'a, voiceprint::Message>| e.map(Message::Voiceprint);
     match tab {
@@ -268,6 +291,7 @@ pub fn dock_content<'a>(
         DockTab::Registers => tab_view(voiceprint::register_tab(src)),
         DockTab::Range => range_view(src),
         DockTab::Dynamics => dynamics_view(src),
+        DockTab::VocalTract => vocal_tract_view(vocal_tract).map(Message::VocalTract),
         DockTab::Mixer => mixer.view().map(Message::Mixer),
     }
 }

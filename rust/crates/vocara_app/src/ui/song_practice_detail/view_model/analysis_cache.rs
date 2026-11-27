@@ -70,7 +70,8 @@ use job::{Outcome, Work};
 mod tests;
 
 /// The tabs of the collapsible bottom dock — one analysis feature each, plus
-/// the mixer. The spectral ones can also show the live mic.
+/// the mixer. The spectral ones and the vocal tract can also show the live
+/// mic.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum DockTab {
     AnalysisSummary,
@@ -84,12 +85,15 @@ pub enum DockTab {
     Registers,
     Range,
     Dynamics,
+    /// How the vocal tract moves (a view of its own, not in the Dart app).
+    VocalTract,
     Mixer,
 }
 
 impl DockTab {
-    /// Every tab, in declaration order (Dart's `DockTab.values`).
-    pub const ALL: [DockTab; 12] = [
+    /// Every tab, in declaration order (Dart's `DockTab.values`, with the
+    /// vocal tract added before the mixer).
+    pub const ALL: [DockTab; 13] = [
         DockTab::AnalysisSummary,
         DockTab::Spectrogram,
         DockTab::Power,
@@ -101,6 +105,7 @@ impl DockTab {
         DockTab::Registers,
         DockTab::Range,
         DockTab::Dynamics,
+        DockTab::VocalTract,
         DockTab::Mixer,
     ];
 
@@ -118,6 +123,7 @@ impl DockTab {
             DockTab::Registers => "registers",
             DockTab::Range => "range",
             DockTab::Dynamics => "dynamics",
+            DockTab::VocalTract => "vocalTract",
             DockTab::Mixer => "mixer",
         }
     }
@@ -845,8 +851,9 @@ impl AnalysisCache {
         self.dock_tab != DockTab::Mixer
     }
 
-    /// The spectral/pitch/timbre tabs can render the live mic; range/dynamics
-    /// need a whole recording and the mixer isn't a view of the source.
+    /// The spectral/pitch/timbre tabs and the vocal tract can render the live
+    /// mic; range/dynamics need a whole recording and the mixer isn't a view
+    /// of the source.
     fn tab_supports_live(t: DockTab) -> bool {
         matches!(
             t,
@@ -858,6 +865,7 @@ impl AnalysisCache {
                 | DockTab::Vibrato
                 | DockTab::Timbre
                 | DockTab::Registers
+                | DockTab::VocalTract
         )
     }
 

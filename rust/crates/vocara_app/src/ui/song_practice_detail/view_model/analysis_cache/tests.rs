@@ -969,7 +969,7 @@ fn every_tab_but_the_mixer_analyzes_the_selected_take() {
 }
 
 #[test]
-fn only_the_spectral_pitch_timbre_family_supports_the_live_mic() {
+fn only_the_spectral_pitch_timbre_family_and_the_vocal_tract_support_the_live_mic() {
     let mut cache = cache(&Stub::new(&[], 0));
     let host = Host::default();
     let live = [
@@ -981,6 +981,7 @@ fn only_the_spectral_pitch_timbre_family_supports_the_live_mic() {
         DockTab::Vibrato,
         DockTab::Timbre,
         DockTab::Registers,
+        DockTab::VocalTract,
     ];
     for tab in DockTab::ALL {
         let _ = cache.show_dock_tab(tab, &host);

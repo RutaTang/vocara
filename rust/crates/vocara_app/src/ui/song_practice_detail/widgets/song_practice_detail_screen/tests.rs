@@ -1479,6 +1479,37 @@ fn the_bottom_dock_opens_and_closes() {
     assert!(h.shows("Stereo Out"), "the mixer desk's master strip");
 }
 
+// The Vocal tract tab: its strip tab opens it on the take, which its header
+// names; the screen feeds it a pose (the seam's), and frames run only while
+// the figure moves.
+#[test]
+fn the_vocal_tract_tab_shows_the_selected_take_and_its_shape() {
+    let mut h = Harness::open(Setup::default());
+    h.send(Message::Row {
+        track_id: "t1".into(),
+        message: track_row::Message::Select,
+    });
+    h.click("Vocal tract");
+    assert!(h.vm().analysis().dock_open());
+    assert_eq!(h.vm().analysis().dock_tab(), DockTab::VocalTract);
+    assert!(h.vm().analysis().active_tab_supports_live());
+    for shown in ["Take 1", "2D", "3D", "Jaw", "Tongue height", "Vocal folds"] {
+        assert!(h.shows(shown), "{shown}");
+    }
+    // The tab's own Take / Live control; none in the strip.
+    assert!(h.find("Live").is_some());
+    assert!(h.screen.vocal_tract.shown().voiced, "the seam's pose fed");
+    assert!(!h.screen.vocal_tract.animating(), "settled: no frames");
+    h.send(Message::Dock(bottom_dock::Message::VocalTract(
+        vocal_tract_view::Message::SetView(vocal_tract_view::TractView::ThreeD),
+    )));
+    assert_eq!(
+        h.screen.vocal_tract.view(),
+        vocal_tract_view::TractView::ThreeD
+    );
+    assert!(h.shows("Drag to turn \u{b7} scroll to zoom"));
+}
+
 // playhead_repaint_test: 'a dock taller than the window leaves the timeline
 // whole'. The dragged height is clamped to a fixed range, not to the window:
 // on a short window a tall dock collapsed the timeline.

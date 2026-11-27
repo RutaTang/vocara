@@ -42,6 +42,7 @@ fn every_tab_is_labelled_in_sentence_case() {
             "Register",
             "Range",
             "Dynamics",
+            "Vocal tract",
             "Mixer"
         ]
     );
@@ -61,8 +62,23 @@ fn the_strip_groups_every_analysis_tab_once() {
         assert_eq!(times, usize::from(t != DockTab::Mixer), "{t:?}");
     }
     assert_eq!(STRIP_GROUPS[0], [DockTab::AnalysisSummary]);
-    assert_eq!(STRIP_GROUPS[1][0], DockTab::Pitch);
-    assert_eq!(STRIP_GROUPS[2][0], DockTab::Spectrogram);
+    // The vocal tract in a group of its own, after Summary (its mockup).
+    assert_eq!(STRIP_GROUPS[1], [DockTab::VocalTract]);
+    assert_eq!(STRIP_GROUPS[2][0], DockTab::Pitch);
+    assert_eq!(STRIP_GROUPS[3][0], DockTab::Spectrogram);
+}
+
+// The vocal tract shows the live mic too, but its Take/Live control sits in
+// its own header (its mockup): the strip shows none for it.
+#[test]
+fn the_vocal_tract_carries_its_own_take_live_control() {
+    assert!(strip_shows_source(DockTab::Spectrogram, true));
+    assert!(!strip_shows_source(DockTab::Range, false));
+    assert!(!strip_shows_source(DockTab::VocalTract, true));
+    let mut ui = iced_test::simulator(bottom_dock(dock(true, DockTab::VocalTract, true)));
+    assert!(ui.find("CONTENT").is_ok());
+    assert!(ui.find("Vocal tract").is_ok());
+    assert!(ui.find("Live").is_err());
 }
 
 #[test]

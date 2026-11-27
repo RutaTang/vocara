@@ -35,6 +35,7 @@ use crate::ui::song_practice_detail::widgets::track_context_menu::{
     confirm_delete_bus, rename_dialog, BusAction, ClipAction, TrackAction,
 };
 use crate::ui::song_practice_detail::widgets::track_row;
+use crate::ui::song_practice_detail::widgets::vocal_tract_view;
 use crate::ui::song_practice_detail::widgets::voiceprint_view as voiceprint;
 use crate::ui::Update;
 
@@ -763,8 +764,44 @@ impl SongPracticeDetailScreen {
                 return self.inspector(m, |id| Source::Mixer(Some(id)), step)
             }
             bottom_dock::Message::Mixer(m) => return self.mixer_desk(m, step),
+            bottom_dock::Message::VocalTract(m) => match m {
+                vocal_tract_view::Message::SelectLive(on) => {
+                    self.vm.analysis_do(|a, h| a.set_live_monitor(on, h))
+                }
+                vocal_tract_view::Message::Frame(at) => {
+                    self.vocal_tract
+                        .update(vocal_tract_view::Message::Frame(at), at);
+                    return;
+                }
+                m => {
+                    self.vocal_tract.update(m, Instant::now());
+                    return;
+                }
+            },
         };
         self.absorb(fx, step);
+    }
+
+    /// Whether the dock shows the Vocal tract tab.
+    pub(super) fn vocal_tract_shown(&self) -> bool {
+        let a = self.vm.analysis();
+        a.dock_open() && a.dock_tab() == DockTab::VocalTract
+    }
+
+    /// Feeds the Vocal tract tab the estimate for now, while it shows: on
+    /// Live for the time since Live began, else for the playhead in the
+    /// selected take. The one place the tab's poses come from
+    /// (`vocal_tract_view::estimate`, the seam with the articulatory
+    /// engine).
+    fn feed_vocal_tract(&mut self) {
+        if !self.vocal_tract_shown() {
+            return;
+        }
+        let now = Instant::now();
+        let live = self.vm.analysis().live_monitor();
+        let clock = self.vocal_tract.clock(live, self.vm.position(), now);
+        let pose = vocal_tract_view::estimate(&*self.vm, live, clock);
+        self.vocal_tract.feed(pose, clock, now);
     }
 
     fn lyrics_message(&mut self, m: lyrics_panel::Message, step: &mut Step) {
@@ -1576,6 +1613,7 @@ impl SongPracticeDetailScreen {
             self.absorb(fx, step);
         }
         self.shown.read(&self.vm);
+        self.feed_vocal_tract();
         self.read_fx_panel(step);
         self.sync_images(step);
         self.sync_lyrics(step);

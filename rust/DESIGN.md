@@ -147,8 +147,8 @@ Line height 16 px for 11–12 px text unless noted.
 - **Tabs** (panel tabs, dock tabs, lane tabs): sentence-case text buttons,
   selected `CONTROL_ACTIVE` background radius 4–5 and `TEXT_PRIMARY`; a count
   may follow in `TEXT_FAINT` ("Notes 4"). Dock tabs are grouped:
-  Summary | Pitch · Vibrato · Range · Register | Spectrogram · Power · LTAS ·
-  Timbre · Vowel · Dynamics, with Mixer at the right end.
+  Summary | Vocal tract | Pitch · Vibrato · Range · Register | Spectrogram ·
+  Power · LTAS · Timbre · Vowel · Dynamics, with Mixer at the right end.
 - **Slider**: 12 px tall hit row; 2 px track `#2A2A31`; fill `#8A8A96`
   (`#3A3A43` when the owner is off); 10 px round knob `TEXT_PRIMARY` with a
   1 px drop shadow (8 px in track headers). Its value sits right-aligned in
@@ -235,6 +235,36 @@ Line height 16 px for 11–12 px text unless noted.
 - **Metric cards** (analysis summary): `SURFACE` radius 8, inset outline;
   11 px label, 18–20 px tabular value with an 11 px unit; a 4 px bar; a
   status dot only when it adds information.
+- **Vocal tract** (dock tab; its mockups are the "Vocal tract" page of the
+  design canvas): a 22 px header (12 px semibold title; the source, a 7 px
+  `RECORD` dot with an 18 % halo and "Live from your microphone", or the
+  take's colour dot and name; the 2D / 3D and Take / Live segmented
+  controls), over a figure well: radius 10, an inset `#222228` outline, a
+  soft radial light from `#15151A` a little above the middle to `#0E0E11`.
+  The figure is drawn from centimetres at one uniform scale fitted to the
+  well. 2D: the head's fill `#1B1B21`→`#17171C` (its crown fading out at the
+  frame), outlines `BORDER_STRONG`; bone `#3C3C45`→`#2B2B32`; the parts that
+  move coral (the tongue `#E9A99C`→`#B5665A` with a soft glow and a white
+  highlight, the velum `#C47B6E`, the lips `#C27668`→`#E6A498`, edges
+  `#E6A498`/`#F2B6AA`); the airway `IN_TUNE` at 32→12 % with a dotted
+  centreline; the larynx `TRACK_PERIWINKLE`; the folds a white line with a
+  halo that brightens while voiced. Callouts 11 px in two aligned columns,
+  elbowed `#45454F` leaders and 2.3 px dots (moving parts `TEXT_PRIMARY` with
+  `ACCENT_BRIGHT` dots, fixed ones `TEXT_SECONDARY` with `TEXT_FAINT` dots);
+  a 10 px legend bottom-left, "Drawn to scale · adult model" bottom-right.
+  3D: projected lines only — the head shell `#8A8A96` at 6–22 % by depth,
+  the airway's rings `ACCENT_BRIGHT` brighter toward the lips (the glottis
+  white) with a soft glow, tongue ribs `#E6A498`, the mandible
+  `TEXT_SECONDARY`, the palate `TEXT_DISABLED`; a Side / ¾ / Front
+  segmented control top-right. Resting (no voice), the figure holds its last
+  shape, dimmed. Beside it a 404 px readout panel: a card (radius 10,
+  `#18181C`, inset `#24242B`) of 30 px component rows (26–24 px in a short
+  dock) — a 12 px `#C4C4CE` label, a 2 px `CONTROL_ACTIVE` track with 9 px
+  `#5E5E6B` range ends, a 6 px band `ACCENT` at 22 % over the last two
+  seconds, a 10 px `#F4EFEA` marker with a coral glow, a 12 px medium tabular
+  value — then a vowel-map card, the fit (a dot and "Good fit" in `GOOD`,
+  "Fair fit" in `WARN`, "Uncertain" in `TEXT_FAINT`), the formants (11 px
+  tabular) and the caveat (11 px `TEXT_DISABLED`).
 
 ## What does not change
 
