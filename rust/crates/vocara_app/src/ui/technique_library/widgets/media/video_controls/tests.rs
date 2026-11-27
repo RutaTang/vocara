@@ -25,7 +25,7 @@ const FULLSCREEN: Point = Point::new(442.0, 242.0);
 /// Inside the fullscreen icon's top-left corner: white while shown.
 const SHOWN_PROBE: Point = Point::new(435.0, 235.0);
 
-const RED: Color = SEEK_BAR_POSITION_COLOR;
+const PLAYED: Color = SEEK_BAR_POSITION_COLOR;
 
 fn s(secs: u64) -> Duration {
     Duration::from_secs(secs)
@@ -177,11 +177,11 @@ fn the_controls_show_while_the_pointer_moves_and_hide_3_s_after() {
     let mut window = Frames::new(WINDOW);
     let t0 = Instant::now();
     assert!(!window.frame(view(p), &[], t0), "idle: no frames");
-    assert!(!near(window.pixel(on_seek_bar(0.25)), RED), "hidden");
+    assert!(!near(window.pixel(on_seek_bar(0.25)), PLAYED), "hidden");
     window.point_at(MIDDLE);
     assert!(window.frame(view(p), &[], t0 + 100 * MS), "fading in");
     assert!(
-        !near(window.pixel(on_seek_bar(0.25)), RED),
+        !near(window.pixel(on_seek_bar(0.25)), PLAYED),
         "the fade starts"
     );
     window.frame(view(p), &[], t0 + 175 * MS);
@@ -189,15 +189,15 @@ fn the_controls_show_while_the_pointer_moves_and_hide_3_s_after() {
     assert!(halfway_in.r > 0.2 && halfway_in.r < 0.8, "{halfway_in:?}");
     assert!(!window.frame(view(p), &[], t0 + 250 * MS), "in: still");
     assert!(
-        near(window.pixel(on_seek_bar(0.25)), RED),
+        near(window.pixel(on_seek_bar(0.25)), PLAYED),
         "the played span"
     );
     // Standing still, they stay 3 s from the entry, then fade out.
     window.frame(view(p), &[], t0 + 3099 * MS);
-    assert!(near(window.pixel(on_seek_bar(0.25)), RED));
+    assert!(near(window.pixel(on_seek_bar(0.25)), PLAYED));
     assert!(window.frame(view(p), &[], t0 + 3100 * MS), "fading out");
     assert!(!window.frame(view(p), &[], t0 + 3250 * MS), "out: still");
-    assert!(!near(window.pixel(on_seek_bar(0.25)), RED));
+    assert!(!near(window.pixel(on_seek_bar(0.25)), PLAYED));
     assert!(!is_white(window.pixel(SHOWN_PROBE)));
     // A move brings them back and starts the timer again.
     window.point_at(Point::new(250.0, 100.0));
@@ -310,12 +310,12 @@ fn hovering_the_seek_bar_thickens_it_and_grows_its_thumb() {
     let above = Point::new(400.0, 209.0);
     let thumb = Point::new(16.0 + 221.0 + 8.0, 207.0);
     assert!(near(window.pixel(above), BACKGROUND));
-    assert!(!near(window.pixel(thumb), RED));
+    assert!(!near(window.pixel(thumb), PLAYED));
     window.point_at(on_seek_bar(0.75));
     assert!(window.frame(view(p), &[], t + 10 * MS), "it grows");
     window.frame(view(p), &[], t + 170 * MS);
     assert!(!near(window.pixel(above), BACKGROUND), "thicker");
-    assert!(near(window.pixel(thumb), RED), "the thumb");
+    assert!(near(window.pixel(thumb), PLAYED), "the thumb");
     // The hovered span, from the start to the pointer, over the bar.
     let bar = over(SEEK_BAR_COLOR, BACKGROUND);
     assert!(near(
@@ -326,13 +326,16 @@ fn hovering_the_seek_bar_thickens_it_and_grows_its_thumb() {
         near(window.pixel(Point::new(400.0, SEEK_Y)), bar),
         "past the pointer"
     );
-    assert!(near(window.pixel(Point::new(200.0, SEEK_Y)), RED), "played");
+    assert!(
+        near(window.pixel(Point::new(200.0, SEEK_Y)), PLAYED),
+        "played"
+    );
     // Off it: back to thin, the span and the thumb gone.
     window.point_at(MIDDLE);
     window.frame(view(p), &[], t + 200 * MS);
     window.frame(view(p), &[], t + 360 * MS);
     assert!(near(window.pixel(above), BACKGROUND));
-    assert!(!near(window.pixel(thumb), RED));
+    assert!(!near(window.pixel(thumb), PLAYED));
     assert!(near(window.pixel(Point::new(300.0, SEEK_Y)), bar));
 }
 
@@ -345,7 +348,7 @@ fn the_buffered_span_lies_over_the_bar_under_the_played_one() {
     };
     let (window, _) = shown(p, t0);
     let bar = over(SEEK_BAR_COLOR, BACKGROUND);
-    assert!(near(window.pixel(on_seek_bar(0.25)), RED));
+    assert!(near(window.pixel(on_seek_bar(0.25)), PLAYED));
     assert!(near(
         window.pixel(on_seek_bar(0.6)),
         over(SEEK_BAR_COLOR, bar)
@@ -369,7 +372,7 @@ fn a_press_on_the_seek_bar_seeks_on_each_move_and_on_release() {
     let (_, sent) = window.frame_messages(view(p), &[], t + 40 * MS);
     assert_eq!(sent, vec![Command::Seek(Duration::from_millis(7_500))]);
     // While pressed the played span follows the pointer.
-    assert!(near(window.pixel(on_seek_bar(0.7)), RED));
+    assert!(near(window.pixel(on_seek_bar(0.7)), PLAYED));
     // Held, they stay past the 3 s (the press stopped the timer).
     window.frame(view(p), &[], t + 4_000 * MS);
     assert!(is_white(window.pixel(SHOWN_PROBE)), "held");
@@ -411,7 +414,7 @@ fn a_completed_clip_resets_the_played_span_until_it_moves() {
     };
     let (mut window, t) = shown(end, t0);
     assert!(
-        near(window.pixel(on_seek_bar(0.9)), RED),
+        near(window.pixel(on_seek_bar(0.9)), PLAYED),
         "played to the end"
     );
     let completed = Playback {
@@ -419,8 +422,8 @@ fn a_completed_clip_resets_the_played_span_until_it_moves() {
         ..end
     };
     window.frame(view(completed), &[], t + 10 * MS);
-    assert!(!near(window.pixel(on_seek_bar(0.9)), RED), "reset");
-    assert!(!near(window.pixel(on_seek_bar(0.01)), RED));
+    assert!(!near(window.pixel(on_seek_bar(0.9)), PLAYED), "reset");
+    assert!(!near(window.pixel(on_seek_bar(0.01)), PLAYED));
     // The next position shows again.
     let replayed = Playback {
         playing: true,
@@ -429,8 +432,8 @@ fn a_completed_clip_resets_the_played_span_until_it_moves() {
         ..end
     };
     window.frame(view(replayed), &[], t + 20 * MS);
-    assert!(near(window.pixel(on_seek_bar(0.05)), RED));
-    assert!(!near(window.pixel(on_seek_bar(0.5)), RED));
+    assert!(near(window.pixel(on_seek_bar(0.05)), PLAYED));
+    assert!(!near(window.pixel(on_seek_bar(0.5)), PLAYED));
 }
 
 // ----------------------------------------------------------------- buttons

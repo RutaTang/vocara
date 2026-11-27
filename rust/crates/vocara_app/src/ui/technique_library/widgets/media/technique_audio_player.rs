@@ -1,8 +1,14 @@
 //! Port of `ui/technique_library/widgets/media/technique_audio_player.dart`:
-//! a compact inline audio player — a play/pause disc, a scrubbable progress
-//! bar and a time readout — over a [`MediaPlayer`] it owns and drops
-//! (disposes) with it. The file is opened paused at creation, so the
+//! a compact inline audio player — a play/pause button, a scrubbable
+//! progress bar and a time readout — over a [`MediaPlayer`] it owns and
+//! drops (disposes) with it. The file is opened paused at creation, so the
 //! duration shows without pressing play first.
+//!
+//! Drawn as `DESIGN.md`'s controls: a 32 px well (`Studio::WELL`, radius
+//! 6, an inset `BORDER_STRONG` outline) holding a 24 px icon button with
+//! the filled play or pause glyph, the thin scrubber (a 2 px track, its
+//! played part in the slider's neutral fill, a 10 px knob while hovered)
+//! and the 11 px tabular readout.
 //!
 //! The Dart file also held what the video player shares: the player seam
 //! (`createExamplePlayer`, here a [`MediaPlayerFactory`] the host passes
@@ -34,8 +40,11 @@ use std::time::{Duration, Instant};
 use iced::alignment::{Horizontal, Vertical};
 use iced::widget::canvas::{self, Frame, Geometry, Path};
 use iced::widget::text::Wrapping;
-use iced::widget::{button, canvas as canvas_widget, container, row, Space};
-use iced::{mouse, Element, Event, Length, Point, Rectangle, Renderer, Size, Subscription, Theme};
+use iced::widget::{canvas as canvas_widget, container, row, Space};
+use iced::{
+    mouse, Color, Element, Event, Length, Padding, Point, Rectangle, Renderer, Size, Subscription,
+    Theme,
+};
 use vocara_services::media_player::{
     MediaKind, MediaPlayer, MediaPlayerError, MediaPlayerFactory, PlayerState, VideoFrame,
     FULL_VOLUME,
@@ -44,8 +53,9 @@ use vocara_store::db::asset_store::AssetStore;
 
 use super::video_controls::Playback;
 use crate::ui::core::icons::{self, Icon};
-use crate::ui::core::theme::{alpha, bare_button, boxed, Studio};
-use crate::ui::core::widgets::opacity_layer::opacity_layer;
+use crate::ui::core::theme::{boxed, height, radius, type_scale, Studio};
+use crate::ui::core::widgets::controls::{icon_button, labelled, SLIDER_FILL, SLIDER_TRACK};
+use crate::ui::core::widgets::line_icon::{glyphs, line_icon};
 use crate::ui::core::widgets::studio_text::studio_text;
 use crate::ui::core::widgets::wrap::Wrap;
 
@@ -62,7 +72,10 @@ pub const AUDIO_POLL_INTERVAL: Duration = Duration::from_millis(33);
 const SETTLE_TICKS: u8 = 15;
 
 /// The player row's height (the live and the unavailable row alike).
-pub const HEIGHT: f32 = 48.0;
+pub const HEIGHT: f32 = 32.0;
+
+/// The readout's column at the bar's right end.
+pub const READOUT_WIDTH: f32 = 76.0;
 
 /// True when the clip's bytes are not on this device: the repository's
 /// `asset://` placeholder for a missing pooled file. Nothing can play it.
@@ -365,23 +378,20 @@ impl Transport {
             format_clock(self.duration)
         );
         row![
-            round_icon_button(
-                if self.playing {
-                    Icon::Pause
-                } else {
-                    Icon::Play
-                },
+            play_button(
+                self.playing,
                 (!(play_blocked && !self.playing)).then_some(Message::PlayOrPause),
             ),
-            Space::new().width(12),
+            Space::new().width(6),
             scrubber(fraction as f32),
-            Space::new().width(12),
+            Space::new().width(10),
             studio_text(readout)
-                .size(11.5)
+                .size(type_scale::LABEL)
+                .line_height(iced::Pixels(type_scale::LINE))
                 .tabular()
                 .color(Studio::TEXT_SECONDARY)
                 .wrapping(Wrapping::None)
-                .width(82)
+                .width(READOUT_WIDTH)
                 .align_x(Horizontal::Right),
         ]
         .align_y(Vertical::Center)
@@ -509,11 +519,26 @@ impl TechniqueAudioPlayer {
         container(self.transport.bar(play_blocked))
             .width(Length::Fill)
             .height(HEIGHT)
-            .padding([0, 10])
+            .padding(Padding {
+                top: 0.0,
+                right: 10.0,
+                bottom: 0.0,
+                left: 4.0,
+            })
             .align_y(Vertical::Center)
-            .style(|_| boxed(Some(Studio::INSET), 10.0, Some(Studio::BORDER)))
+            .style(player_well)
             .into()
     }
+}
+
+/// The player's well: `Studio::WELL`, radius 6, an inset `BORDER_STRONG`
+/// outline.
+fn player_well(_: &Theme) -> iced::widget::container::Style {
+    boxed(
+        Some(Studio::WELL),
+        radius::WELL,
+        Some(Studio::BORDER_STRONG),
+    )
 }
 
 /// The player row for a clip whose file is not on this device: same
@@ -521,10 +546,11 @@ impl TechniqueAudioPlayer {
 pub fn unavailable_clip<'a, M: 'a>() -> Element<'a, M> {
     container(
         row![
-            icons::icon(Icon::FileX, 15.0, Studio::TEXT_FAINT),
-            Space::new().width(10),
+            icons::icon(Icon::FileX, 13.0, Studio::TEXT_FAINT),
+            Space::new().width(8),
             studio_text(UNAVAILABLE_CLIP_MESSAGE)
-                .size(12)
+                .size(type_scale::BODY)
+                .line_height(iced::Pixels(type_scale::LINE))
                 .color(Studio::TEXT_FAINT)
                 .width(Length::Fill)
                 .ellipsis(1),
@@ -533,47 +559,47 @@ pub fn unavailable_clip<'a, M: 'a>() -> Element<'a, M> {
     )
     .width(Length::Fill)
     .height(HEIGHT)
-    .padding([0, 12])
+    .padding([0, 10])
     .align_y(Vertical::Center)
-    .style(|_| boxed(Some(Studio::INSET), 10.0, Some(Studio::BORDER)))
+    .style(player_well)
     .into()
 }
 
-// ------------------------------------------------------------- the disc
+// ------------------------------------------------------- the play button
 
-/// The disc's diameter.
-const DISC: f32 = 30.0;
-
-/// `_RoundIconButton`: a small coral play/pause disc; `on_tap: None` shows
-/// it off (at 40% opacity, as one layer; no click cursor).
-pub(super) fn round_icon_button<'a, M: Clone + 'a>(
-    icon: Icon,
-    on_tap: Option<M>,
-) -> Element<'a, M> {
-    let opacity = if on_tap.is_some() { 1.0 } else { 0.4 };
-    let face = container(icons::icon(icon, 15.0, Studio::ACCENT_BRIGHT))
-        .center_x(DISC)
-        .center_y(DISC)
-        .style(|_| {
-            boxed(
-                Some(alpha(Studio::ACCENT, 0.16)),
-                DISC / 2.0,
-                Some(alpha(Studio::ACCENT, 0.45)),
-            )
-        });
-    button(opacity_layer(opacity, face))
-        .padding(0)
-        .style(bare_button)
-        .on_press_maybe(on_tap)
-        .into()
+/// The play/pause button: a 24 px icon button (`DESIGN.md`) with the filled
+/// play or pause glyph at 12 px and a "Play" / "Pause" tooltip; `on_tap:
+/// None` shows it off (`TEXT_DISABLED`, no press).
+pub fn play_button<'a, M: Clone + 'a>(playing: bool, on_tap: Option<M>) -> Element<'a, M> {
+    let (glyph, tip) = if playing {
+        (glyphs::PAUSE, "Pause")
+    } else {
+        (glyphs::PLAY, "Play")
+    };
+    match on_tap {
+        Some(on_tap) => icon_button(glyph, on_tap)
+            .panel()
+            .icon_size(PLAY_GLYPH)
+            .tooltip(tip)
+            .into(),
+        // An icon button with no press: its glyph in `TEXT_DISABLED`.
+        None => labelled(
+            container(line_icon(glyph, PLAY_GLYPH, Studio::TEXT_DISABLED))
+                .center(height::PANEL_BUTTON),
+            tip,
+        ),
+    }
 }
+
+/// The play and pause glyphs' box.
+const PLAY_GLYPH: f32 = 12.0;
 
 // --------------------------------------------------------- the scrubber
 
 /// The scrubber's height.
 const SCRUBBER_HEIGHT: f32 = 24.0;
-/// The track's thickness.
-const TRACK: f32 = 4.0;
+/// The track's thickness (`DESIGN.md`, Slider).
+const TRACK: f32 = 2.0;
 /// The hover thumb's diameter.
 const THUMB: f32 = 10.0;
 
@@ -736,20 +762,20 @@ impl canvas::Program<Message> for ScrubberPainter {
                 (TRACK / 2.0).min(w / 2.0).into(),
             )
         };
-        frame.fill(&bar(width), Studio::SURFACE_RAISED);
+        frame.fill(&bar(width), SLIDER_TRACK);
         let filled = self.fraction.clamp(0.0, 1.0) * width;
         if filled > 0.0 {
-            frame.fill(&bar(filled), Studio::ACCENT);
+            frame.fill(&bar(filled), SLIDER_FILL);
         }
         if cursor.is_over(bounds) {
+            // The slider's knob: `TEXT_PRIMARY` over a 1 px drop shadow.
             let left = thumb_left(self.fraction.clamp(0.0, 1.0), width);
+            let centre = Point::new(left + THUMB / 2.0, bounds.height / 2.0);
             frame.fill(
-                &Path::circle(
-                    Point::new(left + THUMB / 2.0, bounds.height / 2.0),
-                    THUMB / 2.0,
-                ),
-                Studio::ACCENT_BRIGHT,
+                &Path::circle(Point::new(centre.x, centre.y + 1.0), THUMB / 2.0),
+                Color::from_rgba(0.0, 0.0, 0.0, 0.45),
             );
+            frame.fill(&Path::circle(centre, THUMB / 2.0), Studio::TEXT_PRIMARY);
         }
         vec![frame.into_geometry()]
     }

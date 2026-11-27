@@ -26,12 +26,12 @@ fn loaded() -> (TechniqueAudioPlayer, FakePlayerHandle, FakeMediaPlayers) {
     (audio, handle, players)
 }
 
-/// The bar's scrubber spans x 52..920 of the 1024 px window (10 padding, the
-/// 30 px disc, 12, then 12 and the 82 px readout on the right), centred on
-/// the 48 px row.
-const SCRUB_LEFT: f32 = 52.0;
-const SCRUB_WIDTH: f32 = 868.0;
-const ROW_MID: f32 = 24.0;
+/// The bar's scrubber spans x 34..928 of the 1024 px window (4 padding, the
+/// 24 px play button, 6, then 10, the 76 px readout and 10 on the right),
+/// centred on the 32 px row.
+const SCRUB_LEFT: f32 = 34.0;
+const SCRUB_WIDTH: f32 = 894.0;
+const ROW_MID: f32 = 16.0;
 
 fn press() -> Event {
     Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left))
@@ -362,6 +362,6 @@ fn the_unavailable_row_keeps_the_players_footprint() {
         container(missing.view(false))
     ]);
     let message = ui.find(UNAVAILABLE_CLIP_MESSAGE).expect("shown").bounds();
-    // The second row starts 48 px down and is 48 px tall.
+    // The second row starts a row (HEIGHT) down and is as tall.
     assert!(message.y > HEIGHT && message.y + message.height < 2.0 * HEIGHT);
 }

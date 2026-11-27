@@ -1,7 +1,14 @@
-//! Port of `ui/technique_library/widgets/studio_field.dart`: a labeled,
-//! studio-styled text field used across the technique editor and its
-//! dialogs — a small caption over a dark inset box wrapping a borderless
-//! field — and [`parse_comma_list`], how the aliases and tags fields read.
+//! Port of `ui/technique_library/widgets/studio_field.dart`: a labelled
+//! text field used across the technique editor and its dialogs — a
+//! sentence-case caption over the field — and [`parse_comma_list`], how the
+//! aliases and tags fields read.
+//!
+//! Drawn as `DESIGN.md`'s text fields: the caption 11 px `TEXT_SECONDARY`,
+//! 6 px over the field; the field its own well (`Studio::WELL`, radius 6,
+//! an inset `BORDER_STRONG` outline, the accent at 60 % while focused). A
+//! single-line field is 28 px with 12 px text; a prose field writes at the
+//! read view's 13 px on 20 px lines, so its text keeps its size and its
+//! breaks between reading and editing.
 //!
 //! Flutter's one `TextField` was single-line by default and multi-line with
 //! `minLines`/`maxLines`; the app's text fields (`widgets::text_field`) are
@@ -9,30 +16,40 @@
 //! [`studio_field`] over a `&str` (single line, Return submits) or
 //! [`studio_prose_field`] over a `text_field::Content` (prose: it grows
 //! from `min_lines` to `max_lines`, then scrolls). Both draw Flutter's
-//! macOS caret in the coral `cursorColor` and open its right-click menu;
-//! their text sits forui's content padding less compact density's inside
-//! the well (`theme::FIELD_PADDING`). `autofocus` is the owner's
-//! `iced::widget::operation::focus` task on the field's
-//! [`id`](StudioField::id) when it appears.
+//! macOS caret in the coral `cursorColor` and open its right-click menu.
+//! `autofocus` is the owner's `iced::widget::operation::focus` task on the
+//! field's [`id`](StudioField::id) when it appears.
 
-use iced::widget::{column, container, Space};
-use iced::{widget, Background, Border, Color, Element, Length, Padding, Theme};
+use iced::widget::{column, Space};
+use iced::{widget, Background, Border, Element, Length, Padding, Pixels, Theme};
 use vocara_model::util::dart_string;
 
-use crate::ui::core::theme::{self, font, Studio};
+use crate::ui::core::theme::{self, font, radius, type_scale, Studio};
 use crate::ui::core::widgets::studio_text::studio_text;
 use crate::ui::core::widgets::text_field::editor::{self as text_editor, text_editor};
 use crate::ui::core::widgets::text_field::text_input;
 
-/// The field's text size and line height (`fontSize: 14, height: 1.45`).
-const TEXT_SIZE: f32 = 14.0;
-const LINE_HEIGHT: f32 = 1.45;
+/// A prose field's text size and line height (the read view's prose).
+pub const PROSE_SIZE: f32 = type_scale::TITLE;
+pub const PROSE_LINE: f32 = 20.0;
 
-/// A line of the field: SkParagraph's, a whole pixel tall (20 for 14 px
-/// at 1.45), as `RenderEditable` held a field to `minLines` and
-/// `maxLines` of its `preferredLineHeight`.
+/// A prose field's padding inside its well: 4 above and below a line (one
+/// line makes a 28 px field, as a single-line one), 10 at the sides.
+pub const PROSE_PADDING: Padding = Padding {
+    top: 4.0,
+    right: 10.0,
+    bottom: 4.0,
+    left: 10.0,
+};
+
+/// The space between the caption and the field.
+pub const CAPTION_GAP: f32 = 6.0;
+
+/// A line of a prose field: SkParagraph's, a whole pixel tall, as
+/// `RenderEditable` held a field to `minLines` and `maxLines` of its
+/// `preferredLineHeight`.
 fn field_line() -> f32 {
-    crate::ui::core::text::line_box(font::REGULAR, TEXT_SIZE, LINE_HEIGHT.into()).height
+    crate::ui::core::text::line_box(font::REGULAR, PROSE_SIZE, Pixels(PROSE_LINE).into()).height
 }
 
 enum Input<'a, M> {
@@ -152,19 +169,28 @@ impl<'a, M> StudioField<'a, M> {
     }
 }
 
-/// The borderless multi-line field: [`theme::studio_input`]'s look for a
-/// `text_editor`.
+/// The multi-line field drawing its own well: [`theme::field`]'s look for a
+/// `text_editor` (its outline the accent at 60 % while focused).
 fn studio_editor(_: &Theme, status: text_editor::Status) -> text_editor::Style {
+    let focused = matches!(status, text_editor::Status::Focused { .. });
     text_editor::Style {
-        background: Background::Color(Color::TRANSPARENT),
-        border: Border::default(),
+        background: Background::Color(Studio::WELL),
+        border: Border {
+            color: if focused {
+                theme::FIELD_FOCUS
+            } else {
+                Studio::BORDER_STRONG
+            },
+            width: 1.0,
+            radius: radius::WELL.into(),
+        },
         placeholder: Studio::TEXT_FAINT,
         value: if matches!(status, text_editor::Status::Disabled) {
             Studio::TEXT_FAINT
         } else {
             Studio::TEXT_PRIMARY
         },
-        selection: crate::ui::core::theme::SELECTION,
+        selection: theme::SELECTION,
     }
 }
 
@@ -178,11 +204,11 @@ impl<'a, M: Clone + 'a> From<StudioField<'a, M>> for Element<'a, M> {
                 on_submit,
             } => {
                 let mut input = text_input(&f.hint, value)
-                    .size(TEXT_SIZE)
-                    .line_height(LINE_HEIGHT)
+                    .size(theme::FIELD_TEXT_SIZE)
+                    .line_height(Pixels(type_scale::LINE))
                     .padding(theme::FIELD_PADDING)
                     .caret_color(Studio::ACCENT)
-                    .style(theme::studio_input);
+                    .style(theme::field);
                 if let Some(id) = f.id {
                     input = input.id(id);
                 }
@@ -209,13 +235,12 @@ impl<'a, M: Clone + 'a> From<StudioField<'a, M>> for Element<'a, M> {
                 // maximum so the text may fill `max_lines`.
                 let mut editor = text_editor(content)
                     .placeholder(f.hint)
-                    .size(TEXT_SIZE)
-                    .line_height(LINE_HEIGHT)
-                    .padding(theme::FIELD_PADDING)
+                    .size(PROSE_SIZE)
+                    .line_height(Pixels(PROSE_LINE))
+                    .padding(PROSE_PADDING)
                     .min_height(line * f32::from(min_lines.max(1)))
                     .max_height(
-                        line * f32::from(max_lines.max(min_lines).max(1))
-                            + theme::FIELD_PADDING.y(),
+                        line * f32::from(max_lines.max(min_lines).max(1)) + PROSE_PADDING.y(),
                     )
                     .caret_color(Studio::ACCENT)
                     .style(studio_editor);
@@ -231,19 +256,16 @@ impl<'a, M: Clone + 'a> From<StudioField<'a, M>> for Element<'a, M> {
             }
         };
         // The caption: sentence case, 11 px `TEXT_SECONDARY` (`DESIGN.md`'s
-        // field labels); the well: the text field's (`theme::field_well`).
+        // field labels), over the field, which draws its own well.
         column![
             studio_text(f.label)
-                .size(crate::ui::core::theme::type_scale::LABEL)
+                .size(type_scale::LABEL)
+                .line_height(Pixels(type_scale::LINE))
                 .color(Studio::TEXT_SECONDARY),
-            Space::new().height(6),
-            // 10 by 12 inside the well's 1 px border (a Flutter
-            // `Container`'s padding includes its decoration's border).
-            container(field)
-                .width(Length::Fill)
-                .padding(Padding::from([11, 13]))
-                .style(theme::field_well(false)),
+            Space::new().height(CAPTION_GAP),
+            field,
         ]
+        .width(Length::Fill)
         .into()
     }
 }
@@ -308,14 +330,12 @@ mod tests {
     }
 
     #[test]
-    fn the_field_sits_in_its_well_as_the_collapsed_decoration_put_it() {
-        // The caption (11 px) and 6 above the well; the well's 10 by 12
-        // inside its 1 px border; then the field, forui's content padding
-        // less compact density's: 10 across and 6 down, so a line (14 px
-        // at 1.45) and 12.
+    fn the_field_sits_under_its_caption_at_the_designs_height() {
+        // The caption (11 px on a 16 px line) and 6 above the field, which
+        // spans the width: 28 tall (a 16 px line in 6 above and below).
         let id = widget::Id::unique();
         let mut ui = iced_test::simulator(Element::from(
-            container(
+            iced::widget::container(
                 studio_field("Name", "Twang")
                     .id(id.clone())
                     .on_input(Msg::Input),
@@ -323,22 +343,24 @@ mod tests {
             .width(300),
         ));
         let field = ui.find(id).expect("the field").bounds();
-        // SkParagraph's lines: 14 × 1.45 = 20.3 makes a line of 20, and
-        // the caption's 11 × 1 a line of 11.
-        let line = field_line();
-        assert_eq!(line, 20.0);
-        assert_eq!(field.x, 13.0, "{field:?}");
-        assert_eq!(field.y, 11.0 + 6.0 + 11.0, "{field:?}");
-        assert_eq!(field.width, 300.0 - 2.0 * 13.0, "{field:?}");
-        assert!((field.height - (line + 12.0)).abs() < 1e-3, "{field:?}");
+        assert_eq!(field.x, 0.0, "{field:?}");
+        assert_eq!(field.y, type_scale::LINE + CAPTION_GAP, "{field:?}");
+        assert_eq!(field.width, 300.0, "{field:?}");
+        assert!(
+            (field.height - theme::FIELD_HEIGHT).abs() < 1e-3,
+            "{field:?}"
+        );
 
-        // A prose field: three lines and 12 at least, eight and 12 at most.
+        // A prose field: three 20 px lines and 8 at least, eight and 8 at
+        // most.
+        let line = field_line();
+        assert_eq!(line, PROSE_LINE);
         let short = text_editor::Content::with_text("One line");
         let long = text_editor::Content::with_text(&"A line\n".repeat(20));
         for (content, lines) in [(&short, 3.0), (&long, 8.0)] {
             let id = widget::Id::unique();
             let mut ui = iced_test::simulator(Element::from(
-                container(
+                iced::widget::container(
                     studio_prose_field("Description", content, 3, 8)
                         .id(id.clone())
                         .on_action(edit_or_move),
@@ -347,10 +369,45 @@ mod tests {
             ));
             let field = ui.find(id).expect("the field").bounds();
             assert!(
-                (field.height - (lines * line + 12.0)).abs() < 1e-3,
+                (field.height - (lines * line + PROSE_PADDING.y())).abs() < 1e-3,
                 "{lines} lines: {field:?}"
             );
         }
+    }
+
+    // The edit form's prose captions were not drawn: in a scroll view a
+    // prose field lays its text out for its most lines, past its box, and
+    // the renderer drew the raw text after it through the clip it left.
+    #[test]
+    fn a_caption_under_a_prose_field_in_a_scroll_view_is_drawn() {
+        use crate::ui::core::widgets::animated::testing::Frames;
+        use crate::ui::core::widgets::fading_scrollbar::{scrollable, Fading};
+        use iced::time::Instant;
+        use iced::{Point, Size};
+
+        let first = text_editor::Content::with_text("One line");
+        let second = text_editor::Content::with_text("Another");
+        let view = || -> Element<'_, Msg> {
+            scrollable(
+                iced::widget::column![
+                    studio_prose_field("Summary", &first, 1, 2).on_action(edit_or_move),
+                    studio_prose_field("Description", &second, 3, 8).on_action(edit_or_move),
+                ]
+                .width(300),
+            )
+            .height(400)
+            .fading()
+            .into()
+        };
+        let mut window = Frames::new(Size::new(300.0, 400.0));
+        window.frame(view(), &[], Instant::now());
+        // The second caption sits under the first field (16 + 6 + 28).
+        let top = type_scale::LINE + CAPTION_GAP + theme::FIELD_HEIGHT;
+        let ink = window.ink(
+            Point::new(0.0, top),
+            Point::new(80.0, top + type_scale::LINE),
+        );
+        assert!(ink > 0x60, "the caption is drawn: {ink:#x}");
     }
 
     #[test]

@@ -6,6 +6,8 @@
 
 use std::borrow::Cow;
 
+use crate::ui::core::text;
+
 use iced::widget::{button, column, scrollable, Space};
 use iced::{window, Event as IcedEvent, Size};
 use iced_test::selector::{Candidate, Target};
@@ -283,7 +285,7 @@ fn the_viewer_shows_each_example_with_its_player_and_no_add_zone() {
         example("m1", "/tmp/a.m4a", ""),
         example("m2", "/tmp/b.mp4", ""),
     ]);
-    assert!(page.shows(&read, "EXAMPLES"));
+    assert!(page.shows(&read, "Examples"));
     assert!(page.shows(&read, "a.m4a"));
     assert!(page.shows(&read, "b.mp4"));
     assert!(page.shows(&read, &glyph(Icon::Music2)));
@@ -307,7 +309,7 @@ fn the_viewer_shows_each_example_with_its_player_and_no_add_zone() {
 fn an_empty_read_view_keeps_the_block_with_its_placeholder() {
     let page = Page::new(Vec::new());
     // The Examples label shows too, but with no add/drop zone.
-    assert!(page.shows(&read, "EXAMPLES"));
+    assert!(page.shows(&read, "Examples"));
     assert!(page.shows(&read, EMPTY));
     assert!(!page.shows(&read, ADD_FIRST));
 }
@@ -325,7 +327,7 @@ fn editing_offers_the_add_zone_full_size_then_compact() {
         record.y - label.y
     };
     let page = Page::new(Vec::new());
-    assert!(page.shows(&edit, "EXAMPLES"));
+    assert!(page.shows(&edit, "Examples"));
     assert!(page.shows(&edit, ADD_FIRST));
     assert!(!page.shows(&edit, EMPTY), "the zone, not the placeholder");
     let full = below_label(&page, ADD_FIRST);
@@ -338,9 +340,9 @@ fn editing_offers_the_add_zone_full_size_then_compact() {
             > page.find(&edit, "Example 1").expect("the card").y,
         "under the cards"
     );
-    // Compact once clips exist: 12 of padding, not 22.
+    // Compact once clips exist: 7 of padding, not 22.
     let dense = below_label(&page, ADD_ANOTHER);
-    assert!((full - dense - 10.0).abs() < 0.5, "{full} vs {dense}");
+    assert!((full - dense - 15.0).abs() < 0.5, "{full} vs {dense}");
 }
 
 // ---------------------------------------------------------- the add zone
@@ -552,7 +554,7 @@ fn a_frozen_section_keeps_playback_and_export_but_takes_no_edit() {
     assert_eq!(page.update(&frozen_recording, Message::StopRecord), None);
 
     // Playback stays alive.
-    let _ = page.click(&frozen, &glyph(Icon::Play));
+    let _ = page.click(&frozen, "Play");
     assert_eq!(page.built()[0].plays(), 1);
 }
 
@@ -617,15 +619,16 @@ fn the_rename_dialog_shows_the_caption_and_saves_or_cancels() {
     };
     let mut dialog = RenameExampleDialog::new("Example 0");
     let messages = drive(&dialog, &|ui| {
-        // The field: the well's 12 by 10 inside its 1 px border, then
-        // forui's content padding less compact density's (10 across, 6
-        // down) around the 14 px line.
+        // The field draws its own 28 px well, under the 18 px title, 14,
+        // its 16 px label and 6, across the card's content.
+        use crate::ui::core::widgets::confirm_dialog::{CARD_PADDING, CARD_WIDTH};
         let title = ui.find("Rename example").expect("the title").bounds();
         let field = ui.find("Example 0").expect("the field").bounds();
-        assert_eq!(field.x, title.x + 13.0, "{field:?}");
-        assert_eq!(field.y, title.y + 15.0 + 14.0 + 11.0, "{field:?}");
-        assert_eq!(field.width, 380.0 - 2.0 * 21.0 - 2.0 * 13.0, "{field:?}");
-        assert_eq!(field.height, 14.0 + 12.0, "{field:?}");
+        assert_eq!(field.x, title.x, "{field:?}");
+        assert_eq!(field.y, title.y + 18.0 + 14.0 + 16.0 + 6.0, "{field:?}");
+        assert_eq!(field.width, CARD_WIDTH - 2.0 * CARD_PADDING, "{field:?}");
+        assert_eq!(field.height, theme::FIELD_HEIGHT, "{field:?}");
+        assert!(ui.find("Caption").is_ok(), "the field's label");
         ui.click("Example 0").expect("the field holds the caption");
         let _ = ui.tap_key(iced::keyboard::Key::Named(iced::keyboard::key::Named::End));
         let _ = ui.typewrite("!");
@@ -925,7 +928,7 @@ fn a_take_pauses_every_example_and_blocks_their_play() {
     // Nor can one be started again until the take ends: paused only at the
     // arm, an example played on into the take.
     let live = |s: &mut TechniqueMediaSection<'_>| s.mic_live = true;
-    assert!(page.click(&live, &glyph(Icon::Play)).is_empty());
+    assert!(page.click(&live, "Play").is_empty());
     let _ = page.update(
         &live,
         Message::Player(example_players::Message::Audio(
@@ -936,7 +939,7 @@ fn a_take_pauses_every_example_and_blocks_their_play() {
     assert!(page.built().iter().all(|p| p.plays() == 0));
 
     // Once it ends, they play.
-    let _ = page.click(&edit, &glyph(Icon::Play));
+    let _ = page.click(&edit, "Play");
     assert_eq!(page.built()[0].plays(), 1);
 }
 
@@ -944,7 +947,7 @@ fn a_take_pauses_every_example_and_blocks_their_play() {
 #[test]
 fn removing_an_earlier_example_keeps_the_later_cards_player() {
     let mut page = Page::new(two());
-    let _ = page.click_nth(&edit, &glyph(Icon::Play), 1);
+    let _ = page.click_nth(&edit, "Play", 1);
     assert!(page.built()[1].plays() > 0, "M1 plays");
 
     page.show(vec![example("M1", "/tmp/example-1.wav", "Example 1")]);
@@ -1002,7 +1005,7 @@ fn a_clip_whose_file_is_missing_reads_unavailable_in_its_card() {
 fn a_video_card_plays_through_the_section() {
     let mut page = Page::new(vec![example("V", "/tmp/clip.mp4", "Clip")]);
     assert!(page.built().is_empty(), "the poster until the first play");
-    let _ = page.click(&read, &glyph(Icon::Play));
+    let _ = page.click(&read, "Play");
     assert_eq!(page.built().len(), 1);
     assert!(page.players.needs_tick(), "playing: polled");
     // The poll reaches the video through the section.
@@ -1074,7 +1077,7 @@ mod animations {
         let mut window = Frames::new(Size::new(300.0, 60.0));
         // Inside the 1 px border, clear of the label.
         let fill = Point::new(4.0, 20.0);
-        let (rest, lit) = (Studio::PANEL, alpha(Studio::ACCENT, 0.08));
+        let (rest, lit) = (Studio::WELL, alpha(Studio::ACCENT, 0.08));
         let t0 = Instant::now();
         window.frame(section.add_zone(&state), &[], t0);
         assert!(near(window.pixel(fill), over(rest, BACKGROUND)));

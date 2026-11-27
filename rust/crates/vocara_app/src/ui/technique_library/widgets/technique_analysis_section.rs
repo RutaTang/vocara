@@ -24,26 +24,37 @@
 //! [`update`] lands its renders. Dart's post-frame `ensureReferenceAnalysis`
 //! is the page's too: it asks after each update while the panel is built.
 //!
+//! # The look
+//!
+//! Drawn in the design system (`DESIGN.md`): the Reference / Your practice
+//! switch is a 22 px segmented control, the practice recorder a ghost
+//! button with the record dot (a thin level meter and Stop while a take
+//! records); the dimensions a tab strip; the analysis box a well; the gap
+//! table a well of 12 px tabular figures, a gap within its tolerance in
+//! `GOOD`, past it in `OUT_OF_TUNE`; a clipped or noisy take a calm inline
+//! notice in the warning colour.
+//!
 //! # Differences from Flutter
 //!
 //! The Dart level meter's fill had no height (a childless `ColoredBox` under
 //! `Align` takes the smallest size), so it never showed; here it fills the
-//! meter's 8 px, as intended — as in the examples section's record row.
+//! meter, as intended — as in the examples section's record row.
 
 use crate::ui::core::text;
-use crate::ui::core::widgets::fading_scrollbar::scrollable;
+use crate::ui::core::widgets::fading_scrollbar::{no_scrollbar, scrollable};
 use iced::alignment::{Horizontal, Vertical};
 use iced::widget::canvas::{self, Frame, Geometry, Path};
 use iced::widget::{button, canvas as canvas_widget, column, container, row, Row, Space};
-use iced::{mouse, Element, Length, Padding, Point, Rectangle, Renderer, Size, Theme};
+use iced::{mouse, Element, Length, Padding, Pixels, Point, Rectangle, Renderer, Size, Theme};
 use vocara_model::models::technique_analysis::TechniqueAnalysis;
 use vocara_model::models::voice_metrics::VoiceMetrics;
 use vocara_model::util::dart_num::round_to_i64;
 
+use super::media::technique_media_section::{rec_button, RecGlyph};
 use crate::ui::core::icons::{self, Icon};
-use crate::ui::core::theme::{alpha, bare_button, boxed, font, Studio};
-use crate::ui::core::widgets::studio_button::studio_button;
-use crate::ui::core::widgets::studio_hint::studio_hint;
+use crate::ui::core::theme::{alpha, boxed, font, height, radius, type_scale, Studio};
+use crate::ui::core::widgets::controls::{ghost_button, secondary_button, tab, tab_strip, TabSize};
+use crate::ui::core::widgets::studio_hint::{spinner, studio_hint};
 use crate::ui::core::widgets::studio_text::studio_text;
 use crate::ui::song_practice_detail::view_model::analysis_source::AnalysisSource;
 use crate::ui::song_practice_detail::widgets::voice_profile_view;
@@ -251,7 +262,7 @@ pub fn view<'a>(
     }
     content = content
         .push(dimension_bar(dim))
-        .push(Space::new().height(8))
+        .push(Space::new().height(6))
         .push(analysis_box(vm, || dimension(vm, voiceprint, dim)));
     // Static-take extras: hidden while the live mic feed is showing.
     if !live {
@@ -263,7 +274,7 @@ pub fn view<'a>(
         if let (Some(reference), Some(practice)) = (vm.reference_analysis(), vm.practice_analysis())
         {
             content = content
-                .push(Space::new().height(14))
+                .push(Space::new().height(10))
                 .push(gap_table(&gap_rows(&reference, practice)));
         }
     }
@@ -301,41 +312,37 @@ fn controls(vm: &TechniqueDetailViewModel) -> Element<'_, Message> {
     let mut bar = Row::new()
         .push(subject_toggle(vm.analysis_subject(), practice_enabled(vm)))
         .push(Space::new().width(Length::Fill))
+        .height(height::CONTROL)
         .align_y(Vertical::Center);
     bar = match recorder_state(vm) {
         RecorderState::Recording => bar
             .push(
-                row![
-                    icons::icon(Icon::Mic, 13.0, Studio::RECORD),
-                    Space::new().width(6),
-                    canvas_widget(LevelMeter {
-                        level: vm.record_level() as f32,
-                    })
-                    .width(Length::Fill)
-                    .height(METER_HEIGHT),
-                ]
+                canvas_widget(LevelMeter {
+                    level: vm.record_level() as f32,
+                })
                 .width(90)
-                .align_y(Vertical::Center),
+                .height(METER_HEIGHT),
             )
             .push(Space::new().width(10))
-            .push(rec_button(STOP, Icon::Square, true, Some(Message::Stop))),
-        RecorderState::Analyzing => bar.push(rec_button(ANALYZING, Icon::Loader, false, None)),
+            .push(rec_button(STOP, RecGlyph::Stop, Some(Message::Stop))),
+        RecorderState::Analyzing => bar.push(busy(ANALYZING)),
         // As the example's record row: while the mic starts (the permission
         // prompt, the device opening) it said "Record practice" and ignored
         // every tap, as it did whenever a take could not start.
-        RecorderState::Starting => bar.push(rec_button(STARTING, Icon::Loader, false, None)),
+        RecorderState::Starting => bar.push(busy(STARTING)),
         RecorderState::Idle => {
             if has_practice {
-                bar = bar.push(text_button(CLEAR, Message::Clear));
+                bar = bar
+                    .push(ghost_button(CLEAR, None, Some(Message::Clear)))
+                    .push(Space::new().width(6));
             }
-            bar.push(Space::new().width(8)).push(rec_button(
+            bar.push(rec_button(
                 if has_practice {
                     RE_RECORD
                 } else {
                     RECORD_PRACTICE
                 },
-                Icon::Mic,
-                false,
+                RecGlyph::Dot,
                 vm.can_record_practice().then_some(Message::Record),
             ))
         }
@@ -343,7 +350,26 @@ fn controls(vm: &TechniqueDetailViewModel) -> Element<'_, Message> {
     bar.width(Length::Fill).into()
 }
 
-/// `_SubjectToggle`: two segments in an inset well.
+/// A recorder state that takes no tap: a small spinner and its line, 11 px
+/// `TEXT_FAINT`.
+fn busy<'a>(label: &'a str) -> Element<'a, Message> {
+    row![
+        spinner(12.0, 1.6, Studio::TEXT_SECONDARY),
+        Space::new().width(8),
+        studio_text(label)
+            .size(type_scale::LABEL)
+            .line_height(Pixels(type_scale::LINE))
+            .color(Studio::TEXT_FAINT),
+    ]
+    .align_y(Vertical::Center)
+    .into()
+}
+
+/// `_SubjectToggle`: the segmented control (`DESIGN.md`): 22 px, radius 6,
+/// `SEGMENTED` with an inset `CONTROL_ACTIVE` outline and 2 px of padding;
+/// the selected segment `SEGMENT_SELECTED`, radius 4, `TEXT_PRIMARY`
+/// medium; the others transparent, `TEXT_SECONDARY` (`TEXT_DISABLED`, and
+/// no tap, while there is no take to show).
 fn subject_toggle<'a>(
     subject: TechniqueAnalysisSubject,
     practice_enabled: bool,
@@ -361,11 +387,18 @@ fn subject_toggle<'a>(
             practice_enabled,
             Message::Subject(TechniqueAnalysisSubject::Practice),
         ),
-    ];
-    // 2 inside the 1 px border.
+    ]
+    .align_y(Vertical::Center);
     container(segments)
-        .padding(3)
-        .style(|_| boxed(Some(Studio::INSET), 7.0, Some(Studio::BORDER)))
+        .padding(2)
+        .height(height::CONTROL)
+        .style(|_| {
+            boxed(
+                Some(Studio::SEGMENTED),
+                radius::WELL,
+                Some(Studio::CONTROL_ACTIVE),
+            )
+        })
         .into()
 }
 
@@ -375,78 +408,48 @@ fn segment<'a>(
     enabled: bool,
     on_tap: Message,
 ) -> Element<'a, Message> {
-    let fg = if selected {
-        Studio::BACKGROUND
-    } else if enabled {
-        Studio::TEXT_SECONDARY
-    } else {
-        Studio::TEXT_FAINT
-    };
-    let face = container(text(label).size(12).font(font::SEMIBOLD).color(fg))
-        .padding([5, 12])
-        .style(move |_| boxed(selected.then_some(Studio::ACCENT), 5.0, None));
-    button(face)
-        .padding(0)
-        .style(bare_button)
+    let face = studio_text(label)
+        .size(type_scale::LABEL)
+        .line_height(Pixels(type_scale::LINE))
+        .font(if selected {
+            font::MEDIUM
+        } else {
+            font::REGULAR
+        });
+    button(container(face).center_y(Length::Fill))
+        .padding(Padding::from([0, 10]))
+        .height(height::CONTROL - 4.0)
+        .style(move |_, status| {
+            let hovered = matches!(
+                status,
+                iced::widget::button::Status::Hovered | iced::widget::button::Status::Pressed
+            );
+            iced::widget::button::Style {
+                background: selected.then_some(iced::Background::Color(Studio::SEGMENT_SELECTED)),
+                text_color: if selected || (enabled && hovered) {
+                    Studio::TEXT_PRIMARY
+                } else if enabled {
+                    Studio::TEXT_SECONDARY
+                } else {
+                    Studio::TEXT_DISABLED
+                },
+                border: iced::Border {
+                    radius: radius::SMALL.into(),
+                    ..iced::Border::default()
+                },
+                shadow: iced::Shadow::default(),
+                snap: true,
+            }
+        })
         .on_press_maybe(enabled.then_some(on_tap))
         .into()
 }
 
-/// `_RecButton`: a filled pill (coral, or red for `danger`), dark label;
-/// grey and inert with no `on_tap`.
-fn rec_button<'a>(
-    label: &'a str,
-    icon: Icon,
-    danger: bool,
-    on_tap: Option<Message>,
-) -> Element<'a, Message> {
-    let enabled = on_tap.is_some();
-    let fill = match (enabled, danger) {
-        (false, _) => Studio::SURFACE_RAISED,
-        (true, true) => Studio::RECORD,
-        (true, false) => Studio::ACCENT,
-    };
-    let fg = if enabled {
-        Studio::BACKGROUND
-    } else {
-        Studio::TEXT_FAINT
-    };
-    let face = container(
-        row![
-            icons::icon(icon, 14.0, fg),
-            Space::new().width(6),
-            text(label).size(12).font(font::BOLD).color(fg),
-        ]
-        .align_y(Vertical::Center),
-    )
-    .padding([7, 12])
-    .style(move |_| boxed(Some(fill), 7.0, None));
-    button(face)
-        .padding(0)
-        .style(bare_button)
-        .on_press_maybe(on_tap)
-        .into()
-}
+/// The level meter's height (`DESIGN.md`: meters are thin bars).
+const METER_HEIGHT: f32 = 4.0;
 
-/// `_TextButton`: a plain secondary label.
-fn text_button<'a>(label: &'a str, on_tap: Message) -> Element<'a, Message> {
-    button(
-        text(label)
-            .size(12)
-            .font(font::SEMIBOLD)
-            .color(Studio::TEXT_SECONDARY),
-    )
-    .padding([7, 8])
-    .style(bare_button)
-    .on_press(on_tap)
-    .into()
-}
-
-/// The level meter's height.
-const METER_HEIGHT: f32 = 8.0;
-
-/// `_Level`'s track: inset, radius 4, filled in the record red from the left
-/// to the level (clamped to 0..1).
+/// `_Level`'s track: a thin `INSET` bar, radius 2, filled in the record red
+/// from the left to the level (clamped to 0..1).
 struct LevelMeter {
     level: f32,
 }
@@ -473,7 +476,7 @@ impl canvas::Program<Message> for LevelMeter {
         _: mouse::Cursor,
     ) -> Vec<Geometry> {
         let mut frame = Frame::new(renderer, bounds.size());
-        let track = Path::rounded_rectangle(Point::ORIGIN, bounds.size(), 4.0.into());
+        let track = Path::rounded_rectangle(Point::ORIGIN, bounds.size(), 2.0.into());
         frame.fill(&track, Studio::INSET);
         let filled = meter_fill(self.level, bounds.width);
         if filled > 0.0 {
@@ -489,44 +492,25 @@ impl canvas::Program<Message> for LevelMeter {
 
 // ------------------------------------------------------- the dimension bar
 
-/// `_DimensionBar`: a 28 px horizontal strip of the dimensions, the active
-/// one tinted.
+/// `_DimensionBar`: the dimensions as a dock tab strip (`DESIGN.md`, Tabs:
+/// 22 px, the selected one on `CONTROL_ACTIVE`), scrolling sideways when
+/// the card is narrower than the strip.
 fn dimension_bar<'a>(active: usize) -> Element<'a, Message> {
-    let mut chips = Row::new().spacing(6).height(Length::Fill);
-    for (i, label) in DIMENSIONS.iter().enumerate() {
-        let on = i == active;
-        let (fill, border, fg) = if on {
-            (
-                alpha(Studio::ACCENT, 0.18),
-                alpha(Studio::ACCENT, 0.6),
-                Studio::ACCENT_BRIGHT,
-            )
-        } else {
-            (
-                Studio::SURFACE_RAISED,
-                Studio::BORDER,
-                Studio::TEXT_SECONDARY,
-            )
-        };
-        // 11 across inside the 1 px border.
-        let face = container(text(*label).size(11).font(font::SEMIBOLD).color(fg))
-            .height(Length::Fill)
-            .padding([0, 12])
-            .align_y(Vertical::Center)
-            .style(move |_| boxed(Some(fill), 6.0, Some(border)));
-        chips = chips.push(
-            button(face)
-                .height(Length::Fill)
-                .padding(0)
-                .style(bare_button)
-                .on_press(Message::Dimension(i)),
-        );
-    }
-    scrollable(chips)
-        .horizontal()
-        .width(Length::Fill)
-        .height(28)
-        .into()
+    let tabs = DIMENSIONS
+        .iter()
+        .enumerate()
+        .map(|(i, label)| tab(i, *label))
+        .collect();
+    no_scrollbar(scrollable(tab_strip(
+        tabs,
+        Some(active),
+        TabSize::Dock,
+        Message::Dimension,
+    )))
+    .horizontal()
+    .width(Length::Fill)
+    .height(height::CONTROL)
+    .into()
 }
 
 // --------------------------------------------------------- the analysis box
@@ -607,30 +591,40 @@ fn analysis_box<'a>(
         BoxBody::View => child(),
         BoxBody::Loading(hint) => studio_hint(hint)
             .spinner(true)
-            .font_size(12.5)
+            .font_size(type_scale::BODY)
             .padding(20)
             .into(),
         BoxBody::Retry(cause) => container(
             column![
                 text(cause)
-                    .size(12.5)
-                    .line_height(1.4)
+                    .size(type_scale::BODY)
+                    .line_height(Pixels(18.0))
                     .align_x(Horizontal::Center)
                     .color(Studio::TEXT_FAINT),
                 Space::new().height(12),
-                studio_button(TRY_AGAIN, Message::Retry),
+                secondary_button(TRY_AGAIN, Some(Message::Retry)),
             ]
             .align_x(Horizontal::Center),
         )
         .center(Length::Fill)
         .into(),
-        BoxBody::Hint(hint) => studio_hint(hint).font_size(12.5).padding(20).into(),
+        BoxBody::Hint(hint) => studio_hint(hint)
+            .font_size(type_scale::BODY)
+            .padding(20)
+            .into(),
     };
+    // The analysis well (`DESIGN.md`: graph and lane wells).
     container(body)
         .width(Length::Fill)
         .height(BOX_HEIGHT)
         .clip(true)
-        .style(|_| boxed(Some(Studio::SURFACE), 8.0, Some(Studio::BORDER)))
+        .style(|_| {
+            boxed(
+                Some(Studio::WELL),
+                radius::WELL,
+                Some(Studio::BORDER_STRONG),
+            )
+        })
         .into()
 }
 
@@ -694,15 +688,15 @@ impl GapRow {
 /// the range and the dynamics where both takes have them.
 pub fn gap_rows(r: &TechniqueAnalysis, p: &TechniqueAnalysis) -> Vec<GapRow> {
     let mut rows = vec![
-        GapRow::new("RING", r.metrics.ring_avg, p.metrics.ring_avg),
-        GapRow::new("TILT", r.metrics.tilt_avg, p.metrics.tilt_avg),
+        GapRow::new("Ring", r.metrics.ring_avg, p.metrics.ring_avg),
+        GapRow::new("Tilt", r.metrics.tilt_avg, p.metrics.tilt_avg),
         GapRow::new("CPP", r.metrics.cpp_avg, p.metrics.cpp_avg),
     ];
     if r.ltas.has_data() && p.ltas.has_data() {
         rows.push(GapRow {
             tolerance: 3.0,
             ..GapRow::new(
-                "SINGER'S FORMANT",
+                "Singer's formant",
                 r.ltas.singers_formant_db,
                 p.ltas.singers_formant_db,
             )
@@ -715,14 +709,14 @@ pub fn gap_rows(r: &TechniqueAnalysis, p: &TechniqueAnalysis) -> Vec<GapRow> {
     if r.profile.has_range() && p.profile.has_range() {
         rows.push(GapRow {
             unit: "st",
-            ..GapRow::new("RANGE", span(r), span(p))
+            ..GapRow::new("Range", span(r), span(p))
         });
     }
     if r.profile.has_dynamics() && p.profile.has_dynamics() {
         rows.push(GapRow {
             tolerance: 4.0,
             ..GapRow::new(
-                "DYNAMICS",
+                "Dynamics",
                 r.profile.dynamic_range_db(),
                 p.profile.dynamic_range_db(),
             )
@@ -739,34 +733,38 @@ fn cell<'a>(content: Element<'a, Message>, flex: u16) -> Element<'a, Message> {
         .into()
 }
 
-/// A gap table caption (`_capStyle`: 9 px w700, 0.5 letter spacing).
+/// A gap table caption: 11 px `TEXT_FAINT`, sentence case.
 fn caption<'a>(label: &'a str) -> Element<'a, Message> {
     studio_text(label)
-        .size(9)
-        .font(font::BOLD)
-        .letter_spacing(0.5)
+        .size(type_scale::LABEL)
+        .line_height(Pixels(type_scale::LINE))
         .color(Studio::TEXT_FAINT)
         .into()
 }
 
-/// `_GapTable`: the header (REFERENCE / YOU / GAP), then a row per metric.
+/// One gap table row's height.
+const GAP_ROW: f32 = 22.0;
+
+/// `_GapTable`: the header (Reference / You / Gap), then a row per metric
+/// (12 px `TEXT_SECONDARY` labels, 12 px medium tabular figures), in a
+/// well.
 fn gap_table<'a>(rows: &[GapRow]) -> Element<'a, Message> {
     let mut table = column![row![
         Space::new().width(Length::FillPortion(4)),
-        cell(caption("REFERENCE"), 3),
-        cell(caption("YOU"), 3),
-        cell(caption("GAP"), 3),
+        cell(caption("Reference"), 3),
+        cell(caption("You"), 3),
+        cell(caption("Gap"), 3),
     ]
-    .padding(Padding {
-        bottom: 8.0,
-        ..Padding::ZERO
-    })];
+    .height(GAP_ROW)
+    .align_y(Vertical::Center)];
     for r in rows {
-        let number = |s: String| -> Element<'a, Message> {
-            text(s)
-                .size(12)
-                .font(font::BOLD)
-                .color(Studio::TEXT_PRIMARY)
+        let number = |s: String, color| -> Element<'a, Message> {
+            studio_text(s)
+                .size(type_scale::BODY)
+                .line_height(Pixels(type_scale::LINE))
+                .font(font::MEDIUM)
+                .tabular()
+                .color(color)
                 .into()
         };
         let delta_color = if !r.has() {
@@ -774,45 +772,35 @@ fn gap_table<'a>(rows: &[GapRow]) -> Element<'a, Message> {
         } else if r.close() {
             Studio::GOOD
         } else {
-            Studio::ACCENT_BRIGHT
+            Studio::OUT_OF_TUNE
         };
         table = table.push(
             row![
                 container(
-                    text(r.label)
-                        .size(11)
-                        .font(font::SEMIBOLD)
+                    studio_text(r.label)
+                        .size(type_scale::BODY)
+                        .line_height(Pixels(type_scale::LINE))
                         .color(Studio::TEXT_SECONDARY),
                 )
                 .width(Length::FillPortion(4)),
-                cell(number(r.value_text(r.reference)), 3),
-                cell(number(r.value_text(r.you)), 3),
-                cell(
-                    text(r.delta_text())
-                        .size(12)
-                        .font(font::BOLD)
-                        .color(delta_color)
-                        .into(),
-                    3,
-                ),
+                cell(number(r.value_text(r.reference), Studio::TEXT_PRIMARY), 3),
+                cell(number(r.value_text(r.you), Studio::TEXT_PRIMARY), 3),
+                cell(number(r.delta_text(), delta_color), 3),
             ]
-            .align_y(Vertical::Center)
-            .padding(Padding {
-                bottom: 6.0,
-                ..Padding::ZERO
-            }),
+            .height(GAP_ROW)
+            .align_y(Vertical::Center),
         );
     }
-    // 14/12/14/6 inside the 1 px border.
     container(table.width(Length::Fill))
         .width(Length::Fill)
-        .padding(Padding {
-            top: 13.0,
-            right: 15.0,
-            bottom: 7.0,
-            left: 15.0,
+        .padding([6, 12])
+        .style(|_| {
+            boxed(
+                Some(Studio::WELL),
+                radius::WELL,
+                Some(Studio::BORDER_STRONG),
+            )
         })
-        .style(|_| boxed(Some(Studio::INSET), 8.0, Some(Studio::BORDER)))
         .into()
 }
 
@@ -839,33 +827,34 @@ pub fn quality_warning(metrics: &VoiceMetrics) -> Option<String> {
     }
 }
 
-/// The red banner under the box.
+/// The calm inline notice under the box: the warning glyph in `WARN_TEXT`
+/// and the line in `TEXT_SECONDARY`, on the warning colour at 6 % with a
+/// faint outline of it.
 fn warning_banner<'a>(message: String) -> Element<'a, Message> {
     let banner = container(
         row![
-            icons::icon(Icon::TriangleAlert, 15.0, Studio::RECORD),
+            icons::icon(Icon::TriangleAlert, 13.0, Studio::WARN_TEXT),
             Space::new().width(8),
             text(message)
-                .size(12)
-                .line_height(1.3)
+                .size(type_scale::BODY)
+                .line_height(Pixels(18.0))
                 .color(Studio::TEXT_SECONDARY)
                 .width(Length::Fill),
         ]
         .align_y(Vertical::Center),
     )
     .width(Length::Fill)
-    // 12 / 9 inside the 1 px border.
-    .padding([10, 13])
+    .padding([7, 10])
     .style(|_| {
         boxed(
-            Some(alpha(Studio::RECORD, 0.12)),
-            8.0,
-            Some(alpha(Studio::RECORD, 0.4)),
+            Some(alpha(Studio::WARN, 0.06)),
+            radius::WELL,
+            Some(alpha(Studio::WARN, 0.22)),
         )
     });
     container(banner)
         .padding(Padding {
-            top: 10.0,
+            top: 8.0,
             ..Padding::ZERO
         })
         .into()
