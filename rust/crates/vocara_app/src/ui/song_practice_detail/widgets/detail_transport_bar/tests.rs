@@ -427,10 +427,13 @@ fn the_bar_centres_the_transport_and_bounds_the_sides() {
         Size::new(150.0, 22.0),
     );
     assert_eq!(l, Point::new(0.0, 11.5));
-    assert_eq!(c, Point::new(300.0, 9.5));
+    // Centred on the window: half the insets' difference left of the bar's
+    // own centre.
+    assert_eq!(c, Point::new(300.0 - CENTER_OFFSET, 9.5));
     assert_eq!(r, Point::new(850.0, 15.5));
-    // Each side gets half of what the transport leaves, less the gap...
-    assert_eq!(side_room(1000.0, 400.0), 288.0);
+    // Each side gets half of what the transport leaves, less the offset and
+    // the gap...
+    assert_eq!(side_room(1000.0, 400.0), 288.0 - CENTER_OFFSET);
     // ...and nothing, never less, when the transport takes it all.
     assert_eq!(side_room(300.0, 400.0), 0.0);
 }

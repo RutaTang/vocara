@@ -489,8 +489,10 @@ fn the_header_cluster_right_anchors_and_new_technique_hugs_the_edge() {
     let search = h.find(&glyph(Icon::Search)).expect("the search glyph");
     assert!(search.center_x() > WIDE.width * 0.45, "{search:?}");
     let title = h.find("Technique library").expect("the title");
+    // Just past the back chevron, which starts the toolbar's content
+    // (past the traffic lights on macOS).
     assert!(
-        title.x < 60.0,
+        title.x < crate::ui::core::widgets::toolbar::LEADING_INSET + 44.0,
         "the title sits by the back chevron: {title:?}"
     );
 }

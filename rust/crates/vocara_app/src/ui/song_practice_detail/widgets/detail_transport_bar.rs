@@ -72,6 +72,13 @@ pub const BAR_HEIGHT: f32 = toolbar::HEIGHT;
 /// either side (`_BarLayout._gap`).
 pub const SIDE_GAP: f32 = 12.0;
 
+/// How far left of the bar's own centre the transport sits so that it is
+/// centred on the window, as the mockup draws it: the toolbar's content
+/// starts [`toolbar::LEADING_INSET`] in (past the traffic lights on macOS)
+/// but ends [`toolbar::TRAILING_INSET`] in, so the bar's centre is half
+/// their difference right of the window's.
+pub const CENTER_OFFSET: f32 = (toolbar::LEADING_INSET - toolbar::TRAILING_INSET) / 2.0;
+
 /// The gap between the transport group, the time display and the recording
 /// group.
 pub const CENTER_GAP: f32 = 8.0;
@@ -245,13 +252,14 @@ pub fn time_display(position: Duration, total_duration_ms: i64) -> (String, Stri
 /// `_BarLayout.performLayout`: where the left group, the transport and the
 /// zoom control go on a bar of `size`, given their sizes (`left` and `right`
 /// as laid out within [`side_room`]). Each is centred vertically; the
-/// transport is centred across the bar, the left group flush left and the
-/// zoom flush right.
+/// transport is centred on the window ([`CENTER_OFFSET`] left of the bar's
+/// centre, never past the bar's left edge), the left group flush left and
+/// the zoom flush right.
 pub fn bar_layout(size: Size, left: Size, center: Size, right: Size) -> [Point; 3] {
     [
         Point::new(0.0, (size.height - left.height) / 2.0),
         Point::new(
-            (size.width - center.width) / 2.0,
+            ((size.width - center.width) / 2.0 - CENTER_OFFSET).max(0.0),
             (size.height - center.height) / 2.0,
         ),
         Point::new(size.width - right.width, (size.height - right.height) / 2.0),
@@ -263,7 +271,9 @@ pub fn bar_layout(size: Size, left: Size, center: Size, right: Size) -> [Point; 
 /// room ran under the play and stop buttons (and a very long one overflowed
 /// the bar); bounded here, it gives way instead.
 pub fn side_room(width: f32, center_width: f32) -> f32 {
-    ((width - center_width) / 2.0 - SIDE_GAP).max(0.0)
+    // The left side is the narrower one, the transport sitting
+    // CENTER_OFFSET left of the bar's centre; both sides take its room.
+    ((width - center_width) / 2.0 - CENTER_OFFSET - SIDE_GAP).max(0.0)
 }
 
 // ---------------------------------------------------------------------- view
