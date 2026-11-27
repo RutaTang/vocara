@@ -62,7 +62,7 @@
 
 use std::sync::{Arc, OnceLock};
 
-use crate::anatomy::{BodyMix, HumanArtic};
+use crate::anatomy::{BodyMix, BodyName, HumanArtic};
 use crate::codebook::{Codebook, MAX_NEAREST};
 use crate::forward::TractModel;
 use crate::math::{exp, ln, sqrt};
@@ -165,6 +165,42 @@ impl TractEstimate {
             fitted: false,
         }
     }
+}
+
+/// A body for a singer, from the F3 of their voiced frames: F3 follows the tract's length and
+/// moves least from vowel to vowel, so their median is placed (in log-frequency) on the line from
+/// the adult male's to the adult female's to the child's median F3 over CHIMERA's calibrated
+/// sung vowels (about 2.45, 2.8 and 3.3 kHz). A default to start from, for a view that lets the
+/// singer choose: the measured F3 of a high voice is less reliable, and a man with a short
+/// tract reads as part female. `None` with fewer than 20 values.
+pub fn suggest_body(f3: impl IntoIterator<Item = f64>) -> Option<BodyMix> {
+    let mut v: Vec<f64> = f3
+        .into_iter()
+        .filter(|x| *x > 0.0 && x.is_finite())
+        .collect();
+    if v.len() < 20 {
+        return None;
+    }
+    v.sort_by(f64::total_cmp);
+    let m = ln(v[v.len() / 2]);
+    let reference = |b: BodyName| {
+        let mut f: Vec<f64> = crate::posture::sung_vowels(b)
+            .map(|v| v.formants[2])
+            .filter(|x| x.is_finite())
+            .collect();
+        f.sort_by(f64::total_cmp);
+        ln(f[f.len() / 2])
+    };
+    let (male, female, child) = (
+        reference(BodyName::Male),
+        reference(BodyName::Female),
+        reference(BodyName::Child),
+    );
+    Some(if m <= female {
+        BodyMix::new((m - male) / (female - male), 0.0)
+    } else {
+        BodyMix::new(1.0, (m - female) / (child - female))
+    })
 }
 
 /// Forward-difference steps (template cm) of the Jacobian.

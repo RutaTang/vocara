@@ -5,7 +5,9 @@ use std::time::Instant;
 use vocara_tract::anatomy::{BodyMix, BodyName};
 use vocara_tract::components::TractComponents;
 use vocara_tract::forward::TractModel;
-use vocara_tract::inversion::{FormantFrame, InversionConfig, Inverter, TractEstimate};
+use vocara_tract::inversion::{
+    suggest_body, FormantFrame, InversionConfig, Inverter, TractEstimate,
+};
 use vocara_tract::posture::{sung_vowels, Posture, JAW, LIP_PROT, N_FIT, TB_X, TB_Y};
 use vocara_tract::vowels::vowel;
 
@@ -327,6 +329,28 @@ fn unvoiced_frames_hold_and_decay() {
             n + 1
         );
     }
+}
+
+#[test]
+fn the_suggested_body_follows_the_singers_f3() {
+    for b in BODIES {
+        let f3: Vec<f64> = sung_vowels(b)
+            .flat_map(|v| std::iter::repeat_n(v.formants[2], 3))
+            .collect();
+        let s = suggest_body(f3).unwrap();
+        match b {
+            BodyName::Male => assert!(s.female < 0.05 && s.child == 0.0, "{s:?}"),
+            BodyName::Female => assert!(s.female > 0.95 && s.child < 0.05, "{s:?}"),
+            BodyName::Child => assert!(s.child > 0.95, "{s:?}"),
+        }
+    }
+    // between: a part-female body
+    let mid = suggest_body([2620.0; 40]).unwrap();
+    assert!(
+        mid.female > 0.2 && mid.female < 0.8 && mid.child == 0.0,
+        "{mid:?}"
+    );
+    assert!(suggest_body([2500.0; 10]).is_none());
 }
 
 #[test]

@@ -87,12 +87,11 @@ impl Codebook {
 
     /// `body`'s codebook, built on the first call for that body and shared after.
     pub fn shared(body: BodyMix) -> Arc<Codebook> {
-        static CACHE: OnceLock<Mutex<Vec<Arc<Codebook>>>> = OnceLock::new();
-        let cache = CACHE.get_or_init(|| Mutex::new(Vec::new()));
-        let find = |list: &[Arc<Codebook>]| list.iter().find(|c| same_body(c.body, body)).cloned();
-        if let Some(c) = find(&cache.lock().unwrap_or_else(PoisonError::into_inner)) {
+        if let Some(c) = Codebook::cached(body) {
             return c;
         }
+        let cache = cache();
+        let find = |list: &[Arc<Codebook>]| list.iter().find(|c| same_body(c.body, body)).cloned();
         // built outside the lock: another body's inversion need not wait for this one (two
         // threads asking for the same new body each build it once; the first stored is kept)
         let built = Arc::new(Codebook::build(body));
@@ -105,6 +104,12 @@ impl Codebook {
         }
         list.push(Arc::clone(&built));
         built
+    }
+
+    /// `body`'s shared codebook if this process has built it, without building it.
+    pub fn cached(body: BodyMix) -> Option<Arc<Codebook>> {
+        let list = cache().lock().unwrap_or_else(PoisonError::into_inner);
+        list.iter().find(|c| same_body(c.body, body)).cloned()
     }
 
     /// Builds `body`'s shared codebook now (see the module docs).
@@ -165,6 +170,12 @@ impl Codebook {
 
 /// The most entries [`Codebook::nearest`] returns.
 pub const MAX_NEAREST: usize = 16;
+
+/// The process' codebooks, by body.
+fn cache() -> &'static Mutex<Vec<Arc<Codebook>>> {
+    static CACHE: OnceLock<Mutex<Vec<Arc<Codebook>>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(Vec::new()))
+}
 
 fn same_body(a: BodyMix, b: BodyMix) -> bool {
     a.female.to_bits() == b.female.to_bits() && a.child.to_bits() == b.child.to_bits()
