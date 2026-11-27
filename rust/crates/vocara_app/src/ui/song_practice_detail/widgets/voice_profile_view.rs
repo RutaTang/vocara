@@ -15,22 +15,24 @@
 
 use std::sync::Arc;
 
-use crate::ui::core::{system_font, text};
-use iced::alignment::{Horizontal, Vertical};
-use iced::font::Weight;
+use crate::ui::core::text;
+use iced::alignment::Vertical;
 use iced::widget::canvas::{self, gradient, Frame, Geometry, LineCap, Path, Stroke, Style};
 use iced::widget::text::Alignment;
 use iced::widget::{canvas as canvas_widget, column, container, row, stack, Space};
-use iced::{mouse, Color, Element, Length, Padding, Pixels, Point, Rectangle, Renderer, Theme};
+use iced::{mouse, Color, Element, Length, Pixels, Point, Rectangle, Renderer, Size, Theme};
 use vocara_model::models::audio_track::AudioTrack;
 use vocara_model::models::voice_metrics::{note_name_for_midi, VoiceMetrics, VoiceProfile};
 use vocara_model::util::dart_num::{clamp_f64, round_to_i64};
 use vocara_services::monitor_service::MonitorService;
 
 use super::analysis_lanes::LoudnessLanePainter;
-use crate::ui::core::theme::{alpha, boxed, font, Studio};
+use super::voiceprint_view::{
+    header_row, plot_well, readout, Readout, Swatch, READOUT_GAP, TAB_PADDING,
+};
+use crate::ui::core::theme::{alpha, boxed, font, type_scale, Studio};
 use crate::ui::core::widgets::studio_hint::studio_hint;
-use crate::ui::core::widgets::studio_text::{studio_text, StudioText};
+use crate::ui::core::widgets::studio_text::studio_text;
 use crate::ui::core::widgets::waveform_painter::PlayheadPainter;
 use crate::ui::song_practice_detail::view_model::analysis_source::AnalysisSource;
 
@@ -86,53 +88,53 @@ fn profile_guard<'a, M: 'a>(
 // ------------------------------------------------------------- the tabs
 
 /// `RangeView`: the sung range, comfortable tessitura and estimated register
-/// break (passaggio) for the selected take.
+/// break (passaggio) for the selected take: their readouts, then the range
+/// on a pitch axis filling the tab.
 pub fn range_view<'a, M: 'a>(src: &dyn AnalysisSource) -> Element<'a, M> {
     profile_guard(src, RANGE_LIVE_HINT, RANGE_EMPTY_HINT, |p, _, _| {
         let (Some(low), Some(high)) = (p.low_midi, p.high_midi) else {
             return studio_hint(RANGE_EMPTY_HINT).into();
         };
-        let mut stats = row![stat(
-            "Range",
-            format!("{} – {}", note_name_for_midi(low), note_name_for_midi(high)),
-            format!("{} semitones", high - low),
-            Studio::TEXT_PRIMARY,
+        let mut stats = row![readout(
+            Readout::new(
+                "Range",
+                format!("{} – {}", note_name_for_midi(low), note_name_for_midi(high)),
+            )
+            .whole()
+            .swatch(Swatch::Block(RANGE_BAND))
+            .sub(format!("{} semitones", high - low)),
         )]
-        .spacing(28);
+        .spacing(READOUT_GAP);
         if let (Some(lo), Some(hi)) = (p.tess_lo_midi, p.tess_hi_midi) {
-            stats = stats.push(stat(
-                "Tessitura",
-                format!("{} – {}", note_name_for_midi(lo), note_name_for_midi(hi)),
-                "comfortable zone".to_string(),
-                Studio::TEXT_PRIMARY,
+            stats = stats.push(readout(
+                Readout::new(
+                    "Tessitura",
+                    format!("{} – {}", note_name_for_midi(lo), note_name_for_midi(hi)),
+                )
+                .whole()
+                .swatch(Swatch::Block(TESSITURA_BAND))
+                .sub("comfortable zone"),
             ));
         }
         if let Some(passaggio) = p.passaggio_midi {
-            stats = stats.push(stat(
-                "Passaggio",
-                note_name_for_midi(passaggio),
-                passaggio_shift(p.passaggio_jump_db).to_string(),
-                Studio::RECORD,
+            stats = stats.push(readout(
+                Readout::new("Passaggio", note_name_for_midi(passaggio))
+                    .whole()
+                    .swatch(Swatch::Line(PASSAGGIO))
+                    .sub(passaggio_shift(p.passaggio_jump_db)),
             ));
         }
-        container(
-            column![
-                stats
-                    .wrap()
-                    .vertical_spacing(12)
-                    .align_x(Horizontal::Center),
-                Space::new().height(18),
-                cap_label("Range · tessitura highlighted, passaggio marked"),
-                Space::new().height(6),
+        column![
+            header_row("Sung range on a pitch axis", None, 0.0),
+            stats.wrap().vertical_spacing(8),
+            Space::new().height(12),
+            plot_well(
                 canvas_widget(RangeBarPainter { p })
                     .width(Length::Fill)
-                    .height(Length::Fill),
-            ]
-            .align_x(Horizontal::Center)
-            .width(Length::Fill)
-            .height(Length::Fill),
-        )
-        .padding(ltrb(20.0, 28.0, 20.0, 18.0))
+                    .height(Length::Fill)
+            ),
+        ]
+        .padding(TAB_PADDING)
         .width(Length::Fill)
         .height(Length::Fill)
         .into()
@@ -165,7 +167,7 @@ pub fn dynamics_view<'a, M: 'a>(src: &dyn AnalysisSource) -> Element<'a, M> {
         let start_ms = src.analysis_start_ms();
         let span_ms = src.analysis_duration_ms();
         let position_ms = i64::try_from(src.position().as_millis()).unwrap_or(i64::MAX);
-        let curve = container(stack![
+        let curve = plot_well(stack![
             LoudnessLanePainter {
                 metrics: m,
                 timeline_duration_ms: span_ms,
@@ -182,84 +184,71 @@ pub fn dynamics_view<'a, M: 'a>(src: &dyn AnalysisSource) -> Element<'a, M> {
             })
             .width(Length::Fill)
             .height(Length::Fill),
-        ])
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .style(|_| boxed(Some(Studio::INSET), 6.0, None));
-        let faint = |s: &'static str| text(s).size(9).color(Studio::TEXT_FAINT);
-        container(
-            column![
-                dynamics_stats(p.dynamic_range_db(), p.soft_db, p.loud_db, None),
-                Space::new().height(16),
-                cap_label("Loudness over time"),
-                Space::new().height(6),
-                curve,
-                Space::new().height(10),
-                row![
-                    cap_label("Span"),
-                    Space::new().width(12),
-                    canvas_widget(DynBarPainter {
-                        soft_db: p.soft_db,
-                        loud_db: p.loud_db,
-                    })
-                    .width(Length::Fill)
-                    .height(12),
-                    Space::new().width(12),
-                    faint("−60"),
-                    Space::new().width(Length::Fill),
-                    faint("0 dBFS"),
-                ]
-                .align_y(Vertical::Center),
-            ]
-            .width(Length::Fill)
-            .height(Length::Fill),
-        )
-        .padding(ltrb(20.0, 16.0, 20.0, 18.0))
+        ]);
+        column![
+            header_row("Loudness over time", None, 0.0),
+            dynamics_stats(p.dynamic_range_db(), p.soft_db, p.loud_db),
+            Space::new().height(12),
+            curve,
+            Space::new().height(10),
+            span_row(p.soft_db, p.loud_db),
+        ]
+        .padding(TAB_PADDING)
         .width(Length::Fill)
         .height(Length::Fill)
         .into()
     })
 }
 
-/// The DYNAMIC RANGE / SOFTEST / LOUDEST stats, rounded to whole dB; the
-/// live panel leads the first with `lead` (its red dot).
-fn dynamics_stats<'a, M: 'a>(
-    range_db: f64,
-    soft_db: f64,
-    loud_db: f64,
-    lead: Option<Element<'a, M>>,
-) -> Element<'a, M> {
-    let range = stat(
-        "Dynamic range",
-        format!("{} dB", round_to_i64(range_db)),
-        "soft → loud".to_string(),
-        Studio::TEXT_PRIMARY,
-    );
-    let first: Element<'a, M> = match lead {
-        Some(lead) => row![lead, Space::new().width(14), range]
-            .align_y(Vertical::Center)
-            .into(),
-        None => range,
+/// The dynamic span on the −60..0 dBFS scale: its label, the bar, and the
+/// scale's ends under it.
+fn span_row<'a, M: 'a>(soft_db: f64, loud_db: f64) -> Element<'a, M> {
+    let end = |s: &'static str| {
+        studio_text(s)
+            .size(type_scale::AXIS)
+            .line_height(Pixels(14.0))
+            .tabular()
+            .color(Studio::TEXT_DISABLED)
     };
     row![
-        first,
-        stat(
-            "Softest",
-            format!("{} dBFS", round_to_i64(soft_db)),
-            "5th pct".to_string(),
-            Studio::TEXT_PRIMARY,
+        container(
+            studio_text("Span")
+                .size(type_scale::LABEL)
+                .line_height(Pixels(type_scale::LINE))
+                .color(Studio::TEXT_SECONDARY)
+        )
+        .width(48),
+        column![
+            canvas_widget(DynBarPainter { soft_db, loud_db })
+                .width(Length::Fill)
+                .height(8),
+            row![end("−60"), Space::new().width(Length::Fill), end("0 dBFS")],
+        ]
+        .spacing(2)
+        .width(Length::Fill),
+    ]
+    .align_y(Vertical::Top)
+    .into()
+}
+
+/// The dynamic range / softest / loudest readouts, rounded to whole dB.
+fn dynamics_stats<'a, M: 'a>(range_db: f64, soft_db: f64, loud_db: f64) -> Element<'a, M> {
+    row![
+        readout(
+            Readout::new("Dynamic range", format!("{} dB", round_to_i64(range_db)))
+                .sub("soft → loud"),
         ),
-        stat(
-            "Loudest",
-            format!("{} dBFS", round_to_i64(loud_db)),
-            "95th pct".to_string(),
-            Studio::TEXT_PRIMARY,
+        readout(
+            Readout::new("Softest", format!("{} dBFS", round_to_i64(soft_db))).sub("5th pct"),
+        ),
+        readout(
+            Readout::new("Loudest", format!("{} dBFS", round_to_i64(loud_db))).sub("95th pct"),
         ),
     ]
-    .spacing(28)
-    .align_y(Vertical::Center)
+    .spacing(READOUT_GAP)
+    .align_y(Vertical::Top)
     .wrap()
-    .vertical_spacing(12)
+    .vertical_spacing(8)
     .into()
 }
 
@@ -274,29 +263,17 @@ fn live_dynamics_panel<'a, M: 'a>(monitor: &MonitorService) -> Element<'a, M> {
     if d.range_db.is_nan() {
         return studio_hint(LIVE_DYNAMICS_HINT).into();
     }
-    let dot = container(Space::new())
-        .width(8)
-        .height(8)
-        .style(|_| boxed(Some(Studio::RECORD), 4.0, None));
-    container(
-        column![
-            dynamics_stats(d.range_db, d.soft_db, d.loud_db, Some(dot.into())),
-            Space::new().height(16),
-            cap_label("Loudness (live)"),
-            Space::new().height(6),
-            container(
-                canvas_widget(LiveLoudnessPainter { loud })
-                    .width(Length::Fill)
-                    .height(Length::Fill),
-            )
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .style(|_| boxed(Some(Studio::INSET), 6.0, None)),
-        ]
-        .width(Length::Fill)
-        .height(Length::Fill),
-    )
-    .padding(ltrb(20.0, 16.0, 20.0, 18.0))
+    column![
+        header_row("Loudness (live)", Some(live_badge()), 0.0),
+        dynamics_stats(d.range_db, d.soft_db, d.loud_db),
+        Space::new().height(12),
+        plot_well(
+            canvas_widget(LiveLoudnessPainter { loud })
+                .width(Length::Fill)
+                .height(Length::Fill),
+        ),
+    ]
+    .padding(TAB_PADDING)
     .width(Length::Fill)
     .height(Length::Fill)
     .into()
@@ -304,45 +281,40 @@ fn live_dynamics_panel<'a, M: 'a>(monitor: &MonitorService) -> Element<'a, M> {
 
 // ----------------------------------------------------------- the pieces
 
-/// `EdgeInsets.fromLTRB`.
-fn ltrb(left: f32, top: f32, right: f32, bottom: f32) -> Padding {
-    Padding {
-        top,
-        right,
-        bottom,
-        left,
-    }
-}
+/// The range axis's colours: the whole sung range a neutral band, the
+/// tessitura the good-range green over it, the passaggio the bright accent.
+const RANGE_BAND: Color = Color::from_rgb8(0x4A, 0x4A, 0x54);
+const TESSITURA_BAND: Color = Studio::GOOD;
+const PASSAGGIO: Color = Studio::ACCENT_BRIGHT;
 
-/// `_CapLabel`: a 9 px w700 faint caption with 0.6 letter spacing, as
-/// written (not upper-cased).
-fn cap_label<'a>(label: &str) -> StudioText<'a> {
-    studio_text(label.to_string())
-        .size(9)
-        .font(font::BOLD)
-        .letter_spacing(0.6)
-        .color(Studio::TEXT_FAINT)
-}
-
-/// `_Stat`: a labelled summary value (RANGE  A3 – E5  /  14 semitones).
-fn stat<'a, M: 'a>(label: &str, value: String, sub: String, accent: Color) -> Element<'a, M> {
-    column![
-        cap_label(label),
-        Space::new().height(3),
-        text(value).size(17).font(font::EXTRA_BOLD).color(accent),
-        text(sub).size(10).color(Studio::TEXT_FAINT),
+/// The "● Live" badge of a live panel's header.
+fn live_badge<'a, M: 'a>() -> Element<'a, M> {
+    row![
+        container(Space::new().width(6).height(6)).style(|_| boxed(
+            Some(Studio::RECORD),
+            3.0,
+            None
+        )),
+        studio_text("Live")
+            .size(type_scale::LABEL)
+            .line_height(Pixels(type_scale::LINE))
+            .font(font::MEDIUM)
+            .color(Studio::RECORD_TEXT),
     ]
+    .spacing(6)
+    .align_y(Vertical::Center)
     .into()
 }
 
-/// `_profileText`: `s` in w600 at `size`, its top at `y`, its left edge at
-/// `x` (or centred on it, or ending at it).
+/// A label on the range axis: `s` in Inter at `size` (`font`), its top at
+/// `y`, its left edge at `x` (or centred on it, or ending at it).
 fn profile_text(
     s: String,
     x: f32,
     y: f32,
     color: Color,
     size: f32,
+    font: iced::Font,
     align: Alignment,
 ) -> canvas::Text {
     canvas::Text {
@@ -350,10 +322,8 @@ fn profile_text(
         position: Point::new(x, y),
         color,
         size: Pixels(size),
-        // A `TextPainter`'s style has no height and no family: the system
-        // UI font, on its own line.
         line_height: text::NATURAL,
-        font: system_font::font(Weight::Semibold),
+        font,
         align_x: align,
         align_y: Vertical::Top,
         ..canvas::Text::default()
@@ -402,12 +372,17 @@ pub fn range_bar(p: &VoiceProfile, width: f64, height: f64) -> Option<RangeBar> 
     })
 }
 
-/// `_RangeBarPainter`: a horizontal pitch axis — the full sung range as a
-/// bar, the tessitura brighter, the passaggio as a labelled tick, with
-/// C-octave gridlines and the range's end notes.
+/// `_RangeBarPainter`: a horizontal pitch axis in the well, 20 px in from
+/// its sides — the full sung range as a neutral band, the tessitura over it
+/// in the good-range green, the passaggio as a labelled accent tick, with
+/// C-octave gridlines (`GRID`) and their names (10 px `TEXT_DISABLED`) and
+/// the range's end notes (11 px `TEXT_SECONDARY`).
 struct RangeBarPainter {
     p: Arc<VoiceProfile>,
 }
+
+/// The range axis's inset from the well's sides.
+const RANGE_INSET: f32 = 20.0;
 
 impl<M> canvas::Program<M> for RangeBarPainter {
     type State = ();
@@ -421,34 +396,52 @@ impl<M> canvas::Program<M> for RangeBarPainter {
         _: mouse::Cursor,
     ) -> Vec<Geometry> {
         let mut frame = Frame::new(renderer, bounds.size());
-        let (w, h) = (bounds.width, bounds.height);
+        let (w, h) = (bounds.width - 2.0 * RANGE_INSET, bounds.height);
         let p = &self.p;
         let (Some(bar), Some(low), Some(high)) = (
-            range_bar(p, f64::from(w), f64::from(h)),
+            range_bar(p, f64::from(w.max(0.0)), f64::from(h)),
             p.low_midi,
             p.high_midi,
         ) else {
             return vec![frame.into_geometry()];
         };
-        let bar_y = bar.bar_y as f32;
+        frame.translate(iced::Vector::new(RANGE_INSET, 0.0));
+        let bar_y = (bar.bar_y as f32).round();
         let line = |frame: &mut Frame, x0: f64, y0: f32, x1: f64, y1: f32, stroke: Stroke<'_>| {
             frame.stroke(
                 &Path::line(Point::new(x0 as f32, y0), Point::new(x1 as f32, y1)),
                 stroke,
             );
         };
-        // C-octave gridlines.
-        let grid = Stroke::default()
-            .with_color(alpha(Studio::GRID_STRONG, 0.25))
-            .with_width(1.0);
-        for &gx in &bar.grid {
-            line(&mut frame, gx, bar_y - h * 0.32, gx, bar_y + h * 0.32, grid);
+        // C-octave gridlines and their names along the foot.
+        let grid = Stroke::default().with_color(Studio::GRID).with_width(1.0);
+        // The first C on the axis, as `range_bar` finds its gridlines.
+        let first_c = ((low - 2) as f64 / 12.0).ceil() as i64 * 12;
+        for (i, &gx) in bar.grid.iter().enumerate() {
+            let gx = (gx as f32).round() + 0.5;
+            line(
+                &mut frame,
+                f64::from(gx),
+                8.0,
+                f64::from(gx),
+                h - 22.0,
+                grid,
+            );
+            frame.fill_text(profile_text(
+                note_name_for_midi(first_c + 12 * i as i64),
+                gx,
+                h - 18.0,
+                Studio::TEXT_DISABLED,
+                type_scale::AXIS,
+                font::REGULAR,
+                Alignment::Center,
+            ));
         }
-        // Full sung range (faint), then the brighter tessitura band.
+        // Full sung range, then the tessitura over it.
         let band = |color: Color| {
             Stroke::default()
                 .with_color(color)
-                .with_width(9.0)
+                .with_width(8.0)
                 .with_line_cap(LineCap::Round)
         };
         line(
@@ -457,7 +450,7 @@ impl<M> canvas::Program<M> for RangeBarPainter {
             bar_y,
             bar.range.1,
             bar_y,
-            band(alpha(Studio::ACCENT, 0.45)),
+            band(RANGE_BAND),
         );
         if let Some((lo, hi)) = bar.tessitura {
             line(
@@ -466,7 +459,7 @@ impl<M> canvas::Program<M> for RangeBarPainter {
                 bar_y,
                 hi,
                 bar_y,
-                band(Studio::ACCENT_BRIGHT),
+                band(alpha(TESSITURA_BAND, 0.9)),
             );
         }
         // Passaggio marker (constrained to the range, so always on the bar).
@@ -474,37 +467,39 @@ impl<M> canvas::Program<M> for RangeBarPainter {
             line(
                 &mut frame,
                 px,
-                bar_y - 13.0,
+                bar_y - 12.0,
                 px,
-                bar_y + 13.0,
-                Stroke::default().with_color(Studio::RECORD).with_width(2.0),
+                bar_y + 12.0,
+                Stroke::default()
+                    .with_color(PASSAGGIO)
+                    .with_width(2.0)
+                    .with_line_cap(LineCap::Round),
             );
             frame.fill_text(profile_text(
                 note_name_for_midi(midi),
                 px as f32,
-                bar_y - 28.0,
-                Studio::RECORD,
-                10.0,
+                bar_y - 30.0,
+                PASSAGGIO,
+                type_scale::AXIS,
+                font::MEDIUM,
                 Alignment::Center,
             ));
         }
         // Range end labels.
-        frame.fill_text(profile_text(
-            note_name_for_midi(low),
-            bar.range.0 as f32,
-            bar_y + 14.0,
-            Studio::TEXT_SECONDARY,
-            11.0,
-            Alignment::Left,
-        ));
-        frame.fill_text(profile_text(
-            note_name_for_midi(high),
-            bar.range.1 as f32,
-            bar_y + 14.0,
-            Studio::TEXT_SECONDARY,
-            11.0,
-            Alignment::Right,
-        ));
+        for (x, midi, align) in [
+            (bar.range.0, low, Alignment::Left),
+            (bar.range.1, high, Alignment::Right),
+        ] {
+            frame.fill_text(profile_text(
+                note_name_for_midi(midi),
+                x as f32,
+                bar_y + 12.0,
+                Studio::TEXT_SECONDARY,
+                type_scale::LABEL,
+                font::MEDIUM,
+                align,
+            ));
+        }
         vec![frame.into_geometry()]
     }
 }
@@ -518,8 +513,9 @@ pub fn dyn_bar_x(db: f64, width: f64) -> f64 {
     clamp_f64((db - DYN_LO) / (DYN_HI - DYN_LO), 0.0, 1.0) * width
 }
 
-/// `_DynBarPainter`: the soft → loud span on a −60..0 dBFS track, shaded
-/// from secondary text to the bright accent across the track.
+/// `_DynBarPainter`: the soft → loud span on a −60..0 dBFS track: a 4 px
+/// `CONTROL_ACTIVE` track, the span over it shaded from a quiet grey to
+/// the light data colour across the track (louder reads lighter).
 struct DynBarPainter {
     soft_db: f64,
     loud_db: f64,
@@ -537,26 +533,27 @@ impl<M> canvas::Program<M> for DynBarPainter {
         _: mouse::Cursor,
     ) -> Vec<Geometry> {
         let mut frame = Frame::new(renderer, bounds.size());
-        let (w, mid_y) = (bounds.width, bounds.height / 2.0);
-        frame.stroke(
-            &Path::line(Point::new(0.0, mid_y), Point::new(w, mid_y)),
-            Stroke::default()
-                .with_color(Studio::BORDER)
-                .with_width(5.0)
-                .with_line_cap(LineCap::Round),
+        let (w, mid_y) = (bounds.width, (bounds.height / 2.0).round());
+        frame.fill(
+            &Path::rounded_rectangle(
+                Point::new(0.0, mid_y - 2.0),
+                Size::new(w, 4.0),
+                iced::border::Radius::from(2.0),
+            ),
+            Studio::CONTROL_ACTIVE,
         );
         let x0 = dyn_bar_x(self.soft_db, f64::from(w)) as f32;
         let x1 = dyn_bar_x(self.loud_db, f64::from(w)) as f32;
         // The gradient spans the whole box, left to right.
         let shade = gradient::Linear::new(Point::new(0.0, 0.0), Point::new(w, 0.0))
-            .add_stop(0.0, Studio::TEXT_SECONDARY)
-            .add_stop(1.0, Studio::ACCENT_BRIGHT);
+            .add_stop(0.0, Color::from_rgb8(0x5A, 0x5A, 0x66))
+            .add_stop(1.0, Color::from_rgb8(0xC4, 0xC4, 0xCE));
         frame.stroke(
             &Path::line(Point::new(x0, mid_y), Point::new(x1, mid_y)),
             Stroke {
                 style: Style::Gradient(shade.into()),
                 ..Stroke::default()
-                    .with_width(5.0)
+                    .with_width(4.0)
                     .with_line_cap(LineCap::Round)
             },
         );
@@ -629,7 +626,7 @@ impl<M> canvas::Program<M> for LiveLoudnessPainter {
             frame.stroke(
                 &path,
                 Stroke::default()
-                    .with_color(Studio::ACCENT_BRIGHT)
+                    .with_color(Color::from_rgb8(0xC4, 0xC4, 0xCE))
                     .with_width(1.4),
             );
         }

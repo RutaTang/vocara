@@ -29,7 +29,7 @@ use crate::app::library::{Library, LibraryOpen};
 use crate::app::{self, App, Boot, LibraryEvent, Page};
 use crate::router::{Navigation, PageId, Route};
 use crate::services::ServicesFactory;
-use crate::ui::core::icons::{self, Icon};
+use crate::ui::core::icons;
 use crate::ui::core::theme::font;
 use crate::ui::core::widgets::confirm_dialog;
 use crate::ui::home::testing::{run_task, spawn_task, FakePractices};
@@ -45,10 +45,6 @@ fn settings() -> iced::Settings {
         .map(Cow::Borrowed)
         .collect();
     settings
-}
-
-fn glyph(icon: Icon) -> String {
-    char::from(icon).to_string()
 }
 
 /// The first text reading `label`, in tree order.
@@ -213,7 +209,8 @@ fn a_practice_that_cannot_be_loaded_still_has_a_way_back() {
     })));
     settle(&mut app, task);
     assert!(shows(&app, NOT_LOADED));
-    back(&mut app);
+    // The bar shown with no workspace: the toolbar's back button.
+    click(&mut app, "Back");
     assert_eq!(app.routes(), [Some(Route::Home)]);
     assert_eq!(
         app.top().map(|(id, _)| id),
@@ -246,9 +243,10 @@ fn a_deep_linked_practice_boots_with_its_takes_and_its_chevron_goes_home() {
 fn the_bottom_analysis_dock_opens() {
     let (library, id, _dir) = seeded(2);
     let mut app = boot(library, Some(&crate::router::song_practice(&id)));
-    assert!(shows(&app, &glyph(Icon::PanelBottomOpen)), "starts closed");
-    click(&mut app, &glyph(Icon::PanelBottomOpen));
-    assert!(shows(&app, &glyph(Icon::PanelBottomClose)));
+    use crate::ui::song_practice_detail::widgets::bottom_dock::toggle_label;
+    assert!(shows(&app, toggle_label(false)), "starts closed");
+    click(&mut app, toggle_label(false));
+    assert!(shows(&app, toggle_label(true)));
 }
 
 // detail_arrange_journey: 'the interpretation switcher opens its menu'.

@@ -113,9 +113,9 @@ fn a_monitor_without_columns_shows_the_hint_over_the_well() {
         assert!(ui.find(LIVE_SPECTROGRAM_HINT).is_ok());
         let r = raster(&mut ui);
         assert!(!shows_a_ridge(&r));
-        // The well's inset colour away from the grid lines and the hint.
+        // The well colour away from the grid lines and the hint.
         let [red, green, blue, _] = r.at(4, r.height - 4);
-        let [wr, wg, wb, _] = Studio::INSET.into_rgba8();
+        let [wr, wg, wb, _] = Studio::WELL.into_rgba8();
         assert_eq!([red, green, blue], [wr, wg, wb]);
     }
 }

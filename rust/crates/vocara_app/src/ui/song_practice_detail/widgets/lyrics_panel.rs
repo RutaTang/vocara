@@ -91,7 +91,7 @@ use vocara_model::models::lyric_line::LyricLine;
 use vocara_model::models::practice_note::PracticeNote;
 use vocara_model::models::technique_marker::TechniqueMarker;
 
-use crate::ui::core::icons::{self, Icon};
+use crate::ui::core::icons::Icon;
 use crate::ui::core::motion::{Curve, Implicit};
 use crate::ui::core::theme::{self, alpha, boxed, fill, font, radius, type_scale, Studio};
 use crate::ui::core::widgets::controls::{
@@ -100,7 +100,6 @@ use crate::ui::core::widgets::controls::{
 use crate::ui::core::widgets::fading_scrollbar::{scrollable, Fading};
 use crate::ui::core::widgets::holds_keyboard::holds_keyboard;
 use crate::ui::core::widgets::line_icon::{glyphs, line_icon, Glyph, Part};
-use crate::ui::core::widgets::material_tooltip::material_tooltip;
 use crate::ui::core::widgets::studio_text::studio_text;
 use crate::ui::core::widgets::text_field::editor::{self as text_editor, text_editor};
 use crate::ui::core::widgets::visible_drop_target::visible_drop_target;
@@ -953,43 +952,6 @@ fn bare<'a>(
         .padding(0)
         .style(theme::bare_button)
         .on_press(on_press)
-}
-
-/// A Material tooltip below `target`, its top 24 px below the target's
-/// centre (`target_height` tall).
-fn with_tip<'a>(
-    target: Element<'a, Message>,
-    tip: &str,
-    target_height: f32,
-) -> Element<'a, Message> {
-    material_tooltip(target, tip, 24.0 - target_height / 2.0).into()
-}
-
-/// `_IconBtn`: a 15 px icon in a 6 px pad (coral-washed when `active`),
-/// with its tooltip — the Focus view's exit.
-fn icon_btn<'a>(icon: Icon, tip: &str, on_tap: Message, active: bool) -> Element<'a, Message> {
-    let face = container(icons::icon(
-        icon,
-        15.0,
-        if active {
-            Studio::ACCENT_BRIGHT
-        } else {
-            Studio::TEXT_SECONDARY
-        },
-    ))
-    .padding(6)
-    .style(move |_| {
-        if active {
-            boxed(Some(alpha(Studio::ACCENT, 0.16)), 6.0, None)
-        } else {
-            boxed(None, 0.0, None)
-        }
-    });
-    with_tip(
-        container(bare(face, on_tap)).padding([0, 1]).into(),
-        tip,
-        27.0,
-    )
 }
 
 /// A 24 px panel icon button: `glyph` at 14 px, its tooltip, on when
@@ -1992,15 +1954,17 @@ pub fn lyrics_focus_overlay<'a>(
     let editing = data.lyrics_mode == LyricsMode::Edit;
     let body = container(stack![
         lyrics_reader(state, data, true),
-        container(icon_btn(
-            Icon::Minimize2,
-            "Exit focus",
-            Message::SetLyricsFocus(false),
-            false
-        ))
+        // The design's 28 px icon button, with its tooltip.
+        container(
+            crate::ui::core::widgets::controls::icon_button(
+                Icon::Minimize2,
+                Message::SetLyricsFocus(false)
+            )
+            .tooltip("Exit focus")
+        )
         .padding(Padding {
-            top: 14.0,
-            right: 16.0,
+            top: 12.0,
+            right: 14.0,
             ..Padding::ZERO
         })
         .align_x(Horizontal::Right)
@@ -2010,7 +1974,7 @@ pub fn lyrics_focus_overlay<'a>(
     ])
     .width(Length::Fill)
     .height(Length::Fill)
-    .style(fill(alpha(Studio::BACKGROUND, 0.97)));
+    .style(fill(Studio::BACKGROUND));
     let target = visible_drop_target(body, move |paths: Vec<PathBuf>| {
         // The panel's editor is kept under the overlay with the text it
         // opened on, and its Save would put that back over the import.

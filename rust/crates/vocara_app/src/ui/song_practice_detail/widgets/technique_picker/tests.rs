@@ -129,10 +129,10 @@ fn typing_goes_through_the_search_field() {
 }
 
 #[test]
-fn the_search_field_keeps_its_text_inset_in_the_fixed_well() {
-    // The 34-tall well holds the glyph (10 inside its 1 px border), 8, then
-    // the field: forui's content padding less compact density's (10
-    // across, 6 down) around a 13 px line, centred in the well.
+fn the_search_field_is_a_design_field_under_the_title() {
+    // The title and the field inside the card's 20 px padding; the field
+    // 28 px tall (12 px text on a 16 px line, 6 above and below) and as
+    // wide as the card's content, under the title (an 18 px line) and 12.
     let picker = loaded(Some(library()));
     let mut ui = iced_test::simulator(picker.view());
     let title = ui.find(DEFAULT_TITLE).expect("the title").bounds();
@@ -141,18 +141,13 @@ fn the_search_field_keeps_its_text_inset_in_the_fixed_well() {
         .expect("the search field")
         .bounds();
     let card_left = (1024.0 - WIDTH) / 2.0;
-    assert_eq!(title.x, card_left + 1.0 + 20.0, "{title:?}");
-    assert_eq!(field.x, title.x + 11.0 + 14.0 + 8.0, "{field:?}");
-    assert_eq!(
-        field.width,
-        WIDTH - 2.0 * 21.0 - 2.0 * 11.0 - 14.0 - 8.0,
-        "{field:?}"
-    );
-    assert_eq!(field.height, 13.0 + 12.0, "{field:?}");
-    // Under the title (16 px) and 12, the well; the field centred in the
-    // 32 inside its border.
-    let well_top = title.y + 16.0 + 12.0;
-    assert_eq!(field.y, well_top + 1.0 + (32.0 - 25.0) / 2.0, "{field:?}");
+    assert_eq!(title.x, card_left + 20.0, "{title:?}");
+    assert_eq!(field.x, title.x, "{field:?}");
+    assert_eq!(field.width, WIDTH - 2.0 * 20.0, "{field:?}");
+    assert_eq!(field.height, theme::FIELD_HEIGHT, "{field:?}");
+    assert_eq!(field.y, title.y + 18.0 + 12.0, "{field:?}");
+    // Its text starts past the search glyph (9 px in, 14 px wide).
+    assert_eq!(SEARCH_TEXT_INSET, 9.0 + 14.0 + 7.0);
 }
 
 // ------------------------------------------------------ the outcomes

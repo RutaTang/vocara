@@ -110,10 +110,12 @@ impl Studio {
     pub const WAVEFORM: Color = Color::from_rgb8(0x6A, 0x6A, 0x77);
     pub const TOGGLE_OFF: Color = Color::from_rgb8(0x3A, 0x3A, 0x43);
 
-    // Semantic analysis colors shared by the dock views. Chest is warm, head is
-    // cool; mix is derived by lerping the two at the usage site.
-    pub const REGISTER_CHEST: Color = Color::from_rgb8(0xE0, 0x82, 0x5A);
-    pub const REGISTER_HEAD: Color = Color::from_rgb8(0x5B, 0x8D, 0xEF);
+    // Semantic analysis colors shared by the dock views. Chest is warm and
+    // darker, head cool and lighter (told apart by lightness as well as hue,
+    // muted beside the track colours); mix is derived by lerping the two at
+    // the usage site.
+    pub const REGISTER_CHEST: Color = Color::from_rgb8(0xBF, 0x6F, 0x55);
+    pub const REGISTER_HEAD: Color = Color::from_rgb8(0xAF, 0xC2, 0xEE);
     /// Pitch within tolerance / healthy: the sung pitch line.
     pub const IN_TUNE: Color = Color::from_rgb8(0x7C, 0xC4, 0xA6);
     /// Metric in the good range.

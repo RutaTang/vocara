@@ -195,24 +195,20 @@ fn a_save_with_nothing_to_save_closes_with_nothing() {
 #[test]
 fn the_card_is_at_most_460_wide_and_centred() {
     let editor = NoteEditor::new(None, ms(12_000), None, normalize);
-    // The default 1024 px window: the card's 20 px padding and 1 px border, the icon and its
-    // 8 px gap before the title.
+    // The default 1024 px window: the title inside the card's 20 px
+    // padding (its outline is inset).
     let mut ui = iced_test::simulator(editor.view());
     let title = ui.find("Note at 00:12").expect("the title").bounds();
     let card_left = (1024.0 - CARD_MAX_WIDTH) / 2.0;
-    assert!(
-        (title.x - (card_left + 21.0 + 16.0 + 8.0)).abs() < 0.5,
-        "{title:?}"
-    );
+    assert!((title.x - (card_left + 20.0)).abs() < 0.5, "{title:?}");
 }
 
 #[test]
 fn the_field_holds_three_to_six_lines_and_its_inset() {
-    // `minLines: 3, maxLines: 6` of 14 px at 1.4, and forui's content
-    // padding less compact density's: 6 above and below, 10 at the sides.
-    // A line is SkParagraph's: 19.6 rounded to 20.
+    // `minLines: 3, maxLines: 6` of 12 px on an 18 px line, and the field
+    // padding: 6 above and below, 10 at the sides.
     let line = field_line();
-    assert_eq!(line, 20.0);
+    assert_eq!(line, 18.0);
     let mut editor = NoteEditor::new(None, Duration::ZERO, None, normalize);
     let long = "line\n".repeat(12);
     for (text, lines) in [("short", MIN_LINES), (long.as_str(), MAX_LINES)] {
@@ -223,8 +219,8 @@ fn the_field_holds_three_to_six_lines_and_its_inset() {
             (field.height - (lines * line + 12.0)).abs() < 1e-3,
             "{lines} lines: {field:?}"
         );
-        // The card's 20 and border, the well's 12 and border.
+        // The card's 20: the field draws its own well.
         let card_left = (1024.0 - CARD_MAX_WIDTH) / 2.0;
-        assert_eq!(field.x, card_left + 21.0 + 13.0, "{field:?}");
+        assert_eq!(field.x, card_left + 20.0, "{field:?}");
     }
 }

@@ -96,7 +96,7 @@ use vocara_store::sync::sync_hashes::Loaded;
 use super::*;
 use crate::app::library::Library;
 use crate::router::{Navigation, Route};
-use crate::ui::core::icons::{self, Icon};
+use crate::ui::core::icons;
 use crate::ui::core::theme::font;
 use crate::ui::core::widgets::confirm_dialog::{Dialog, DialogResult};
 use crate::ui::song_practice_detail::view_model::analysis_source::AnalysisSource;
@@ -1063,10 +1063,6 @@ fn settings() -> iced::Settings {
     settings
 }
 
-fn glyph(icon: Icon) -> String {
-    char::from(icon).to_string()
-}
-
 /// The `n`-th text reading `label` (0 first), in tree order.
 fn nth(label: &str, n: usize) -> impl FnMut(Candidate<'_>) -> Option<Target> + Send {
     let label = label.to_string();
@@ -1381,7 +1377,7 @@ fn a_practice_that_cannot_be_loaded_says_so_and_has_a_way_back() {
         settle: false,
         ..Setup::default()
     });
-    // Loading: a spinner under the bar with the back chevron.
+    // Loading: a spinner under the toolbar with its back button.
     assert!(h.vm().load_running());
     assert!(h.shows("Back"));
     h.settle();
@@ -1470,14 +1466,14 @@ fn the_transport_toggles_play_and_pause_and_stop_resets_it() {
 #[test]
 fn the_bottom_dock_opens_and_closes() {
     let mut h = Harness::open(Setup::default());
-    assert!(h.shows(&glyph(Icon::PanelBottomOpen)), "starts closed");
-    h.click(&glyph(Icon::PanelBottomOpen));
+    assert!(h.shows(bottom_dock::toggle_label(false)), "starts closed");
+    h.click(bottom_dock::toggle_label(false));
     assert!(h.vm().analysis().dock_open());
-    assert!(h.shows(&glyph(Icon::PanelBottomClose)));
+    assert!(h.shows(bottom_dock::toggle_label(true)));
     // A tab opens the dock on it.
-    h.click(&glyph(Icon::PanelBottomClose));
+    h.click(bottom_dock::toggle_label(true));
     assert!(!h.vm().analysis().dock_open());
-    h.click("MIXER");
+    h.click("Mixer");
     assert!(h.vm().analysis().dock_open());
     assert_eq!(h.vm().analysis().dock_tab(), DockTab::Mixer);
     assert!(h.shows("Stereo Out"), "the mixer desk's master strip");
@@ -1504,7 +1500,7 @@ fn a_dock_taller_than_the_window_leaves_the_timeline_whole() {
         .find("Back")
         .expect("the transport's back chevron")
         .bounds();
-    let tabs = h.find("MIXER").expect("the dock's tab strip").bounds();
+    let tabs = h.find("Mixer").expect("the dock's tab strip").bounds();
     // The timeline keeps its least height between the transport and the
     // dock's tab strip (under the grabber), and the dock's bottom shows.
     let transport_bottom = transport.y + transport.height;

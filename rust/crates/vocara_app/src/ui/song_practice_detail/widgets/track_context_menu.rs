@@ -35,13 +35,13 @@ use iced::advanced::{overlay, renderer, Clipboard, Shell, Widget};
 use iced::alignment::Vertical;
 use iced::widget::{button, column, container, row, Column, Row, Space};
 use iced::{
-    keyboard, mouse, touch, Border, Color, Element, Event, Length, Padding, Point, Rectangle,
-    Renderer, Size, Theme, Vector,
+    keyboard, mouse, touch, Border, Color, Element, Event, Length, Padding, Pixels, Point,
+    Rectangle, Renderer, Size, Theme, Vector,
 };
 
 use crate::ui::core::icons::{self, Icon};
-use crate::ui::core::theme::{self, bare_button, font, Studio};
-use crate::ui::core::widgets::animated::ink_hover;
+use crate::ui::core::theme::{self, bare_button, font, type_scale, Studio};
+use crate::ui::core::widgets::cap_label::cap_label;
 use crate::ui::core::widgets::confirm_dialog::{ConfirmDialog, StudioPrompt};
 use crate::ui::core::widgets::fading_scrollbar::{no_scrollbar, scrollable};
 use crate::ui::core::widgets::gesture::{any_tap_event, AnyTap};
@@ -477,22 +477,34 @@ pub fn rename_dialog(current: &str) -> StudioPrompt {
         .confirm_label("Rename")
 }
 
-/// The menu's card: `Studio.surfaceRaised`, radius 10, a 1 px
-/// `Studio.border` outline, elevation 10; the rows scroll (no scrollbar)
-/// inside a [`MENU_MAX_HEIGHT`] cap.
+/// The space between a menu card's edge and its rows.
+pub const MENU_PADDING: f32 = 4.0;
+
+/// A plain row's height (a row with a subtitle grows).
+pub const MENU_ROW_HEIGHT: f32 = 26.0;
+
+/// A row's inset, its icon box and the gap after the icon.
+const ROW_PADDING_X: f32 = 8.0;
+pub const MENU_ICON: f32 = 14.0;
+const ICON_GAP: f32 = 8.0;
+
+/// The menu's card (`DESIGN.md`, Menus: `theme::menu`, a `SURFACE` card,
+/// radius 8, an inset `BORDER_STRONG` outline, a soft shadow), its rows
+/// [`MENU_PADDING`] in; the rows scroll (no scrollbar) inside a
+/// [`MENU_MAX_HEIGHT`] cap.
 fn menu_card<'a, M: 'a>(rows: Column<'a, M>, width: f32) -> Element<'a, M> {
     container(
         container(no_scrollbar(scrollable(rows.width(Length::Fill)))).max_height(MENU_MAX_HEIGHT),
     )
     .width(width)
-    // Inside the 1 px border (a decoration's border pads its child).
-    .padding(1)
+    .padding(MENU_PADDING)
     .style(theme::menu)
     .clip(true)
     .into()
 }
 
-/// `_MenuDivider`: `Divider(height: 9, thickness: 1, color: Studio.border)`.
+/// `_MenuDivider`: a 1 px `BORDER` separator, 4 px clear of the rows each
+/// side and as wide as the rows' hover.
 fn menu_divider<'a, M: 'a>() -> Element<'a, M> {
     container(
         container(Space::new())
@@ -513,10 +525,11 @@ fn menu_row<'a, M: Clone + 'a>(icon: Option<Icon>, label: &str, on_tap: M) -> El
     entry.into()
 }
 
-/// `_MenuRow`: a full-bleed row (`Studio.hover` under the pointer), 14 / 9
-/// padding: a 15 px icon 12 px before the 13 px label (one line), a faint
-/// subtitle under it (two lines at most), and a check when selected. Red
-/// when it is the danger row, coral when selected.
+/// `_MenuRow` (`DESIGN.md`, Menus): a 26 px row (`HOVER` under the pointer,
+/// radius 4), 8 px in: a 14 px `TEXT_SECONDARY` icon 8 px before the 12 px
+/// label (one line), an 11 px `TEXT_FAINT` subtitle under it (two lines at
+/// most), and an `ACCENT_BRIGHT` check at its end when selected. A danger
+/// row's label and icon are `RECORD_TEXT`.
 pub struct MenuRow<M> {
     icon: Option<Icon>,
     label: String,
@@ -561,11 +574,18 @@ impl<M> MenuRow<M> {
     /// The row's label color.
     pub fn color(&self) -> Color {
         if self.danger {
-            Studio::RECORD
-        } else if self.selected {
-            Studio::ACCENT
+            Studio::RECORD_TEXT
         } else {
             Studio::TEXT_PRIMARY
+        }
+    }
+
+    /// The row's icon color.
+    pub fn icon_color(&self) -> Color {
+        if self.danger {
+            Studio::RECORD_TEXT
+        } else {
+            Studio::TEXT_SECONDARY
         }
     }
 }
@@ -573,93 +593,132 @@ impl<M> MenuRow<M> {
 impl<'a, M: Clone + 'a> From<MenuRow<M>> for Element<'a, M> {
     fn from(r: MenuRow<M>) -> Self {
         let color = r.color();
-        let mut content = row![].align_y(Vertical::Center);
+        let mut content = row![].spacing(ICON_GAP).align_y(Vertical::Center);
         if let Some(icon) = r.icon {
-            content = content
-                .push(icons::icon(icon, 15.0, color))
-                .push(Space::new().width(12));
+            content = content.push(
+                container(icons::icon(icon, MENU_ICON, r.icon_color()))
+                    .center_x(MENU_ICON)
+                    .center_y(MENU_ICON),
+            );
         }
         // One line, ellipsized.
-        let mut labels =
-            column![studio_text(r.label).size(13).color(color).ellipsis(1)].width(Length::Fill);
+        let mut labels = column![studio_text(r.label)
+            .size(type_scale::BODY)
+            .line_height(Pixels(type_scale::LINE))
+            .font(if r.selected {
+                font::MEDIUM
+            } else {
+                font::REGULAR
+            })
+            .color(color)
+            .ellipsis(1)]
+        .width(Length::Fill);
+        let two_lines = r.subtitle.is_some();
         if let Some(subtitle) = r.subtitle {
-            labels = labels.push(Space::new().height(2)).push(
+            labels = labels.push(
                 // Two lines at most, the second ellipsized.
                 studio_text(subtitle)
-                    .size(10.5)
-                    .line_height(1.3)
+                    .size(type_scale::LABEL)
+                    .line_height(Pixels(14.0))
                     .color(Studio::TEXT_FAINT)
                     .ellipsis(2),
             );
         }
         content = content.push(labels);
         if r.selected {
-            content = content.push(icons::icon(Icon::Check, 14.0, Studio::ACCENT));
+            content = content.push(icons::icon(Icon::Check, MENU_ICON, Studio::ACCENT_BRIGHT));
         }
-        // An `InkWell(hoverColor: Studio.hover)`.
-        let row = button(content)
+        let row = button(container(content).center_y(Length::Fill))
             .width(Length::Fill)
-            .padding([9, 14])
-            .style(bare_button)
+            .height(if two_lines {
+                Length::Shrink
+            } else {
+                Length::Fixed(MENU_ROW_HEIGHT)
+            })
+            .padding(Padding::from([
+                if two_lines { 5.0 } else { 0.0 },
+                ROW_PADDING_X,
+            ]))
+            .style(menu_row_style)
             .on_press(r.on_tap);
-        ink_hover(row, Studio::HOVER, 0.0)
+        row.into()
     }
 }
 
-/// `_ColorGrid`: the inline lane-color picker — a faint "COLOR" caption over
-/// the preset swatches, eight to a row at the menu's width. The caption is
-/// 9 px w700 with 0.6 letter spacing.
+/// A menu row's face: `HOVER` under the pointer at once, radius 4.
+fn menu_row_style(_: &Theme, status: button::Status) -> button::Style {
+    let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+    button::Style {
+        background: hovered.then_some(Studio::HOVER.into()),
+        text_color: Studio::TEXT_PRIMARY,
+        border: Border {
+            radius: theme::radius::SMALL.into(),
+            ..Border::default()
+        },
+        shadow: iced::Shadow::default(),
+        snap: true,
+    }
+}
+
+/// The color grid's swatches: their side, the gap between them, and how
+/// many a row holds.
+pub const SWATCH: f32 = 20.0;
+pub const SWATCH_GAP: f32 = 10.0;
+const SWATCHES_A_ROW: usize = 8;
+
+/// The color grid's inset inside the menu's padding.
+pub const COLOR_GRID_PADDING: Padding = Padding {
+    top: 6.0,
+    right: ROW_PADDING_X,
+    bottom: 8.0,
+    left: ROW_PADDING_X,
+};
+
+/// `_ColorGrid`: the inline lane-color picker — a "Color" section label
+/// (11 px semibold `TEXT_SECONDARY`) over the preset swatches, eight to a
+/// row.
 fn color_grid<'a, M: Clone + 'a>(
     current: Option<i64>,
     on_pick: impl Fn(i64) -> M,
 ) -> Element<'a, M> {
-    let swatches = TRACK_COLOR_PALETTE
-        .iter()
-        .map(|&value| color_swatch(argb(value), current == Some(value), on_pick(value)));
-    container(column![
-        container(
-            studio_text("COLOR")
-                .size(9)
-                .font(font::BOLD)
-                .letter_spacing(0.6)
-                .color(Studio::TEXT_FAINT)
+    let rows = TRACK_COLOR_PALETTE.chunks(SWATCHES_A_ROW).map(|chunk| {
+        Row::with_children(
+            chunk
+                .iter()
+                .map(|&value| color_swatch(argb(value), current == Some(value), on_pick(value))),
         )
-        .padding(Padding {
-            left: 1.0,
+        .spacing(SWATCH_GAP)
+        .into()
+    });
+    container(column![
+        container(cap_label("Color")).padding(Padding {
             bottom: 8.0,
             ..Padding::ZERO
         }),
-        Row::with_children(swatches)
-            .spacing(8)
-            .wrap()
-            .vertical_spacing(8),
+        Column::with_children(rows).spacing(SWATCH_GAP),
     ])
-    .padding(Padding {
-        top: 12.0,
-        right: 14.0,
-        bottom: 10.0,
-        left: 14.0,
-    })
+    .padding(COLOR_GRID_PADDING)
     .into()
 }
 
-/// `_ColorSwatch`: a 22 px disc of `color`, ringed 2 px in
-/// `Studio.textPrimary` when it is the lane's tint, else 1 px in
-/// `Studio.border`.
+/// `_ColorSwatch`: a [`SWATCH`] px disc of `color`, ringed 2 px in
+/// `TEXT_PRIMARY` when it is the lane's tint, else outlined 1 px in a faint
+/// white so a dark tint keeps its edge on the card.
 fn color_swatch<'a, M: Clone + 'a>(color: Color, selected: bool, on_tap: M) -> Element<'a, M> {
-    let disc = container(Space::new().width(22).height(22)).style(move |_| container::Style {
-        background: Some(color.into()),
-        border: Border {
-            color: if selected {
-                Studio::TEXT_PRIMARY
-            } else {
-                Studio::BORDER
+    let disc =
+        container(Space::new().width(SWATCH).height(SWATCH)).style(move |_| container::Style {
+            background: Some(color.into()),
+            border: Border {
+                color: if selected {
+                    Studio::TEXT_PRIMARY
+                } else {
+                    theme::alpha(Color::WHITE, 0.10)
+                },
+                width: if selected { 2.0 } else { 1.0 },
+                radius: (SWATCH / 2.0).into(),
             },
-            width: if selected { 2.0 } else { 1.0 },
-            radius: 11.0.into(),
-        },
-        ..container::Style::default()
-    });
+            ..container::Style::default()
+        });
     button(disc)
         .padding(0)
         .style(bare_button)

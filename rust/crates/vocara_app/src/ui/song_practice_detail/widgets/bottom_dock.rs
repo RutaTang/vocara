@@ -32,13 +32,22 @@
 //!   at once.
 //!
 //! Where iced differs: the tab strip scrolls without a visible scrollbar.
+//!
+//! The look is `DESIGN.md`'s (Tabs, and the approved workspace and mixer
+//! mockups): a 32 px `PANEL` strip of sentence-case dock tabs in groups —
+//! Summary | Pitch · Vibrato · Range · Register | Spectrogram · Power ·
+//! LTAS · Timbre · Vowel · Dynamics ([`STRIP_GROUPS`]; `DockTab`'s own order
+//! is unchanged) — then the Take/Live toggle where the open tab has one, the
+//! Mixer tab with its glyph at the right end and the show/hide chevron. Open,
+//! a quiet 6 px grabber sits above the strip and the content below it, on
+//! the dock's [`CONTENT_BACKGROUND`] under a 1 px rule.
 
 #[cfg(test)]
 mod tests;
 
 use crate::ui::core::widgets::fading_scrollbar::scrollable;
 use iced::alignment::Vertical;
-use iced::widget::{button, column, container, row, stack, Row, Space};
+use iced::widget::{column, container, row, stack, Space};
 use iced::{mouse, Color, Element, Event, Length, Padding};
 use vocara_model::models::voice_metrics::{Ltas, RegisterMap, VoiceMetrics, VoiceProfile};
 
@@ -46,31 +55,67 @@ use super::left_panel::{self, voice_summary_view, VoiceSummary};
 use super::mixer_strip::{self, MixerStrip};
 use super::voice_profile_view::{dynamics_view, range_view};
 use super::voiceprint_view::{self as voiceprint, VoiceprintState};
-use crate::ui::core::icons::{self, Icon};
-use crate::ui::core::theme::{bare_button, boxed, fill, font, Studio};
-use crate::ui::core::widgets::studio_text::studio_text;
+use crate::ui::core::theme::{boxed, fill, Studio};
+use crate::ui::core::widgets::controls::{icon_button, tab, tab_strip, Tab, TabSize};
+use crate::ui::core::widgets::line_icon::glyphs;
 use crate::ui::core::widgets::wrap::Wrap;
 use crate::ui::song_practice_detail::view_model::analysis_source::AnalysisSource;
 use crate::ui::song_practice_detail::view_model::song_practice_detail_view_model::DockTab;
 
 /// The resize grabber's height.
-pub const HANDLE_HEIGHT: f32 = 10.0;
+pub const HANDLE_HEIGHT: f32 = 6.0;
 
 /// The tab strip's height.
-pub const TAB_BAR_HEIGHT: f32 = 34.0;
+pub const TAB_BAR_HEIGHT: f32 = 32.0;
 
 /// The dock's chrome over its content: the top border, the resize grabber
 /// and the tab bar (`_chromeHeight`).
 pub const CHROME_HEIGHT: f32 = 1.0 + HANDLE_HEIGHT + TAB_BAR_HEIGHT;
 
+/// What the open dock's content lies on (the mixer mockup's dock body):
+/// a shade under the strip's `PANEL`, so the cards and wells on it read.
+pub const CONTENT_BACKGROUND: Color = Color::from_rgb8(0x13, 0x13, 0x16);
+
+/// The 1 px rule between the open strip and its content (the mockup's).
+const STRIP_RULE: Color = Color::from_rgb8(0x22, 0x22, 0x28);
+
+/// The analysis tabs as the strip shows them, group by group (`DESIGN.md`,
+/// Tabs); the Mixer tab sits apart at the strip's right end.
+pub const STRIP_GROUPS: [&[DockTab]; 3] = [
+    &[DockTab::AnalysisSummary],
+    &[
+        DockTab::Pitch,
+        DockTab::Vibrato,
+        DockTab::Range,
+        DockTab::Registers,
+    ],
+    &[
+        DockTab::Spectrogram,
+        DockTab::Power,
+        DockTab::Ltas,
+        DockTab::Timbre,
+        DockTab::Vowel,
+        DockTab::Dynamics,
+    ],
+];
+
+/// The show / hide chevron's tooltip (and label), as the dock is now.
+pub fn toggle_label(open: bool) -> &'static str {
+    if open {
+        "Hide analysis panel"
+    } else {
+        "Show analysis panel"
+    }
+}
+
 /// How far a mouse moves vertically before the grabber's drag wins
 /// (`kPrecisePointerHitSlop`).
 const DRAG_SLOP: f32 = 1.0;
 
-/// Short tab label for each dock feature (`_tabLabel`).
+/// Short tab label for each dock feature (`_tabLabel`), in sentence case.
 pub fn tab_label(t: DockTab) -> &'static str {
     match t {
-        DockTab::AnalysisSummary => "Analysis Summary",
+        DockTab::AnalysisSummary => "Summary",
         DockTab::Spectrogram => "Spectrogram",
         DockTab::Power => "Power",
         DockTab::Ltas => "LTAS",
@@ -168,8 +213,8 @@ pub fn bottom_dock(dock: BottomDock<'_>) -> Element<'_, Message> {
         Space::new().into()
     };
     let content: Element<'_, Message> = match (open, dock.content) {
-        // The content's top border is painted over it (a `DecoratedBox`
-        // does not inset its child).
+        // The rule under the strip is painted over the content's top (a
+        // `DecoratedBox` does not inset its child).
         (true, Some(content)) => container(stack![
             container(content)
                 .width(Length::Fill)
@@ -178,10 +223,11 @@ pub fn bottom_dock(dock: BottomDock<'_>) -> Element<'_, Message> {
             column![container(Space::new())
                 .width(Length::Fill)
                 .height(1)
-                .style(fill(Studio::BORDER))],
+                .style(fill(STRIP_RULE))],
         ])
         .width(Length::Fill)
         .height(height)
+        .style(fill(CONTENT_BACKGROUND))
         .into(),
         _ => Space::new().into(),
     };
@@ -193,7 +239,7 @@ pub fn bottom_dock(dock: BottomDock<'_>) -> Element<'_, Message> {
             .style(fill(Studio::BORDER)),
         container(column![handle, tabs, content].width(Length::Fill))
             .width(Length::Fill)
-            .style(fill(Studio::SURFACE)),
+            .style(fill(Studio::PANEL)),
     ]
     .width(Length::Fill)
     .into()
@@ -256,109 +302,68 @@ impl SummaryData {
     }
 }
 
-/// `_TabBar`: the analysis tabs (scrolling on a narrow window), the
-/// Take/Live toggle where the open tab has one, the mixer tab set apart, and
-/// the dock toggle.
+/// `_TabBar`: the analysis tabs in their groups (scrolling on a narrow
+/// window), the Take/Live toggle where the open tab has one, the Mixer tab
+/// at the right end, and the show / hide chevron. No tab reads as selected
+/// while the dock is closed.
 fn tab_bar<'a>(open: bool, tab: DockTab, shows_live: bool, live: bool) -> Element<'a, Message> {
-    let mut tabs = Row::new().align_y(Vertical::Center);
-    for t in DockTab::ALL {
-        if t == DockTab::Mixer {
-            continue;
+    let selected = open.then_some(tab);
+    let mut tabs: Vec<Tab<'a, DockTab>> = Vec::new();
+    for (g, group) in STRIP_GROUPS.iter().enumerate() {
+        for (i, &t) in group.iter().enumerate() {
+            let entry = self::tab(t, tab_label(t));
+            tabs.push(if g > 0 && i == 0 {
+                entry.divided()
+            } else {
+                entry
+            });
         }
-        tabs = tabs
-            .push(dock_tab(
-                tab_label(t),
-                open && tab == t,
-                Message::ShowDockTab(t),
-            ))
-            .push(Space::new().width(6));
     }
+    let analysis = tab_strip(tabs, selected, TabSize::Dock, Message::ShowDockTab);
     let mut bar = row![
-        Space::new().width(12),
         // Left: the voice-analysis tabs (scroll on a narrow window).
-        scrollable(tabs).horizontal().width(Length::Fill),
+        scrollable(analysis).horizontal().width(Length::Fill),
+        Space::new().width(8),
     ]
     .align_y(Vertical::Center)
+    .padding(Padding::from([0, 8]))
     .height(TAB_BAR_HEIGHT);
     if shows_live {
         bar = bar
-            .push(Space::new().width(8))
-            .push(voiceprint::source_toggle(live).map(Message::Voiceprint));
+            .push(voiceprint::source_toggle(live).map(Message::Voiceprint))
+            .push(
+                container(
+                    container(Space::new())
+                        .width(1)
+                        .height(14)
+                        .style(fill(Studio::BORDER_STRONG)),
+                )
+                .padding(Padding::from([0, 8])),
+            );
     }
-    // Right: Mixer, separated from the analysis tabs.
+    // Right: Mixer, apart from the analysis tabs, then the chevron.
     bar = bar
-        .push(Space::new().width(10))
-        .push(
-            container(Space::new())
-                .width(1)
-                .height(16)
-                .style(fill(Studio::BORDER)),
-        )
-        .push(Space::new().width(10))
-        .push(dock_tab(
-            tab_label(DockTab::Mixer),
-            open && tab == DockTab::Mixer,
-            Message::ShowDockTab(DockTab::Mixer),
+        .push(tab_strip(
+            vec![self::tab(DockTab::Mixer, tab_label(DockTab::Mixer)).icon(glyphs::MIXER)],
+            selected,
+            TabSize::Dock,
+            Message::ShowDockTab,
         ))
-        .push(Space::new().width(6))
+        .push(Space::new().width(2))
         .push(
-            button(
-                container(icons::icon(
-                    // Panel-toggle icon, matching the left inspector + right
-                    // lyrics panel's collapse buttons (this is the bottom
-                    // panel).
-                    if open {
-                        Icon::PanelBottomClose
-                    } else {
-                        Icon::PanelBottomOpen
-                    },
-                    15.0,
-                    Studio::TEXT_SECONDARY,
-                ))
-                .padding(Padding::from([0, 12])),
+            icon_button(
+                if open {
+                    glyphs::CHEVRON_DOWN
+                } else {
+                    glyphs::CHEVRON_UP
+                },
+                Message::ToggleDock,
             )
-            .padding(0)
-            .style(bare_button)
-            .on_press(Message::ToggleDock),
+            .panel()
+            .icon_size(12.0)
+            .tooltip(toggle_label(open)),
         );
     bar.into()
-}
-
-/// `_Tab`: an upper-cased 11 px label, raised with a border when active.
-fn dock_tab<'a>(label: &'static str, active: bool, on_tap: Message) -> Element<'a, Message> {
-    let face = container(
-        studio_text(label.to_uppercase())
-            .size(11)
-            .font(font::BOLD)
-            .letter_spacing(0.8)
-            .color(if active {
-                Studio::TEXT_PRIMARY
-            } else {
-                Studio::TEXT_FAINT
-            }),
-    )
-    // 12 / 5 inside the 1 px border.
-    .padding(Padding::from([6, 13]))
-    .style(move |_| {
-        boxed(
-            Some(if active {
-                Studio::SURFACE_RAISED
-            } else {
-                Color::TRANSPARENT
-            }),
-            5.0,
-            Some(if active {
-                Studio::BORDER
-            } else {
-                Color::TRANSPARENT
-            }),
-        )
-    });
-    button(face)
-        .padding(0)
-        .style(bare_button)
-        .on_press(on_tap)
-        .into()
 }
 
 /// A press of the grabber in flight.
@@ -375,14 +380,14 @@ struct GrabPress {
     dragging: bool,
 }
 
-/// `_ResizeHandle`: a thin grabber along the dock's top edge; drag it to
-/// resize the dock.
+/// `_ResizeHandle`: a thin grabber along the dock's top edge, a quiet 28 × 2
+/// `GRID_STRONG` grip centred in it; drag it to resize the dock.
 fn resize_handle<'a>(cap: f32) -> Element<'a, Message> {
     let grip = container(
         container(Space::new())
-            .width(36)
-            .height(3)
-            .style(|_| boxed(Some(Studio::BORDER_STRONG), 2.0, None)),
+            .width(28)
+            .height(2)
+            .style(|_| boxed(Some(Studio::GRID_STRONG), 1.0, None)),
     )
     .width(Length::Fill)
     .height(HANDLE_HEIGHT)

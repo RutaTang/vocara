@@ -33,13 +33,20 @@
 //!
 //! Where iced has no widget of Flutter's:
 //!
-//! - The live spectrogram's `ClipRRect(borderRadius: 6)`: iced clips to
-//!   rectangles, so the panel draws its four corners outside the rounded
-//!   rectangle over everything in it, in the color both its hosts lay
-//!   behind it (the dock's and the technique page's analysis box,
-//!   `Studio.surface`, opaque): what the clip let show of the backdrop
-//!   there ([`RoundedCorners`]), the corners' antialiasing the clip's
-//!   complement.
+//! - The spectrograms' `ClipRRect(borderRadius: 6)` (the take's and the
+//!   live one's wells): iced clips to rectangles, so the panel draws its
+//!   four corners outside the rounded rectangle over everything in it, in
+//!   the colour its host lays behind it ([`VoiceprintState::with_backdrop`];
+//!   the dock's [`BACKDROP`] unless set): what the clip let show of the
+//!   backdrop there ([`RoundedCorners`]), the corners' antialiasing the
+//!   clip's complement.
+//!
+//! The look is `DESIGN.md`'s: each tab a sentence-case 11 px header with
+//! its legend (small swatches and 11 px text) at the right, readouts of an
+//! 11 px label over an 18 px tabular value with its 11 px unit, and its
+//! chart in a `WELL` plot well (radius 6, an inset outline); axis labels
+//! 10 px tabular in `TEXT_FAINT` / `TEXT_DISABLED`; data in the muted
+//! track and status colours, the accent kept for meaning.
 //! - The `Tooltip`s are `material_tooltip`'s, fading as Material's did,
 //!   below their chip or above it when only there they fit
 //!   (`positionDependentBox`), kept 10 px inside the window.
@@ -49,10 +56,9 @@ use std::f64::consts::LN_2;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::ui::core::{system_font, text};
+use crate::ui::core::text;
 use iced::alignment::{Horizontal, Vertical};
 use iced::border::Radius;
-use iced::font::Weight;
 use iced::widget::canvas::{self, gradient, Frame, Geometry, LineCap, Path, Stroke};
 use iced::widget::text::Alignment;
 use iced::widget::{
@@ -71,18 +77,21 @@ use vocara_model::models::voice_metrics::{
 use vocara_model::util::dart_num::{clamp_f64, floor_to_i64, round_to_i64};
 use vocara_services::monitor_service::{MonitorService, MonitorState};
 
-use super::detail_transport_bar::flexible_row;
+use super::left_panel::split_unit;
 use super::live_spectrogram::live_spectrogram;
 use super::pitch_lane::{note_vibrato_of, pitch_lane, pitch_notes_of, pitch_range_of};
-use crate::ui::core::theme::{self, boxed, fill, font, inset, Studio};
+use crate::ui::core::theme::{self, boxed, fill, font, type_scale, Studio};
+use crate::ui::core::widgets::cap_label::cap_label;
+use crate::ui::core::widgets::controls::{labelled, meter_color};
 use crate::ui::core::widgets::material_tooltip::material_tooltip;
 use crate::ui::core::widgets::painter::{KeyedCache, Same};
 use crate::ui::core::widgets::spectrogram_painter::{
     FormantTrackPainter, FrequencyGridPainter, LiveFormantPainter, PowerSpectrumPainter,
     RenderRequest, Rendered, SpectrogramImage, VowelSpacePainter, F0_COLOR, FORMANT_COLORS,
+    SINGERS_FORMANT_BAND, SPECTRUM_ENVELOPE, SPECTRUM_FILL,
 };
 use crate::ui::core::widgets::studio_hint::studio_hint;
-use crate::ui::core::widgets::studio_text::studio_text;
+use crate::ui::core::widgets::studio_text::{studio_text, tabular_font};
 use crate::ui::core::widgets::waveform_painter::PlayheadPainter;
 use crate::ui::song_practice_detail::view_model::analysis_source::AnalysisSource;
 use crate::util::to_string_as_fixed;
@@ -92,19 +101,30 @@ mod tests;
 
 /// The width of the frequency axis left of the spectra; the tab headers are
 /// indented past it.
-const AXIS_WIDTH: f32 = 46.0;
+const AXIS_WIDTH: f32 = 36.0;
 
-// Per-metric colors for the Timbre tab's time curves.
-const TIMBRE_RING: Color = Color::from_rgb8(0xE0, 0xA0, 0x50);
-const TIMBRE_TILT: Color = Color::from_rgb8(0x5B, 0x8D, 0xEF);
-const TIMBRE_CPP: Color = Color::from_rgb8(0x52, 0xB7, 0x88);
-const TIMBRE_H1H2: Color = Color::from_rgb8(0xD9, 0x8A, 0x8A);
+// Per-metric colors for the Timbre tab's time curves: the track colours,
+// muted and of one lightness.
+const TIMBRE_RING: Color = Studio::TRACK_OCHRE;
+const TIMBRE_TILT: Color = Studio::TRACK_PERIWINKLE;
+const TIMBRE_CPP: Color = Studio::TRACK_SAGE;
+const TIMBRE_H1H2: Color = Studio::TRACK_CORAL;
 
 const CHEST_COLOR: Color = Studio::REGISTER_CHEST; // warm = chest
 const HEAD_COLOR: Color = Studio::REGISTER_HEAD; // cool = head
 
-/// In-tune color for the live tuner (green); off-pitch ramps toward red.
+/// In-tune color for the live tuner (green); off-pitch ramps toward the
+/// out-of-tune orange.
 const TUNER_GREEN: Color = Studio::IN_TUNE;
+const TUNER_OFF: Color = Studio::OUT_OF_TUNE;
+
+/// A chart's data line where it is not a formant or a register: neutral
+/// (`DESIGN.md`: the accent is for meaning, not data).
+const DATA_LINE: Color = Color::from_rgb8(0xC4, 0xC4, 0xCE);
+
+/// What the dock lays behind the tabs (its content background), which a
+/// rounded well's corners show: see [`RoundedCorners`].
+pub const BACKDROP: Color = super::bottom_dock::CONTENT_BACKGROUND;
 
 /// The hint of a take-based tab with no recorded take selected.
 pub const SELECT_TAKE_HINT: &str = "Select a recorded take to analyze.";
@@ -137,19 +157,38 @@ pub enum Message {
 // ------------------------------------------------------------------- state
 
 /// What the voiceprint tabs keep between views: the Spectrogram tab's take
-/// image. The host keeps one per place it shows the tab (the dock, the
-/// technique page).
-#[derive(Default)]
+/// image, and the colour its host lays behind the tabs. The host keeps one
+/// per place it shows the tab (the dock, the technique page).
 pub struct VoiceprintState {
     image: SpectrogramImage,
     /// The spectrogram [`Self::image`] shows, so a view can tell whether it
     /// is the source's.
     shown: Option<Arc<Spectrogram>>,
+    /// What shows around the spectrogram wells' rounded corners: the host's
+    /// background ([`BACKDROP`], the dock's, unless set).
+    backdrop: Color,
+}
+
+impl Default for VoiceprintState {
+    fn default() -> Self {
+        Self {
+            image: SpectrogramImage::default(),
+            shown: None,
+            backdrop: BACKDROP,
+        }
+    }
 }
 
 impl VoiceprintState {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A host that lays another colour than the dock's behind the tabs (a
+    /// card) says so: the wells' rounded corners show it.
+    pub fn with_backdrop(mut self, backdrop: Color) -> Self {
+        self.backdrop = backdrop;
+        self
     }
 
     /// Brings the take image up to what the Spectrogram tab shows from `src`.
@@ -183,7 +222,8 @@ impl VoiceprintState {
 
     /// Lets go of the take image: the tab left the screen.
     pub fn clear(&mut self) {
-        *self = Self::default();
+        self.image = SpectrogramImage::default();
+        self.shown = None;
     }
 
     /// Whether the image (rendered or rendering) is `spec`'s.
@@ -357,14 +397,18 @@ pub fn spectrogram_tab<'a>(
     state: &VoiceprintState,
 ) -> Element<'a, Message> {
     if src.live_monitor() {
-        return live_spectrogram_panel(src.monitor());
+        return live_spectrogram_panel(src.monitor(), state.backdrop);
     }
+    let backdrop = state.backdrop;
     with_spectrogram(src, |spec, metrics| {
         column![
             tab_header("Spectrogram", Some(formant_legend())),
-            axis_row(spec.max_hz, take_spectro_stack(src, state, &spec, metrics)),
+            axis_row(
+                spec.max_hz,
+                rounded_well(take_spectro_stack(src, state, &spec, metrics), backdrop),
+            ),
         ]
-        .padding(ltrb(16.0, 12.0, 20.0, 16.0))
+        .padding(TAB_PADDING)
         .width(Length::Fill)
         .height(Length::Fill)
         .into()
@@ -382,10 +426,15 @@ pub fn power_tab<'a>(src: &'a dyn AnalysisSource) -> Element<'a, Message> {
                 max_hz: m.max_hz(),
                 formants: vec![m.current_f1(), m.current_f2(), m.current_f3()],
                 min_ceil_db: Some(48.0),
-                label: "Power spectrum",
             }
         };
-        return padded(spectrum_strip(strip), ltrb(16.0, 12.0, 20.0, 16.0));
+        return padded(
+            column![
+                tab_header("Power spectrum", Some(spectrum_legend(true))),
+                spectrum_strip(strip),
+            ],
+            TAB_PADDING,
+        );
     }
     with_spectrogram(src, |spec, metrics| {
         let (column, formants) = power_readout(
@@ -401,9 +450,14 @@ pub fn power_tab<'a>(src: &'a dyn AnalysisSource) -> Element<'a, Message> {
             max_hz: spec.max_hz,
             formants,
             min_ceil_db: None,
-            label: "Power spectrum",
         };
-        padded(spectrum_strip(strip), ltrb(16.0, 12.0, 20.0, 16.0))
+        padded(
+            column![
+                tab_header("Power spectrum", Some(spectrum_legend(true))),
+                spectrum_strip(strip),
+            ],
+            TAB_PADDING,
+        )
     })
 }
 
@@ -414,7 +468,7 @@ pub fn vowel_tab<'a>(src: &'a dyn AnalysisSource) -> Element<'a, Message> {
             let m = src.monitor().read();
             (m.current_f1(), m.current_f2())
         };
-        return vowel_panel(f1, f2);
+        return vowel_panel(f1, f2, true);
     }
     with_metrics(src, |m, _| {
         let (f1, f2) = vowel_formants(
@@ -423,7 +477,7 @@ pub fn vowel_tab<'a>(src: &'a dyn AnalysisSource) -> Element<'a, Message> {
             src.analysis_start_ms(),
             &m,
         );
-        vowel_panel(f1, f2)
+        vowel_panel(f1, f2, false)
     })
 }
 
@@ -431,7 +485,10 @@ pub fn vowel_tab<'a>(src: &'a dyn AnalysisSource) -> Element<'a, Message> {
 pub fn pitch_tab<'a>(src: &'a dyn AnalysisSource) -> Element<'a, Message> {
     if src.live_monitor() {
         let tuner = live_tuner(&src.monitor().read());
-        return padded(column![tuner], ltrb(16.0, 16.0, 20.0, 16.0));
+        return padded(
+            column![plain_header("Tuner", Some(live_dot())), tuner],
+            TAB_PADDING,
+        );
     }
     with_metrics(src, |m, track| {
         let start_ms = src.analysis_start_ms();
@@ -487,13 +544,16 @@ pub fn timbre_tab<'a>(src: &'a dyn AnalysisSource) -> Element<'a, Message> {
         let bar = live_metrics_bar(&src.monitor().read());
         return padded(
             column![
+                plain_header("Timbre", Some(live_dot())),
                 bar,
-                Space::new().height(16),
-                text("Timbre curves are available for recorded takes.")
-                    .size(12)
-                    .color(Studio::TEXT_FAINT),
+                Space::new().height(12),
+                plot_well(center(
+                    text("Timbre curves are available for recorded takes.")
+                        .size(type_scale::BODY)
+                        .color(Studio::TEXT_FAINT),
+                )),
             ],
-            ltrb(16.0, 16.0, 20.0, 16.0),
+            TAB_PADDING,
         );
     }
     with_metrics(src, |m, _| {
@@ -513,16 +573,12 @@ pub fn timbre_tab<'a>(src: &'a dyn AnalysisSource) -> Element<'a, Message> {
             playhead(position, span_ms, start_ms, false),
         ];
         column![
+            plain_header("Timbre", Some(timbre_legend())),
             metrics_bar(position, &m, span_ms, start_ms),
             Space::new().height(12),
-            timbre_legend(),
-            Space::new().height(6),
-            container(curves)
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .style(|_: &Theme| boxed(Some(Studio::INSET), 6.0, None)),
+            plot_well(curves),
         ]
-        .padding(ltrb(16.0, 12.0, 20.0, 16.0))
+        .padding(TAB_PADDING)
         .width(Length::Fill)
         .height(Length::Fill)
         .into()
@@ -564,42 +620,45 @@ fn db_or_dash(v: f64) -> String {
 }
 
 fn ltas_body<'a>(ltas: &Ltas, live: bool) -> Element<'a, Message> {
-    let mut stats = Row::new().align_y(Vertical::Center);
-    if live {
-        stats = stats.push(live_dot()).push(Space::new().width(14));
-    }
     // Guarded: Dart's round() threw on NaN / Infinity, which swapped the
     // whole tab for an error widget; an unmeasurable stat reads as a dash
     // like the dock's other readouts.
-    stats = stats
-        .push(stat_inline(
+    let stats = row![
+        readout(Readout::new(
             "Singer's formant",
-            db_or_dash(ltas.singers_formant_db),
-            Studio::TEXT_PRIMARY,
-        ))
-        .push(Space::new().width(22))
-        .push(stat_inline(
-            "Brightness α",
-            db_or_dash(ltas.alpha_ratio),
-            Studio::TEXT_PRIMARY,
-        ));
+            db_or_dash(ltas.singers_formant_db)
+        )),
+        readout(Readout::new("Brightness α", db_or_dash(ltas.alpha_ratio))),
+    ]
+    .spacing(READOUT_GAP);
     let strip = SpectrumStrip {
         column: Arc::from(ltas.db.as_slice()),
         bin_hz: ltas.bin_hz,
         max_hz: ltas.max_hz,
         formants: Vec::new(),
         min_ceil_db: None,
-        label: if live {
-            "LTAS · running average"
-        } else {
-            "LTAS · average spectrum"
-        },
+    };
+    let trailing: Element<'a, Message> = if live {
+        row![live_dot(), spectrum_legend(false)]
+            .spacing(14)
+            .align_y(Vertical::Center)
+            .into()
+    } else {
+        spectrum_legend(false)
     };
     column![
-        container(stats).padding(ltrb(AXIS_WIDTH, 0.0, 0.0, 6.0)),
+        tab_header(
+            if live {
+                "LTAS · running average"
+            } else {
+                "LTAS · average spectrum"
+            },
+            Some(trailing),
+        ),
+        container(stats).padding(ltrb(AXIS_WIDTH, 0.0, 0.0, 10.0)),
         spectrum_strip(strip),
     ]
-    .padding(ltrb(16.0, 12.0, 20.0, 16.0))
+    .padding(TAB_PADDING)
     .width(Length::Fill)
     .height(Length::Fill)
     .into()
@@ -640,7 +699,7 @@ pub fn vibrato_tab<'a>(src: &'a dyn AnalysisSource) -> Element<'a, Message> {
 }
 
 fn vibrato_body<'a>(v: Option<Arc<Vibrato>>, live: bool, empty_hint: &str) -> Element<'a, Message> {
-    let header = vibrato_header(v.as_deref(), live);
+    let header = vibrato_header(v.as_deref());
     let content: Element<'a, Message> = match v {
         Some(v) if v.deviation_cents.len() > 4 => canvas_widget(VibratoPainter { v })
             .width(Length::Fill)
@@ -648,86 +707,62 @@ fn vibrato_body<'a>(v: Option<Arc<Vibrato>>, live: bool, empty_hint: &str) -> El
             .into(),
         _ => center(
             text(empty_hint.to_string())
-                .size(12)
+                .size(type_scale::BODY)
                 .color(Studio::TEXT_FAINT),
         )
         .into(),
     };
+    let trailing: Option<Element<'a, Message>> = live.then(live_dot);
     column![
+        plain_header("Vibrato", trailing),
         header,
-        Space::new().height(14),
-        container(content)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .style(|_: &Theme| boxed(Some(Studio::INSET), 6.0, None)),
+        Space::new().height(12),
+        plot_well(content),
     ]
-    .padding(ltrb(20.0, 16.0, 20.0, 18.0))
+    .padding(TAB_PADDING)
     .width(Length::Fill)
     .height(Length::Fill)
     .into()
 }
 
-fn vibrato_header<'a>(v: Option<&Vibrato>, live: bool) -> Element<'a, Message> {
+fn vibrato_header<'a>(v: Option<&Vibrato>) -> Element<'a, Message> {
     let v = match v {
         Some(v) if v.present => v,
         _ => {
-            let dot: Element<'a, Message> = if live {
-                container(live_dot())
-                    .padding(ltrb(0.0, 0.0, 6.0, 0.0))
-                    .into()
-            } else {
-                Space::new().into()
-            };
-            return row![
-                dot,
-                stat_inline(
-                    "Vibrato",
-                    "none / straight tone".to_string(),
-                    Studio::TEXT_PRIMARY
-                ),
-            ]
-            .align_y(Vertical::Center)
-            .into();
+            return readout(Readout::new("Vibrato", "None".to_string()).sub("straight tone"));
         }
     };
     let healthy = v.rate_hz >= 5.0 && v.rate_hz <= 7.0;
-    let mut stats = Row::new().spacing(22).align_y(Vertical::Center);
-    if live {
-        stats = stats.push(live_dot());
-    }
+    let mut stats = Row::new().spacing(READOUT_GAP).align_y(Vertical::Top);
     stats = stats
-        .push(stat_inline(
-            "Rate",
-            format!("{} Hz", to_string_as_fixed(v.rate_hz, 1)),
-            if healthy { TUNER_GREEN } else { Studio::RECORD },
+        .push(readout(
+            Readout::new("Rate", format!("{} Hz", to_string_as_fixed(v.rate_hz, 1)))
+                .status(if healthy { TUNER_GREEN } else { TUNER_OFF }),
         ))
-        .push(stat_inline(
+        .push(readout(Readout::new(
             "Extent",
             format!("±{}¢", round_to_i64(v.extent_cents)),
-            Studio::TEXT_PRIMARY,
-        ))
-        .push(stat_inline(
+        )))
+        .push(readout(Readout::new(
             "Regularity",
             format!("{}%", round_to_i64(v.regularity * 100.0)),
-            Studio::TEXT_PRIMARY,
-        ));
+        )));
     if !v.jitter.is_nan() {
-        stats = stats.push(stat_inline(
-            "Jitter",
-            format!("{}%", round_to_i64(v.jitter * 100.0)),
-            if v.jitter <= 0.1 {
-                TUNER_GREEN
-            } else {
-                Studio::RECORD
-            },
+        stats = stats.push(readout(
+            Readout::new("Jitter", format!("{}%", round_to_i64(v.jitter * 100.0))).status(
+                if v.jitter <= 0.1 {
+                    TUNER_GREEN
+                } else {
+                    TUNER_OFF
+                },
+            ),
         ));
     }
     if !v.onset_ms.is_nan() {
-        stats = stats.push(stat_inline(
+        stats = stats.push(readout(Readout::new(
             "Onset",
             format!("{} ms", round_to_i64(v.onset_ms)),
-            Studio::TEXT_PRIMARY,
-        ));
+        )));
     }
     stats.wrap().vertical_spacing(8).into()
 }
@@ -746,21 +781,11 @@ pub fn register_tab<'a>(src: &'a dyn AnalysisSource) -> Element<'a, Message> {
         let range = pitch_range_of(&m);
         let span_ms = src.analysis_duration_ms();
         let start_ms = src.analysis_start_ms();
-        let swatches = row![
-            reg_swatch(
-                CHEST_COLOR,
-                format!("chest {}%", round_to_i64(reg.chest_pct))
-            ),
-            reg_swatch(
-                lerp_color(CHEST_COLOR, HEAD_COLOR, 0.5),
-                format!("mix {}%", round_to_i64(reg.mix_pct)),
-            ),
-            reg_swatch(HEAD_COLOR, format!("head {}%", round_to_i64(reg.head_pct))),
-        ]
-        .spacing(18)
-        .align_y(Vertical::Center)
-        .wrap()
-        .vertical_spacing(6);
+        let swatches = register_legend(
+            round_to_i64(reg.chest_pct),
+            round_to_i64(reg.mix_pct),
+            round_to_i64(reg.head_pct),
+        );
         let map = stack![
             canvas_widget(RegisterMapPainter {
                 metrics: Arc::clone(&m),
@@ -774,64 +799,99 @@ pub fn register_tab<'a>(src: &'a dyn AnalysisSource) -> Element<'a, Message> {
             playhead(src.position(), span_ms, start_ms, false),
         ];
         column![
-            container(swatches).padding(ltrb(AXIS_WIDTH, 0.0, 0.0, 6.0)),
-            container(map)
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .style(|_: &Theme| boxed(Some(Studio::INSET), 6.0, None)),
+            plain_header("Register over time", Some(swatches)),
+            plot_well(map),
         ]
-        .padding(ltrb(16.0, 12.0, 20.0, 16.0))
+        .padding(TAB_PADDING)
         .width(Length::Fill)
         .height(Length::Fill)
         .into()
     })
 }
 
-/// `SourceToggle(live: ..., onSelect: ...)`: the dock's Take | Live
-/// segmented switch; a segment's tap is [`Message::SelectLive`].
-pub fn source_toggle<'a>(live: bool) -> Element<'a, Message> {
-    container(row![
-        toggle_segment("Take", !live, Message::SelectLive(false)),
-        toggle_segment("Live", live, Message::SelectLive(true)),
+/// The chest / mix / head key: a swatch and its share each, in the
+/// register colours.
+fn register_legend<'a>(chest: i64, mix: i64, head: i64) -> Element<'a, Message> {
+    legend(vec![
+        (Swatch::Dot(CHEST_COLOR), format!("chest {chest}%")),
+        (
+            Swatch::Dot(lerp_color(CHEST_COLOR, HEAD_COLOR, 0.5)),
+            format!("mix {mix}%"),
+        ),
+        (Swatch::Dot(HEAD_COLOR), format!("head {head}%")),
     ])
+}
+
+/// `SourceToggle(live: ..., onSelect: ...)`: the dock's Take | Live switch,
+/// drawn as `DESIGN.md`'s segmented control at 20 px (a strip's height): a
+/// `SEGMENTED` well with an inset outline, the selected segment
+/// `SEGMENT_SELECTED` in `TEXT_PRIMARY` medium. Live marks itself with a
+/// small `RECORD` dot while it is on (the mic is live). A segment's tap is
+/// [`Message::SelectLive`], the selected one's too (as Dart's did).
+pub fn source_toggle<'a>(live: bool) -> Element<'a, Message> {
+    container(
+        row![
+            toggle_segment("Take", !live, false, Message::SelectLive(false)),
+            toggle_segment("Live", live, live, Message::SelectLive(true)),
+        ]
+        .align_y(Vertical::Center),
+    )
     .padding(2)
-    .style(inset(7.0))
+    .height(SOURCE_TOGGLE_HEIGHT)
+    .style(|_: &Theme| {
+        boxed(
+            Some(Studio::SEGMENTED),
+            theme::radius::WELL,
+            Some(Studio::CONTROL_ACTIVE),
+        )
+    })
     .into()
 }
+
+/// The Take/Live toggle's height (a segmented control inside a strip).
+const SOURCE_TOGGLE_HEIGHT: f32 = 20.0;
 
 fn toggle_segment<'a>(
     label: &'static str,
     selected: bool,
+    live_dot: bool,
     on_tap: Message,
 ) -> Element<'a, Message> {
-    let fill_color = if label == "Live" {
-        Studio::RECORD
-    } else {
-        Studio::ACCENT
-    };
-    button(
-        text(label)
-            .size(12)
-            .font(font::SEMIBOLD)
-            .color(if selected {
-                Studio::BACKGROUND
+    let mut face = row![].spacing(5).align_y(Vertical::Center);
+    if live_dot {
+        face = face.push(dot(Studio::RECORD, 6.0));
+    }
+    face = face.push(
+        studio_text(label)
+            .size(theme::type_scale::LABEL)
+            .line_height(Pixels(theme::type_scale::LINE))
+            .font(if selected {
+                font::MEDIUM
+            } else {
+                font::REGULAR
+            }),
+    );
+    button(container(face).center_y(Length::Fill))
+        .padding(Padding::from([0, 9]))
+        .height(SOURCE_TOGGLE_HEIGHT - 4.0)
+        .style(move |_: &Theme, status| button::Style {
+            background: selected.then_some(Background::Color(Studio::SEGMENT_SELECTED)),
+            text_color: if selected
+                || matches!(status, button::Status::Hovered | button::Status::Pressed)
+            {
+                Studio::TEXT_PRIMARY
             } else {
                 Studio::TEXT_SECONDARY
-            }),
-    )
-    .padding([5, 12])
-    .style(move |_: &Theme, _| button::Style {
-        background: selected.then_some(Background::Color(fill_color)),
-        text_color: Studio::TEXT_PRIMARY,
-        border: Border {
-            radius: Radius::from(5.0),
-            ..Border::default()
-        },
-        shadow: Shadow::default(),
-        snap: false,
-    })
-    .on_press(on_tap)
-    .into()
+            },
+            border: Border {
+                radius: Radius::from(theme::radius::SMALL),
+                ..Border::default()
+            },
+            shadow: Shadow::default(),
+            snap: true,
+        })
+        .on_press(on_tap)
+        .into()
 }
 
 // ------------------------------------------------------ the take spectrogram
@@ -864,7 +924,7 @@ fn take_spectro_stack<'a>(
         container(Space::new())
             .width(Length::Fill)
             .height(Length::Fill)
-            .style(fill(Studio::INSET)),
+            .style(fill(Studio::WELL)),
         image,
         canvas_widget(FrequencyGridPainter::new(spec.max_hz))
             .width(Length::Fill)
@@ -1003,9 +1063,13 @@ fn playhead<'a>(
 // --------------------------------------------------------- the live panels
 
 /// `_LiveSpectrogramPanel`: the live-mic spectrogram (the Spectrogram tab in
-/// Live mode) — the LIVE badge, the input level and the legend over the
-/// rolling spectrogram and its formant overlay.
-fn live_spectrogram_panel<'a>(monitor: &'a MonitorService) -> Element<'a, Message> {
+/// Live mode) — the Live badge, the input level and the legend over the
+/// rolling spectrogram and its formant overlay, in a rounded well whose
+/// corners show `backdrop`.
+fn live_spectrogram_panel<'a>(
+    monitor: &'a MonitorService,
+    backdrop: Color,
+) -> Element<'a, Message> {
     // Read and let go before the spectrogram reads the monitor itself.
     let (level, overlay) = {
         let m = monitor.read();
@@ -1021,39 +1085,58 @@ fn live_spectrogram_panel<'a>(monitor: &'a MonitorService) -> Element<'a, Messag
         )
     };
     let max_hz = overlay.max_hz;
-    let header = row![
+    let trailing = row![
         live_dot(),
-        Space::new().width(12),
-        canvas_widget(MonitorLevel { level }).width(80).height(8),
-        Space::new().width(Length::Fill),
+        canvas_widget(MonitorLevel { level }).width(64).height(4),
+        Space::new().width(6),
         formant_legend(),
     ]
+    .spacing(10)
     .align_y(Vertical::Center);
     let panel = stack![
         live_spectrogram(monitor),
         canvas_widget(overlay)
             .width(Length::Fill)
             .height(Length::Fill),
-        // `ClipRRect(borderRadius: BorderRadius.circular(6))` over both.
-        canvas_widget(RoundedCorners {
-            radius: LIVE_CLIP_RADIUS,
-            backdrop: Studio::SURFACE,
-        })
-        .width(Length::Fill)
-        .height(Length::Fill),
     ];
     column![
-        container(header).padding(ltrb(AXIS_WIDTH, 0.0, 0.0, 6.0)),
-        axis_row(max_hz, panel),
+        tab_header("Spectrogram", Some(trailing.into())),
+        // `ClipRRect(borderRadius: BorderRadius.circular(6))` over both.
+        axis_row(max_hz, rounded_well(panel, backdrop)),
     ]
-    .padding(ltrb(16.0, 12.0, 20.0, 16.0))
+    .padding(TAB_PADDING)
     .width(Length::Fill)
     .height(Length::Fill)
     .into()
 }
 
-/// The live panel's `ClipRRect` radius.
+/// The spectrogram wells' rounded clip radius (`DESIGN.md`'s wells).
 const LIVE_CLIP_RADIUS: f32 = 6.0;
+
+/// `content` as a rounded well: clipped round ([`RoundedCorners`] in
+/// `backdrop`, what lies around it) and outlined by an inset 1 px
+/// `BORDER_STRONG` line, as `theme::well` draws a well that can clip.
+fn rounded_well<'a>(
+    content: impl Into<Element<'a, Message>>,
+    backdrop: Color,
+) -> Element<'a, Message> {
+    stack![
+        content.into(),
+        canvas_widget(RoundedCorners {
+            radius: LIVE_CLIP_RADIUS,
+            backdrop,
+        })
+        .width(Length::Fill)
+        .height(Length::Fill),
+        container(Space::new())
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(|_: &Theme| boxed(None, LIVE_CLIP_RADIUS, Some(Studio::BORDER_STRONG))),
+    ]
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .into()
+}
 
 /// A rounded clip over what lies under it in a stack, drawn as its
 /// complement: the four corners outside a rectangle rounded by `radius`
@@ -1125,11 +1208,11 @@ fn live_register_panel<'a>(m: &MonitorState) -> Element<'a, Message> {
     let label = if !has_now {
         "—"
     } else if score < 0.4 {
-        "CHEST"
+        "Chest"
     } else if score < 0.6 {
-        "MIX"
+        "Mix"
     } else {
-        "HEAD"
+        "Head"
     };
     if total == 0 && !has_now {
         return studio_hint("Sing into the mic to map your registers live.").into();
@@ -1137,17 +1220,14 @@ fn live_register_panel<'a>(m: &MonitorState) -> Element<'a, Message> {
     let pct = |n: usize| round_to_i64(n as f64 * inv);
     let swatches = row![
         live_dot(),
-        reg_swatch(CHEST_COLOR, format!("chest {}%", pct(m.register_chest()))),
-        reg_swatch(
-            lerp_color(CHEST_COLOR, HEAD_COLOR, 0.5),
-            format!("mix {}%", pct(m.register_mix())),
+        register_legend(
+            pct(m.register_chest()),
+            pct(m.register_mix()),
+            pct(m.register_head()),
         ),
-        reg_swatch(HEAD_COLOR, format!("head {}%", pct(m.register_head()))),
     ]
-    .spacing(18)
-    .align_y(Vertical::Center)
-    .wrap()
-    .vertical_spacing(6);
+    .spacing(14)
+    .align_y(Vertical::Center);
     let label_color = if has_now {
         lerp_color(CHEST_COLOR, HEAD_COLOR, clamp_f64(score, 0.0, 1.0) as f32)
     } else {
@@ -1155,29 +1235,31 @@ fn live_register_panel<'a>(m: &MonitorState) -> Element<'a, Message> {
     };
     let readout = column![
         studio_text(label)
-            .size(24)
-            .font(font::EXTRA_BOLD)
-            .letter_spacing(1.5)
+            .size(type_scale::READOUT + 2.0)
+            .line_height(Pixels(24.0))
+            .font(font::SEMIBOLD)
             .color(label_color),
-        Space::new().height(4),
-        text(if has_now {
+        Space::new().height(2),
+        studio_text(if has_now {
             format!("H1−H2  {} dB", to_string_as_fixed(h, 1))
         } else {
             "Hold a sustained note".to_string()
         })
-        .size(11)
+        .size(type_scale::LABEL)
+        .line_height(Pixels(type_scale::LINE))
+        .tabular()
         .color(Studio::TEXT_FAINT),
-        // 20 apart in Dart; the meter's marker reaches 3 px above its bar,
-        // so the meter's box starts 3 px higher here.
-        Space::new().height(20.0 - METER_OVERHANG),
+        // The meter's marker reaches 3 px above its bar, so the meter's box
+        // starts 3 px higher.
+        Space::new().height(16.0 - METER_OVERHANG),
         register_meter(score),
     ]
     .align_x(Horizontal::Center);
     column![
-        container(swatches).padding(ltrb(AXIS_WIDTH, 0.0, 0.0, 6.0)),
-        center(readout),
+        plain_header("Register", Some(swatches.into())),
+        plot_well(center(readout)),
     ]
-    .padding(ltrb(16.0, 12.0, 20.0, 16.0))
+    .padding(TAB_PADDING)
     .width(Length::Fill)
     .height(Length::Fill)
     .into()
@@ -1186,20 +1268,24 @@ fn live_register_panel<'a>(m: &MonitorState) -> Element<'a, Message> {
 /// How far the register meter's marker reaches above and below its bar.
 const METER_OVERHANG: f32 = 3.0;
 
+/// The register meter's bar height.
+const METER_BAR: f32 = 6.0;
+
 /// `_RegisterMeter`: a horizontal chest↔head gradient bar with a marker at
 /// the current `score` (NaN hides the marker), labelled chest / head.
 fn register_meter<'a>(score: f64) -> Element<'a, Message> {
+    let end = |label: &'static str| {
+        studio_text(label)
+            .size(type_scale::AXIS)
+            .line_height(Pixels(14.0))
+            .color(Studio::TEXT_DISABLED)
+    };
     column![
         canvas_widget(RegisterMeterPainter { score })
             .width(Length::Fill)
-            .height(14.0 + 2.0 * METER_OVERHANG),
+            .height(METER_BAR + 2.0 * METER_OVERHANG),
         Space::new().height(6.0 - METER_OVERHANG),
-        container(row![
-            text("chest").size(9).color(Studio::TEXT_FAINT),
-            Space::new().width(Length::Fill),
-            text("head").size(9).color(Studio::TEXT_FAINT),
-        ])
-        .padding([0, 2]),
+        row![end("Chest"), Space::new().width(Length::Fill), end("Head")],
     ]
     .width(280)
     .into()
@@ -1212,7 +1298,7 @@ fn live_tuner<'a>(m: &MonitorState) -> Element<'a, Message> {
     let content: Element<'a, Message> = match note_of(m.tuner_f0()) {
         None => center(
             text("Sing a sustained note to tune…")
-                .size(13)
+                .size(type_scale::BODY)
                 .color(Studio::TEXT_FAINT),
         )
         .into(),
@@ -1220,26 +1306,35 @@ fn live_tuner<'a>(m: &MonitorState) -> Element<'a, Message> {
             let cents = note.cents;
             let color = lerp_color(
                 TUNER_GREEN,
-                Studio::RECORD,
+                TUNER_OFF,
                 clamp_f64(cents.abs() / 35.0, 0.0, 1.0) as f32,
             );
             row![
-                container(text(note.name).size(24).font(font::EXTRA_BOLD).color(color)).width(56),
+                container(
+                    studio_text(note.name)
+                        .size(type_scale::READOUT + 2.0)
+                        .line_height(Pixels(24.0))
+                        .font(font::SEMIBOLD)
+                        .color(Studio::TEXT_PRIMARY)
+                )
+                .width(64),
                 canvas_widget(TunerDialPainter { cents, color })
                     .width(Length::Fill)
                     .height(Length::Fill),
                 container(
-                    text(format!(
+                    studio_text(format!(
                         "{}{}¢",
                         if cents >= 0.0 { '+' } else { '−' },
                         round_to_i64(cents.abs())
                     ))
-                    .size(15)
-                    .font(font::BOLD)
+                    .size(type_scale::READOUT)
+                    .line_height(Pixels(22.0))
+                    .font(font::SEMIBOLD)
+                    .tabular()
                     .color(color)
                     .align_x(Horizontal::Right)
                 )
-                .width(60)
+                .width(64)
                 .align_x(Horizontal::Right),
             ]
             .align_y(Vertical::Center)
@@ -1249,41 +1344,42 @@ fn live_tuner<'a>(m: &MonitorState) -> Element<'a, Message> {
     };
     container(content)
         .width(Length::Fill)
-        .height(62)
-        .padding([8, 14])
-        .style(|_: &Theme| boxed(Some(Studio::SURFACE), 8.0, Some(Studio::BORDER)))
+        .height(Length::Fill)
+        .max_height(120)
+        .padding([10, 16])
+        .style(well_style)
         .into()
 }
 
-/// `_LiveMetricsBar`: the live RING / TILT / CPP readouts with their
+/// `_LiveMetricsBar`: the live ring / tilt / CPP readouts with their
 /// session averages. F0 is shown prominently by the tuner, so it's dropped
 /// here.
 fn live_metrics_bar<'a>(m: &MonitorState) -> Element<'a, Message> {
     row![
         metric_chip(
-            "RING",
+            "Ring",
             "Singer's-formant ring (3 kHz projection)",
             m.ring(),
             m.ring_avg(),
+            TIMBRE_RING,
         ),
-        Space::new().width(8),
         metric_chip(
-            "TILT",
+            "Tilt",
             "Spectral tilt: higher = brighter/pressed",
             m.tilt(),
             m.tilt_avg(),
+            TIMBRE_TILT,
         ),
-        Space::new().width(8),
         metric_chip(
             "CPP",
             "Cepstral peak prominence: higher = cleaner",
             m.cpp(),
             m.cpp_avg(),
+            TIMBRE_CPP,
         ),
-        Space::new().width(Length::Fill),
-        formant_legend(),
     ]
-    .align_y(Vertical::Center)
+    .spacing(READOUT_GAP)
+    .align_y(Vertical::Top)
     .into()
 }
 
@@ -1299,141 +1395,106 @@ fn metrics_bar<'a>(
     start_ms: i64,
 ) -> Element<'a, Message> {
     let t = local_seconds(position, duration_ms, start_ms);
-    // Outside the subject's span every chip reads "—" (NaN).
+    // Outside the subject's span every readout reads "—" (NaN).
     let at = |series: &[f32]| t.map_or(f64::NAN, |t| m.sample_at(series, t));
     row![
         f0_chip(at(&m.f0)),
-        Space::new().width(8),
         metric_chip(
-            "RING",
+            "Ring",
             "Singer's-formant ring (3 kHz projection): higher carries more",
             at(&m.ring),
             m.ring_avg,
+            TIMBRE_RING,
         ),
-        Space::new().width(8),
         metric_chip(
-            "TILT",
+            "Tilt",
             "Spectral tilt: higher = brighter/pressed, lower = darker/breathy",
             at(&m.tilt),
             m.tilt_avg,
+            TIMBRE_TILT,
         ),
-        Space::new().width(8),
         metric_chip(
             "CPP",
             "Cepstral peak prominence: higher = cleaner, lower = breathier",
             at(&m.cpp),
             m.cpp_avg,
+            TIMBRE_CPP,
         ),
-        Space::new().width(Length::Fill),
-        formant_legend(),
     ]
-    .align_y(Vertical::Center)
+    .spacing(READOUT_GAP)
+    .align_y(Vertical::Top)
     .into()
 }
 
-/// The height of a readout chip (5 px padding around a 12 px line), for its
+/// The height of a readout (its label, value and sub-line), for its
 /// tooltip's placement.
-const CHIP_HEIGHT: f32 = 26.0;
+const READOUT_HEIGHT: f32 = 54.0;
 
-/// A Material tooltip below `target`: its top 24 px below the target's
-/// centre.
+/// A Material tooltip below `target`: its top 6 px below the readout.
 fn with_tip<'a>(target: Element<'a, Message>, tip: &'static str) -> Element<'a, Message> {
-    material_tooltip(target, tip, 24.0 - CHIP_HEIGHT / 2.0).into()
+    material_tooltip(target, tip, READOUT_HEIGHT / 2.0 + 6.0).into()
 }
 
 /// `_F0Chip`: the F0 (pitch) readout — frequency plus the equal-tempered
 /// note name and cents.
 fn f0_chip<'a>(hz: f64) -> Element<'a, Message> {
     let has = !hz.is_nan() && hz > 0.0;
-    let mut content = row![
-        dot(F0_COLOR, 8.0),
-        Space::new().width(6),
-        studio_text("F0")
-            .size(9)
-            .font(font::BOLD)
-            .letter_spacing(0.6)
-            .color(Studio::TEXT_FAINT),
-        Space::new().width(6),
-        text(if has {
+    let mut r = Readout::new(
+        "Pitch (F0)",
+        if has {
             format!("{} Hz", round_to_i64(hz))
         } else {
             "—".to_string()
-        })
-        .size(12)
-        .font(font::BOLD)
-        .color(Studio::TEXT_PRIMARY),
-    ]
-    .align_y(Vertical::Center);
-    if has {
-        content = content.push(Space::new().width(6)).push(
-            text(note_label(hz))
-                .size(11)
-                .font(font::SEMIBOLD)
-                .color(Studio::ACCENT_BRIGHT),
-        );
-    }
-    with_tip(
-        container(content).padding([5, 10]).style(inset(6.0)).into(),
-        "Fundamental pitch (F0) at the playhead",
+        },
     )
+    .swatch(Swatch::Dot(F0_COLOR));
+    if has {
+        r = r.sub(note_label(hz));
+    }
+    with_tip(readout(r), "Fundamental pitch (F0) at the playhead")
 }
 
 /// `_Metric`: one timbre readout — the value at the playhead (or live) and
-/// the average.
+/// the average, keyed to its curve by `color`.
 fn metric_chip<'a>(
     label: &'static str,
     tip: &'static str,
     value: f64,
     avg: f64,
+    color: Color,
 ) -> Element<'a, Message> {
     let fmt = |v: f64| {
         if v.is_nan() {
             "—".to_string()
         } else {
-            to_string_as_fixed(v, 1)
+            to_string_as_fixed(v, 1).replacen('-', "−", 1)
         }
     };
-    let content = row![
-        studio_text(label)
-            .size(9)
-            .font(font::BOLD)
-            .letter_spacing(0.6)
-            .color(Studio::TEXT_FAINT),
-        Space::new().width(6),
-        text(format!("{} dB", fmt(value)))
-            .size(12)
-            .font(font::BOLD)
-            .color(Studio::TEXT_PRIMARY),
-        Space::new().width(5),
-        text(format!("avg {}", fmt(avg)))
-            .size(9)
-            .color(Studio::TEXT_FAINT),
-    ]
-    .align_y(Vertical::Center);
+    let value = if value.is_nan() {
+        "—".to_string()
+    } else {
+        format!("{} dB", to_string_as_fixed(value, 1))
+    };
     with_tip(
-        container(content).padding([5, 10]).style(inset(6.0)).into(),
+        readout(
+            Readout::new(label, value)
+                .swatch(Swatch::Line(color))
+                .sub(format!("avg {}", fmt(avg))),
+        ),
         tip,
     )
 }
 
-/// `_StatInline`: a small inline "LABEL value" stat used in tab headers.
-fn stat_inline<'a>(label: &str, value: String, accent: Color) -> Element<'a, Message> {
-    row![
-        studio_text(format!("{}  ", label.to_uppercase()))
-            .size(9)
-            .font(font::BOLD)
-            .letter_spacing(0.5)
-            .color(Studio::TEXT_FAINT),
-        text(value).size(12).font(font::BOLD).color(accent),
-    ]
-    .align_y(Vertical::Center)
-    .into()
-}
-
 // -------------------------------------------------------------- the chrome
 
+/// The dock tabs' padding.
+pub(crate) const TAB_PADDING: Padding = ltrb(16.0, 12.0, 16.0, 16.0);
+
+/// The gap between two readouts in a row.
+pub(crate) const READOUT_GAP: f32 = 28.0;
+
 /// `EdgeInsets.fromLTRB`.
-fn ltrb(left: f32, top: f32, right: f32, bottom: f32) -> Padding {
+const fn ltrb(left: f32, top: f32, right: f32, bottom: f32) -> Padding {
     Padding {
         top,
         right,
@@ -1471,116 +1532,281 @@ fn dot<'a>(color: Color, size: f32) -> Element<'a, Message> {
         .into()
 }
 
-/// `_LiveDot`: a small red "● LIVE" badge for live tab headers.
+/// `_LiveDot`: a small "● Live" badge for live tab headers, in the record
+/// colours.
 fn live_dot<'a>() -> Element<'a, Message> {
     row![
-        dot(Studio::RECORD, 8.0),
-        Space::new().width(6),
-        studio_text("LIVE")
-            .size(10)
-            .font(font::BOLD)
-            .letter_spacing(0.5)
-            .color(Studio::RECORD),
+        dot(Studio::RECORD, 6.0),
+        studio_text("Live")
+            .size(type_scale::LABEL)
+            .line_height(Pixels(type_scale::LINE))
+            .font(font::MEDIUM)
+            .color(Studio::RECORD_TEXT),
     ]
+    .spacing(6)
     .align_y(Vertical::Center)
     .into()
 }
 
-/// `_regSwatch`: a register's colour dot and its share.
-fn reg_swatch<'a>(color: Color, label: String) -> Element<'a, Message> {
-    row![
-        dot(color, 9.0),
-        Space::new().width(5),
-        text(label).size(10).color(Studio::TEXT_SECONDARY),
-    ]
-    .align_y(Vertical::Center)
-    .into()
-}
-
-/// `_TabHeader`: a small uppercase header row for a tab, indented past the
-/// frequency axis, with an optional `trailing` widget after it.
-fn tab_header<'a>(label: &str, trailing: Option<Element<'a, Message>>) -> Element<'a, Message> {
-    // The label is `Flexible`: it ellipsizes in what `trailing` leaves it.
-    let mut header: Vec<Element<'a, Message>> = vec![studio_text(label.to_uppercase())
-        .size(10)
-        .font(font::BOLD)
-        .letter_spacing(0.8)
-        .color(Studio::TEXT_FAINT)
-        .ellipsis(1)
-        .into()];
-    if let Some(trailing) = trailing {
-        header.push(Space::new().width(10).into());
-        header.push(trailing);
-    }
-    container(flexible_row(header, 0))
-        .padding(ltrb(AXIS_WIDTH, 0.0, 0.0, 6.0))
+/// A plot well (`DESIGN.md`): `WELL`, radius 6, an inset `BORDER_STRONG`
+/// outline, filling the rest of the tab.
+pub(crate) fn plot_well<'a, M: 'a>(content: impl Into<Element<'a, M>>) -> Element<'a, M> {
+    container(content)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(well_style)
         .into()
 }
 
-/// `_PanelLabel`: a small uppercase panel caption (POWER SPECTRUM, LTAS …),
-/// indented past the frequency axis so the panels read consistently.
-fn panel_label<'a>(label: &str) -> Element<'a, Message> {
-    container(
-        studio_text(label.to_uppercase())
-            .size(10)
-            .font(font::BOLD)
-            .letter_spacing(0.8)
-            .color(Studio::TEXT_FAINT),
-    )
-    .padding(ltrb(AXIS_WIDTH, 0.0, 0.0, 4.0))
+/// [`plot_well`]'s look.
+fn well_style(theme: &Theme) -> container::Style {
+    theme::well(theme::radius::WELL)(theme)
+}
+
+/// What a legend entry's or a readout's key is: a dot (a series of dots),
+/// a short line (a curve) or a block (an area).
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Swatch {
+    Dot(Color),
+    Line(Color),
+    Block(Color),
+}
+
+fn swatch<'a, M: 'a>(s: Swatch) -> Element<'a, M> {
+    let (w, h, r, color) = match s {
+        Swatch::Dot(c) => (6.0, 6.0, 3.0, c),
+        Swatch::Line(c) => (10.0, 2.0, 1.0, c),
+        Swatch::Block(c) => (8.0, 8.0, 2.0, c),
+    };
+    container(Space::new().width(w).height(h))
+        .style(move |_: &Theme| boxed(Some(color), r, None))
+        .into()
+}
+
+/// A legend (`DESIGN.md`: small swatches and 11 px text), 12 px between
+/// entries.
+pub(crate) fn legend<'a, M: 'a>(entries: Vec<(Swatch, String)>) -> Element<'a, M> {
+    Row::with_children(entries.into_iter().map(|(s, label)| {
+        row![
+            swatch(s),
+            studio_text(label)
+                .size(type_scale::LABEL)
+                .line_height(Pixels(type_scale::LINE))
+                .color(Studio::TEXT_SECONDARY),
+        ]
+        .spacing(6)
+        .align_y(Vertical::Center)
+        .into()
+    }))
+    .spacing(12)
+    .align_y(Vertical::Center)
     .into()
+}
+
+/// A readout (`DESIGN.md`): an 11 px `TEXT_SECONDARY` label (after its
+/// swatch, before a verdict dot), the value 18 px semibold tabular with its
+/// unit 11 px `TEXT_FAINT`, and an optional 11 px `TEXT_FAINT` sub-line.
+pub(crate) struct Readout {
+    label: String,
+    value: String,
+    sub: Option<String>,
+    swatch: Option<Swatch>,
+    status: Option<Color>,
+    whole: bool,
+}
+
+impl Readout {
+    pub(crate) fn new(label: impl Into<String>, value: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+            value: value.into(),
+            sub: None,
+            swatch: None,
+            status: None,
+            whole: false,
+        }
+    }
+
+    /// The value has no unit to split off ("A3 – E5"): all of it at the
+    /// readout size.
+    pub(crate) fn whole(mut self) -> Self {
+        self.whole = true;
+        self
+    }
+
+    /// A sub-line under the value.
+    pub(crate) fn sub(mut self, sub: impl Into<String>) -> Self {
+        self.sub = Some(sub.into());
+        self
+    }
+
+    /// A key before the label (the series it reads).
+    pub(crate) fn swatch(mut self, swatch: Swatch) -> Self {
+        self.swatch = Some(swatch);
+        self
+    }
+
+    /// A verdict dot after the label.
+    pub(crate) fn status(mut self, color: Color) -> Self {
+        self.status = Some(color);
+        self
+    }
+}
+
+/// See [`Readout`]. The value reads as a whole ("5.6 Hz") for the widget
+/// tree.
+pub(crate) fn readout<'a, M: 'a>(r: Readout) -> Element<'a, M> {
+    let mut label = row![].spacing(6).align_y(Vertical::Center);
+    if let Some(s) = r.swatch {
+        label = label.push(swatch(s));
+    }
+    label = label.push(
+        studio_text(r.label)
+            .size(type_scale::LABEL)
+            .line_height(Pixels(type_scale::LINE))
+            .color(Studio::TEXT_SECONDARY),
+    );
+    if let Some(color) = r.status {
+        label = label.push(swatch(Swatch::Dot(color)));
+    }
+    let value: Element<'a, M> = if r.whole {
+        studio_text(r.value)
+            .size(type_scale::READOUT)
+            .line_height(Pixels(22.0))
+            .font(font::SEMIBOLD)
+            .tabular()
+            .color(Studio::TEXT_PRIMARY)
+            .into()
+    } else {
+        value_line(&r.value)
+    };
+    let mut col = column![label, value];
+    if let Some(sub) = r.sub {
+        col = col.push(
+            studio_text(sub)
+                .size(type_scale::LABEL)
+                .line_height(Pixels(type_scale::LINE))
+                .tabular()
+                .color(Studio::TEXT_FAINT),
+        );
+    }
+    col.into()
+}
+
+/// A reading as `DESIGN.md`'s big readout: the number 18 px semibold
+/// tabular (a typographic minus), its unit 11 px `TEXT_FAINT` after it.
+fn value_line<'a, M: 'a>(value: &str) -> Element<'a, M> {
+    let (number, unit) = split_unit(value);
+    let shown = match number.strip_prefix('-') {
+        Some(rest) => format!("−{rest}"),
+        None => number.to_string(),
+    };
+    let plain = unit.is_empty() && shown == value;
+    let mut line = row![studio_text(shown)
+        .size(type_scale::READOUT)
+        .line_height(Pixels(22.0))
+        .font(font::SEMIBOLD)
+        .tabular()
+        .color(Studio::TEXT_PRIMARY)]
+    .spacing(if unit == "%" || unit == "¢" { 1 } else { 3 })
+    .align_y(Vertical::Bottom);
+    if !unit.is_empty() {
+        line = line.push(
+            container(
+                studio_text(unit.to_string())
+                    .size(type_scale::LABEL)
+                    .line_height(Pixels(type_scale::LINE))
+                    .color(Studio::TEXT_FAINT),
+            )
+            .padding(Padding {
+                bottom: 2.0,
+                ..Padding::ZERO
+            }),
+        );
+    }
+    if plain {
+        line.into()
+    } else {
+        labelled(line, value.to_string())
+    }
+}
+
+/// `_TabHeader`: a tab's header row, indented past the frequency axis (see
+/// [`header_row`]).
+fn tab_header<'a>(label: &str, trailing: Option<Element<'a, Message>>) -> Element<'a, Message> {
+    header_row(label, trailing, AXIS_WIDTH)
+}
+
+/// The header row of a tab with no frequency axis: flush with its content.
+fn plain_header<'a>(label: &str, trailing: Option<Element<'a, Message>>) -> Element<'a, Message> {
+    header_row(label, trailing, 0.0)
+}
+
+/// A dock tab's 24 px header row, `indent` in from the tab's padding: its
+/// title (11 px semibold `TEXT_SECONDARY`, sentence case; it ellipsizes in
+/// what `trailing` leaves it), then `trailing` (a legend, the live badge)
+/// at its right end; 6 px above what follows.
+pub(crate) fn header_row<'a, M: 'a>(
+    label: &str,
+    trailing: Option<Element<'a, M>>,
+    indent: f32,
+) -> Element<'a, M> {
+    let mut header = row![container(cap_label(label).ellipsis(1)).width(Length::Fill)]
+        .spacing(12)
+        .align_y(Vertical::Center);
+    if let Some(trailing) = trailing {
+        header = header.push(trailing);
+    }
+    container(header)
+        .height(24 + 6)
+        .align_y(Vertical::Top)
+        .padding(ltrb(indent, 4.0, 0.0, 6.0))
+        .into()
 }
 
 /// `_FormantLegend`: the color key for the F0 and F1/F2/F3 tracks drawn on
 /// the spectrogram.
 fn formant_legend<'a>() -> Element<'a, Message> {
-    let entry = |color: Color, label: &'static str| -> Element<'a, Message> {
-        container(
-            row![
-                dot(color, 8.0),
-                Space::new().width(4),
-                text(label).size(10).color(Studio::TEXT_SECONDARY),
-            ]
-            .align_y(Vertical::Center),
-        )
-        .padding(ltrb(10.0, 0.0, 0.0, 0.0))
-        .into()
-    };
-    row![
-        entry(F0_COLOR, "F0"),
-        entry(FORMANT_COLORS[0], "F1"),
-        entry(FORMANT_COLORS[1], "F2"),
-        entry(FORMANT_COLORS[2], "F3"),
-    ]
-    .align_y(Vertical::Center)
-    .into()
+    legend(vec![
+        (Swatch::Dot(F0_COLOR), "F0".to_string()),
+        (Swatch::Dot(FORMANT_COLORS[0]), "F1".to_string()),
+        (Swatch::Dot(FORMANT_COLORS[1]), "F2".to_string()),
+        (Swatch::Dot(FORMANT_COLORS[2]), "F3".to_string()),
+    ])
+}
+
+/// The power spectrum's key: the spectrum, its envelope (and the formant
+/// markers where `formants`), the singer's-formant band.
+fn spectrum_legend<'a>(formants: bool) -> Element<'a, Message> {
+    // The keys of the washes, as they read over a well.
+    let on_well = |wash: Color| lerp_color(Studio::WELL, Color { a: 1.0, ..wash }, wash.a * 2.2);
+    let mut entries = vec![
+        (
+            Swatch::Block(on_well(SPECTRUM_FILL)),
+            "Spectrum".to_string(),
+        ),
+        (Swatch::Line(SPECTRUM_ENVELOPE), "Envelope".to_string()),
+    ];
+    if formants {
+        entries.push((Swatch::Line(FORMANT_COLORS[0]), "F1".to_string()));
+        entries.push((Swatch::Line(FORMANT_COLORS[1]), "F2".to_string()));
+        entries.push((Swatch::Line(FORMANT_COLORS[2]), "F3".to_string()));
+    }
+    entries.push((
+        Swatch::Block(on_well(SINGERS_FORMANT_BAND)),
+        "Singer's formant".to_string(),
+    ));
+    legend(entries)
 }
 
 /// `_TimbreLegend`: the color key for the timbre time curves.
 fn timbre_legend<'a>() -> Element<'a, Message> {
-    let entry = |color: Color, label: &'static str| -> Element<'a, Message> {
-        container(
-            row![
-                container(Space::new())
-                    .width(12)
-                    .height(2.5)
-                    .style(fill(color)),
-                Space::new().width(5),
-                text(label).size(10).color(Studio::TEXT_SECONDARY),
-            ]
-            .align_y(Vertical::Center),
-        )
-        .padding(ltrb(0.0, 0.0, 16.0, 0.0))
-        .into()
-    };
-    row![
-        entry(TIMBRE_RING, "RING"),
-        entry(TIMBRE_TILT, "TILT"),
-        entry(TIMBRE_CPP, "CPP"),
-        entry(TIMBRE_H1H2, "H1−H2"),
-    ]
-    .align_y(Vertical::Center)
-    .into()
+    legend(vec![
+        (Swatch::Line(TIMBRE_RING), "Ring".to_string()),
+        (Swatch::Line(TIMBRE_TILT), "Tilt".to_string()),
+        (Swatch::Line(TIMBRE_CPP), "CPP".to_string()),
+        (Swatch::Line(TIMBRE_H1H2), "H1−H2".to_string()),
+    ])
 }
 
 /// `_AxisRow`: a frequency axis on the left and `child` on the right.
@@ -1596,38 +1822,70 @@ fn axis_row<'a>(max_hz: f64, child: impl Into<Element<'a, Message>>) -> Element<
     .into()
 }
 
-/// `_vowelPanel`: a large centered F1×F2 vowel chart filling the tab, 1.3
-/// wide for 1 tall.
-fn vowel_panel<'a>(f1: f64, f2: f64) -> Element<'a, Message> {
-    let chart = responsive(move |size| {
-        let (w, h) = aspect_fit(size, 1.3);
+/// `_vowelPanel`: the F1×F2 vowel chart (1.3 wide for 1 tall) as tall as the
+/// tab, with the readouts at the playhead beside it, the pair centred
+/// across the dock.
+fn vowel_panel<'a>(f1: f64, f2: f64, live: bool) -> Element<'a, Message> {
+    let body = responsive(move |size| {
+        let room = Size::new(
+            (size.width - VOWEL_READOUTS_WIDTH - VOWEL_GAP).max(0.0),
+            size.height,
+        );
+        let (w, h) = aspect_fit(room, 1.3);
         center(
-            container(
-                canvas_widget(VowelSpacePainter { f1, f2 })
-                    .width(Length::Fill)
-                    .height(Length::Fill),
-            )
-            .padding(12)
-            .width(w)
-            .height(h)
-            .style(|_: &Theme| boxed(Some(Studio::INSET), 8.0, None)),
+            row![
+                container(
+                    canvas_widget(VowelSpacePainter { f1, f2 })
+                        .width(Length::Fill)
+                        .height(Length::Fill),
+                )
+                .padding(10)
+                .width(w)
+                .height(h)
+                .style(well_style),
+                Space::new().width(VOWEL_GAP),
+                vowel_readouts(f1, f2, h),
+            ]
+            .height(h),
         )
         .into()
     });
+    let trailing: Option<Element<'a, Message>> = live.then(live_dot);
+    column![plain_header("Vowel space · F1 × F2", trailing), body]
+        .padding(TAB_PADDING)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
+}
+
+/// The vowel chart's readouts beside it, `height` tall: F1 and F2 at the
+/// playhead (or live), and the chart's key at the foot.
+fn vowel_readouts<'a>(f1: f64, f2: f64, height: f32) -> Element<'a, Message> {
+    let hz = |v: f64| {
+        if v.is_finite() && v > 0.0 {
+            format!("{} Hz", round_to_i64(v))
+        } else {
+            "—".to_string()
+        }
+    };
     column![
-        studio_text("VOWEL  F1×F2")
-            .size(10)
-            .font(font::BOLD)
-            .letter_spacing(0.8)
-            .color(Studio::TEXT_FAINT),
-        Space::new().height(8),
-        chart,
+        readout(Readout::new("F1", hz(f1)).sub("openness")),
+        readout(Readout::new("F2", hz(f2)).sub("frontness")),
+        Space::new().height(Length::Fill),
+        legend(vec![
+            (Swatch::Dot(Studio::TEXT_PRIMARY), "Now".to_string()),
+            (Swatch::Dot(Studio::TEXT_DISABLED), "Reference".to_string()),
+        ]),
     ]
-    .padding(ltrb(20.0, 14.0, 20.0, 18.0))
-    .width(Length::Fill)
-    .height(Length::Fill)
+    .spacing(14)
+    .width(VOWEL_READOUTS_WIDTH)
+    .height(height)
     .into()
 }
+
+/// The vowel readouts' column, and its gap from the chart.
+const VOWEL_READOUTS_WIDTH: f32 = 140.0;
+const VOWEL_GAP: f32 = 24.0;
 
 /// `AspectRatio(aspectRatio: ratio)` in a box of `size`: as wide as fits,
 /// then as tall as the ratio allows.
@@ -1643,11 +1901,10 @@ struct SpectrumStrip {
     max_hz: f64,
     formants: Vec<f64>,
     min_ceil_db: Option<f64>,
-    label: &'static str,
 }
 
-/// `_SpectrumStrip`: a captioned power-spectrum panel — a rotated "dB" in
-/// the axis column, the spectrum and its kHz labels in an inset well.
+/// `_SpectrumStrip`: a power-spectrum panel — a rotated "dB" in the axis
+/// column, the spectrum and its kHz labels in a plot well.
 fn spectrum_strip<'a>(s: SpectrumStrip) -> Element<'a, Message> {
     let mut painter = PowerSpectrumPainter::new(s.column, s.bin_hz, s.max_hz);
     painter.formants = s.formants;
@@ -1660,18 +1917,11 @@ fn spectrum_strip<'a>(s: SpectrumStrip) -> Element<'a, Message> {
             .width(Length::Fill)
             .height(Length::Fill),
     ];
-    column![
-        panel_label(s.label),
-        row![
-            canvas_widget(RotatedLabel { label: "dB" })
-                .width(AXIS_WIDTH)
-                .height(Length::Fill),
-            container(well)
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .style(|_: &Theme| boxed(Some(Studio::INSET), 6.0, None)),
-        ]
-        .height(Length::Fill),
+    row![
+        canvas_widget(RotatedLabel { label: "dB" })
+            .width(AXIS_WIDTH)
+            .height(Length::Fill),
+        plot_well(well),
     ]
     .width(Length::Fill)
     .height(Length::Fill)
@@ -1680,46 +1930,31 @@ fn spectrum_strip<'a>(s: SpectrumStrip) -> Element<'a, Message> {
 
 // --------------------------------------------------------------- painters
 
-/// What set a label in Flutter, and so its face and line.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SetBy {
-    /// A `TextPainter`, which inherits no theme: the system UI font
-    /// ([`system_font`]), on the font's own line ([`text::NATURAL`]).
-    Painter,
-    /// A `Text` under the app's Material theme: Inter, at height 1.0.
-    Text,
-}
-
-/// A canvas text at `position`, aligned as given, in w400 on the line of
-/// what set it ([`SetBy`]).
+/// An axis label (`DESIGN.md`: 10 px regular, tabular) at `position`,
+/// aligned as given, in `color`: Inter with tabular figures, on its own
+/// line.
 fn label_text(
     content: String,
     position: Point,
-    size: f32,
     color: Color,
     align_x: Alignment,
     align_y: Vertical,
-    set_by: SetBy,
 ) -> canvas::Text {
-    let (font, line_height) = match set_by {
-        SetBy::Painter => (system_font::font(Weight::Normal), text::NATURAL),
-        SetBy::Text => (font::REGULAR, 1.0.into()),
-    };
     canvas::Text {
         content,
         position,
         color,
-        size: Pixels(size),
-        line_height,
-        font,
+        size: Pixels(type_scale::AXIS),
+        line_height: text::NATURAL,
+        font: tabular_font(font::REGULAR),
         align_x,
         align_y,
         ..canvas::Text::default()
     }
 }
 
-/// `_FreqAxisPainter`: the frequency axis — `1k`, `2k`, … right-aligned 6 px
-/// from its edge at each kHz's height.
+/// `_FreqAxisPainter`: the frequency axis — `1k`, `2k`, … in `TEXT_FAINT`,
+/// right-aligned 6 px from its edge at each kHz's height.
 struct FreqAxisPainter {
     max_hz: f64,
 }
@@ -1747,12 +1982,9 @@ impl<M> canvas::Program<M> for FreqAxisPainter {
                 frame.fill_text(label_text(
                     format!("{}k", round_to_i64(hz / 1000.0)),
                     Point::new(size.width - 6.0, y as f32),
-                    10.0,
                     Studio::TEXT_FAINT,
                     Alignment::Right,
                     Vertical::Center,
-                    // `_FreqAxisPainter`'s `TextPainter`, centred on y.
-                    SetBy::Painter,
                 ));
                 hz += 1000.0;
             }
@@ -1787,7 +2019,8 @@ pub fn freq_axis_labels(max_hz: f64, width: f64) -> Vec<(i64, f64, Alignment)> {
 }
 
 /// `_FreqAxisLabels`: the kHz labels along the power spectrum's bottom edge
-/// (see [`freq_axis_labels`]), 2 px above it.
+/// (see [`freq_axis_labels`]) in `TEXT_DISABLED`, 6 px in from the well's
+/// sides and 4 above its foot.
 struct FreqAxisLabels {
     max_hz: f64,
 }
@@ -1806,15 +2039,17 @@ impl<M> canvas::Program<M> for FreqAxisLabels {
         let size = bounds.size();
         vec![state.draw(renderer, size, self.max_hz.to_bits(), |frame| {
             for (k, x, align) in freq_axis_labels(self.max_hz, f64::from(size.width)) {
+                let inset = match align {
+                    Alignment::Left => 6.0,
+                    Alignment::Right => -6.0,
+                    _ => 0.0,
+                };
                 frame.fill_text(label_text(
                     format!("{k} kHz"),
-                    Point::new(x as f32, size.height - 2.0),
-                    9.0,
-                    Studio::TEXT_FAINT,
+                    Point::new(x as f32 + inset, size.height - 4.0),
+                    Studio::TEXT_DISABLED,
                     align,
                     Vertical::Bottom,
-                    // A `Text` (`_FreqAxisLabels`), 2 off the bottom.
-                    SetBy::Text,
                 ));
             }
         })]
@@ -1822,7 +2057,7 @@ impl<M> canvas::Program<M> for FreqAxisLabels {
 }
 
 /// `RotatedBox(quarterTurns: 3, child: Text(label))`, centred: the label
-/// reads bottom to top.
+/// reads bottom to top, in `TEXT_DISABLED`.
 struct RotatedLabel {
     label: &'static str,
 }
@@ -1844,18 +2079,16 @@ impl<M> canvas::Program<M> for RotatedLabel {
         frame.fill_text(label_text(
             self.label.to_string(),
             Point::ORIGIN,
-            10.0,
-            Studio::TEXT_FAINT,
+            Studio::TEXT_DISABLED,
             Alignment::Center,
             Vertical::Center,
-            // A `Text` in a `RotatedBox`, centred.
-            SetBy::Text,
         ));
         vec![frame.into_geometry()]
     }
 }
 
-/// `_MonitorLevel`: the live input level as a record-red bar filling its
+/// `_MonitorLevel`: the live input level as a meter bar (`DESIGN.md`'s
+/// meter colours at its level: green, then warn, then record) filling its
 /// share of a rounded inset track (clipped to the track's rounded corners).
 struct MonitorLevel {
     level: f64,
@@ -1896,7 +2129,7 @@ impl<M> canvas::Program<M> for MonitorLevel {
                         bottom_left: left,
                     },
                 ),
-                Studio::RECORD,
+                meter_color(self.level as f32),
             );
         }
         vec![frame.into_geometry()]
@@ -2010,7 +2243,7 @@ impl<M> canvas::Program<M> for TimbreCurvesPainter {
                         }
                     }
                 });
-                frame.stroke(&path, Stroke::default().with_color(color).with_width(1.4));
+                frame.stroke(&path, Stroke::default().with_color(color).with_width(1.2));
             }
         })]
     }
@@ -2045,13 +2278,20 @@ impl<M> canvas::Program<M> for VibratoPainter {
                 let extent = self.v.extent_cents;
                 let amp = (if extent <= 0.0 { 50.0 } else { extent }) * 1.6;
                 let y = |cents: f64| mid_y - clamp_f64(cents / amp, -1.0, 1.0) * (h * 0.42);
-                frame.stroke(
-                    &Path::line(
-                        Point::new(0.0, mid_y as f32),
-                        Point::new(w as f32, mid_y as f32),
-                    ),
-                    Stroke::default().with_color(Studio::BORDER).with_width(1.0),
-                );
+                // The ±extent guides (`GRID`), then the 0¢ line
+                // (`GRID_STRONG`), each on a whole pixel.
+                let line = |frame: &mut Frame, at: f64, color: Color| {
+                    let at = (at as f32).round() + 0.5;
+                    frame.stroke(
+                        &Path::line(Point::new(0.0, at), Point::new(w as f32, at)),
+                        Stroke::default().with_color(color).with_width(1.0),
+                    );
+                };
+                if extent > 0.0 {
+                    line(frame, y(extent), Studio::GRID);
+                    line(frame, y(-extent), Studio::GRID);
+                }
+                line(frame, mid_y, Studio::GRID_STRONG);
                 let path = Path::new(|b| {
                     for (i, &c) in dev.iter().enumerate() {
                         let p = Point::new(
@@ -2067,9 +2307,7 @@ impl<M> canvas::Program<M> for VibratoPainter {
                 });
                 frame.stroke(
                     &path,
-                    Stroke::default()
-                        .with_color(Studio::ACCENT_BRIGHT)
-                        .with_width(1.5),
+                    Stroke::default().with_color(DATA_LINE).with_width(1.4),
                 );
             }),
         ]
@@ -2195,8 +2433,10 @@ impl<M> canvas::Program<M> for RegisterMapPainter {
     }
 }
 
-/// `_TunerDialPainter`: the tuner's ±50¢ dial — baseline, the ±12¢ in-tune
-/// zone, ticks every 25¢ and the needle at `cents`.
+/// `_TunerDialPainter`: the tuner's ±50¢ dial — a 2 px `GRID_STRONG`
+/// baseline, the ±12¢ in-tune zone (`IN_TUNE`, soft), ticks every 25¢
+/// (`TEXT_DISABLED`, the centre `TEXT_SECONDARY`) and the needle at
+/// `cents` in its colour.
 struct TunerDialPainter {
     cents: f64,
     color: Color,
@@ -2215,7 +2455,7 @@ impl<M> canvas::Program<M> for TunerDialPainter {
     ) -> Vec<Geometry> {
         let size = bounds.size();
         let mut frame = Frame::new(renderer, size);
-        let mid_y = size.height / 2.0;
+        let mid_y = (size.height / 2.0).round();
         let w = size.width;
         let x_of = |c: f64| ((clamp_f64(c, -50.0, 50.0) + 50.0) / 100.0) as f32 * w;
         let line =
@@ -2235,20 +2475,20 @@ impl<M> canvas::Program<M> for TunerDialPainter {
             2.0,
             true,
         );
-        // In-tune green zone (±12¢).
+        // In-tune zone (±12¢).
         line(
             &mut frame,
             Point::new(x_of(-12.0), mid_y),
             Point::new(x_of(12.0), mid_y),
-            theme::alpha(TUNER_GREEN, 0.55),
-            5.0,
+            theme::alpha(TUNER_GREEN, 0.40),
+            4.0,
             true,
         );
         // Ticks at −50/−25/0/+25/+50.
         for c in [-50.0, -25.0, 0.0, 25.0, 50.0] {
-            let x = x_of(c);
+            let x = x_of(c).round() + 0.5;
             let centre = c == 0.0;
-            let h = if centre { 11.0 } else { 6.0 };
+            let h = if centre { 10.0 } else { 5.0 };
             line(
                 &mut frame,
                 Point::new(x, mid_y - h),
@@ -2256,9 +2496,9 @@ impl<M> canvas::Program<M> for TunerDialPainter {
                 if centre {
                     Studio::TEXT_SECONDARY
                 } else {
-                    Studio::TEXT_FAINT
+                    Studio::TEXT_DISABLED
                 },
-                if centre { 2.0 } else { 1.0 },
+                1.0,
                 false,
             );
         }
@@ -2266,13 +2506,13 @@ impl<M> canvas::Program<M> for TunerDialPainter {
         let nx = x_of(self.cents);
         line(
             &mut frame,
-            Point::new(nx, mid_y - 15.0),
-            Point::new(nx, mid_y + 15.0),
+            Point::new(nx, mid_y - 14.0),
+            Point::new(nx, mid_y + 14.0),
             self.color,
-            3.0,
+            2.0,
             true,
         );
-        frame.fill(&Path::circle(Point::new(nx, mid_y), 4.5), self.color);
+        frame.fill(&Path::circle(Point::new(nx, mid_y), 4.0), self.color);
         vec![frame.into_geometry()]
     }
 }
@@ -2288,9 +2528,9 @@ pub fn register_marker_left(score: f64, width: f32) -> Option<f32> {
     Some(x.max(0.0).min(width - 3.0))
 }
 
-/// The register meter's bar and marker: the bar 14 px tall, radius 7, a
-/// chest→head gradient; the marker 3 × 20 px, radius 2, reaching
-/// [`METER_OVERHANG`] above and below the bar.
+/// The register meter's bar and marker: the bar [`METER_BAR`] tall, its
+/// ends round, a chest→head gradient; the marker 3 px wide, radius 1.5,
+/// `TEXT_PRIMARY`, reaching [`METER_OVERHANG`] above and below the bar.
 struct RegisterMeterPainter {
     score: f64,
 }
@@ -2312,8 +2552,8 @@ impl<M> canvas::Program<M> for RegisterMeterPainter {
         frame.fill(
             &Path::rounded_rectangle(
                 Point::new(0.0, top),
-                Size::new(size.width, 14.0),
-                Radius::from(7.0),
+                Size::new(size.width, METER_BAR),
+                Radius::from(METER_BAR / 2.0),
             ),
             gradient::Linear::new(Point::new(0.0, top), Point::new(size.width, top))
                 .add_stop(0.0, CHEST_COLOR)
@@ -2323,8 +2563,8 @@ impl<M> canvas::Program<M> for RegisterMeterPainter {
             frame.fill(
                 &Path::rounded_rectangle(
                     Point::new(left, 0.0),
-                    Size::new(3.0, 14.0 + 2.0 * METER_OVERHANG),
-                    Radius::from(2.0),
+                    Size::new(3.0, METER_BAR + 2.0 * METER_OVERHANG),
+                    Radius::from(1.5),
                 ),
                 Studio::TEXT_PRIMARY,
             );

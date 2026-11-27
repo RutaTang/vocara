@@ -841,27 +841,39 @@ impl TabSize {
     }
 }
 
-/// One tab of a [`tab_strip`]: sentence-case text, an optional count after
-/// it in `TEXT_FAINT` ("Notes 4"), and whether a group divider comes
-/// before it.
+/// One tab of a [`tab_strip`]: sentence-case text, an optional 12 px line
+/// glyph before it (the dock's "Mixer"), an optional count after it in
+/// `TEXT_FAINT` ("Notes 4"), and whether a group divider comes before it.
 pub struct Tab<'a, T> {
     pub value: T,
     pub label: Cow<'a, str>,
+    pub icon: Option<Glyph>,
     pub count: Option<usize>,
     pub divider_before: bool,
 }
+
+/// The glyph box of a tab's icon ([`Tab::icon`]), and its gap to the label.
+pub const TAB_ICON_SIZE: f32 = 12.0;
+pub const TAB_ICON_GAP: f32 = 6.0;
 
 /// A tab reading `label`.
 pub fn tab<'a, T>(value: T, label: impl Into<Cow<'a, str>>) -> Tab<'a, T> {
     Tab {
         value,
         label: label.into(),
+        icon: None,
         count: None,
         divider_before: false,
     }
 }
 
 impl<T> Tab<'_, T> {
+    /// A line glyph before the label, in the label's colour.
+    pub fn icon(mut self, glyph: Glyph) -> Self {
+        self.icon = Some(glyph);
+        self
+    }
+
     /// A count after the label.
     pub fn count(mut self, count: usize) -> Self {
         self.count = Some(count);
@@ -878,9 +890,10 @@ impl<T> Tab<'_, T> {
 /// A strip of text tabs (`DESIGN.md`, Tabs): the selected one on a
 /// `CONTROL_ACTIVE` fill in `TEXT_PRIMARY` medium, the others transparent in
 /// `TEXT_SECONDARY` (`TEXT_PRIMARY` under the pointer), 2 px apart; a
-/// divider is 1 × 14 `BORDER_STRONG` with 6 px either side. A press on a
-/// tab sends `on_select` with its value (the selected one too: a caller may
-/// toggle).
+/// divider is 1 × 14 `BORDER_STRONG` with 6 px either side. A tab's glyph
+/// ([`Tab::icon`]) sits 6 px before its label, in the label's colour. A
+/// press on a tab sends `on_select` with its value (the selected one too: a
+/// caller may toggle).
 pub fn tab_strip<'a, T, M>(
     tabs: Vec<Tab<'a, T>>,
     selected: Option<T>,
@@ -903,12 +916,21 @@ where
             );
         }
         let on = selected == Some(tab.value);
-        let mut label = row![studio_text(tab.label)
-            .size(text_size)
-            .line_height(iced::Pixels(type_scale::LINE))
-            .font(if on { font::MEDIUM } else { font::REGULAR })]
-        .spacing(4)
-        .align_y(Vertical::Center);
+        let mut label = row![].spacing(4).align_y(Vertical::Center);
+        if let Some(glyph) = tab.icon {
+            label = label.push(container(line_icon_inherit(glyph, TAB_ICON_SIZE)).padding(
+                Padding {
+                    right: TAB_ICON_GAP - 4.0,
+                    ..Padding::ZERO
+                },
+            ));
+        }
+        label = label.push(
+            studio_text(tab.label)
+                .size(text_size)
+                .line_height(iced::Pixels(type_scale::LINE))
+                .font(if on { font::MEDIUM } else { font::REGULAR }),
+        );
         if let Some(count) = tab.count {
             label = label.push(
                 studio_text(count.to_string())
@@ -1736,6 +1758,34 @@ mod tests {
         assert!(ui.find("NOTES").is_err());
         ui.click("Techniques").expect("a tab");
         assert_eq!(ui.into_messages().collect::<Vec<_>>(), vec![Msg::Pick(3)]);
+    }
+
+    #[test]
+    fn a_tab_with_a_glyph_draws_it_before_its_label_and_still_selects() {
+        let strip = || -> Element<'static, Msg> {
+            container(tab_strip(
+                vec![tab(1u8, "Mixer").icon(glyphs::MIXER)],
+                Some(1),
+                TabSize::Dock,
+                Msg::Pick,
+            ))
+            .padding(4)
+            .into()
+        };
+        let mut ui = iced_test::simulator(strip());
+        let label = ui.find("Mixer").expect("the label").bounds();
+        // The 8 px padding, the 12 px glyph and its 6 px gap.
+        assert_eq!(label.x, 4.0 + 8.0 + TAB_ICON_SIZE + TAB_ICON_GAP);
+        ui.click("Mixer").expect("the tab");
+        assert_eq!(ui.into_messages().collect::<Vec<_>>(), vec![Msg::Pick(1)]);
+        // The selected tab's fill, and the glyph drawn left of the label in
+        // its text colour.
+        let mut window = Frames::new(Size::new(120.0, 30.0));
+        window.frame(strip(), &[], Instant::now());
+        let fill = window.pixel(Point::new(6.0, 6.0));
+        assert!(near(fill, Studio::CONTROL_ACTIVE), "{fill:?}");
+        let ink = window.ink(Point::new(12.0, 9.0), Point::new(24.0, 21.0));
+        assert!(ink > 0x60, "{ink:#x}");
     }
 
     #[test]

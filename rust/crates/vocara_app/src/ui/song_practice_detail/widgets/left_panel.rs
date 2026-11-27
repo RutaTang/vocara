@@ -77,7 +77,7 @@ use super::track_context_menu::{
 };
 use super::track_row::{bus_color, channel_color};
 use crate::ui::core::icons::{self, Icon};
-use crate::ui::core::theme::{alpha, bare_button, boxed, fill, font, height, type_scale, Studio};
+use crate::ui::core::theme::{alpha, boxed, fill, font, height, type_scale, Studio};
 use crate::ui::core::widgets::cap_label::cap_label;
 use crate::ui::core::widgets::controls::{
     icon_button, labelled, msr_button, popup_button, thin_slider, MsrKind, PARAMETER_LABEL_WIDTH,
@@ -119,10 +119,11 @@ const OUTPUT_MENU_WIDTH: f32 = 180.0;
 /// The output routing's "no bus" destination.
 pub const STEREO_OUT: &str = "Stereo Out";
 
-// Pass / warn / flag indicator colors for the scorecard dots.
+// Pass / warn / flag indicator colors for the scorecard dots (the status
+// tokens: in tune, warn, off).
 const GOOD: Color = Studio::GOOD;
-const WARN: Color = Color::from_rgb8(0xE0, 0xA0, 0x4C);
-const FLAG: Color = Studio::RECORD;
+const WARN: Color = Studio::WARN;
+const FLAG: Color = Studio::OUT_OF_TUNE;
 
 // Register split colors (warm chest → cool head).
 const CHEST: Color = Studio::REGISTER_CHEST;
@@ -577,8 +578,32 @@ pub struct SummaryCell {
     pub sub: String,
     /// The pass / warn / flag dot, when the metric has a verdict.
     pub dot: Option<Color>,
+    /// Where the reading sits on the card's bar, 0 to 1 ([`metric_level`]);
+    /// `None` without a reading.
+    pub level: Option<f32>,
     /// The dock tab a tap opens.
     pub tab: DockTab,
+}
+
+/// The display range of each metric card's bar, low to high: where a
+/// reading draws on it, not a verdict. In tune 0–100 %, vibrato rate
+/// 0–10 Hz, clarity (CPP) 0–20 dB, ring (the singer's-formant prominence)
+/// −30–0 dB, dynamic range 0–40 dB, brightness (α ratio) −30–0 dB.
+pub const METRIC_RANGES: [(f64, f64); 6] = [
+    (0.0, 100.0),
+    (0.0, 10.0),
+    (0.0, 20.0),
+    (-30.0, 0.0),
+    (0.0, 40.0),
+    (-30.0, 0.0),
+];
+
+/// Where `value` sits on a bar spanning `range`, clamped to it; `None` for a
+/// value with no reading.
+pub fn metric_level(value: f64, (lo, hi): (f64, f64)) -> Option<f32> {
+    value
+        .is_finite()
+        .then(|| ((value - lo) / (hi - lo)).clamp(0.0, 1.0) as f32)
 }
 
 /// Whole dB, or "—" for a value with no reading. (Dart rounded without a
@@ -628,6 +653,7 @@ pub fn summary_cells(
                     FLAG
                 }
             }),
+            level: in_tune.and_then(|p| metric_level(p, METRIC_RANGES[0])),
             tab: DockTab::Pitch,
         },
         SummaryCell {
@@ -647,6 +673,9 @@ pub fn summary_cells(
                     WARN
                 }
             }),
+            level: vib
+                .as_ref()
+                .and_then(|v| metric_level(v.rate_hz, METRIC_RANGES[1])),
             tab: DockTab::Vibrato,
         },
         SummaryCell {
@@ -658,6 +687,7 @@ pub fn summary_cells(
             },
             sub: "CPP".to_string(),
             dot: None,
+            level: metric_level(m.cpp_avg, METRIC_RANGES[2]),
             tab: DockTab::Timbre,
         },
         SummaryCell {
@@ -665,6 +695,7 @@ pub fn summary_cells(
             value: ltas.map_or_else(|| "—".to_string(), |l| whole_db(l.singers_formant_db)),
             sub: "singer's formant".to_string(),
             dot: None,
+            level: ltas.and_then(|l| metric_level(l.singers_formant_db, METRIC_RANGES[3])),
             tab: DockTab::Ltas,
         },
         SummaryCell {
@@ -676,6 +707,11 @@ pub fn summary_cells(
             },
             sub: "soft → loud".to_string(),
             dot: None,
+            level: if profile.has_dynamics() {
+                metric_level(profile.dynamic_range_db(), METRIC_RANGES[4])
+            } else {
+                None
+            },
             tab: DockTab::Dynamics,
         },
         SummaryCell {
@@ -683,6 +719,7 @@ pub fn summary_cells(
             value: ltas.map_or_else(|| "—".to_string(), |l| whole_db(l.alpha_ratio)),
             sub: "α ratio".to_string(),
             dot: None,
+            level: ltas.and_then(|l| metric_level(l.alpha_ratio, METRIC_RANGES[5])),
             tab: DockTab::Ltas,
         },
     ]
@@ -1432,10 +1469,18 @@ pub struct VoiceSummary<'a> {
     pub ltas: Option<&'a Ltas>,
 }
 
+// The summary's own imports, kept with it.
+use crate::ui::core::theme as studio_theme;
+
 /// `VoiceSummaryView`: the voice-analysis summary for the selected take —
 /// range, in-tune %, vibrato, clarity, dynamics, brightness, register.
-/// Hosted in the bottom dock's "Analysis Summary" tab (moved out of the
-/// inspector, which is now a channel strip).
+/// Hosted in the bottom dock's "Summary" tab (moved out of the inspector,
+/// which is now a channel strip).
+///
+/// Drawn as `DESIGN.md`'s metric cards across the dock: a "Voice summary"
+/// heading, the range and register cards side by side, then the six metric
+/// cards in a row (three or two a row on a narrower dock, see
+/// [`summary_columns`]). Each card opens its dock tab.
 pub fn voice_summary_view<'a>(summary: VoiceSummary<'a>) -> Element<'a, Message> {
     let Some(track) = summary.selected_track else {
         return empty("Select a take to see its analysis.", true, false);
@@ -1443,25 +1488,46 @@ pub fn voice_summary_view<'a>(summary: VoiceSummary<'a>) -> Element<'a, Message>
     if track.is_backing() {
         return empty("Backing track has no voice analysis.", true, false);
     }
-    scrollable(
-        container(voice_summary(summary))
-            .width(Length::Fill)
-            .padding(Padding {
-                top: 14.0,
-                right: 16.0,
-                bottom: 18.0,
-                left: 16.0,
-            }),
-    )
-    .fading()
-    .width(Length::Fill)
-    .height(Length::Fill)
+    responsive(move |size| {
+        let columns = summary_columns(size.width - 2.0 * SUMMARY_INSET);
+        scrollable(
+            container(voice_summary(summary, columns))
+                .width(Length::Fill)
+                .padding(Padding {
+                    top: 12.0,
+                    right: SUMMARY_INSET,
+                    bottom: SUMMARY_INSET,
+                    left: SUMMARY_INSET,
+                }),
+        )
+        .fading()
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
+    })
     .into()
 }
 
+/// The summary's inset from the dock's edges, and the gap between cards.
+const SUMMARY_INSET: f32 = 16.0;
+const SUMMARY_GAP: f32 = 8.0;
+
+/// How many metric cards a row holds on a summary `width` wide: all six
+/// from 900 px, three from 480, else two.
+pub fn summary_columns(width: f32) -> usize {
+    if width >= 900.0 {
+        6
+    } else if width >= 480.0 {
+        3
+    } else {
+        2
+    }
+}
+
 /// `_VoiceSummary`: the "scorecard" — a quality banner when the take can't
-/// be trusted, the range, a grid of vital metrics and the register split.
-fn voice_summary<'a>(s: VoiceSummary<'a>) -> Element<'a, Message> {
+/// be trusted, the range and register cards, and the metric cards,
+/// `columns` a row.
+fn voice_summary<'a>(s: VoiceSummary<'a>, columns: usize) -> Element<'a, Message> {
     if s.spectrogram_loading || s.metrics_loading {
         return empty_line("Analyzing…", true);
     }
@@ -1472,104 +1538,219 @@ fn voice_summary<'a>(s: VoiceSummary<'a>) -> Element<'a, Message> {
     if let Some(warning) = quality_warning(m) {
         col = col.push(quality_banner(warning));
     }
-    col = col
-        .push(
-            studio_text("VOICE SUMMARY")
-                .size(10)
-                .font(font::BOLD)
-                .letter_spacing(0.8)
-                .color(Studio::TEXT_SECONDARY),
-        )
-        .push(Space::new().height(10))
-        .push(range_row(profile))
-        .push(Space::new().height(14))
-        .push(grid(summary_cells(m, profile, s.ltas)));
+    let mut top = row![range_card(profile)].spacing(SUMMARY_GAP);
     if let Some(reg) = s.register.filter(|r| r.has_data()) {
-        col = col.push(Space::new().height(16)).push(register_bar(reg));
+        top = top.push(register_card(reg));
     }
-    col.into()
+    col.push(cap_label("Voice summary"))
+        .push(Space::new().height(8))
+        .push(top)
+        .push(Space::new().height(SUMMARY_GAP))
+        .push(metric_grid(summary_cells(m, profile, s.ltas), columns))
+        .into()
 }
 
-/// `_qualityBanner`: a red banner when the selected take is clipped or too
-/// noisy to trust.
+/// `_qualityBanner`: a banner when the selected take is clipped or too
+/// noisy to trust, on a faint `RECORD` wash.
 fn quality_banner<'a>(message: String) -> Element<'a, Message> {
     container(
         container(
             row![
-                icons::icon(Icon::TriangleAlert, 14.0, Studio::RECORD),
-                Space::new().width(7),
-                text(message)
-                    .size(11)
-                    .line_height(1.3)
-                    .color(Studio::TEXT_SECONDARY)
+                icons::icon(Icon::TriangleAlert, 14.0, Studio::RECORD_TEXT),
+                Space::new().width(8),
+                studio_text(message)
+                    .size(studio_theme::type_scale::LABEL)
+                    .line_height(Pixels(studio_theme::type_scale::LINE))
+                    .color(Studio::TEXT_PRIMARY)
                     .width(Length::Fill),
             ]
             .align_y(Vertical::Center),
         )
         .width(Length::Fill)
-        // 10 / 8, and the banner's 1 px border.
-        .padding([9, 11])
+        .padding([7, 10])
         .style(|_| {
             boxed(
-                Some(alpha(Studio::RECORD, 0.12)),
-                8.0,
-                Some(alpha(Studio::RECORD, 0.4)),
+                Some(alpha(Studio::RECORD, 0.10)),
+                studio_theme::radius::CARD,
+                Some(alpha(Studio::RECORD, 0.32)),
             )
         }),
     )
     .padding(Padding {
-        bottom: 12.0,
+        bottom: 10.0,
         ..Padding::ZERO
     })
     .into()
 }
 
-/// `_Tappable`: a click cursor and a tap opening `tab`.
-fn tappable<'a>(content: impl Into<Element<'a, Message>>, tab: DockTab) -> Element<'a, Message> {
+/// A summary card (`DESIGN.md`, Cards and Metric cards): `SURFACE`, radius
+/// 8, an inset `BORDER` outline; under the pointer `#1C1C21` with a
+/// `#3A3A43` outline. A press opens `tab`.
+fn summary_card<'a>(
+    content: impl Into<Element<'a, Message>>,
+    tab: DockTab,
+) -> Element<'a, Message> {
     button(content)
-        .padding(0)
+        .padding([10, 12])
         .width(Length::Fill)
-        .style(bare_button)
+        .style(|_, status| {
+            let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+            let face = boxed(
+                Some(if hovered {
+                    Color::from_rgb8(0x1C, 0x1C, 0x21)
+                } else {
+                    Studio::SURFACE
+                }),
+                studio_theme::radius::CARD,
+                Some(if hovered {
+                    Color::from_rgb8(0x3A, 0x3A, 0x43)
+                } else {
+                    Studio::BORDER
+                }),
+            );
+            button::Style {
+                background: face.background,
+                text_color: Studio::TEXT_PRIMARY,
+                border: face.border,
+                shadow: iced::Shadow::default(),
+                snap: true,
+            }
+        })
         .on_press(Message::ShowDockTab(tab))
         .into()
 }
 
-/// `_RangeRow`: the sung-range line and a mini bar (tessitura highlight and
-/// passaggio marker); "No pitch detected" without a range.
-fn range_row<'a>(p: &'a VoiceProfile) -> Element<'a, Message> {
-    let Some((range, span)) = range_line(p) else {
-        return text("No pitch detected")
-            .size(12)
-            .color(Studio::TEXT_FAINT)
-            .into();
-    };
-    tappable(
-        column![
-            row![
-                text(range)
-                    .size(15)
-                    .font(font::EXTRA_BOLD)
-                    .color(Studio::TEXT_PRIMARY),
-                Space::new().width(6),
-                text(format!("{span} st"))
-                    .size(11)
-                    .color(Studio::TEXT_FAINT),
-                Space::new().width(Length::Fill),
-                cap_label("Range"),
-            ]
-            .align_y(Vertical::Bottom),
-            Space::new().height(7),
-            canvas_widget(RangeBar { profile: p })
-                .width(Length::Fill)
-                .height(8),
-        ]
-        .width(Length::Fill),
-        DockTab::Range,
-    )
+/// A card's label: 11 px `TEXT_SECONDARY`.
+fn card_label<'a>(label: &str) -> Element<'a, Message> {
+    studio_text(label.to_string())
+        .size(studio_theme::type_scale::LABEL)
+        .line_height(Pixels(studio_theme::type_scale::LINE))
+        .color(Studio::TEXT_SECONDARY)
+        .ellipsis(1)
+        .into()
 }
 
-/// `_RangeBar`: the track, the tessitura highlight, end caps and the
-/// passaggio marker.
+/// A readout's number and its unit ("86%" → "86" and "%", "5.6 Hz" → "5.6"
+/// and "Hz"); a reading with no unit ("straight", "—") is all number.
+pub fn split_unit(value: &str) -> (&str, &str) {
+    if let Some((number, unit)) = value.split_once(' ') {
+        return (number, unit);
+    }
+    match value.strip_suffix('%') {
+        Some(number) if !number.is_empty() => (number, "%"),
+        _ => (value, ""),
+    }
+}
+
+/// A big readout (`DESIGN.md`: 18 px semibold, tabular, its unit 11 px
+/// `TEXT_FAINT` after it), labelled with the whole reading for the widget
+/// tree.
+fn readout<'a>(value: &str) -> Element<'a, Message> {
+    let (number, unit) = split_unit(value);
+    // A typographic minus: the hyphen sits low and narrow among tabular
+    // figures.
+    let number = match number.strip_prefix('-') {
+        Some(rest) => format!("−{rest}"),
+        None => number.to_string(),
+    };
+    let mut line = row![studio_text(number)
+        .size(studio_theme::type_scale::READOUT)
+        .line_height(Pixels(22.0))
+        .font(font::SEMIBOLD)
+        .tabular()
+        .color(Studio::TEXT_PRIMARY)
+        .ellipsis(1)]
+    .spacing(if unit == "%" { 1 } else { 3 })
+    .align_y(Vertical::Bottom);
+    if !unit.is_empty() {
+        line = line.push(
+            container(
+                studio_text(unit.to_string())
+                    .size(studio_theme::type_scale::LABEL)
+                    .line_height(Pixels(studio_theme::type_scale::LINE))
+                    .color(Studio::TEXT_FAINT),
+            )
+            .padding(Padding {
+                bottom: 2.0,
+                ..Padding::ZERO
+            }),
+        );
+    }
+    labelled(line, value.to_string())
+}
+
+/// `_RangeRow`: the sung range ("A3 – E5", its span in semitones) and a
+/// bar (the full range, the tessitura over it, the passaggio's tick); "No
+/// pitch detected" without a range.
+fn range_card<'a>(p: &'a VoiceProfile) -> Element<'a, Message> {
+    let body: Element<'a, Message> = match range_line(p) {
+        None => column![
+            card_label("Range"),
+            Space::new().height(6),
+            text("No pitch detected")
+                .size(studio_theme::type_scale::BODY)
+                .color(Studio::TEXT_FAINT),
+        ]
+        .into(),
+        Some((range, span)) => {
+            let mut value = row![
+                studio_text(range)
+                    .size(studio_theme::type_scale::READOUT)
+                    .line_height(Pixels(22.0))
+                    .font(font::SEMIBOLD)
+                    .tabular()
+                    .color(Studio::TEXT_PRIMARY),
+                container(
+                    studio_text(format!("{span} st"))
+                        .size(studio_theme::type_scale::LABEL)
+                        .line_height(Pixels(studio_theme::type_scale::LINE))
+                        .color(Studio::TEXT_FAINT),
+                )
+                .padding(Padding {
+                    bottom: 2.0,
+                    ..Padding::ZERO
+                }),
+            ]
+            .spacing(6)
+            .align_y(Vertical::Bottom);
+            if let (Some(lo), Some(hi)) = (p.tess_lo_midi, p.tess_hi_midi) {
+                value = value.push(Space::new().width(Length::Fill)).push(
+                    container(
+                        studio_text(format!(
+                            "Tessitura {} – {}",
+                            note_name_for_midi(lo),
+                            note_name_for_midi(hi)
+                        ))
+                        .size(studio_theme::type_scale::LABEL)
+                        .line_height(Pixels(studio_theme::type_scale::LINE))
+                        .color(Studio::TEXT_FAINT)
+                        .ellipsis(1),
+                    )
+                    .padding(Padding {
+                        bottom: 2.0,
+                        ..Padding::ZERO
+                    }),
+                );
+            }
+            column![
+                card_label("Range"),
+                Space::new().height(2),
+                value,
+                Space::new().height(8),
+                canvas_widget(RangeBar { profile: p })
+                    .width(Length::Fill)
+                    .height(10),
+            ]
+            .width(Length::Fill)
+            .into()
+        }
+    };
+    summary_card(body, DockTab::Range)
+}
+
+/// `_RangeBar`: a 4 px `CONTROL_ACTIVE` track (the sung range), the
+/// tessitura over it in the good-range green, and the passaggio as a 2 px
+/// `ACCENT_BRIGHT` tick.
 struct RangeBar<'a> {
     profile: &'a VoiceProfile,
 }
@@ -1598,13 +1779,14 @@ impl<M> canvas::Program<M> for RangeBar<'_> {
         };
         let (w, h) = (bounds.width, bounds.height);
         let x = |midi| range_x(midi, lo, hi, w);
+        let mid = (h / 2.0).round();
         frame.fill(
             &Path::rounded_rectangle(
-                Point::new(0.0, h / 2.0 - 1.5),
-                Size::new(w, 3.0),
+                Point::new(0.0, mid - 2.0),
+                Size::new(w, 4.0),
                 Radius::from(2.0),
             ),
-            Studio::INSET,
+            Studio::CONTROL_ACTIVE,
         );
         // Tessitura highlight.
         if let (Some(t_lo), Some(t_hi)) = (p.tess_lo_midi, p.tess_hi_midi) {
@@ -1612,28 +1794,22 @@ impl<M> canvas::Program<M> for RangeBar<'_> {
             if right > left {
                 frame.fill(
                     &Path::rounded_rectangle(
-                        Point::new(left, h / 2.0 - 2.5),
-                        Size::new(right - left, 5.0),
-                        Radius::from(3.0),
+                        Point::new(left, mid - 2.0),
+                        Size::new(right - left, 4.0),
+                        Radius::from(2.0),
                     ),
-                    Studio::ACCENT,
+                    alpha(Studio::GOOD, 0.85),
                 );
             }
         }
-        // End caps.
-        frame.fill(
-            &Path::circle(Point::new(2.0, h / 2.0), 2.5),
-            Studio::TEXT_SECONDARY,
-        );
-        frame.fill(
-            &Path::circle(Point::new(w - 2.0, h / 2.0), 2.5),
-            Studio::TEXT_SECONDARY,
-        );
         // Passaggio marker.
         if let Some(passaggio) = p.passaggio_midi {
-            frame.fill_rectangle(
-                Point::new(x(passaggio) - 1.0, 0.0),
-                Size::new(2.0, h),
+            frame.fill(
+                &Path::rounded_rectangle(
+                    Point::new(x(passaggio) - 1.0, 0.0),
+                    Size::new(2.0, h),
+                    Radius::from(1.0),
+                ),
                 Studio::ACCENT_BRIGHT,
             );
         }
@@ -1641,78 +1817,137 @@ impl<M> canvas::Program<M> for RangeBar<'_> {
     }
 }
 
-/// The scorecard: two cells a row, 8 px apart, 4 px between rows.
-fn grid<'a>(cells: [SummaryCell; 6]) -> Element<'a, Message> {
-    let mut rows = Column::new().width(Length::Fill);
-    let mut cells = cells.into_iter();
-    while let Some(first) = cells.next() {
-        let second: Element<'a, Message> = match cells.next() {
-            Some(cell) => metric(cell),
-            None => Space::new().width(Length::Fill).into(),
-        };
-        rows = rows.push(
-            container(
-                row![
-                    container(metric(first)).width(Length::Fill),
-                    Space::new().width(8),
-                    container(second).width(Length::Fill),
-                ]
-                .align_y(Vertical::Top),
-            )
-            .padding(Padding {
-                bottom: 4.0,
-                ..Padding::ZERO
-            }),
-        );
+/// The metric cards, `columns` a row, [`SUMMARY_GAP`] apart.
+fn metric_grid<'a>(cells: [SummaryCell; 6], columns: usize) -> Element<'a, Message> {
+    let mut rows = Column::new().width(Length::Fill).spacing(SUMMARY_GAP);
+    let mut cells = cells.into_iter().peekable();
+    while cells.peek().is_some() {
+        let mut line = row![].spacing(SUMMARY_GAP).width(Length::Fill);
+        for _ in 0..columns {
+            line = line.push(match cells.next() {
+                Some(cell) => metric(cell),
+                None => Space::new().width(Length::Fill).into(),
+            });
+        }
+        rows = rows.push(line);
     }
     rows.into()
 }
 
-/// `_Metric`: one scorecard cell — label, big value, sub-line, an optional
-/// pass/warn dot; a tap opens the matching dock tab.
+/// The fill of a metric card's bar: neutral; the verdict is the dot's.
+const METRIC_BAR_FILL: Color = Color::from_rgb8(0x8A, 0x8A, 0x96);
+
+/// `_Metric`: one metric card (`DESIGN.md`): its label (and a 6 px verdict
+/// dot where the metric has one), the reading (see [`readout`]), a 4 px bar
+/// at the cell's [`SummaryCell::level`] and the sub-line; a tap opens the
+/// matching dock tab.
 fn metric<'a>(cell: SummaryCell) -> Element<'a, Message> {
     let mut top =
-        row![cap_label(cell.label), Space::new().width(Length::Fill)].align_y(Vertical::Center);
+        row![container(card_label(cell.label)).width(Length::Fill)].align_y(Vertical::Center);
     if let Some(color) = cell.dot {
-        top = top.push(disc(7.0, color));
+        top = top.push(disc(6.0, color));
     }
-    tappable(
-        container(column![
+    let level = cell.level;
+    summary_card(
+        column![
             top,
-            Space::new().height(4),
-            studio_text(cell.value)
-                .size(16)
-                .font(font::EXTRA_BOLD)
-                .color(Studio::TEXT_PRIMARY)
-                .ellipsis(1),
+            Space::new().height(2),
+            readout(&cell.value),
+            Space::new().height(8),
+            canvas_widget(LevelBar { level })
+                .width(Length::Fill)
+                .height(4),
+            Space::new().height(6),
             studio_text(cell.sub)
-                .size(9.5)
+                .size(studio_theme::type_scale::LABEL)
+                .line_height(Pixels(studio_theme::type_scale::LINE))
                 .color(Studio::TEXT_FAINT)
                 .ellipsis(1),
-        ])
-        .width(Length::Fill)
-        // 10 / 9, and the cell's 1 px border.
-        .padding([10, 11])
-        .style(|_| boxed(Some(Studio::INSET), 8.0, Some(Studio::BORDER))),
+        ]
+        .width(Length::Fill),
         cell.tab,
     )
 }
 
-/// `_RegisterBar`: the chest / mix / head split as a caption and a 7 px
-/// bar, its ends rounded.
-fn register_bar<'a>(reg: &'a RegisterMap) -> Element<'a, Message> {
-    tappable(
+/// A metric card's 4 px bar: a `CONTROL_ACTIVE` track, filled to `level`
+/// (0 to 1; none without a reading).
+struct LevelBar {
+    level: Option<f32>,
+}
+
+impl<M> canvas::Program<M> for LevelBar {
+    type State = ();
+
+    fn draw(
+        &self,
+        _: &(),
+        renderer: &Renderer,
+        _: &Theme,
+        bounds: Rectangle,
+        _: mouse::Cursor,
+    ) -> Vec<Geometry> {
+        let mut frame = Frame::new(renderer, bounds.size());
+        let size = bounds.size();
+        let r = Radius::from(size.height / 2.0);
+        frame.fill(
+            &Path::rounded_rectangle(Point::ORIGIN, size, r),
+            Studio::CONTROL_ACTIVE,
+        );
+        if let Some(level) = self.level.filter(|l| l.is_finite()) {
+            let w = level.clamp(0.0, 1.0) * size.width;
+            if w > 0.0 {
+                frame.fill(
+                    &Path::rounded_rectangle(
+                        Point::ORIGIN,
+                        Size::new(w.max(size.height), size.height),
+                        r,
+                    ),
+                    METRIC_BAR_FILL,
+                );
+            }
+        }
+        vec![frame.into_geometry()]
+    }
+}
+
+/// `_RegisterBar`: the chest / mix / head split: a legend of swatches (read
+/// as "chest 40 · mix 35 · head 25") over a 6 px bar, its ends rounded.
+fn register_card<'a>(reg: &'a RegisterMap) -> Element<'a, Message> {
+    let swatch = |color: Color, label: String| -> Element<'a, Message> {
+        row![
+            container(Space::new().width(8).height(8)).style(move |_| boxed(
+                Some(color),
+                2.0,
+                None
+            )),
+            studio_text(label)
+                .size(studio_theme::type_scale::LABEL)
+                .line_height(Pixels(studio_theme::type_scale::LINE))
+                .tabular()
+                .color(Studio::TEXT_SECONDARY),
+        ]
+        .spacing(6)
+        .align_y(Vertical::Center)
+        .into()
+    };
+    let legend = row![
+        swatch(CHEST, format!("Chest {}%", round_to_i64(reg.chest_pct))),
+        swatch(mix_color(), format!("Mix {}%", round_to_i64(reg.mix_pct))),
+        swatch(HEAD, format!("Head {}%", round_to_i64(reg.head_pct))),
+    ]
+    .spacing(14)
+    .align_y(Vertical::Center);
+    summary_card(
         column![
-            row![
-                cap_label("Register"),
-                Space::new().width(Length::Fill),
-                text(register_line(reg)).size(10).color(Studio::TEXT_FAINT),
-            ]
-            .align_y(Vertical::Center),
-            Space::new().height(7),
+            card_label("Register"),
+            Space::new().height(2),
+            container(labelled(legend, register_line(reg)))
+                .height(22)
+                .align_y(Vertical::Bottom),
+            Space::new().height(10),
             canvas_widget(RegisterSplit { reg })
                 .width(Length::Fill)
-                .height(7),
+                .height(6),
         ]
         .width(Length::Fill),
         DockTab::Registers,
@@ -1745,21 +1980,24 @@ impl<M> canvas::Program<M> for RegisterSplit<'_> {
         _: mouse::Cursor,
     ) -> Vec<Geometry> {
         let mut frame = Frame::new(renderer, bounds.size());
+        // A 1 px gap between the shares.
         let widths = register_widths(self.reg, bounds.width);
         let colors = [CHEST, mix_color(), HEAD];
-        // The bar's 3 px rounded clip: the first share rounds the bar's left
+        // The bar's rounded ends: the first share rounds the bar's left
         // corners, the last its right ones.
         let first = widths.iter().position(|w| *w > 0.0);
         let last = widths.iter().rposition(|w| *w > 0.0);
+        let r = bounds.height / 2.0;
         let mut x = 0.0;
         for (i, (w, color)) in widths.into_iter().zip(colors).enumerate() {
             if w > 0.0 {
-                let left = if Some(i) == first { 3.0 } else { 0.0 };
-                let right = if Some(i) == last { 3.0 } else { 0.0 };
+                let left = if Some(i) == first { r } else { 0.0 };
+                let right = if Some(i) == last { r } else { 0.0 };
+                let gap = if Some(i) == last { 0.0 } else { 1.0 };
                 frame.fill(
                     &Path::rounded_rectangle(
                         Point::new(x, 0.0),
-                        Size::new(w, bounds.height),
+                        Size::new((w - gap).max(1.0), bounds.height),
                         Radius {
                             top_left: left,
                             bottom_left: left,
