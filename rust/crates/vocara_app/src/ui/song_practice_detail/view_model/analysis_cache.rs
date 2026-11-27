@@ -4,7 +4,10 @@
 //! loading/unavailable latches, whole-lane aggregate merging for multi-clip
 //! takes, the wide-range EQ display spectrogram, the inline fold-out lanes,
 //! the bottom dock (open/tab/height), and live-vs-take switching (owns the
-//! live-monitor flag and the 30 ms capture pump feeding the monitor).
+//! live-monitor flag and the 30 ms capture pump feeding the monitor). Not
+//! Dart's: the "Vocal tract" view's estimates, a take's track computed on a
+//! worker from its metrics and memoized like the profile and register, and
+//! the live one the monitor keeps (see `AnalysisCache::ensure_vocal_tract`).
 //!
 //! Selection and the playhead come from the host ([`AnalysisHost`], Dart's
 //! injected closures) — this cache owns no model or selection state. Every
@@ -58,6 +61,8 @@ use vocara_services::graph_audio_playback_service::GraphAudioPlaybackService;
 use vocara_services::mic_permission;
 use vocara_services::monitor_service::{downmix_interleaved_stereo, LiveMonitor, MonitorService};
 use vocara_services::spectrogram_service::SpectrogramAnalyses;
+use vocara_services::vocal_tract::{suggested_body, VocalTractState, VocalTractTrack};
+use vocara_tract::anatomy::BodyMix;
 
 use super::analysis_source::AnalysisSource;
 
@@ -292,6 +297,19 @@ fn agg_bytes(a: &TakeAnalysis) -> usize {
 // spectrogram, which is tuned for voice metrics rather than a wide display.
 const EQ_DISPLAY_MAX_HZ: f64 = 18000.0;
 
+/// The body the vocal tract is estimated for until the view sets one:
+/// halfway between the adult male and the adult female CHIMERA calibrated,
+/// which misses either by less than the other preset would.
+pub const DEFAULT_TRACT_BODY: BodyMix = BodyMix {
+    female: 0.5,
+    child: 0.0,
+};
+
+/// How a failed track is latched: its body and subject.
+fn tract_failure_key(body: BodyMix, key: &str) -> String {
+    format!("{},{}|{key}", body.female, body.child)
+}
+
 const MIN_DOCK_HEIGHT: f64 = 160.0;
 const MAX_DOCK_HEIGHT: f64 = 760.0;
 
@@ -322,6 +340,10 @@ struct Derived {
     agg_profile: HashMap<String, Arc<VoiceProfile>>,
     agg_ltas: HashMap<String, Arc<Ltas>>,
     agg_register: HashMap<String, Arc<RegisterMap>>,
+    /// The vocal-tract tracks (not Dart's), computed on a worker from the
+    /// metrics under the same key, for the body each names.
+    tract: HashMap<String, Arc<VocalTractTrack>>,
+    agg_tract: HashMap<String, Arc<VocalTractTrack>>,
 }
 
 impl Derived {
@@ -330,6 +352,7 @@ impl Derived {
         self.profile.remove(key);
         self.ltas.remove(key);
         self.register.remove(key);
+        self.tract.remove(key);
     }
 
     /// Dart's `_dropAggDerived`.
@@ -337,6 +360,7 @@ impl Derived {
         self.agg_profile.remove(key);
         self.agg_ltas.remove(key);
         self.agg_register.remove(key);
+        self.agg_tract.remove(key);
     }
 
     fn len(&self) -> usize {
@@ -346,6 +370,8 @@ impl Derived {
             + self.agg_profile.len()
             + self.agg_ltas.len()
             + self.agg_register.len()
+            + self.tract.len()
+            + self.agg_tract.len()
     }
 }
 
@@ -417,6 +443,18 @@ struct Compute {
 enum Pending {
     Compute(Compute),
     Merge { run: u64 },
+    VocalTract(TractCompute),
+}
+
+/// A vocal-tract track in flight: for which subject, from which metrics, for
+/// which body, and the flag an eviction of the subject's audio sets (its
+/// `wanted`).
+struct TractCompute {
+    key: String,
+    aggregate: bool,
+    metrics: Arc<VoiceMetrics>,
+    body: BodyMix,
+    disowned: Arc<AtomicBool>,
 }
 
 /// One `_ensureAggregateAnalysis` run in flight: its loop over the clips, the
@@ -553,6 +591,13 @@ pub struct AnalysisCache {
     eq_spectro_cache: LruBytesCache<Arc<Spectrogram>>,
     eq_spectro_loading: HashSet<String>,
     eq_spectro_unavailable: HashSet<String>,
+    // --- The vocal tract (not Dart's) ---
+    /// The body the tracks (and the live estimate) are for.
+    vocal_tract_body: BodyMix,
+    /// Subjects whose track computes, by job id.
+    tract_in_flight: HashMap<String, u64>,
+    /// Subjects (key and body) whose track's compute failed: not retried.
+    tract_failed: HashSet<String>,
     // Inline analysis sub-lanes (view state, not persisted): which tracks are
     // folded open (in the order they were), and which lanes each shows.
     expanded_tracks: Vec<String>,
@@ -673,6 +718,14 @@ impl AnalysisSource for CacheSource<'_> {
     fn revision(&self) -> u64 {
         self.cache.revision()
     }
+
+    fn selected_vocal_tract(&self) -> Option<Arc<VocalTractTrack>> {
+        self.cache.selected_vocal_tract(self.host)
+    }
+
+    fn vocal_tract_loading(&self) -> bool {
+        self.cache.vocal_tract_loading(self.host)
+    }
 }
 
 impl AnalysisCache {
@@ -763,6 +816,9 @@ impl AnalysisCache {
             eq_spectro_cache,
             eq_spectro_loading: HashSet::new(),
             eq_spectro_unavailable: HashSet::new(),
+            vocal_tract_body: DEFAULT_TRACT_BODY,
+            tract_in_flight: HashMap::new(),
+            tract_failed: HashSet::new(),
             expanded_tracks: Vec::new(),
             track_lanes: HashMap::new(),
             // Defaults closed; the build flag is a dev hook for previewing
@@ -1353,6 +1409,178 @@ impl AnalysisCache {
         Some(Arc::clone(cache.entry(s.key).or_insert_with(|| {
             Arc::new(analyze_register(&m, RegisterOptions::default()))
         })))
+    }
+
+    // --- The vocal tract (not Dart's) ----------------------------------------
+
+    /// The body the vocal tract is estimated for (see
+    /// [`AnalysisCache::set_vocal_tract_body`]).
+    pub fn vocal_tract_body(&self) -> BodyMix {
+        self.vocal_tract_body
+    }
+
+    /// Sets the body the vocal tract is estimated for: the live estimate,
+    /// when it runs, restarts for it, and the subject's track is asked for
+    /// again (a track of the other body stays memoized until the subject's
+    /// analysis goes, unread).
+    #[must_use]
+    pub fn set_vocal_tract_body(
+        &mut self,
+        body: BodyMix,
+        host: &dyn AnalysisHost,
+    ) -> Vec<AnalysisEffect> {
+        if self.vocal_tract_body != body {
+            self.vocal_tract_body = body;
+            let live = self.monitor.read().vocal_tract_body().is_some();
+            if live {
+                self.monitor.set_vocal_tract(Some(body));
+            }
+            self.notify();
+        }
+        self.ensure_vocal_tract(host)
+    }
+
+    /// A body to start from for the analysis subject (its metrics' F3, see
+    /// `vocara_services::vocal_tract::suggested_body`); `None` until its
+    /// metrics are in, or when too few of its frames are voiced.
+    pub fn suggested_vocal_tract_body(&self, host: &dyn AnalysisHost) -> Option<BodyMix> {
+        suggested_body(self.selected_metrics(host)?.as_ref())
+    }
+
+    /// The analysis subject's vocal-tract track for the current body, once
+    /// computed (see [`AnalysisCache::ensure_vocal_tract`]). Its times are the
+    /// subject's, as its metrics' are.
+    pub fn selected_vocal_tract(&self, host: &dyn AnalysisHost) -> Option<Arc<VocalTractTrack>> {
+        let s = self.analysis_subject(host)?;
+        let d = lock(&self.derived);
+        let map = if s.aggregate { &d.agg_tract } else { &d.tract };
+        map.get(&s.key)
+            .filter(|t| t.body() == self.vocal_tract_body)
+            .cloned()
+    }
+
+    /// Whether the analysis subject's vocal-tract track is computing.
+    pub fn vocal_tract_loading(&self, host: &dyn AnalysisHost) -> bool {
+        self.analysis_subject(host)
+            .is_some_and(|s| self.tract_in_flight.contains_key(&s.key))
+    }
+
+    /// Asks for the analysis subject's vocal-tract track. Without its metrics
+    /// it asks for them (as [`AnalysisCache::heal_selected_analysis`] does)
+    /// and must be called again once they are in: a view showing a take calls
+    /// it as it shows one, the inspector's way. With them, the track computes
+    /// on a worker (a few seconds for a long take, in an analysis-gate slot)
+    /// and is memoized beside them, dropped with them. A track computed,
+    /// computing, or whose compute failed for this body is not asked again.
+    #[must_use]
+    pub fn ensure_vocal_tract(&mut self, host: &dyn AnalysisHost) -> Vec<AnalysisEffect> {
+        if self.disposed {
+            return self.finish(host);
+        }
+        let Some(s) = self.analysis_subject(host) else {
+            return self.finish(host);
+        };
+        let Some(metrics) = self.selected_metrics(host) else {
+            return self.heal_selected_analysis(Some(false), Some(true), host);
+        };
+        let body = self.vocal_tract_body;
+        if self.selected_vocal_tract(host).is_some()
+            || self.tract_in_flight.contains_key(&s.key)
+            || self.tract_failed.contains(&tract_failure_key(body, &s.key))
+        {
+            return self.finish(host);
+        }
+        let disowned = Arc::new(AtomicBool::new(false));
+        let wanted =
+            WantedProbe::not_disowned(Arc::clone(&self.disposed_flag), Arc::clone(&disowned));
+        let id = self.id();
+        self.tract_in_flight.insert(s.key.clone(), id);
+        self.pending.insert(
+            id,
+            Pending::VocalTract(TractCompute {
+                key: s.key,
+                aggregate: s.aggregate,
+                metrics: Arc::clone(&metrics),
+                body,
+                disowned,
+            }),
+        );
+        self.effects.push(AnalysisEffect::Run(AnalysisJob {
+            id,
+            work: Work::VocalTract {
+                gate: self.gate,
+                metrics,
+                body,
+                wanted,
+            },
+        }));
+        self.notify();
+        self.finish(host)
+    }
+
+    /// The vocal tract at the playhead: the subject's track at the
+    /// playhead's time within the subject's span. `None` until the track is
+    /// computed.
+    pub fn vocal_tract_at_playhead(&self, host: &dyn AnalysisHost) -> Option<VocalTractState> {
+        let track = self.selected_vocal_tract(host)?;
+        let position_ms = i64::try_from(host.position().as_millis()).unwrap_or(i64::MAX);
+        let seconds = (position_ms - self.analysis_start_ms(host)) as f64 / 1000.0;
+        track.state_at(seconds)
+    }
+
+    /// Starts (or stops) estimating the live vocal tract, the monitor's, for
+    /// the current body: on while the view shows the live mic.
+    pub fn set_live_vocal_tract(&mut self, on: bool) {
+        self.monitor
+            .set_vocal_tract(on.then_some(self.vocal_tract_body));
+        self.notify();
+    }
+
+    /// The live vocal tract after the latest mic frame; `None` while it is
+    /// not asked for, and until its body's codebook is built.
+    pub fn live_vocal_tract(&self) -> Option<VocalTractState> {
+        self.monitor.read().vocal_tract().copied()
+    }
+
+    /// A track landed: memoized under its subject while the subject's
+    /// metrics are still the ones it came from.
+    fn tract_landed(
+        &mut self,
+        id: u64,
+        t: TractCompute,
+        result: Result<Option<Arc<VocalTractTrack>>, String>,
+    ) {
+        if self.tract_in_flight.get(&t.key) == Some(&id) {
+            self.tract_in_flight.remove(&t.key);
+        }
+        if self.disposed || t.disowned.load(Ordering::SeqCst) {
+            self.notify();
+            return;
+        }
+        match result {
+            Ok(Some(track)) => {
+                let current = if t.aggregate {
+                    self.agg_analysis_cache.get(&t.key).and_then(|a| a.metrics)
+                } else {
+                    self.metrics_cache.get(&t.key)
+                };
+                if current.is_some_and(|m| Arc::ptr_eq(&m, &t.metrics)) {
+                    let mut d = lock(&self.derived);
+                    let map = if t.aggregate {
+                        &mut d.agg_tract
+                    } else {
+                        &mut d.tract
+                    };
+                    map.insert(t.key, track);
+                }
+            }
+            // no longer wanted as the gate admitted it
+            Ok(None) => {}
+            Err(_) => {
+                self.tract_failed.insert(tract_failure_key(t.body, &t.key));
+            }
+        }
+        self.notify();
     }
 
     pub fn spectrogram_loading(&self, host: &dyn AnalysisHost) -> bool {
@@ -2283,6 +2511,16 @@ impl AnalysisCache {
         self.eq_spectro_cache.remove(path);
         self.eq_spectro_unavailable.remove(path);
         self.evict_aggregates_folding(path);
+        // the vocal-tract tracks in flight over it describe the old audio
+        for p in self.pending.values() {
+            if let Pending::VocalTract(t) = p {
+                if t.key == path || (t.aggregate && Self::aggregate_folds(&t.key, path)) {
+                    t.disowned.store(true, Ordering::SeqCst);
+                }
+            }
+        }
+        self.tract_failed
+            .retain(|k| !(k.ends_with(path) || Self::aggregate_folds(k, path)));
     }
 
     /// Drops the whole-lane aggregates that folded `path` in. Aggregate keys
@@ -2469,6 +2707,13 @@ impl AnalysisCache {
                 };
                 self.agg_merged(run, result, host);
             }
+            Some(Pending::VocalTract(t)) => {
+                let result = match done.outcome {
+                    Outcome::VocalTract(result) => result,
+                    _ => Err("not a vocal-tract track".to_string()),
+                };
+                self.tract_landed(done.id, t, result);
+            }
             None => {}
         }
         self.finish(host)
@@ -2504,7 +2749,8 @@ impl AnalysisCache {
                 };
                 self.eq_landed(c, result);
             }
-            JobKind::MergeLane => {}
+            // never a clip compute's
+            JobKind::MergeLane | JobKind::VocalTract => {}
         }
     }
 

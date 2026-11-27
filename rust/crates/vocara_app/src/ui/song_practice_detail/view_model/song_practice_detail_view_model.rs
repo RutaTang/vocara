@@ -173,6 +173,7 @@ use vocara_services::playback_engine_factory::create_playback_engine;
 use vocara_services::recording_finalizer::{Landing, RecordingFinalizer};
 use vocara_services::source_separation_service::SourceSeparationService;
 use vocara_services::spectrogram_service::SpectrogramAnalyses;
+use vocara_services::vocal_tract::VocalTractTrack;
 use vocara_services::waveform_service::{self, WaveformResult, DEFAULT_TARGET_BUCKETS};
 use vocara_store::repositories::{SongPracticeRepository, TechniqueRepository};
 use vocara_store::sync::sync_engine::RemoteApplied;
@@ -2239,5 +2240,13 @@ impl AnalysisSource for SongPracticeDetailViewModel {
 
     fn revision(&self) -> u64 {
         SongPracticeDetailViewModel::revision(self)
+    }
+
+    fn selected_vocal_tract(&self) -> Option<Arc<VocalTractTrack>> {
+        self.with_analysis(|a, h| a.selected_vocal_tract(h))
+    }
+
+    fn vocal_tract_loading(&self) -> bool {
+        self.with_analysis(|a, h| a.vocal_tract_loading(h))
     }
 }

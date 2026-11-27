@@ -4540,6 +4540,7 @@ dependencies = [
  "vocara_model",
  "vocara_services",
  "vocara_store",
+ "vocara_tract",
 ]
 
 [[package]]
