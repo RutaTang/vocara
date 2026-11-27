@@ -13,6 +13,7 @@
 //! | Thin slider | [`thin_slider`] | 12 tall row, 2 px track, 10 or 8 px knob |
 //! | Parameter row | [`parameter_row`] | 22 tall: 62 px label, control, 54 px value |
 //! | Power button | [`power_button`] | 18 px circle |
+//! | Switch (a setting on or off) | [`toggle_switch`] | 28 × 16 |
 //! | M / S / R | [`msr_button`] | 22 × 18 |
 //! | Section label | `cap_label` (sentence case, 11 px semibold) | |
 //! | Fader and meters (mixer) | [`draw_fader`], [`draw_meter`] | 22 px column, 4 px meters |
@@ -1224,6 +1225,78 @@ pub fn power_button<'a, M: Clone + 'a>(on: bool, on_toggle: M) -> Element<'a, M>
         .into()
 }
 
+// ------------------------------------------------------------------ switch
+
+/// The switch's track.
+pub const SWITCH_WIDTH: f32 = 28.0;
+pub const SWITCH_HEIGHT: f32 = 16.0;
+/// Its knob's diameter (2 px inside the track).
+pub const SWITCH_KNOB: f32 = 12.0;
+
+/// The switch's track colour: on, `ACCENT` (`ACCENT_BRIGHT` under the
+/// pointer); off, `CONTROL_ACTIVE` (`SEGMENT_SELECTED` under the pointer).
+pub fn switch_track(on: bool, hovered: bool) -> Color {
+    match (on, hovered) {
+        (true, false) => Studio::ACCENT,
+        (true, true) => Studio::ACCENT_BRIGHT,
+        (false, false) => Studio::CONTROL_ACTIVE,
+        (false, true) => Studio::SEGMENT_SELECTED,
+    }
+}
+
+/// A switch (`DESIGN.md`: a setting that is on or off, such as Settings'
+/// "Headphones only"; desktop-sized, not Material's): a 28 × 16 track,
+/// radius 8, with an inset `BORDER_STRONG` outline while off, and a 12 px
+/// `TEXT_PRIMARY` knob at its left (off) or right (on). A press sends
+/// `on_toggle`; `None` disables it (the knob at `TEXT_DISABLED`).
+pub fn toggle_switch<'a, M: Clone + 'a>(on: bool, on_toggle: Option<M>) -> Element<'a, M> {
+    let enabled = on_toggle.is_some();
+    let knob = container(Space::new())
+        .width(SWITCH_KNOB)
+        .height(SWITCH_KNOB)
+        .style(move |_| container::Style {
+            shadow: Shadow {
+                color: Color::from_rgba(0.0, 0.0, 0.0, 0.35),
+                offset: Vector::new(0.0, 1.0),
+                blur_radius: 2.0,
+            },
+            ..crate::ui::core::theme::boxed(
+                Some(if enabled {
+                    Studio::TEXT_PRIMARY
+                } else {
+                    Studio::TEXT_DISABLED
+                }),
+                SWITCH_KNOB / 2.0,
+                None,
+            )
+        });
+    let face = container(knob)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .padding(2)
+        .align_x(if on {
+            Horizontal::Right
+        } else {
+            Horizontal::Left
+        })
+        .align_y(Vertical::Center);
+    button(face)
+        .padding(0)
+        .width(SWITCH_WIDTH)
+        .height(SWITCH_HEIGHT)
+        .on_press_maybe(on_toggle)
+        .style(move |_, status| {
+            let hovered = is_hovered(status) && status != button::Status::Disabled;
+            styled(
+                Some(switch_track(on, hovered)),
+                Studio::TEXT_PRIMARY,
+                SWITCH_HEIGHT / 2.0,
+                (!on).then_some(Studio::BORDER_STRONG),
+            )
+        })
+        .into()
+}
+
 // ------------------------------------------------------------------- M S R
 
 /// What an M / S / R button toggles: its letter and its "on" colours.
@@ -1731,6 +1804,37 @@ mod tests {
             msr_colors(MsrKind::Solo, false, false),
             (Studio::CONTROL, Studio::TEXT_SECONDARY)
         );
+    }
+
+    #[test]
+    fn a_switch_toggles_and_draws_its_knob_on_its_side() {
+        // A press toggles; a disabled switch takes none.
+        let mut ui =
+            iced_test::simulator(Element::from(center(toggle_switch(false, Some(Msg::Go)))));
+        ui.point_at(Point::new(512.0, 384.0));
+        let _ = ui.simulate(iced_test::simulator::click());
+        assert_eq!(ui.into_messages().collect::<Vec<_>>(), vec![Msg::Go]);
+        let mut ui = iced_test::simulator(Element::from(center(toggle_switch::<Msg>(true, None))));
+        ui.point_at(Point::new(512.0, 384.0));
+        let _ = ui.simulate(iced_test::simulator::click());
+        assert!(ui.into_messages().next().is_none());
+
+        // Its track and knob: the knob at the left while off, the right
+        // while on; the track the accent while on.
+        let mut window = Frames::new(Size::new(SWITCH_WIDTH, SWITCH_HEIGHT));
+        let (left, right) = (Point::new(8.0, 8.0), Point::new(20.0, 8.0));
+        window.frame(toggle_switch(false, Some(Msg::Go)), &[], Instant::now());
+        assert!(
+            near(window.pixel(left), Studio::TEXT_PRIMARY),
+            "off: the knob"
+        );
+        assert!(near(window.pixel(right), switch_track(false, false)));
+        window.frame(toggle_switch(true, Some(Msg::Go)), &[], Instant::now());
+        assert!(
+            near(window.pixel(right), Studio::TEXT_PRIMARY),
+            "on: the knob"
+        );
+        assert!(near(window.pixel(left), Studio::ACCENT));
     }
 
     #[test]

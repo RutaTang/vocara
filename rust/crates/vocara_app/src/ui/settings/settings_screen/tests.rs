@@ -386,16 +386,16 @@ fn the_page_lays_out_its_sections_under_the_header() {
     let page = Setup::new().mount();
     assert!(page.shows("Settings"));
     for label in [
-        "AUDIO OUTPUT",
-        "AUDIO INPUT",
-        "MONITORING",
-        "MAINTENANCE",
-        "ABOUT",
+        "Audio output",
+        "Audio input",
+        "Monitoring",
+        "Maintenance",
+        "About",
     ] {
         assert!(page.shows(label), "{label}");
     }
-    // Each device card offers a System Default row and a refresh.
-    assert_eq!(page.count("System Default"), 2);
+    // Each device group offers a System default row and a refresh.
+    assert_eq!(page.count(SYSTEM_DEFAULT), 2);
     assert!(page.shows("Follow the macOS output device"));
     assert!(page.shows("Follow the macOS input device"));
     assert_eq!(page.count("Refresh devices"), 2);
@@ -448,7 +448,7 @@ fn the_device_cards_list_the_devices_and_pick_one() {
     assert!(page.shows("44.1 kHz"));
     assert!(page.shows("MacBook Pro Microphone"));
     assert!(page.shows("system default"));
-    // System Default is the choice in both cards.
+    // System default is the choice in both groups.
     assert_eq!(page.count(&glyph(Icon::Check)), 2);
 
     page.click("LG Monitor");
@@ -458,9 +458,9 @@ fn the_device_cards_list_the_devices_and_pick_one() {
     assert_eq!(page.count(&glyph(Icon::Check)), 2);
 
     // Back to following the system.
-    page.click_nth("System Default", 0);
+    page.click_nth(SYSTEM_DEFAULT, 0);
     assert_eq!(page.settings().output_device_uid(), None);
-    page.click_nth("System Default", 1);
+    page.click_nth(SYSTEM_DEFAULT, 1);
     assert_eq!(page.settings().input_device_uid(), None);
 }
 
@@ -1366,7 +1366,7 @@ fn a_cards_rows_show_no_ink_but_take_taps_under_the_click_cursor() {
     // Material between: their ink went on the Scaffold's Material, under
     // the card. So neither hovering nor pressing a row tints it.
     let view = || {
-        card(vec![
+        group(vec![
             action_row(
                 Icon::Wrench,
                 "Repair library",
@@ -1374,7 +1374,7 @@ fn a_cards_rows_show_no_ink_but_take_taps_under_the_click_cursor() {
                 Some(Message::RepairLibrary),
                 false,
             ),
-            divider(),
+            separator(ICON_ROW_INSET),
             action_row(Icon::FileDown, "Export", "Saves.", None, false),
         ])
     };
@@ -1385,8 +1385,8 @@ fn a_cards_rows_show_no_ink_but_take_taps_under_the_click_cursor() {
     window.point_at(spot);
     window.frame(view(), &[], t0);
     window.frame(view(), &[], t0 + 200 * MS);
-    // Studio.hover is two steps off the card's color: compare exactly.
-    let card_color = Studio::SURFACE_RAISED.into_rgba8();
+    // Studio.hover is a few steps off the group's color: compare exactly.
+    let card_color = Studio::SURFACE.into_rgba8();
     assert_eq!(window.pixel(spot).into_rgba8(), card_color, "hovered");
     assert_eq!(window.interaction(), mouse::Interaction::Pointer);
 

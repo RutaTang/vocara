@@ -467,8 +467,16 @@ impl Engine {
                     return;
                 }
 
-                let clip_mask = (!physical_bounds.is_within(&clip_bounds))
-                    .then_some(clip_mask as &_);
+                // vocara: the mask set to this text's clip, as the other
+                // texts set it; upstream drew through whatever mask the
+                // text before it had left (an editor's, say), dropping it.
+                let clip_mask = match physical_bounds.is_within(&clip_bounds) {
+                    true => None,
+                    false => {
+                        adjust_clip_mask(clip_mask, clip_bounds);
+                        Some(clip_mask as &_)
+                    }
+                };
 
                 self.text_pipeline.draw_raw(
                     &buffer,

@@ -48,11 +48,21 @@
 //! time counted from the end of its entrance (`ui::snack`); the timer is a
 //! subscription. The
 //! header ignores its buttons for a double-tap's span after it switches
-//! modes, as Dart's `IgnorePointer` did, by dropping their messages. No
-//! italic Inter face is bundled, so "Empty content" asks for italic and
-//! draws upright. The prose fields are iced text editors that
-//! grow from their minimum to their maximum lines, then scroll, as Flutter's
-//! did.
+//! modes, as Dart's `IgnorePointer` did, by dropping their messages. The
+//! prose fields are iced text editors that grow from their minimum to their
+//! maximum lines, then scroll, as Flutter's did.
+//!
+//! # The look
+//!
+//! Drawn in the design system (`DESIGN.md`) as the library and the
+//! workspace are: the unified toolbar with Back, the name, then Edit (a
+//! secondary button) and Delete (a trash icon button; while editing, Cancel
+//! and the one primary action, Save); the content in a readable column at
+//! most [`CONTENT_WIDTH`] wide, centred. The read view puts the aliases and
+//! tags as neutral tags, then the examples card, then the prose under
+//! sentence-case headings at 13 px on 20 px lines ("Empty content" in
+//! `TEXT_DISABLED` where a field is empty). The edit form labels every
+//! field above it, sentence case, the prose editors included.
 
 /// The page's message for what its snack bars report.
 fn snack_message(event: SnackEvent) -> Message {
@@ -73,8 +83,8 @@ use std::time::{Duration, Instant};
 
 use crate::ui::core::text;
 use iced::alignment::Vertical;
-use iced::widget::{center, column, container, stack, Column, Row, Space};
-use iced::{widget, Element, Font, Length, Padding, Subscription, Task};
+use iced::widget::{center, column, container, row, stack, Column, Row, Space};
+use iced::{widget, Element, Length, Padding, Pixels, Subscription, Task};
 use vocara_model::models::technique::Technique;
 use vocara_model::models::technique_media::TechniqueMedia;
 use vocara_model::util::dart_string;
@@ -89,17 +99,19 @@ use super::media::technique_media_section::{
     MediaSectionState, TechniqueMediaSection,
 };
 use super::media::technique_video_player::window_task;
-use super::studio_field::{parse_comma_list, studio_field, studio_prose_field};
+use super::studio_field::{
+    parse_comma_list, studio_field, studio_prose_field, PROSE_LINE, PROSE_SIZE,
+};
 use super::technique_analysis_section as analysis;
 use crate::app::library::RemoteAppliedBroadcast;
 use crate::router::{Navigation, Route};
 use crate::services::Services;
 use crate::ui::core::icons::Icon;
-use crate::ui::core::theme::{self, alpha, boxed, font, Studio};
+use crate::ui::core::theme::{self, boxed, font, radius, type_scale, Studio};
 use crate::ui::core::widgets::confirm_dialog::ConfirmDialog;
+use crate::ui::core::widgets::controls::{icon_button, primary_button, secondary_button};
 use crate::ui::core::widgets::fading_scrollbar::{scrollable, Fading};
 use crate::ui::core::widgets::spectrogram_painter::{release_spectrogram_images, RenderRequest};
-use crate::ui::core::widgets::studio_button::{studio_button, StudioButtonVariant};
 use crate::ui::core::widgets::studio_hint::spinner;
 use crate::ui::core::widgets::studio_text::studio_text;
 use crate::ui::core::widgets::text_field::editor as text_editor;
@@ -129,6 +141,28 @@ pub const DELETE_FAILED: &str = "Couldn't delete the technique.";
 pub const DISCARD_TITLE: &str = "Discard unsaved changes?";
 /// The read view's placeholder for a field with nothing in it.
 pub const EMPTY_CONTENT: &str = "Empty content";
+
+/// The readable column's widest (`DESIGN.md`: prose at a readable line
+/// length), centred in the page.
+pub const CONTENT_WIDTH: f32 = 760.0;
+/// The page's padding around the column.
+pub const PAGE_PADDING: Padding = Padding {
+    top: 28.0,
+    right: 32.0,
+    bottom: 40.0,
+    left: 32.0,
+};
+/// The space between the page's blocks (the properties, the examples, the
+/// prose).
+pub const SECTION_GAP: f32 = 28.0;
+/// The space between two prose sections of the read view.
+pub const PROSE_GAP: f32 = 24.0;
+/// The space between two fields of the edit form.
+pub const FIELD_GAP: f32 = 16.0;
+/// The aliases' and tags' label column.
+pub const PROPERTY_LABEL_WIDTH: f32 = 88.0;
+/// A tag's height (an alias or a tag).
+pub const TAG_HEIGHT: f32 = 20.0;
 
 /// How long the header ignores taps after it switches between edit and view
 /// (Flutter's `kDoubleTapTimeout`).
@@ -1008,7 +1042,7 @@ impl TechniqueDetailScreen {
         if !self.editing {
             bar = bar
                 .push(toolbar::back_button(Message::Back))
-                .push(Space::new().width(8));
+                .push(Space::new().width(4));
         }
         // Filling (not shrinking with a spacer) so the title takes the
         // middle and the action buttons sit flush against the right edge.
@@ -1016,30 +1050,27 @@ impl TechniqueDetailScreen {
             .push(container(toolbar::title(title)).width(Length::Fill))
             .push(Space::new().width(12));
         if self.editing {
+            // The form's commit: Cancel, then the one primary action.
             bar = bar
-                .push(studio_button("Cancel", Message::Cancel).enabled(!self.cancel_blocked()))
+                .push(secondary_button(
+                    "Cancel",
+                    (!self.cancel_blocked()).then_some(Message::Cancel),
+                ))
                 .push(Space::new().width(8))
-                .push(
-                    studio_button("Save", Message::Save)
-                        .icon(Icon::Check)
-                        .variant(StudioButtonVariant::Accent)
-                        .enabled(!self.save_blocked()),
-                );
+                .push(primary_button(
+                    "Save",
+                    (!self.save_blocked()).then_some(Message::Save),
+                ));
         } else if technique.is_some() {
-            // Shown but disabled while a practice take is recording (or
-            // starting): the editor has no practice Stop to end it.
+            // Edit is shown but disabled while a practice take is recording
+            // (or starting): the editor has no practice Stop to end it.
             bar = bar
-                .push(
-                    studio_button("Edit", Message::Edit)
-                        .icon(Icon::Pencil)
-                        .enabled(vm.can_edit()),
-                )
-                .push(Space::new().width(8))
-                .push(
-                    studio_button("Delete", Message::Delete)
-                        .icon(Icon::Trash2)
-                        .variant(StudioButtonVariant::Danger),
-                );
+                .push(secondary_button(
+                    "Edit",
+                    vm.can_edit().then_some(Message::Edit),
+                ))
+                .push(Space::new().width(6))
+                .push(icon_button(Icon::Trash2, Message::Delete).tooltip("Delete"));
         }
         // The page's toolbar (`widgets::toolbar`).
         toolbar::page_toolbar(bar)
@@ -1051,7 +1082,13 @@ impl TechniqueDetailScreen {
             return center(spinner(36.0, 4.0, Studio::TEXT_SECONDARY)).into();
         }
         let Some(t) = vm.technique() else {
-            return center(text(NOT_LOADED).size(13).color(Studio::TEXT_SECONDARY)).into();
+            return center(
+                studio_text(NOT_LOADED)
+                    .size(type_scale::BODY)
+                    .line_height(Pixels(18.0))
+                    .color(Studio::TEXT_SECONDARY),
+            )
+            .into();
         };
         match self.form.as_deref().filter(|_| self.editing) {
             Some(form) => self.edit_form(form),
@@ -1073,52 +1110,34 @@ impl TechniqueDetailScreen {
     }
 
     /// The read-only view: the same fields as the edit form, in the same
-    /// order, display only. Every field is shown; empty ones read "Empty
-    /// content".
+    /// order, display only, in the readable column. The aliases and tags as
+    /// neutral tags, the examples, then the prose under sentence-case
+    /// headings; empty fields read "Empty content".
     fn viewer<'a>(&'a self, t: &'a Technique) -> Element<'a, Message> {
-        let chips =
-            |labels: &'a [String], tint: bool| (!labels.is_empty()).then(|| chip_row(labels, tint));
         let page = column![
-            view_field("Aliases", chips(&t.aliases, false), None, false),
-            Space::new().height(20),
-            view_field("Tags", chips(&t.tags, true), None, false),
-            Space::new().height(20),
+            properties(&t.aliases, &t.tags),
+            Space::new().height(SECTION_GAP),
             self.media_section(),
-            Space::new().height(24),
-            view_field("Summary", None, Some(&t.summary), false),
-            Space::new().height(20),
-            view_field("Description", None, Some(&t.description), false),
-            Space::new().height(20),
-            view_field("How to produce it", None, Some(&t.cues), false),
-            Space::new().height(20),
-            view_field("Exercises", None, Some(&t.exercises), false),
-            Space::new().height(20),
-            view_field(
-                "Acoustic signature in Vocara",
-                None,
-                Some(&t.acoustic_signature),
-                true
-            ),
-        ]
-        .width(Length::Fill)
-        .padding(Padding {
-            top: 22.0,
-            right: 28.0,
-            bottom: 28.0,
-            left: 28.0,
-        });
-        scrollable(page)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .fading()
-            .into()
+            Space::new().height(SECTION_GAP),
+            prose_section("Summary", &t.summary),
+            Space::new().height(PROSE_GAP),
+            prose_section("Description", &t.description),
+            Space::new().height(PROSE_GAP),
+            prose_section("How to produce it", &t.cues),
+            Space::new().height(PROSE_GAP),
+            prose_section("Exercises", &t.exercises),
+            Space::new().height(PROSE_GAP),
+            prose_section("Acoustic signature in Vocara", &t.acoustic_signature),
+        ];
+        reading_column(page)
     }
 
-    /// The edit form: the labeled text fields, then the examples block,
-    /// then the prose. Frozen while the save commits: the commit snapshotted
-    /// the form and the media draft when it started, so text or media edits
-    /// made during it would be silently thrown away when the save lands and
-    /// the screen drops out of edit mode.
+    /// The edit form, in the readable column: the labelled fields, then the
+    /// examples block, then the prose, each under its sentence-case label.
+    /// Frozen while the save commits: the commit snapshotted the form and the
+    /// media draft when it started, so text or media edits made during it
+    /// would be silently thrown away when the save lands and the screen drops
+    /// out of edit mode.
     fn edit_form<'a>(&'a self, form: &'a EditForm) -> Element<'a, Message> {
         let enabled = !self.vm.saving();
         let line = |label: &str, value: &'a str, hint: &str, field: LineField| {
@@ -1145,29 +1164,25 @@ impl TechniqueDetailScreen {
         };
         let page: Column<'a, Message> = column![
             line("Name", &form.name, "e.g. Twang", LineField::Name),
-            Space::new().height(16),
+            Space::new().height(FIELD_GAP),
             line(
                 "Aliases (comma separated)",
                 &form.aliases,
                 "e.g. Edge, Brassy quality",
                 LineField::Aliases,
             ),
-            Space::new().height(16),
+            Space::new().height(FIELD_GAP),
             line(
                 "Tags (comma separated)",
                 &form.tags,
                 "e.g. EVT, Voice quality, Resonance",
                 LineField::Tags,
             ),
-            Space::new().height(22),
-            rule(),
-            Space::new().height(20),
+            Space::new().height(SECTION_GAP),
             // Examples sit right after the identity fields so they're
             // visible without scrolling past the long prose fields.
             self.media_section(),
-            Space::new().height(22),
-            rule(),
-            Space::new().height(20),
+            Space::new().height(SECTION_GAP),
             prose(
                 "Summary",
                 &form.summary,
@@ -1175,7 +1190,7 @@ impl TechniqueDetailScreen {
                 (1, 2),
                 ProseField::Summary,
             ),
-            Space::new().height(16),
+            Space::new().height(FIELD_GAP),
             prose(
                 "Description",
                 &form.description,
@@ -1183,7 +1198,7 @@ impl TechniqueDetailScreen {
                 (3, 8),
                 ProseField::Description,
             ),
-            Space::new().height(16),
+            Space::new().height(FIELD_GAP),
             prose(
                 "How to produce it",
                 &form.cues,
@@ -1191,7 +1206,7 @@ impl TechniqueDetailScreen {
                 (3, 8),
                 ProseField::Cues,
             ),
-            Space::new().height(16),
+            Space::new().height(FIELD_GAP),
             prose(
                 "Exercises",
                 &form.exercises,
@@ -1199,7 +1214,7 @@ impl TechniqueDetailScreen {
                 (2, 6),
                 ProseField::Exercises,
             ),
-            Space::new().height(16),
+            Space::new().height(FIELD_GAP),
             prose(
                 "Acoustic signature in Vocara",
                 &form.acoustic,
@@ -1208,19 +1223,9 @@ impl TechniqueDetailScreen {
                 ProseField::Acoustic,
             ),
         ];
-        scrollable(page.width(Length::Fill).padding(Padding {
-            top: 20.0,
-            right: 28.0,
-            bottom: 28.0,
-            left: 28.0,
-        }))
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .fading()
-        .into()
+        reading_column(page)
     }
 }
-
 impl Screen for TechniqueDetailScreen {
     type Message = Message;
 
@@ -1309,88 +1314,116 @@ fn discard_dialog(then: fn(bool) -> Message) -> Update<Message> {
     )
 }
 
-/// A full-width 1 px line in `Studio.border`.
-fn rule<'a>() -> Element<'a, Message> {
-    container(Space::new())
-        .width(Length::Fill)
-        .height(1)
-        .style(theme::fill(Studio::BORDER))
+/// The page's content in its readable column: at most [`CONTENT_WIDTH`]
+/// wide, centred, in the page's padding, scrolling vertically.
+fn reading_column<'a>(page: Column<'a, Message>) -> Element<'a, Message> {
+    scrollable(
+        container(
+            container(page.width(Length::Fill))
+                .width(Length::Fill)
+                .max_width(CONTENT_WIDTH),
+        )
+        .center_x(Length::Fill)
+        .padding(PAGE_PADDING),
+    )
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .fading()
+    .into()
+}
+
+/// A section's heading in the read view and over the examples: 13 px
+/// semibold `TEXT_PRIMARY`, sentence case.
+pub fn section_heading<'a, M: 'a>(label: &'a str) -> Element<'a, M> {
+    studio_text(label)
+        .size(type_scale::TITLE)
+        .font(font::SEMIBOLD)
+        .line_height(Pixels(18.0))
+        .color(Studio::TEXT_PRIMARY)
         .into()
 }
 
-/// `_ViewField`: a labeled read-only field. Shows `child` (e.g. chips) or
-/// `text`; when both are absent/blank it shows a muted "Empty content"
-/// placeholder so every field stays visible.
-fn view_field<'a>(
-    label: &str,
-    child: Option<Element<'a, Message>>,
-    value: Option<&'a str>,
-    accent: bool,
-) -> Element<'a, Message> {
-    let body: Element<'a, Message> = match (child, value) {
-        (Some(child), _) => child,
-        (None, Some(value)) if !dart_string::trim(value).is_empty() => text(value)
-            .size(14)
-            .line_height(1.5)
+/// "Empty content": what a field with nothing in it reads, at `size` on
+/// `line` px lines, in `TEXT_DISABLED`.
+fn empty_content<'a>(size: f32, line: f32) -> Element<'a, Message> {
+    studio_text(EMPTY_CONTENT)
+        .size(size)
+        .line_height(Pixels(line))
+        .color(Studio::TEXT_DISABLED)
+        .into()
+}
+
+/// A prose field of the read view: its heading, then its text at 13 px on
+/// 20 px lines (or "Empty content").
+fn prose_section<'a>(label: &'a str, value: &'a str) -> Element<'a, Message> {
+    let body: Element<'a, Message> = if dart_string::trim(value).is_empty() {
+        empty_content(PROSE_SIZE, PROSE_LINE)
+    } else {
+        text(value)
+            .size(PROSE_SIZE)
+            .line_height(Pixels(PROSE_LINE))
             .color(Studio::TEXT_PRIMARY)
-            .into(),
-        _ => text(EMPTY_CONTENT)
-            .size(13)
-            .font(Font {
-                style: iced::font::Style::Italic,
-                ..font::REGULAR
-            })
-            .color(Studio::TEXT_FAINT)
-            .into(),
+            .width(Length::Fill)
+            .into()
+    };
+    column![section_heading(label), Space::new().height(6), body]
+        .width(Length::Fill)
+        .into()
+}
+
+/// The aliases and the tags: a row each, its label in a column of its own
+/// (12 px `TEXT_SECONDARY`), then its items as neutral tags (or "Empty
+/// content").
+fn properties<'a>(aliases: &'a [String], tags: &'a [String]) -> Element<'a, Message> {
+    let property = |label: &'a str, items: &'a [String]| -> Element<'a, Message> {
+        let value: Element<'a, Message> = if items.is_empty() {
+            container(empty_content(type_scale::BODY, TAG_HEIGHT)).into()
+        } else {
+            tag_row(items)
+        };
+        row![
+            container(
+                studio_text(label)
+                    .size(type_scale::BODY)
+                    .line_height(Pixels(TAG_HEIGHT))
+                    .color(Studio::TEXT_SECONDARY),
+            )
+            .width(PROPERTY_LABEL_WIDTH),
+            container(value).width(Length::Fill),
+        ]
+        .align_y(Vertical::Top)
+        .into()
     };
     column![
-        studio_text(label.to_uppercase())
-            .size(10.5)
-            .font(font::BOLD)
-            .letter_spacing(0.6)
-            .color(if accent {
-                Studio::ACCENT_BRIGHT
-            } else {
-                Studio::TEXT_FAINT
-            }),
-        Space::new().height(7),
-        body,
+        property("Aliases", aliases),
+        Space::new().height(8),
+        property("Tags", tags),
     ]
     .width(Length::Fill)
     .into()
 }
 
-/// `_ChipRow`: the aliases (plain) or tags (tinted) as wrapping chips.
-fn chip_row<'a>(labels: &'a [String], tint: bool) -> Element<'a, Message> {
-    let (fill, border, fg) = if tint {
-        (
-            alpha(Studio::ACCENT, 0.12),
-            alpha(Studio::ACCENT, 0.3),
-            Studio::ACCENT_BRIGHT,
-        )
-    } else {
-        (
-            Studio::SURFACE_RAISED,
-            Studio::BORDER,
-            Studio::TEXT_SECONDARY,
-        )
-    };
-    let chips = labels.iter().map(|label| {
-        // 8 / 3 inside the 1 px border.
+/// `_ChipRow`: the aliases or the tags as neutral tags (`DESIGN.md`: no
+/// chips, no coral), wrapping: 20 px, radius 4, 11 px `TEXT_SECONDARY` on
+/// `CONTROL`, 4 apart.
+fn tag_row<'a>(labels: &'a [String]) -> Element<'a, Message> {
+    let tags = labels.iter().map(|label| {
         container(
-            text(label.as_str())
-                .size(11.5)
-                .font(font::SEMIBOLD)
-                .color(fg),
+            studio_text(label.as_str())
+                .size(type_scale::LABEL)
+                .line_height(Pixels(type_scale::LINE))
+                .color(Studio::TEXT_SECONDARY),
         )
-        .padding([4, 9])
-        .style(move |_| boxed(Some(fill), 6.0, Some(border)))
+        .height(TAG_HEIGHT)
+        .padding([0, 7])
+        .center_y(TAG_HEIGHT)
+        .style(|_| boxed(Some(Studio::CONTROL), radius::SMALL, None))
         .into()
     });
-    Row::with_children(chips)
-        .spacing(6)
+    Row::with_children(tags)
+        .spacing(4)
         .align_y(Vertical::Center)
         .wrap()
-        .vertical_spacing(6)
+        .vertical_spacing(4)
         .into()
 }

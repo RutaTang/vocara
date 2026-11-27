@@ -308,12 +308,12 @@ fn the_gap_table_compares_the_metrics_both_takes_have() {
     assert_eq!(
         labels,
         [
-            "RING",
-            "TILT",
+            "Ring",
+            "Tilt",
             "CPP",
-            "SINGER'S FORMANT",
-            "RANGE",
-            "DYNAMICS"
+            "Singer's formant",
+            "Range",
+            "Dynamics"
         ]
     );
 
@@ -343,7 +343,7 @@ fn the_gap_table_compares_the_metrics_both_takes_have() {
         .iter()
         .map(|r| r.label)
         .collect();
-    assert!(!labels.contains(&"RANGE"));
+    assert!(!labels.contains(&"Range"));
 }
 
 // `_QualityWarning`: a clipped take, then a noisy one, flagged rather than

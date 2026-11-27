@@ -336,14 +336,14 @@ fn the_viewer_shows_the_fields_and_play_only_examples() {
     let mut h = Harness::loaded(Setup::new(full(media)));
     h.size = Size::new(1200.0, 900.0);
     assert!(h.shows("Twang"), "the header names it");
-    assert!(h.shows("EXAMPLES"));
+    assert!(h.shows("Examples"));
     assert!(h.shows("a.m4a") && h.shows("b.mp4"));
     assert!(h.shows("Edge") && h.shows("EVT") && h.shows("Voice quality"));
     assert!(h.shows("Bright carrying quality."));
-    assert!(h.shows("ACOUSTIC SIGNATURE IN VOCARA"));
+    assert!(h.shows("Acoustic signature in Vocara"));
     // The block shows, but with no add/drop zone (read-only).
     assert!(!h.shows(ADD_FIRST));
-    assert_eq!(h.count(&glyph(Icon::Pencil)), 1, "Edit's, no rename");
+    assert_eq!(h.count(&glyph(Icon::Pencil)), 0, "no rename");
     // The audio example's player opens now; the video's waits for its play.
     assert_eq!(h.built().len(), 1);
 }
@@ -360,7 +360,7 @@ fn an_empty_technique_shows_every_field_with_a_placeholder() {
     assert!(!h.shows("Save"));
     // Every field stays visible; empty ones read "Empty content". The
     // Examples label shows too, but with no add/drop zone.
-    assert!(h.shows("EXAMPLES"));
+    assert!(h.shows("Examples"));
     assert!(!h.shows(ADD_FIRST));
     // Aliases, tags, examples, summary, description, cues, exercises, and
     // the acoustic signature.
@@ -405,7 +405,7 @@ fn edit_opens_the_form_with_cancel_and_save_in_the_header() {
     assert!(h.shows("Save"));
     assert!(!h.shows("Delete"));
     // Media is addable while editing too.
-    assert!(h.shows("EXAMPLES"));
+    assert!(h.shows("Examples"));
     assert!(h.shows(ADD_FIRST));
     assert!(h.shows("Name"));
     assert_eq!(h.screen.form().map(EditForm::name), Some("Twang"));
@@ -875,8 +875,8 @@ fn starting_a_practice_take_pauses_every_example_player() {
 
     // Nor can one be started again until the take ends: paused only at the
     // arm, an example played on into the take.
-    assert_eq!(h.count(&glyph(Icon::Play)), 2);
-    let pressed = h.press(&glyph(Icon::Play));
+    assert_eq!(h.count("Play"), 2);
+    let pressed = h.press("Play");
     h.feed(pressed);
     h.settle();
     assert!(built.iter().all(|p| p.plays() == 0));
@@ -1017,8 +1017,8 @@ fn a_practice_take_is_compared_against_the_reference() {
     h.settle();
     assert!(h.vm().practice_analysis().is_some());
     assert!(h.shows(analysis::RE_RECORD));
-    assert!(h.shows("REFERENCE") && h.shows("YOU") && h.shows("GAP"));
-    assert!(h.shows("RING") && h.shows("SINGER'S FORMANT"));
+    assert!(h.shows("You") && h.shows("Gap"));
+    assert!(h.shows("Ring") && h.shows("Singer's formant"));
 
     h.click(analysis::YOUR_PRACTICE);
     assert_eq!(
@@ -1028,7 +1028,7 @@ fn a_practice_take_is_compared_against_the_reference() {
     h.click(analysis::CLEAR);
     assert!(h.vm().practice_analysis().is_none());
     assert!(h.shows(analysis::RECORD_PRACTICE));
-    assert!(!h.shows("GAP"));
+    assert!(!h.shows("Gap"));
 }
 
 // The page's dimension bar picks the view the box shows, and keeps it on

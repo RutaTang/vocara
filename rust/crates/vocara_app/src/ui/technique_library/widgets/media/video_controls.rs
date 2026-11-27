@@ -41,8 +41,10 @@
 //! - **The seek bar** (`:901-1117`): a 3.2 px bar of white at 24 % (5.6
 //!   under the pointer; 150 ms), over it the hovered span (from the start
 //!   to the pointer), the buffered span, both white at 24 %, and the
-//!   played span in red; a red thumb (12 px, growing from nothing over 150
-//!   ms while hovered or pressed) whose left edge sits at `(width - 6) ×`
+//!   played span in `TEXT_PRIMARY` (media_kit's was red; the design keeps
+//!   its accent for meaning); a thumb in it too (12 px, growing from
+//!   nothing over 150 ms while hovered or pressed) whose left edge sits at
+//!   `(width - 6) ×`
 //!   the fraction. A press cancels the hide timer; each move while pressed
 //!   seeks to the pointer's fraction, as does the release, which restarts
 //!   the timer; while pressed the played span follows the pointer. The
@@ -131,7 +133,7 @@ use iced::{
 
 use crate::ui::core::material_icons::{self, MaterialIcon};
 use crate::ui::core::motion::{Controller, Curve, Implicit};
-use crate::ui::core::theme::{faded, font, Zinc};
+use crate::ui::core::theme::{faded, font, Studio};
 use crate::ui::core::widgets::opacity_layer::Effects as _;
 use crate::ui::core::widgets::pan_zoom::{self, Scroll};
 use crate::ui::core::widgets::studio_hint::arc_at;
@@ -171,8 +173,9 @@ pub const BUTTON_MIN_SIZE: f32 = 40.0;
 /// forui's icon-button shape (its `style.borderRadius`).
 pub const BUTTON_RADIUS: f32 = 8.0;
 
-/// forui's ghost button background, hovered or pressed.
-pub const BUTTON_LIT: Color = Zinc::SECONDARY;
+/// A button's background, hovered or pressed (forui's ghost button's,
+/// drawn in the design's `CONTROL`).
+pub const BUTTON_LIT: Color = Studio::CONTROL;
 
 /// The `InkWell`'s hovered highlight (`IconButton.styleFrom`'s overlay:
 /// the foreground at 8 %).
@@ -210,8 +213,9 @@ pub const SEEK_BAR_OFFSET: f32 = 16.0;
 /// `0x3D`.
 pub const SEEK_BAR_COLOR: Color = Color::from_rgba(1.0, 1.0, 1.0, 0x3D as f32 / 255.0);
 
-/// `seekBarPositionColor` and `seekBarThumbColor`.
-pub const SEEK_BAR_POSITION_COLOR: Color = Color::from_rgb(1.0, 0.0, 0.0);
+/// `seekBarPositionColor` and `seekBarThumbColor`: `TEXT_PRIMARY`
+/// (`DESIGN.md`: the accent is for meaning; media_kit's were red).
+pub const SEEK_BAR_POSITION_COLOR: Color = Studio::TEXT_PRIMARY;
 
 /// `seekBarThumbSize`.
 pub const SEEK_BAR_THUMB_SIZE: f32 = 12.0;

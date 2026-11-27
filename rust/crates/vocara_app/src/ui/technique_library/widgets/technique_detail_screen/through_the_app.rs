@@ -177,7 +177,7 @@ fn the_library_opens_a_technique_and_back_returns_to_it() {
     // Its page loaded: the name in the header, the read view's actions.
     assert!(shows(&app, "Twang"));
     assert!(shows(&app, "Edit") && shows(&app, "Delete"));
-    assert!(shows(&app, "EXAMPLES"));
+    assert!(shows(&app, "Examples"));
     assert!(!shows(&app, "New technique"), "the library is covered");
 
     click(&mut app, &chevron());

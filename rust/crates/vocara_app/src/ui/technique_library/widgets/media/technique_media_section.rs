@@ -38,6 +38,17 @@
 //!   ([`ExamplePlayers::set_play_blocked`]), and carries an
 //!   [`Event::Window`] out on the window.
 //!
+//! # The look
+//!
+//! Drawn in the design system (`DESIGN.md`): the "Examples" heading as the
+//! page's other sections; each example a card (`SURFACE`, radius 8, an
+//! inset `BORDER` outline) with a 24 px header (its kind's glyph, its name,
+//! then 24 px icon buttons: Export, Rename and Remove under the pointer,
+//! and the analysis chevron), its player bar, and its analysis when
+//! expanded; the add zone a well with a plus and a line of text; the
+//! record control a 22 px ghost button with a red dot, and while a take
+//! records a thin level meter and a Stop.
+//!
 //! # Differences from Flutter
 //!
 //! The hover icons fade (120 ms), the zone's padding and drag highlight
@@ -45,17 +56,15 @@
 //! implicit animations did; the turned chevron at rest is the up chevron
 //! (the same glyph turned half a turn); the faded zone and the hover icons
 //! fade as one layer each (`Opacity`, `AnimatedOpacity`:
-//! `widgets::opacity_layer`). No italic Inter face is bundled, so "Empty content"
-//! asks for italic and draws upright. The Dart level meter's fill had no
-//! height (a childless `ColoredBox` under `Align` takes the smallest size),
-//! so it never showed; here it fills the meter's 8 px, as intended.
+//! `widgets::opacity_layer`). The Dart level meter's fill had no height (a
+//! childless `ColoredBox` under `Align` takes the smallest size), so it
+//! never showed; here it fills the meter, as intended.
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::{Path as FilePath, PathBuf};
 use std::time::Duration;
 
-use crate::ui::core::text;
 use iced::alignment::{Horizontal, Vertical};
 use iced::widget::canvas::{self, Frame, Geometry, Path};
 use iced::widget::{
@@ -63,7 +72,7 @@ use iced::widget::{
     Space,
 };
 use iced::{
-    mouse, widget, Color, Element, Font, Length, Padding, Point, Rectangle, Renderer, Size,
+    mouse, widget, Color, Element, Length, Padding, Pixels, Point, Rectangle, Renderer, Size,
     Subscription, Task, Theme,
 };
 use vocara_model::models::technique_media::TechniqueMedia;
@@ -75,15 +84,23 @@ use super::technique_audio_player as audio;
 use super::technique_video_player::WindowRequest;
 use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::motion::Curve;
-use crate::ui::core::theme::{self, alpha, bare_button, boxed, font, Studio};
+use crate::ui::core::theme::{
+    self, alpha, bare_button, boxed, font, height, radius, type_scale, Studio,
+};
 use crate::ui::core::widgets::animated::{animated, animated_container, Decoration};
-use crate::ui::core::widgets::confirm_dialog::{self, modal, DialogResult, Fade};
-use crate::ui::core::widgets::material_tooltip::material_tooltip;
+use crate::ui::core::widgets::confirm_dialog::{
+    self, buttons, card as dialog_card, field_label, modal, title, DialogResult, Fade,
+};
+use crate::ui::core::widgets::controls::{
+    dialog_button_colors, icon_button, labelled, DialogButton,
+};
+use crate::ui::core::widgets::line_icon::{glyphs, line_icon};
 use crate::ui::core::widgets::opacity_layer::opacity_layer;
 use crate::ui::core::widgets::studio_hint::spinner;
 use crate::ui::core::widgets::studio_text::studio_text;
 use crate::ui::core::widgets::text_field::text_input;
 use crate::ui::core::widgets::visible_drop_target::visible_drop_target;
+use crate::ui::technique_library::widgets::technique_detail_screen::section_heading;
 
 /// How long the hover icons take to fade in or out (`AnimatedOpacity`).
 pub const HOVER_ANIMATION: Duration = Duration::from_millis(120);
@@ -504,17 +521,11 @@ impl<'a> TechniqueMediaSection<'a> {
     {
         let has_analysis = analysis.is_some();
         let mut analysis = analysis;
-        let mut header = row![
-            studio_text("EXAMPLES")
-                .size(10.5)
-                .font(font::BOLD)
-                .letter_spacing(0.6)
-                .color(Studio::ACCENT_BRIGHT),
-            Space::new().width(8),
-        ]
-        .align_y(Vertical::Center);
+        let mut header = row![section_heading("Examples"), Space::new().width(8)]
+            .height(18)
+            .align_y(Vertical::Center);
         if self.importing {
-            header = header.push(spinner(12.0, 1.8, Studio::TEXT_SECONDARY));
+            header = header.push(spinner(12.0, 1.6, Studio::TEXT_SECONDARY));
         }
         let mut content: Column<'a, M> = column![
             Element::from(header).map(on_message.clone()),
@@ -562,13 +573,10 @@ impl<'a> TechniqueMediaSection<'a> {
             // Read view with no clips: keep the field visible with a
             // placeholder.
             content = content.push(
-                text(EMPTY)
-                    .size(13)
-                    .font(Font {
-                        style: iced::font::Style::Italic,
-                        ..font::REGULAR
-                    })
-                    .color(Studio::TEXT_FAINT),
+                studio_text(EMPTY)
+                    .size(type_scale::TITLE)
+                    .line_height(Pixels(20.0))
+                    .color(Studio::TEXT_DISABLED),
             );
         }
         content.width(Length::Fill).into()
@@ -607,24 +615,29 @@ impl<'a> TechniqueMediaSection<'a> {
                 13.0,
                 Studio::TEXT_FAINT,
             ),
-            Space::new().width(6),
+            Space::new().width(8),
             // The name area toggles the analysis (when expandable).
             button(
-                studio_text(label.clone())
-                    .size(12)
-                    .font(font::MEDIUM)
-                    .color(Studio::TEXT_SECONDARY)
-                    .width(Length::Fill)
-                    .ellipsis(1),
+                container(
+                    studio_text(label.clone())
+                        .size(type_scale::BODY)
+                        .line_height(Pixels(type_scale::LINE))
+                        .font(font::MEDIUM)
+                        .color(Studio::TEXT_PRIMARY)
+                        .width(Length::Fill)
+                        .ellipsis(1),
+                )
+                .center_y(height::PANEL_BUTTON),
             )
             .width(Length::Fill)
             .padding(0)
             .style(bare_button)
             .on_press_maybe(can_expand.then(|| Message::ToggleExpand(m.id.clone()))),
         ]
+        .height(height::PANEL_BUTTON)
         .align_y(Vertical::Center);
         if editable || self.exportable {
-            header = header.push(Space::new().width(8)).push(hover_actions(
+            header = header.push(Space::new().width(4)).push(hover_actions(
                 hovered,
                 self.exportable,
                 editable,
@@ -633,7 +646,7 @@ impl<'a> TechniqueMediaSection<'a> {
             ));
         }
         if can_expand {
-            header = header.push(Space::new().width(8)).push(expand_chevron(
+            header = header.push(Space::new().width(2)).push(expand_chevron(
                 expanded,
                 Message::ToggleExpand(m.id.clone()),
             ));
@@ -653,27 +666,27 @@ impl<'a> TechniqueMediaSection<'a> {
         ];
         if let Some(analysis) = analysis {
             body = body
-                .push(Space::new().height(14))
+                .push(Space::new().height(12))
                 .push(divider())
-                .push(Space::new().height(14))
+                .push(Space::new().height(12))
                 .push(analysis);
         }
+        // The open card (the example the analysis follows) is outlined a
+        // step stronger.
         let border = if expanded {
-            alpha(Studio::ACCENT, 0.4)
+            CARD_OUTLINE_OPEN
         } else {
             Studio::BORDER
         };
-        // 12/10/12/12 of padding inside the 1 px border (a decoration's
-        // border pads its child; an iced border does not).
         let card = container(body.width(Length::Fill))
             .width(Length::Fill)
             .padding(Padding {
-                top: 11.0,
-                right: 13.0,
-                bottom: 13.0,
-                left: 13.0,
+                top: 8.0,
+                right: 8.0,
+                bottom: 12.0,
+                left: 12.0,
             })
-            .style(move |_| boxed(Some(Studio::SURFACE), 10.0, Some(border)));
+            .style(move |_| boxed(Some(Studio::SURFACE), radius::CARD, Some(border)));
         mouse_area(card)
             .on_enter(on_message(Message::Hover(m.id.clone(), true)))
             .on_exit(on_message(Message::Hover(m.id.clone(), false)))
@@ -687,34 +700,35 @@ impl<'a> TechniqueMediaSection<'a> {
         let dense = !self.media.is_empty();
         let dragging = state.dragging() && enabled;
         let fg = if dragging {
-            Studio::ACCENT
+            Studio::TEXT_PRIMARY
         } else {
             Studio::TEXT_SECONDARY
         };
+        // A drop over it is the zone's selection: the accent's outline.
         let (fill, border) = if dragging {
             (alpha(Studio::ACCENT, 0.08), alpha(Studio::ACCENT, 0.6))
         } else {
-            (Studio::PANEL, Studio::BORDER)
+            (Studio::WELL, Studio::BORDER_STRONG)
         };
         let content = row![
-            icons::icon(Icon::Plus, 15.0, fg),
+            line_icon(glyphs::PLUS, 12.0, fg),
             Space::new().width(8),
             studio_text(if dense { ADD_ANOTHER } else { ADD_FIRST })
-                .size(12.5)
-                .font(font::MEDIUM)
+                .size(type_scale::BODY)
+                .line_height(Pixels(type_scale::LINE))
                 .color(fg)
                 .ellipsis(1),
         ]
         .align_y(Vertical::Center);
-        // 16 across and 12 (dense) or 22 down, inside the 1 px border. The
-        // padding and the drag's tint move over 120 ms, linear (the Dart
+        // 16 across and 7 (dense: a 30 px zone) or 22 down. The padding and
+        // the drag's tint move over 120 ms, linear (the Dart
         // `AnimatedContainer`), inside the `Opacity` that fades a disabled
         // zone to half at once, as one layer.
         let zone = animated_container(content, ZONE_ANIMATION)
             .width(Length::Fill)
             .align((0.0, -1.0))
-            .padding([if dense { 13.0 } else { 23.0 }, 17.0])
-            .decoration(Decoration::boxed(fill, 10.0, border, 1.0));
+            .padding([if dense { 7.0 } else { 22.0 }, 16.0])
+            .decoration(Decoration::boxed(fill, radius::CARD, border, 1.0));
         let tap = button(opacity_layer(if enabled { 1.0 } else { 0.5 }, zone))
             .width(Length::Fill)
             .padding(0)
@@ -735,19 +749,21 @@ impl<'a> TechniqueMediaSection<'a> {
     fn record_row(&self) -> Element<'a, Message> {
         if self.saving_recording {
             return row![
-                spinner(13.0, 1.8, Studio::TEXT_SECONDARY),
+                spinner(12.0, 1.6, Studio::TEXT_SECONDARY),
                 Space::new().width(8),
                 // A pending start is busy too, but nothing is recorded yet:
                 // it read "Saving example…" through the permission prompt
                 // and the mic open.
-                text(if self.starting_recording {
+                studio_text(if self.starting_recording {
                     STARTING
                 } else {
                     SAVING
                 })
-                .size(12)
+                .size(type_scale::BODY)
+                .line_height(Pixels(type_scale::LINE))
                 .color(Studio::TEXT_FAINT),
             ]
+            .height(height::CONTROL)
             .align_y(Vertical::Center)
             .into();
         }
@@ -761,18 +777,17 @@ impl<'a> TechniqueMediaSection<'a> {
                 Space::new().width(10),
                 rec_button(
                     STOP,
-                    Icon::Square,
-                    true,
+                    RecGlyph::Stop,
                     self.enabled.then_some(Message::StopRecord),
                 ),
             ]
+            .height(height::CONTROL)
             .align_y(Vertical::Center)
             .into();
         }
         container(rec_button(
             RECORD,
-            Icon::Mic,
-            false,
+            RecGlyph::Dot,
             self.record_live().then_some(Message::StartRecord),
         ))
         .width(Length::Fill)
@@ -790,11 +805,14 @@ fn divider<'a, M: 'a>() -> Element<'a, M> {
         .into()
 }
 
+/// The open card's outline (`#3A3A43`, a hovered library card's).
+const CARD_OUTLINE_OPEN: Color = Color::from_rgb8(0x3A, 0x3A, 0x43);
+
 /// A card's hover icons — Export (when `exportable`), then Rename and
-/// Remove (when `editable`) — faded in while the card is `hovered` and out
-/// when it is not, over 120 ms (`AnimatedOpacity`, the row as one layer);
-/// there, and tappable, either way (a faded widget keeps its place and its
-/// taps).
+/// Remove (when `editable`), 24 px icon buttons — faded in while the card
+/// is `hovered` and out when it is not, over 120 ms (`AnimatedOpacity`,
+/// the row as one layer); there, and tappable, either way (a faded widget
+/// keeps its place and its taps).
 fn hover_actions<'a>(
     hovered: bool,
     exportable: bool,
@@ -803,16 +821,13 @@ fn hover_actions<'a>(
     label: String,
 ) -> Element<'a, Message> {
     let actions = move |opacity: f32| -> Element<'a, Message> {
-        let mut actions = row![].align_y(Vertical::Center);
+        let mut actions = row![].spacing(2).align_y(Vertical::Center);
         if exportable {
             actions = actions.push(hover_icon(
                 Icon::Download,
                 "Export",
                 Message::Export(id.clone()),
             ));
-            if editable {
-                actions = actions.push(Space::new().width(4));
-            }
         }
         if editable {
             actions = actions
@@ -824,7 +839,6 @@ fn hover_actions<'a>(
                         current: label.clone(),
                     },
                 ))
-                .push(Space::new().width(4))
                 .push(hover_icon(
                     Icon::Trash2,
                     "Remove",
@@ -837,42 +851,47 @@ fn hover_actions<'a>(
     animated(target, HOVER_ANIMATION, Curve::Linear, actions).into()
 }
 
-/// `_HoverIcon`: a 14 px faint glyph with a click cursor and a tooltip.
+/// `_HoverIcon`: a 24 px icon button (`DESIGN.md`, Icon button) with a
+/// 14 px glyph and a tooltip.
 fn hover_icon<'a>(icon: Icon, tip: &'a str, on_tap: Message) -> Element<'a, Message> {
-    let target = button(icons::icon(icon, 14.0, Studio::TEXT_FAINT))
-        .padding(0)
-        .style(bare_button)
-        .on_press(on_tap);
-    // Material's tooltip sits 24 px below the target's centre.
-    material_tooltip(target, tip, 24.0 - 14.0 / 2.0).into()
+    icon_button(icon, on_tap).panel().tooltip(tip).into()
 }
 
-/// `_ExpandChevron`: the expand/collapse affordance, a chevron that turns
-/// half a turn when open, over 150 ms (`AnimatedRotation`); its color
-/// changes at once. At rest it is the down or the up chevron (the down one
-/// turned half a turn); while it turns, the chevron's path, turned.
+/// `_ExpandChevron`: the expand/collapse affordance, a 24 px icon button
+/// whose chevron turns half a turn when open, over 150 ms
+/// (`AnimatedRotation`). At rest it is the down or the up chevron (the down
+/// one turned half a turn); while it turns, the chevron's path, turned.
 fn expand_chevron<'a>(expanded: bool, on_tap: Message) -> Element<'a, Message> {
-    let color = if expanded {
-        Studio::ACCENT_BRIGHT
+    let tip = if expanded {
+        "Hide the analysis"
     } else {
-        Studio::TEXT_FAINT
+        "Show the analysis"
     };
     let face = move |turns: f32| -> Element<'a, Message> {
-        let glyph: Element<'a, Message> = if turns == 0.0 {
-            icons::icon(Icon::ChevronDown, 16.0, color).into()
-        } else if turns == 0.5 {
-            icons::icon(Icon::ChevronUp, 16.0, color).into()
-        } else {
-            canvas_widget(TurnedChevron { turns, color })
-                .width(16)
-                .height(16)
-                .into()
-        };
-        button(container(glyph).padding(4))
-            .padding(0)
-            .style(bare_button)
-            .on_press(on_tap.clone())
-            .into()
+        if turns == 0.0 || turns == 0.5 {
+            let glyph = if turns == 0.0 {
+                Icon::ChevronDown
+            } else {
+                Icon::ChevronUp
+            };
+            return icon_button(glyph, on_tap.clone())
+                .panel()
+                .tooltip(tip)
+                .into();
+        }
+        let turning = canvas_widget(TurnedChevron {
+            turns,
+            color: Studio::TEXT_SECONDARY,
+        })
+        .width(14)
+        .height(14);
+        labelled(
+            button(container(turning).center(height::PANEL_BUTTON))
+                .padding(0)
+                .style(bare_button)
+                .on_press(on_tap.clone()),
+            tip,
+        )
     };
     let turns = if expanded { 0.5 } else { 0.0 };
     animated(turns, CHEVRON_ANIMATION, Curve::Linear, face).into()
@@ -918,47 +937,74 @@ impl canvas::Program<Message> for TurnedChevron {
     }
 }
 
-/// `_RecBtn`: a filled pill (coral, or red for `danger`), dark label; grey
-/// and inert with no `on_tap`.
-fn rec_button<'a>(
+/// What a record control shows before its label.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecGlyph {
+    /// The record dot: start recording.
+    Dot,
+    /// A square: stop.
+    Stop,
+}
+
+/// A record control (`DESIGN.md`: the ghost button, with the record
+/// colour's mark): 22 px, radius 5, transparent with an inset
+/// `BORDER_STRONG` outline (a `HOVER` fill under the pointer), an 8 px
+/// `RECORD` dot (or square, to stop) before an 11 px label; disabled, the
+/// mark and the label dim to `TEXT_DISABLED`.
+pub fn rec_button<'a, M: Clone + 'a>(
     label: &'a str,
-    icon: Icon,
-    danger: bool,
-    on_tap: Option<Message>,
-) -> Element<'a, Message> {
+    glyph: RecGlyph,
+    on_tap: Option<M>,
+) -> Element<'a, M> {
     let enabled = on_tap.is_some();
-    let fill = match (enabled, danger) {
-        (false, _) => Studio::SURFACE_RAISED,
-        (true, true) => Studio::RECORD,
-        (true, false) => Studio::ACCENT,
-    };
-    let fg = if enabled {
-        Studio::BACKGROUND
+    let mark_color = if enabled {
+        Studio::RECORD
     } else {
-        Studio::TEXT_FAINT
+        Studio::TEXT_DISABLED
     };
-    let face = container(
-        row![
-            icons::icon(icon, 13.0, fg),
-            Space::new().width(6),
-            text(label).size(12).font(font::BOLD).color(fg),
-        ]
-        .align_y(Vertical::Center),
-    )
-    .padding([7, 12])
-    .style(move |_| boxed(Some(fill), 7.0, None));
-    button(face)
-        .padding(0)
-        .style(bare_button)
+    let mark_radius = match glyph {
+        RecGlyph::Dot => 4.0,
+        RecGlyph::Stop => 1.5,
+    };
+    let mark = container(Space::new())
+        .width(8)
+        .height(8)
+        .style(move |_| boxed(Some(mark_color), mark_radius, None));
+    let content = row![
+        mark,
+        Space::new().width(6),
+        studio_text(label)
+            .size(type_scale::LABEL)
+            .line_height(Pixels(type_scale::LINE))
+            .font(font::MEDIUM),
+    ]
+    .align_y(Vertical::Center);
+    button(container(content).center_y(Length::Fill))
+        .padding(Padding::from([0, 8]))
+        .height(height::CONTROL)
         .on_press_maybe(on_tap)
+        .style(|_, status| {
+            let (fill, text, outline) = dialog_button_colors(DialogButton::Secondary, status);
+            iced::widget::button::Style {
+                background: fill.map(iced::Background::Color),
+                text_color: text,
+                border: iced::Border {
+                    color: outline.unwrap_or(Color::TRANSPARENT),
+                    width: 1.0,
+                    radius: radius::CONTROL.into(),
+                },
+                shadow: iced::Shadow::default(),
+                snap: true,
+            }
+        })
         .into()
 }
 
-/// The level meter's height.
-const METER_HEIGHT: f32 = 8.0;
+/// The level meter's height (`DESIGN.md`: meters are thin bars).
+const METER_HEIGHT: f32 = 4.0;
 
-/// The record level meter: an inset track, radius 4, filled in the record
-/// red from the left to `level` (clamped to 0..1).
+/// The record level meter: a thin `INSET` track, radius 2, filled in the
+/// record red from the left to `level` (clamped to 0..1).
 struct LevelMeter {
     level: f32,
 }
@@ -985,7 +1031,7 @@ impl canvas::Program<Message> for LevelMeter {
         _: mouse::Cursor,
     ) -> Vec<Geometry> {
         let mut frame = Frame::new(renderer, bounds.size());
-        let track = Path::rounded_rectangle(Point::ORIGIN, bounds.size(), 4.0.into());
+        let track = Path::rounded_rectangle(Point::ORIGIN, bounds.size(), 2.0.into());
         frame.fill(&track, Studio::INSET);
         let filled = meter_fill(self.level, bounds.width);
         if filled > 0.0 {
@@ -1061,78 +1107,42 @@ impl RenameExampleDialog {
         }
     }
 
-    /// The dialog over the whole window, all in: the barrier
-    /// (`Color(0xB0000000)`) and the centred 380-wide card.
+    /// The dialog over the whole window, all in: the barrier and the
+    /// centred studio dialog card (`confirm_dialog::card`).
     pub fn view(&self) -> Element<'_, confirm_dialog::Message> {
         self.view_at(Fade::SHOWN)
     }
 
-    /// The dialog at `fade` (`confirm_dialog`'s module docs).
+    /// The dialog at `fade` (`confirm_dialog`'s module docs): the title,
+    /// the caption's field under its label, Cancel and Save.
     pub fn view_at(&self, fade: Fade) -> Element<'_, confirm_dialog::Message> {
         use confirm_dialog::Message;
         let field = text_input("Caption", &self.text)
             .id(self.input.clone())
             .on_input(Message::Input)
             .on_submit(Message::Confirm)
-            .size(14)
-            .line_height(1.0)
+            .size(theme::FIELD_TEXT_SIZE)
+            .line_height(Pixels(type_scale::LINE))
             .padding(theme::FIELD_PADDING)
             .caret_color(Studio::ACCENT)
-            .style(theme::studio_input);
-        let card = container(
-            column![
-                text("Rename example")
-                    .size(15)
-                    .font(font::BOLD)
-                    .color(Studio::TEXT_PRIMARY),
-                Space::new().height(14),
-                // 12 by 10 inside the well's 1 px border.
-                container(field)
-                    .width(Length::Fill)
-                    .padding([11, 13])
-                    .style(theme::inset(8.0)),
-                Space::new().height(18),
-                row![
-                    Space::new().width(Length::Fill),
-                    dialog_button("Cancel", Message::Cancel, false),
-                    Space::new().width(8),
-                    dialog_button("Save", Message::Confirm, true),
-                ],
-            ]
-            .width(Length::Fill),
-        )
-        .width(380)
-        // 20 inside the 1 px border.
-        .padding(21)
-        .style(|_| boxed(Some(Studio::SURFACE_RAISED), 16.0, Some(Studio::BORDER)));
-        modal(container(card).padding(24).into(), fade)
+            .style(theme::field);
+        let content = column![
+            title("Rename example"),
+            Space::new().height(14),
+            field_label("Caption"),
+            Space::new().height(6),
+            field,
+            Space::new().height(20),
+            buttons(
+                "Cancel",
+                Message::Cancel,
+                "Save",
+                Some(Message::Confirm),
+                DialogButton::Primary,
+            ),
+        ];
+        modal(dialog_card(content.into()), fade)
     }
-}
-
-/// `_DialogButton`: the rename dialog's flat buttons (no hover change).
-fn dialog_button<'a>(
-    label: &'a str,
-    on_tap: confirm_dialog::Message,
-    accent: bool,
-) -> Element<'a, confirm_dialog::Message> {
-    let (fill, border, fg) = if accent {
-        (
-            alpha(Studio::ACCENT, 0.16),
-            alpha(Studio::ACCENT, 0.45),
-            Studio::ACCENT_BRIGHT,
-        )
-    } else {
-        (Studio::SURFACE_RAISED, Studio::BORDER, Studio::TEXT_PRIMARY)
-    };
-    // 14 by 8 inside the 1 px border.
-    let face = container(text(label).size(13).font(font::SEMIBOLD).color(fg))
-        .padding([9, 15])
-        .style(move |_| boxed(Some(fill), 7.0, Some(border)));
-    button(face)
-        .padding(0)
-        .style(bare_button)
-        .on_press(on_tap)
-        .into()
 }
 
 #[cfg(test)]

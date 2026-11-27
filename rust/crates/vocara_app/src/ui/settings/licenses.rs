@@ -96,6 +96,14 @@
 //!   spinner until the last has. "Powered by Flutter" reads "Powered by
 //!   iced".
 //!
+//! The look is the design system's (`DESIGN.md`), on Flutter's layout:
+//! the master and the detail card are `Studio::SURFACE` (the card an inset
+//! `BORDER` outline, radius 8 at its top), the package rows a 13 px name
+//! over its 11 px `TEXT_FAINT` count, the about block a 15 px semibold
+//! name over 12 and 11 px lines, the detail's header a 13 px semibold
+//! package over its count, the licenses 12 px `TEXT_SECONDARY` on 16 px
+//! lines under `BORDER` dividers, the spinners neutral.
+//!
 //! Where it still differs:
 //!
 //! - Flutter's scrollbar on the detail spanned the whole scroll view, the
@@ -117,13 +125,15 @@ use iced::alignment::Horizontal;
 use iced::border::Radius;
 use iced::widget::text::{LineHeight, Wrapping};
 use iced::widget::{button, column, container, row, stack, Column, Space};
-use iced::{Background, Border, Color, Element, Length, Padding, Shadow, Task, Theme, Vector};
+use iced::{
+    Background, Border, Color, Element, Length, Padding, Pixels, Shadow, Task, Theme, Vector,
+};
 use serde::Deserialize;
 use vocara_services::update_check_service::UpdateCheckService;
 
 use crate::ui::core::motion::{Controller, Curve};
-use crate::ui::core::theme::{self, font, Studio, Zinc};
-use crate::ui::core::widgets::animated::{ink_hover, INK_HIGHLIGHT};
+use crate::ui::core::theme::{self, font, type_scale, Studio, Zinc};
+use crate::ui::core::widgets::animated::ink_hover;
 use crate::ui::core::widgets::fading_scrollbar::{scrollable, Fading};
 use crate::ui::core::widgets::opacity_layer::opacity_layer;
 use crate::ui::core::widgets::slide::slide;
@@ -551,8 +561,9 @@ const MASTER_WIDTH: f32 = 320.0;
 const GUTTER: f32 = 24.0;
 /// `_kCardElevation`.
 const CARD_ELEVATION: f32 = 4.0;
-/// `_textVerticalSeparation`.
-const TEXT_SEPARATION: f32 = 18.0;
+/// The about block's separation between its groups of lines
+/// (`_textVerticalSeparation`'s place).
+const TEXT_SEPARATION: f32 = 12.0;
 
 /// How long a package's licenses take to come in, and the last one's to
 /// go (the detail's `AnimatedSwitcher`).
@@ -568,9 +579,11 @@ pub const TILE_HOVER: Color = Color {
     ..Color::WHITE
 };
 
-/// The rows' highlights' corners: forui's `listTileTheme` shape (its
-/// `style.borderRadius`, 8).
-pub const TILE_RADIUS: f32 = 8.0;
+/// The selected row's fill (`DESIGN.md`: a selected tab's, `CONTROL_ACTIVE`).
+pub const TILE_SELECTED: Color = Studio::CONTROL_ACTIVE;
+
+/// The rows' highlights' corners: a row's (`DESIGN.md`, 5).
+pub const TILE_RADIUS: f32 = theme::radius::CONTROL;
 
 /// The gathered registry, as a message carries it (compared by address).
 #[derive(Clone, Copy)]
@@ -813,7 +826,7 @@ impl LicensesPage {
             // spinner, on a card with no elevation.
             None => container(column![
                 about(),
-                container(spinner(36.0, 4.0, Zinc::PRIMARY)).center_x(Length::Fill),
+                container(spinner(24.0, 2.0, Studio::TEXT_SECONDARY)).center_x(Length::Fill),
             ])
             .width(MASTER_WIDTH)
             .height(Length::Fill)
@@ -822,8 +835,9 @@ impl LicensesPage {
             // The error, centred.
             Some(Err(error)) => container(
                 text(error.clone())
-                    .size(theme::DEFAULT_TEXT_SIZE)
-                    .color(Zinc::FOREGROUND),
+                    .size(type_scale::BODY)
+                    .line_height(Pixels(18.0))
+                    .color(Studio::TEXT_SECONDARY),
             )
             .center_x(MASTER_WIDTH)
             .center_y(Length::Fill)
@@ -836,7 +850,7 @@ impl LicensesPage {
                 ))
                 .width(MASTER_WIDTH)
                 .height(Length::Fill)
-                .style(material(Some(Radius::from(0.0))))
+                .style(surface(Radius::from(0.0), false))
                 .into()
             }
         };
@@ -893,20 +907,22 @@ impl LicensesPage {
     }
 }
 
-/// A Material surface: `Studio.surface` (the card colour Settings set) at
-/// elevation 4, with `radius` (`None` = square).
-fn material(radius: Option<Radius>) -> impl Fn(&Theme) -> container::Style {
+/// A surface (the master, the detail card): `Studio::SURFACE` with
+/// `radius`, an inset `BORDER` outline when `outlined`, and a soft shadow
+/// (the card's elevation over the master).
+fn surface(radius: Radius, outlined: bool) -> impl Fn(&Theme) -> container::Style {
     move |_| container::Style {
-        text_color: Some(Zinc::FOREGROUND),
+        text_color: Some(Studio::TEXT_PRIMARY),
         background: Some(Background::Color(Studio::SURFACE)),
         border: Border {
-            radius: radius.unwrap_or_default(),
-            ..Border::default()
+            radius,
+            color: Studio::BORDER,
+            width: if outlined { 1.0 } else { 0.0 },
         },
         shadow: Shadow {
-            color: Color::from_rgba8(0, 0, 0, 0.45),
+            color: Color::from_rgba8(0, 0, 0, 0.35),
             offset: Vector::new(0.0, 2.0),
-            blur_radius: 6.0,
+            blur_radius: 8.0,
         },
         snap: false,
     }
@@ -953,25 +969,48 @@ fn app_bar<'a>(scrolled: bool) -> Element<'a, Message> {
     .into()
 }
 
-/// `_AboutProgram`: the name, version, legalese and "Powered by".
+/// `_AboutProgram`: the name (15 px semibold), the version (12 px
+/// `TEXT_SECONDARY`), the legalese and "Powered by" (11 px `TEXT_FAINT`).
 fn about<'a>() -> Element<'a, Message> {
-    let centred = |s: String, size: f32| {
+    let centred = |s: String, size: f32, line: f32, color: Color| {
         text(s)
             .size(size)
-            .line_height(1.0)
-            .color(Zinc::FOREGROUND)
+            .line_height(Pixels(line))
+            .color(color)
             .width(Length::Fill)
             .align_x(Horizontal::Center)
     };
     container(column![
-        centred(APPLICATION_NAME.to_string(), 20.0),
-        container(centred(application_version(), 14.0)).padding(Padding {
+        centred(
+            APPLICATION_NAME.to_string(),
+            type_scale::HEADING,
+            20.0,
+            Studio::TEXT_PRIMARY
+        )
+        .font(font::SEMIBOLD),
+        container(centred(
+            application_version(),
+            type_scale::BODY,
+            type_scale::LINE,
+            Studio::TEXT_SECONDARY
+        ))
+        .padding(Padding {
             bottom: TEXT_SEPARATION,
             ..Padding::ZERO
         }),
-        centred(APPLICATION_LEGALESE.to_string(), 12.0),
+        centred(
+            APPLICATION_LEGALESE.to_string(),
+            type_scale::LABEL,
+            type_scale::LINE,
+            Studio::TEXT_FAINT
+        ),
         Space::new().height(TEXT_SEPARATION),
-        centred("Powered by iced".to_string(), 14.0),
+        centred(
+            "Powered by iced".to_string(),
+            type_scale::LABEL,
+            type_scale::LINE,
+            Studio::TEXT_FAINT
+        ),
     ])
     .padding([24.0, GUTTER])
     .width(Length::Fill)
@@ -993,7 +1032,7 @@ fn master(data: &LicenseData, selected: usize) -> Element<'_, Message> {
 
 /// `_PackageListTile`: the package and its license count in a two-line
 /// `ListTile` (64 tall at the desktop's compact density, its baselines 32
-/// and 48 down), on the theme's `highlightColor` when selected (an `Ink`
+/// and 48 down), on [`TILE_SELECTED`] when selected (an `Ink`
 /// under the tile's own). Its `InkWell` lights the row in forui's rounded
 /// list-tile shape over that: the theme's `hoverColor` under the pointer
 /// (fading over 50 ms) and its `highlightColor` while pressed (over
@@ -1008,10 +1047,10 @@ fn package_tile<'a>(
     let tile = two_line_tile(
         text(package.to_string())
             .size(list_tile::TITLE_SIZE)
-            .color(Zinc::FOREGROUND),
+            .color(Studio::TEXT_PRIMARY),
         text(licenses_detail_text(licenses))
             .size(list_tile::SUBTITLE_SIZE)
-            .color(Zinc::FOREGROUND),
+            .color(Studio::TEXT_FAINT),
     );
     let row = button(tile)
         .padding(0)
@@ -1021,7 +1060,7 @@ fn package_tile<'a>(
     container(ink_hover(row, TILE_HOVER, TILE_RADIUS))
         .width(Length::Fill)
         .style(move |_: &Theme| container::Style {
-            background: selected.then_some(Background::Color(INK_HIGHLIGHT)),
+            background: selected.then_some(Background::Color(TILE_SELECTED)),
             ..container::Style::default()
         })
         .into()
@@ -1031,19 +1070,22 @@ fn package_tile<'a>(
 /// count, then each of the first `loaded` licenses after a divider,
 /// paragraph by paragraph, and Material's spinner while more are to come.
 fn detail<'a>(package: &str, licenses: &[&LicenseEntry], loaded: usize) -> Element<'a, Message> {
-    let fg = Zinc::FOREGROUND;
+    let fg = Studio::TEXT_SECONDARY;
     // `_PackageLicensePageTitle` in the pinned `SliverAppBar`'s toolbar:
-    // the title (`titleLarge`) right over the subtitle (`titleSmall`), both
-    // at the column's start, the column centred on the card (macOS, no
-    // actions) and in the toolbar's height.
+    // the title (13 px semibold) right over the subtitle (11 px
+    // `TEXT_FAINT`), both at the column's start, the column centred on the
+    // card (macOS, no actions) and in the toolbar's height.
     let header = container(column![
         text(package.to_string())
-            .size(18)
-            .color(fg)
+            .size(type_scale::TITLE)
+            .line_height(Pixels(18.0))
+            .font(font::SEMIBOLD)
+            .color(Studio::TEXT_PRIMARY)
             .wrapping(Wrapping::None),
         text(licenses_detail_text(licenses.len()))
-            .size(14)
-            .color(fg)
+            .size(type_scale::LABEL)
+            .line_height(Pixels(type_scale::LINE))
+            .color(Studio::TEXT_FAINT)
             .wrapping(Wrapping::None),
     ])
     .padding([0.0, 16.0])
@@ -1052,13 +1094,13 @@ fn detail<'a>(package: &str, licenses: &[&LicenseEntry], loaded: usize) -> Eleme
     let mut body = Column::new();
     for license in licenses.iter().take(loaded) {
         // `Padding(all: 18, child: Divider())`: a 16 px divider, its 1 px
-        // line centred, in forui's `dividerTheme` color (`secondary`).
+        // line centred, in `Studio::BORDER`.
         body = body.push(
             container(
                 container(Space::new())
                     .width(Length::Fill)
                     .height(1)
-                    .style(theme::fill(Zinc::SECONDARY)),
+                    .style(theme::fill(Studio::BORDER)),
             )
             .padding([18.0 + 7.5, 18.0]),
         );
@@ -1067,10 +1109,9 @@ fn detail<'a>(package: &str, licenses: &[&LicenseEntry], loaded: usize) -> Eleme
         }
     }
     if loaded < licenses.len() {
-        // `CircularProgressIndicator()` in 24 / 0 padding, in the scheme's
-        // primary.
+        // A spinner in 24 / 0 padding, neutral.
         body = body.push(
-            container(spinner(36.0, 4.0, Zinc::PRIMARY))
+            container(spinner(24.0, 2.0, Studio::TEXT_SECONDARY))
                 .width(Length::Fill)
                 .align_x(Horizontal::Center)
                 .padding([24, 0]),
@@ -1090,31 +1131,39 @@ fn detail<'a>(package: &str, licenses: &[&LicenseEntry], loaded: usize) -> Eleme
     container(content)
         .width(Length::Fill)
         .height(Length::Fill)
-        .style(material(Some(Radius {
-            top_left: 3.0,
-            top_right: 3.0,
-            bottom_right: 0.0,
-            bottom_left: 0.0,
-        })))
+        .style(surface(
+            Radius {
+                top_left: theme::radius::CARD,
+                top_right: theme::radius::CARD,
+                bottom_right: 0.0,
+                bottom_left: 0.0,
+            },
+            true,
+        ))
         .into()
 }
 
-/// One paragraph in the licenses' `bodySmall` style, in `color`: a centred
-/// bold heading 16 below the last, or text 8 below it, indented 16 a level.
+/// One paragraph of a license, 12 px on 16 px lines in `color`: a centred
+/// semibold heading (in `TEXT_PRIMARY`) 16 below the last, or text 8 below
+/// it, indented 16 a level.
 fn paragraph<'a>(p: LicenseParagraph, color: Color) -> Element<'a, Message> {
     let body = text(p.text)
-        .size(12)
-        .line_height(LineHeight::Relative(1.0))
+        .size(type_scale::BODY)
+        .line_height(LineHeight::Absolute(Pixels(type_scale::LINE)))
         .color(color)
         .width(Length::Fill);
     if p.indent == LicenseParagraph::CENTERED_INDENT {
-        container(body.font(font::BOLD).align_x(Horizontal::Center))
-            .padding(Padding {
-                top: 16.0,
-                ..Padding::ZERO
-            })
-            .width(Length::Fill)
-            .into()
+        container(
+            body.font(font::SEMIBOLD)
+                .color(Studio::TEXT_PRIMARY)
+                .align_x(Horizontal::Center),
+        )
+        .padding(Padding {
+            top: 16.0,
+            ..Padding::ZERO
+        })
+        .width(Length::Fill)
+        .into()
     } else {
         container(body)
             .padding(Padding {

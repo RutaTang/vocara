@@ -72,7 +72,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::ui::core::text;
 use iced::advanced::layout::{self, Layout};
 use iced::advanced::widget::{tree, Operation, Tree};
 use iced::advanced::{overlay, renderer, Clipboard, Shell, Widget};
@@ -86,9 +85,11 @@ use vocara_services::media_player::{clamp_volume, MediaKind, MediaPlayerFactory,
 
 use super::technique_audio_player::{is_unavailable_path, Transport, UNAVAILABLE_CLIP_MESSAGE};
 use super::video_controls::{self as controls, seek_target, video_controls, Command, Shortcut};
-use crate::ui::core::icons::{self, Icon};
-use crate::ui::core::theme::{alpha, boxed, Studio};
+use crate::ui::core::theme::{alpha, boxed, radius, type_scale, Studio};
+use crate::ui::core::widgets::controls::labelled;
 use crate::ui::core::widgets::holds_keyboard::holds_keyboard;
+use crate::ui::core::widgets::line_icon::{glyphs, line_icon};
+use crate::ui::core::widgets::studio_text::studio_text;
 use crate::ui::core::widgets::wrap::Wrap;
 
 /// How often a playing video is polled: a new frame can be due at 60 Hz.
@@ -100,9 +101,12 @@ pub const MAX_WIDTH: f32 = 520.0;
 /// The box's width : height.
 pub const ASPECT_RATIO: f32 = 16.0 / 9.0;
 
-/// The box's corner radius, and its border's width.
-pub const RADIUS: f32 = 10.0;
+/// The box's corner radius (a well's, `DESIGN.md`), and its border's width.
+pub const RADIUS: f32 = radius::WELL;
 pub const BORDER_WIDTH: f32 = 1.0;
+
+/// The poster's play button's diameter.
+pub const POSTER_BUTTON: f32 = 44.0;
 
 /// The video player's messages.
 #[derive(Debug, Clone, PartialEq)]
@@ -383,7 +387,7 @@ impl TechniqueVideoPlayer {
             .max_width(MAX_WIDTH)
             .padding(BORDER_WIDTH)
             .clip(true)
-            .style(|_| boxed(Some(Color::BLACK), RADIUS, Some(Studio::BORDER)))
+            .style(|_| boxed(Some(Color::BLACK), RADIUS, Some(Studio::BORDER_STRONG)))
             .into()
     }
 
@@ -437,25 +441,41 @@ fn frame_handle(frame: &VideoFrame) -> image::Handle {
     )
 }
 
-/// `_Poster`: a dark surface with a centered play button, or the
-/// unavailable notice when the clip cannot be played here.
+/// `_Poster`: a dark surface with a centred play button (a translucent
+/// dark disc with a faint ring and the filled play glyph, "Play" to the
+/// widget tree), or the unavailable notice when the clip cannot be played
+/// here. While play is blocked the glyph dims to `TEXT_DISABLED`.
 fn poster<'a>(unavailable: bool, play_blocked: bool) -> Element<'a, Message> {
     let black = |_: &Theme| boxed(Some(Color::BLACK), 0.0, None);
     if unavailable {
         return container(
-            text(UNAVAILABLE_CLIP_MESSAGE)
-                .size(12)
+            studio_text(UNAVAILABLE_CLIP_MESSAGE)
+                .size(type_scale::BODY)
+                .line_height(iced::Pixels(type_scale::LINE))
                 .color(Studio::TEXT_FAINT),
         )
         .center(Length::Fill)
         .style(black)
         .into();
     }
-    let button = container(icons::icon(Icon::Play, 24.0, Color::WHITE))
-        .center_x(54)
-        .center_y(54)
-        .style(|_| boxed(Some(alpha(Studio::ACCENT, 0.9)), 27.0, None));
-    let surface = container(button).center(Length::Fill).style(black);
+    let glyph = if play_blocked {
+        Studio::TEXT_DISABLED
+    } else {
+        Studio::TEXT_PRIMARY
+    };
+    let button = container(line_icon(glyphs::PLAY, 18.0, glyph))
+        .center_x(POSTER_BUTTON)
+        .center_y(POSTER_BUTTON)
+        .style(|_| {
+            boxed(
+                Some(alpha(Color::BLACK, 0.55)),
+                POSTER_BUTTON / 2.0,
+                Some(alpha(Color::WHITE, 0.18)),
+            )
+        });
+    let surface = container(labelled(button, "Play"))
+        .center(Length::Fill)
+        .style(black);
     if play_blocked {
         return surface.into();
     }

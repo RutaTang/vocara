@@ -15,15 +15,13 @@
 //! the dialog's state so it was disposed only after the exit transition; the
 //! state here is plain data and goes with the dialog.)
 
-use crate::ui::core::text;
-use iced::widget::{column, container, row, Space};
-use iced::{widget, Element, Length, Task};
+use iced::widget::{column, Space};
+use iced::{widget, Element, Task};
 use vocara_model::util::dart_string;
 
 use super::studio_field::studio_field;
-use crate::ui::core::theme::{self, font, Studio};
-use crate::ui::core::widgets::confirm_dialog::{modal, DialogResult, Fade};
-use crate::ui::core::widgets::studio_button::{studio_button, StudioButtonVariant};
+use crate::ui::core::widgets::confirm_dialog::{buttons, card, modal, title, DialogResult, Fade};
+use crate::ui::core::widgets::controls::DialogButton;
 
 pub use crate::ui::core::widgets::confirm_dialog::Message;
 
@@ -88,43 +86,32 @@ impl NewTechniqueDialog {
     }
 
     /// The dialog over the whole window, all in: the barrier and the
-    /// centred card (440 wide, the studio dialog card).
+    /// centred card (the studio dialog card, `confirm_dialog::card`).
     pub fn view(&self) -> Element<'_, Message> {
         self.view_at(Fade::SHOWN)
     }
 
     /// The dialog at `fade` (`confirm_dialog`'s module docs).
     pub fn view_at(&self, fade: Fade) -> Element<'_, Message> {
-        let card = container(
-            column![
-                text("New technique")
-                    .size(16)
-                    .font(font::BOLD)
-                    .color(Studio::TEXT_PRIMARY),
-                Space::new().height(16),
-                studio_field("Name", &self.name)
-                    .hint("e.g. Twang, Mixed voice, Curbing")
-                    .id(self.input.clone())
-                    .on_input(Message::Input)
-                    // Return creates, as in the app's other name dialogs.
-                    .on_submit(Message::Confirm),
-                Space::new().height(20),
-                row![
-                    Space::new().width(Length::Fill),
-                    studio_button("Cancel", Message::Cancel),
-                    Space::new().width(8),
-                    studio_button("Create", Message::Confirm)
-                        .variant(StudioButtonVariant::Accent)
-                        .enabled(self.trimmed().is_some()),
-                ],
-            ]
-            .width(Length::Fill),
-        )
-        .width(440)
-        // 22 inside the card's 1 px border.
-        .padding(23)
-        .style(theme::dialog_card);
-        modal(container(card).padding(24).into(), fade)
+        let content = column![
+            title("New technique"),
+            Space::new().height(14),
+            studio_field("Name", &self.name)
+                .hint("e.g. Twang, Mixed voice, Curbing")
+                .id(self.input.clone())
+                .on_input(Message::Input)
+                // Return creates, as in the app's other name dialogs.
+                .on_submit(Message::Confirm),
+            Space::new().height(20),
+            buttons(
+                "Cancel",
+                Message::Cancel,
+                "Create",
+                self.trimmed().is_some().then_some(Message::Confirm),
+                DialogButton::Primary,
+            ),
+        ];
+        modal(card(content.into()), fade)
     }
 }
 
@@ -149,17 +136,18 @@ mod tests {
 
     #[test]
     fn the_card_pads_its_content_inside_its_border() {
-        // 440 wide, centred in the 1024-wide window, 22 inside its 1 px
-        // border: the title and the name field's caption start there, and
-        // the well spans the rest.
+        use crate::ui::core::widgets::confirm_dialog::{CARD_PADDING, CARD_WIDTH};
+        // The studio dialog card, centred in the 1024-wide window, its
+        // content in its padding: the title and the name field start there,
+        // and the field spans the rest.
         let dialog = NewTechniqueDialog::new();
         let mut ui = iced_test::simulator(dialog.view());
         let title = ui.find("New technique").expect("the title").bounds();
-        let card_left = (1024.0 - 440.0) / 2.0;
-        assert_eq!(title.x, card_left + 23.0, "{title:?}");
+        let card_left = (1024.0 - CARD_WIDTH) / 2.0;
+        assert_eq!(title.x, card_left + CARD_PADDING, "{title:?}");
         let field = ui.find(dialog.input_id()).expect("the field").bounds();
-        assert_eq!(field.x, card_left + 23.0 + 13.0, "{field:?}");
-        assert_eq!(field.width, 440.0 - 2.0 * 23.0 - 2.0 * 13.0, "{field:?}");
+        assert_eq!(field.x, card_left + CARD_PADDING, "{field:?}");
+        assert_eq!(field.width, CARD_WIDTH - 2.0 * CARD_PADDING, "{field:?}");
     }
 
     #[test]

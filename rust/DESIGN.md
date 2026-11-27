@@ -158,6 +158,11 @@ Line height 16 px for 11–12 px text unless noted.
 - **Power button** (effect enable): 18 px circle with the power glyph; on:
   `ACCENT` at 16 % behind `ACCENT_BRIGHT`; off: `CONTROL` behind
   `TEXT_DISABLED`, and the effect's body at 55 % opacity.
+- **Switch** (a setting on or off, in Settings): a 28 × 16 track, radius
+  8, `CONTROL_ACTIVE` with an inset `BORDER_STRONG` outline while off,
+  `ACCENT` while on (`SEGMENT_SELECTED` / `ACCENT_BRIGHT` under the
+  pointer), and a 12 px `TEXT_PRIMARY` knob 2 px in at its left or right.
+  Not Material's switch.
 - **M / S / R**: 20–22 × 18–20, radius 4, 10 px semibold letters; off
   `CONTROL`/`TEXT_SECONDARY`; mute on and record on: `RECORD` at 20–24 % /
   `#F08A80`; solo on: `WARN` at 22 % / `#E3C46A`.

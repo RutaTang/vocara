@@ -32,7 +32,11 @@ comments) and the files named below; `LICENSE` is the upstream project's
   moved into `draw_layers`, which draws a group's layers into an offscreen
   pixmap and composites it, or in place and puts back what lies outside
   its clip, and filters backdrops), `src/engine.rs` and `src/geometry.rs`
-  (two helpers made visible to the crate).
+  (two helpers made visible to the crate). And `src/engine.rs` draws a raw
+  text (the app's `studio_text`) through a mask set to its own clip, as
+  it draws every other text: upstream drew it through the mask the text
+  before it in the layer had left, so a label after a text editor taller
+  than its box (a prose field in a scroll view) was not drawn.
 - `iced_renderer` 0.14.0 (MIT, <https://github.com/iced-rs/iced>):
   `src/effects.rs` (new) is the `Effects` trait the app's widgets call,
   implemented by both renderers and by the fallback renderer that is
