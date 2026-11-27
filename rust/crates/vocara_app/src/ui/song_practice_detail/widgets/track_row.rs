@@ -322,6 +322,25 @@ pub fn take_color(track: &AudioTrack, index: usize) -> Color {
     }
 }
 
+/// A channel's colour wherever it is drawn: its lane in the arrange, its
+/// mixer strip's cap and the inspector's colour square. [`take_color`] at
+/// the take's place among the shown interpretation's vocal takes, which is
+/// the order the arrange lists them in (0 for a track not among them, as
+/// the backing is), so a channel reads as one colour across the window.
+pub fn channel_color(track: &AudioTrack, vocal_takes: &[Arc<AudioTrack>]) -> Color {
+    let index = vocal_takes
+        .iter()
+        .position(|t| t.id == track.id)
+        .unwrap_or(0);
+    take_color(track, index)
+}
+
+/// A bus's colour wherever it is drawn (its lane, its strip, the
+/// inspector): its tint, else periwinkle (`DESIGN.md`, track colours).
+pub fn bus_color(bus: &vocara_model::models::fx_bus::FxBus) -> Color {
+    bus.color_value.map_or(Studio::TRACK_PERIWINKLE, argb)
+}
+
 /// The side of a note's diamond on a clip.
 pub const NOTE_DIAMOND: f32 = 5.0;
 

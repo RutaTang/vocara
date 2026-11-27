@@ -69,9 +69,10 @@ use crate::ui::song_practice_detail::widgets::timeline::{
     timeline_envelope_painter, timeline_scroll_thumb,
 };
 use crate::ui::song_practice_detail::widgets::track_context_menu::{
-    argb, bus_context_menu, clip_context_menu, menu_host, studio_menu, track_context_menu, BusMenu,
+    bus_context_menu, clip_context_menu, menu_host, studio_menu, track_context_menu, BusMenu,
     StudioMenuItem, TrackMenu,
 };
+use crate::ui::song_practice_detail::widgets::track_row::bus_color;
 use crate::ui::song_practice_detail::widgets::track_row::{
     header_frame, header_name, take_color, track_menu_button, track_row, TIMELINE_H_MARGIN,
     TRACK_HEADER_W,
@@ -371,6 +372,7 @@ impl SongPracticeDetailScreen {
             let settings = vm.app_settings();
             let mixer = MixerStrip {
                 tracks: &self.shown.mixer_tracks,
+                vocal_takes: &self.shown.vocal_takes,
                 buses: &practice.fx_buses,
                 supports_effects: vm.mixer().supports_effects(),
                 selected_track_id: vm.selected_track_id(),
@@ -806,7 +808,7 @@ impl SongPracticeDetailScreen {
     ) -> Element<'a, Message> {
         let vm = &*self.vm;
         let selected = vm.selected_bus_id() == Some(bus.id.as_str());
-        let accent = bus.color_value.map_or(Studio::TRACK_PERIWINKLE, argb);
+        let accent = bus_color(bus);
         let id = bus.id.clone();
         let fader_id = bus.id.clone();
         let content = column![

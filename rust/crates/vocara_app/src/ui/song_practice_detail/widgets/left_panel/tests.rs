@@ -1169,14 +1169,19 @@ fn a_take_is_numbered_among_the_interpretations_takes() {
 
 #[test]
 fn a_take_dot_is_its_tint_else_the_lane_default() {
-    use crate::ui::song_practice_detail::widgets::track_row::lane_accent;
+    use crate::ui::song_practice_detail::widgets::track_row::channel_color;
+    let takes = vec![Arc::new(vocal("t0")), Arc::new(vocal("t1"))];
     let mut t = vocal("t1");
-    assert_eq!(take_dot_color(&t), lane_accent(&t));
+    assert_eq!(take_dot_color(&t, &takes), channel_color(&t, &takes));
+    assert_eq!(take_dot_color(&t, &takes), Studio::track_color(1));
     t.color_value = Some(0xFF5B8DEF);
-    assert_eq!(take_dot_color(&t), Color::from_rgb8(0x5B, 0x8D, 0xEF));
+    assert_eq!(
+        take_dot_color(&t, &takes),
+        Color::from_rgb8(0x5B, 0x8D, 0xEF)
+    );
     let mut b = vocal("b");
     b.kind = AudioTrackKind::Accompaniment;
-    assert_eq!(take_dot_color(&b), lane_accent(&b));
+    assert_eq!(take_dot_color(&b, &takes), Studio::TRACK_BACKING);
 }
 
 #[test]

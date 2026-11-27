@@ -43,9 +43,6 @@ use crate::ui::core::widgets::line_icon::{glyphs, line_icon_stroked};
 use crate::ui::core::widgets::studio_text::studio_text;
 use crate::ui::core::widgets::wrap::Wrap;
 
-/// A model color (`colorValue`, ARGB) as Flutter's `Color(value)`.
-pub use super::track_context_menu::argb;
-
 // ------------------------------------------------------------- pop-up face
 
 /// A pop-up button's face (`DESIGN.md`, Pop-up button: the look of
@@ -1143,6 +1140,7 @@ impl<'a, M: Clone + 'a> From<MenuRow<'a, M>> for Element<'a, M> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::song_practice_detail::widgets::track_context_menu::argb;
 
     #[test]
     fn argb_reads_like_flutters_color() {

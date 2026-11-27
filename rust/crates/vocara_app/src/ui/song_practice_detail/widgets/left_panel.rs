@@ -73,9 +73,9 @@ use vocara_model::util::dart_num::round_to_i64;
 
 use super::pitch_lane::{note_vibrato_of, pitch_in_tune_percent, pitch_notes_of, PitchNote};
 use super::track_context_menu::{
-    argb, menu_host, studio_menu, MenuAnchor, StudioMenuItem, MENU_ANCHOR_BELOW_DY,
+    menu_host, studio_menu, MenuAnchor, StudioMenuItem, MENU_ANCHOR_BELOW_DY,
 };
-use super::track_row::lane_accent;
+use super::track_row::{bus_color, channel_color};
 use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::theme::{alpha, bare_button, boxed, fill, font, height, type_scale, Studio};
 use crate::ui::core::widgets::cap_label::cap_label;
@@ -426,10 +426,11 @@ impl Inspector<'_> {
 // ------------------------------------------------------------- pure parts
 
 /// The identity block's colour square: the channel's colour in the arrange
-/// (`track_row::lane_accent`: its own tint, else the lane's default), so
-/// the inspector, the lane and the mixer strip read as one channel.
-pub fn take_dot_color(track: &AudioTrack) -> Color {
-    lane_accent(track)
+/// (`track_row::channel_color`: its own tint, else its place among the
+/// shown vocal takes), so the inspector, the lane and the mixer strip read
+/// as one channel.
+pub fn take_dot_color(track: &AudioTrack, vocal_takes: &[Arc<AudioTrack>]) -> Color {
+    channel_color(track, vocal_takes)
 }
 
 /// `_takeLabel`: "Take 2 · Interpretation 1" — the take's place among the
@@ -919,7 +920,7 @@ fn take_body<'a, M: Clone + 'a>(
     let is_vocal = !track.is_backing() && insp.supports_effects;
     responsive(move |size| {
         let identity = identity_block(
-            take_dot_color(track),
+            take_dot_color(track, insp.vocal_takes),
             &track.display_name,
             take_subtitle(track, insp.vocal_takes, insp.active_interpretation),
             // The FX panel's preset row closes the block.
@@ -987,12 +988,7 @@ fn bus_body<'a, M: Clone + 'a>(
     on: fn(Message) -> M,
 ) -> Element<'a, M> {
     responsive(move |size| {
-        let identity = identity_block(
-            bus.color_value.map_or(Studio::ACCENT, argb),
-            &bus.name,
-            "FX bus".to_string(),
-            false,
-        );
+        let identity = identity_block(bus_color(bus), &bus.name, "FX bus".to_string(), false);
         // A bus never routes or sends into itself: the feedback loop is not
         // even offered.
         let others: Vec<&'a FxBus> = insp
