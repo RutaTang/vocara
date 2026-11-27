@@ -1745,15 +1745,17 @@ pub fn lyrics_focus_overlay<'a>(
     let editing = data.lyrics_mode == LyricsMode::Edit;
     let body = container(stack![
         lyrics_reader(state, data, true),
-        container(icon_btn(
-            Icon::Minimize2,
-            "Exit focus",
-            Message::SetLyricsFocus(false),
-            false
-        ))
+        // The design's 28 px icon button, with its tooltip.
+        container(
+            crate::ui::core::widgets::controls::icon_button(
+                Icon::Minimize2,
+                Message::SetLyricsFocus(false)
+            )
+            .tooltip("Exit focus")
+        )
         .padding(Padding {
-            top: 14.0,
-            right: 16.0,
+            top: 12.0,
+            right: 14.0,
             ..Padding::ZERO
         })
         .align_x(Horizontal::Right)
@@ -1763,7 +1765,7 @@ pub fn lyrics_focus_overlay<'a>(
     ])
     .width(Length::Fill)
     .height(Length::Fill)
-    .style(fill(alpha(Studio::BACKGROUND, 0.97)));
+    .style(fill(Studio::BACKGROUND));
     let target = visible_drop_target(body, move |paths: Vec<PathBuf>| {
         // The panel's editor is kept under the overlay with the text it
         // opened on, and its Save would put that back over the import.

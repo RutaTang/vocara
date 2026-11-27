@@ -33,17 +33,21 @@ use std::time::Duration;
 
 use crate::ui::core::text;
 use iced::alignment::{Horizontal, Vertical};
-use iced::widget::{center, column, container, opaque, row, stack, Space};
-use iced::{keyboard, widget, Background, Border, Color, Element, Event, Length, Shadow, Task};
+use iced::widget::{button, center, column, container, opaque, row, stack, Space};
+use iced::{
+    keyboard, widget, Background, Border, Color, Element, Event, Length, Padding, Pixels, Shadow,
+    Task,
+};
 use vocara_model::models::practice_note::PracticeNote;
 use vocara_model::util::dart_string;
 use vocara_model::util::format::format_clock_ms;
 
 use crate::ui::core::icons::{self, Icon};
-use crate::ui::core::theme::{self, alpha, font, Studio};
-use crate::ui::core::widgets::confirm_dialog::{barrier, Fade};
+use crate::ui::core::theme::{self, font, Studio};
+use crate::ui::core::widgets::confirm_dialog::{self, barrier, Fade};
+use crate::ui::core::widgets::controls::{dialog_button_colors, DialogButton};
 use crate::ui::core::widgets::focus_traversal::focus_scope;
-use crate::ui::core::widgets::studio_button::{studio_button, StudioButtonVariant};
+use crate::ui::core::widgets::studio_text::studio_text;
 use crate::ui::core::widgets::text_field::editor::{self as text_editor, text_editor};
 use crate::ui::core::widgets::wrap::Wrap;
 
@@ -53,17 +57,18 @@ mod tests;
 /// The hint in the empty field.
 pub const HINT: &str = "What happened here? (e.g. breath runs out, pitch flat)";
 
-/// The barrier's color: black at 55 %.
-pub const BARRIER: Color = alpha(Color::BLACK, 0.55);
+/// The barrier's color: the studio dialogs' (black at 50 %).
+pub const BARRIER: Color = theme::DIALOG_BARRIER;
 
 /// The card's widest (`BoxConstraints(maxWidth: 460)`), and its inset from
 /// the window's edges (`insetPadding`).
 const CARD_MAX_WIDTH: f32 = 460.0;
 const INSET: f32 = 24.0;
 
-/// The field's text size and line height (14 px at 1.4).
-const FIELD_SIZE: f32 = 14.0;
-const FIELD_LINE_HEIGHT: f32 = 1.4;
+/// The field's text size and line height (`DESIGN.md`'s 12 px field text,
+/// an 18 px line).
+const FIELD_SIZE: f32 = theme::FIELD_TEXT_SIZE;
+const FIELD_LINE_HEIGHT: f32 = 1.5;
 
 /// How the field grows: from 3 lines to 6, then it scrolls.
 const MIN_LINES: f32 = 3.0;
@@ -244,16 +249,6 @@ impl NoteEditor {
     /// The editor at `fade` (`confirm_dialog`'s module docs: its host keeps
     /// its `DialogMotion`).
     pub fn view_at(&self, fade: Fade) -> Element<'_, Message> {
-        let heading = row![
-            icons::icon(Icon::StickyNote, 16.0, Studio::ACCENT),
-            Space::new().width(8),
-            text(self.title.as_str())
-                .size(15)
-                .font(font::BOLD)
-                .color(Studio::TEXT_PRIMARY),
-        ]
-        .align_y(Vertical::Center);
-
         let field = text_editor(&self.content)
             .id(self.input.clone())
             .placeholder(HINT)
@@ -270,44 +265,32 @@ impl NoteEditor {
             .caret_color(Studio::ACCENT)
             .style(field_style);
 
-        let mut actions = row![].align_y(Vertical::Center);
+        let mut actions = row![].spacing(8).align_y(Vertical::Center);
         if self.editing {
-            actions = actions.push(
-                studio_button("Delete", Message::Delete)
-                    .icon(Icon::Trash2)
-                    .variant(StudioButtonVariant::Danger),
-            );
+            actions = actions.push(delete_button());
         }
-        actions = actions
-            .push(Space::new().width(Length::Fill))
-            .push(studio_button("Cancel", Message::Cancel))
-            .push(Space::new().width(8))
-            .push(
-                studio_button(if self.editing { "Save" } else { "Add" }, Message::Save)
-                    .variant(StudioButtonVariant::Accent)
-                    .enabled(self.can_save()),
-            );
+        actions = actions.push(confirm_dialog::buttons(
+            "Cancel",
+            Message::Cancel,
+            if self.editing { "Save" } else { "Add" },
+            self.can_save().then_some(Message::Save),
+            DialogButton::Primary,
+        ));
 
         let card = container(
             column![
-                heading,
+                confirm_dialog::title(self.title.as_str()),
                 Space::new().height(14),
-                // 10 / 12, and the well's 1 px border: a decoration's border
-                // pads its child too (as on the card).
-                container(field)
-                    .width(Length::Fill)
-                    .padding([11, 13])
-                    .style(theme::inset(8.0)),
-                Space::new().height(18),
+                field,
+                Space::new().height(20),
                 actions,
             ]
             .width(Length::Fill),
         )
         .width(Length::Fill)
         .max_width(CARD_MAX_WIDTH)
-        // 20, and the card's 1 px border.
-        .padding(21)
-        .style(card_style);
+        .padding(confirm_dialog::CARD_PADDING)
+        .style(theme::dialog_card);
         modal(
             container(card)
                 .width(Length::Fill)
@@ -319,26 +302,59 @@ impl NoteEditor {
     }
 }
 
-/// The card: `Studio.surface`, radius 12, `Studio.border`, shadow
-/// `0x99000000` blurred 28 at (0, 12).
-fn card_style(_: &iced::Theme) -> container::Style {
-    container::Style {
-        shadow: Shadow {
-            color: Color::from_rgba8(0, 0, 0, 0x99 as f32 / 255.0),
-            offset: iced::Vector::new(0.0, 12.0),
-            blur_radius: 28.0,
-        },
-        ..theme::boxed(Some(Studio::SURFACE), 12.0, Some(Studio::BORDER))
-    }
+/// The editor's Delete (editing only), apart on the left: a secondary
+/// dialog button whose label reads in `RECORD_TEXT` after a trash glyph.
+fn delete_button<'a>() -> Element<'a, Message> {
+    let label = row![
+        icons::icon(Icon::Trash2, 13.0, Studio::RECORD_TEXT),
+        studio_text("Delete")
+            .size(theme::type_scale::BODY)
+            .line_height(Pixels(theme::type_scale::LINE))
+            .font(font::MEDIUM)
+            .color(Studio::RECORD_TEXT),
+    ]
+    .spacing(6)
+    .align_y(Vertical::Center);
+    container(
+        button(container(label).center_y(Length::Fill))
+            .padding(Padding::from([0, 12]))
+            .height(theme::height::TOOLBAR_BUTTON)
+            .on_press(Message::Delete)
+            .style(|_, status| {
+                let (fill, text, outline) = dialog_button_colors(DialogButton::Secondary, status);
+                button::Style {
+                    background: fill.map(Background::Color),
+                    text_color: text,
+                    border: Border {
+                        color: outline.unwrap_or(Color::TRANSPARENT),
+                        width: 1.0,
+                        radius: theme::radius::WELL.into(),
+                    },
+                    shadow: Shadow::default(),
+                    snap: true,
+                }
+            }),
+    )
+    .width(Length::Shrink)
+    .into()
 }
 
-/// The field: no fill or border of its own (the inset well draws them),
-/// `Studio.textPrimary` text, a `Studio.textFaint` hint, Material 3's
-/// selection color.
-fn field_style(_: &iced::Theme, _: text_editor::Status) -> text_editor::Style {
+/// The field (`DESIGN.md`, Text fields): its own `WELL` fill, radius 6, an
+/// inset `BORDER_STRONG` outline (`ACCENT` at 60 % while focused),
+/// `TEXT_PRIMARY` text, a `TEXT_FAINT` hint, the selection colour.
+fn field_style(_: &iced::Theme, status: text_editor::Status) -> text_editor::Style {
+    let focused = matches!(status, text_editor::Status::Focused { .. });
     text_editor::Style {
-        background: Background::Color(Color::TRANSPARENT),
-        border: Border::default(),
+        background: Background::Color(Studio::WELL),
+        border: Border {
+            color: if focused {
+                theme::FIELD_FOCUS
+            } else {
+                Studio::BORDER_STRONG
+            },
+            width: 1.0,
+            radius: theme::radius::WELL.into(),
+        },
         placeholder: Studio::TEXT_FAINT,
         value: Studio::TEXT_PRIMARY,
         selection: crate::ui::core::theme::SELECTION,

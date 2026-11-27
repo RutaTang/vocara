@@ -1381,12 +1381,12 @@ fn a_practice_that_cannot_be_loaded_says_so_and_has_a_way_back() {
         settle: false,
         ..Setup::default()
     });
-    // Loading: a spinner under the bar with the back chevron.
+    // Loading: a spinner under the toolbar with its back button.
     assert!(h.vm().load_running());
-    assert!(h.shows(&glyph(Icon::ChevronLeft)));
+    assert!(h.shows("Back"));
     h.settle();
     assert!(h.shows(NOT_LOADED));
-    h.click(&glyph(Icon::ChevronLeft));
+    h.click("Back");
     assert_eq!(h.leaves(), 1);
 }
 

@@ -25,13 +25,13 @@
 use crate::ui::core::text;
 use iced::alignment::{Horizontal, Vertical};
 use iced::widget::{button, center, column, container, opaque, row, stack, Column, Space};
-use iced::{keyboard, widget, Element, Event, Length, Padding, Task};
+use iced::{keyboard, widget, Element, Event, Length, Padding, Pixels, Task};
 use vocara_model::models::technique::Technique;
 use vocara_model::util::dart_string;
 
 use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::theme::{self, font, Studio};
-use crate::ui::core::widgets::confirm_dialog::{barrier, Fade};
+use crate::ui::core::widgets::confirm_dialog::{self, barrier, Fade};
 use crate::ui::core::widgets::fading_scrollbar::{scrollable, Fading};
 use crate::ui::core::widgets::focus_traversal::focus_scope;
 use crate::ui::core::widgets::studio_hint::spinner;
@@ -158,18 +158,15 @@ impl TechniquePicker {
     /// its `DialogMotion`).
     pub fn view_at(&self, fade: Fade) -> Element<'_, Message> {
         let header = container(column![
-            text(self.title.as_str())
-                .size(16)
-                .font(font::BOLD)
-                .color(Studio::TEXT_PRIMARY),
+            confirm_dialog::title(self.title.as_str()),
             Space::new().height(12),
             search_field(&self.query, self.search.clone()),
         ])
         .padding(Padding {
-            top: 18.0,
-            right: 20.0,
+            top: confirm_dialog::CARD_PADDING,
+            right: confirm_dialog::CARD_PADDING,
             bottom: 12.0,
-            left: 20.0,
+            left: confirm_dialog::CARD_PADDING,
         });
         let card = container(
             column![
@@ -183,15 +180,15 @@ impl TechniquePicker {
             .width(Length::Fill),
         )
         .width(WIDTH)
-        // Inside the 1 px border (a decoration's border pads its child).
-        .padding(1)
-        .style(theme::dialog_card);
+        .style(theme::dialog_card)
+        // The rows' hover keeps inside the card's rounded corners.
+        .clip(true);
         modal(container(card).padding(24).into(), fade)
     }
 
     fn body(&self) -> Element<'_, Message> {
         let Some(all) = &self.all else {
-            return container(spinner(20.0, 2.0, Studio::TEXT_SECONDARY))
+            return container(spinner(18.0, 2.0, Studio::TEXT_SECONDARY))
                 .width(Length::Fill)
                 .height(120)
                 .align_x(Horizontal::Center)
@@ -210,7 +207,7 @@ impl TechniquePicker {
         }
         let rows = Column::with_children(filtered.into_iter().map(technique_row))
             .width(Length::Fill)
-            .padding([6, 0]);
+            .padding(LIST_PADDING);
         container(scrollable(rows).fading())
             .width(Length::Fill)
             .max_height(LIST_MAX_HEIGHT)
@@ -218,74 +215,99 @@ impl TechniquePicker {
     }
 }
 
-/// `_SearchField`: 34 tall, the inset well (radius 8), a search glyph before
-/// the field. The well's height is fixed, so the field's own inset
-/// ([`theme::FIELD_PADDING`]) moves its text in from the sides only: the
-/// field stays centred in the well.
+/// The list's inset inside the card, under the search.
+const LIST_PADDING: f32 = 6.0;
+
+/// `_SearchField`: `DESIGN.md`'s text field (28 px, `WELL`, radius 6, an
+/// inset outline, the accent at 60 % while focused, 12 px text) with a
+/// 14 px search glyph inside its left end: the field's text starts past it.
 fn search_field(query: &str, id: widget::Id) -> Element<'_, Message> {
-    container(
-        row![
-            icons::icon(Icon::Search, 14.0, Studio::TEXT_FAINT),
-            Space::new().width(8),
-            text_input("Search techniques", query)
-                .id(id)
-                .on_input(Message::Query)
-                .size(13)
-                .line_height(1.0)
-                .padding(theme::FIELD_PADDING)
-                .caret_color(Studio::ACCENT)
-                .style(theme::studio_input),
-        ]
-        .align_y(Vertical::Center),
-    )
+    let field = text_input("Search techniques", query)
+        .id(id)
+        .on_input(Message::Query)
+        .size(theme::FIELD_TEXT_SIZE)
+        .line_height(Pixels(theme::type_scale::LINE))
+        .padding(Padding {
+            left: SEARCH_TEXT_INSET,
+            ..theme::FIELD_PADDING
+        })
+        .caret_color(Studio::ACCENT)
+        .style(theme::field);
+    stack![
+        field,
+        container(icons::icon(Icon::Search, 14.0, Studio::TEXT_FAINT))
+            .padding(Padding {
+                left: 9.0,
+                ..Padding::ZERO
+            })
+            .height(theme::FIELD_HEIGHT)
+            .align_y(Vertical::Center),
+    ]
     .width(Length::Fill)
-    .height(34)
-    // 10 inside the 1 px border.
-    .padding([0, 11])
-    .align_y(Vertical::Center)
-    .style(theme::inset(8.0))
     .into()
 }
 
-/// `_TechniqueRow`: `Studio.hover` under the pointer, 20 / 9 padding; a
-/// coral waypoints glyph, the name (13.5 px w600) and, when it has tags,
-/// them joined by " · " under it — one line each.
+/// Where the search field's text starts: past the glyph's 9 px inset, the
+/// 14 px glyph and a 7 px gap.
+pub const SEARCH_TEXT_INSET: f32 = 9.0 + 14.0 + 7.0;
+
+/// `_TechniqueRow`: a list row (`HOVER` under the pointer, radius 4), 10 px
+/// in: a 14 px `TEXT_SECONDARY` waypoints glyph, the name (12 px medium)
+/// and, when it has tags, them joined by " · " under it (11 px
+/// `TEXT_FAINT`) — one line each.
 fn technique_row(t: &Technique) -> Element<'_, Message> {
     let mut labels = column![studio_text(t.name.as_str())
-        .size(13.5)
-        .font(font::SEMIBOLD)
+        .size(theme::type_scale::BODY)
+        .line_height(Pixels(theme::type_scale::LINE))
+        .font(font::MEDIUM)
         .color(Studio::TEXT_PRIMARY)
         .ellipsis(1)]
     .width(Length::Fill);
     if !t.tags.is_empty() {
-        labels = labels.push(Space::new().height(2)).push(
+        labels = labels.push(
             studio_text(t.tags.join(" · "))
-                .size(11)
+                .size(theme::type_scale::LABEL)
+                .line_height(Pixels(14.0))
                 .color(Studio::TEXT_FAINT)
                 .ellipsis(1),
         );
     }
     button(
         row![
-            icons::icon(Icon::Waypoints, 13.0, Studio::ACCENT),
-            Space::new().width(10),
+            icons::icon(Icon::Waypoints, 14.0, Studio::TEXT_SECONDARY),
             labels,
         ]
+        .spacing(10)
         .align_y(Vertical::Center),
     )
     .width(Length::Fill)
-    .padding([9, 20])
-    .style(theme::menu_item)
+    .padding([6, 10])
+    .style(row_style)
     .on_press(Message::Pick(t.id.clone()))
     .into()
 }
 
-/// `_Hint`: a faint centred message, 20 / 28 padding.
+/// A list row's face: `HOVER` under the pointer at once, radius 4.
+fn row_style(_: &iced::Theme, status: button::Status) -> button::Style {
+    let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+    button::Style {
+        background: hovered.then_some(Studio::HOVER.into()),
+        text_color: Studio::TEXT_PRIMARY,
+        border: iced::Border {
+            radius: theme::radius::SMALL.into(),
+            ..iced::Border::default()
+        },
+        shadow: iced::Shadow::default(),
+        snap: true,
+    }
+}
+
+/// `_Hint`: a faint centred message (12 px `TEXT_FAINT`), 20 / 28 padding.
 fn hint(label: &str) -> Element<'_, Message> {
     container(
         text(label)
-            .size(12.5)
-            .line_height(1.4)
+            .size(theme::type_scale::BODY)
+            .line_height(1.5)
             .align_x(Horizontal::Center)
             .width(Length::Fill)
             .color(Studio::TEXT_FAINT),

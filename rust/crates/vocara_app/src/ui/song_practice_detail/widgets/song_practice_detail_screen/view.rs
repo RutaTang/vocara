@@ -12,14 +12,14 @@ use iced::advanced::layout::{self, Layout};
 use iced::advanced::widget::{tree, Operation, Tree};
 use iced::advanced::{overlay, renderer, Clipboard, Shell, Widget};
 use iced::alignment::{Horizontal, Vertical};
-use iced::widget::canvas::{self, gradient, Frame, Geometry, Path};
+use iced::widget::canvas::{self, Frame, Geometry, Path};
 use iced::widget::{
     button, canvas as canvas_widget, column, container, mouse_area, opaque, responsive, row, stack,
     Space,
 };
 use iced::{
-    keyboard, mouse, Color, Element, Event, Length, Padding, Point, Rectangle, Renderer, Shadow,
-    Size, Theme, Vector,
+    keyboard, mouse, Color, Element, Event, Length, Padding, Point, Rectangle, Renderer, Size,
+    Theme, Vector,
 };
 use vocara_model::models::audio_track::AudioTrack;
 use vocara_model::models::fx_bus::FxBus;
@@ -39,7 +39,6 @@ use crate::ui::core::widgets::fading_scrollbar::{scrollable, Fading};
 use crate::ui::core::widgets::holds_keyboard::holds_keyboard;
 use crate::ui::core::widgets::pan_zoom::{self, Held, Scroll};
 use crate::ui::core::widgets::slide::inert;
-use crate::ui::core::widgets::studio_button::studio_button;
 use crate::ui::core::widgets::studio_controls::{fader_db_readout, studio_fader};
 use crate::ui::core::widgets::studio_hint::spinner;
 use crate::ui::core::widgets::studio_text::studio_text;
@@ -198,12 +197,12 @@ impl SongPracticeDetailScreen {
     pub(super) fn page(&self) -> Element<'_, Message> {
         let vm = &*self.vm;
         if vm.load_running() && vm.practice().is_none() {
-            return no_workspace(spinner(36.0, 4.0, Studio::TEXT_SECONDARY));
+            return no_workspace(spinner(24.0, 2.0, Studio::TEXT_SECONDARY));
         }
         let Some(practice) = vm.practice() else {
             return no_workspace(
                 text(NOT_LOADED)
-                    .size(14)
+                    .size(theme::type_scale::TITLE)
                     .color(Studio::TEXT_SECONDARY)
                     .into(),
             );
@@ -554,17 +553,18 @@ impl SongPracticeDetailScreen {
         // highlight comes and goes.
         let mut highlighted = stack![row];
         if hover {
+            // The drop target: an accent wash with an inset 1 px accent
+            // outline, its corners a well's.
             highlighted = highlighted.push(
                 container(Space::new())
                     .width(Length::Fill)
                     .height(Length::Fill)
-                    .style(|_| container::Style {
-                        border: iced::Border {
-                            color: Studio::ACCENT,
-                            width: 1.5,
-                            radius: 0.0.into(),
-                        },
-                        ..boxed(Some(alpha(Studio::ACCENT, 0.08)), 0.0, None)
+                    .style(|_| {
+                        boxed(
+                            Some(alpha(Studio::ACCENT, 0.08)),
+                            theme::radius::WELL,
+                            Some(alpha(Studio::ACCENT, 0.8)),
+                        )
                     }),
             );
         }
@@ -1039,25 +1039,10 @@ fn slot(layer: Option<Element<'_, Message>>) -> Element<'_, Message> {
 /// the practice could not be loaded, and Home's open guard, released only
 /// when this page pops, stayed set.
 fn no_workspace(child: Element<'_, Message>) -> Element<'_, Message> {
-    let back = button(
-        container(icons::icon(Icon::ChevronLeft, 20.0, Studio::TEXT_SECONDARY))
-            .center_x(30)
-            .center_y(30),
-    )
-    .padding(0)
-    .style(bare_button)
-    .on_press(Message::Back);
+    use crate::ui::core::widgets::toolbar;
     column![
-        container(back)
-            .width(Length::Fill)
-            .height(53)
-            .padding(Padding::from([0, 14]))
-            .align_y(Vertical::Center)
-            .style(fill(Studio::SURFACE)),
-        container(Space::new())
-            .width(Length::Fill)
-            .height(1)
-            .style(fill(Studio::BORDER)),
+        // The pages' unified toolbar, its back button alone.
+        toolbar::page_toolbar(row![toolbar::back_button(Message::Back)]),
         container(child)
             .width(Length::Fill)
             .height(Length::Fill)
@@ -1080,18 +1065,26 @@ fn catch_up_guard(workspace: Element<'_, Message>, catching_up: bool) -> Element
         .height(Length::Fill)];
     if catching_up {
         // A file dropped on the guard: nothing beneath takes it through the
-        // guard, so it is said instead.
-        let dim = container(text(FINISHING_SAVE).size(13).color(Studio::TEXT_SECONDARY))
+        // guard, so it is said instead. The workspace dims under the
+        // dialogs' barrier; the message sits on a toast card.
+        let note = container(
+            row![
+                spinner(12.0, 1.5, Studio::TEXT_SECONDARY),
+                text(FINISHING_SAVE)
+                    .size(theme::type_scale::BODY)
+                    .color(Studio::TEXT_PRIMARY),
+            ]
+            .spacing(10)
+            .align_y(Vertical::Center),
+        )
+        .padding([9, 14])
+        .style(theme::toast);
+        let dim = container(note)
             .width(Length::Fill)
             .height(Length::Fill)
             .center_x(Length::Fill)
             .center_y(Length::Fill)
-            .style(fill(Color::from_rgba8(
-                0x0A,
-                0x0A,
-                0x0E,
-                0x80 as f32 / 255.0,
-            )));
+            .style(fill(theme::DIALOG_BARRIER));
         layers = layers.push(opaque(visible_drop_target(dim, |_| {
             Message::RefusedDrop(WAIT_FOR_SAVE)
         })));
@@ -1105,7 +1098,7 @@ fn catch_up_guard(workspace: Element<'_, Message>, catching_up: bool) -> Element
 /// How long the separation bar's fill takes to reach a new value.
 pub const SEPARATION_FILL_ANIMATION: std::time::Duration = std::time::Duration::from_millis(280);
 
-/// The separation bar, 8 tall: its fill moves to each new `progress` over
+/// The separation bar, 4 tall: its fill moves to each new `progress` over
 /// 280 ms, easing out (its `AnimatedContainer`).
 fn separation_fill<'a>(progress: f64) -> Element<'a, Message> {
     animated(
@@ -1115,7 +1108,7 @@ fn separation_fill<'a>(progress: f64) -> Element<'a, Message> {
         |value| {
             canvas_widget(ProgressBar { value })
                 .width(Length::Fill)
-                .height(8)
+                .height(4)
                 .into()
         },
     )
@@ -1126,70 +1119,52 @@ fn separation_fill<'a>(progress: f64) -> Element<'a, Message> {
 /// multi-minute background job). Nothing beneath takes a drop through it
 /// (said instead), nor a key, nor a tap.
 fn separation_overlay<'a>(progress: Option<f64>, can_cancel: bool) -> Element<'a, Message> {
+    use crate::ui::core::widgets::confirm_dialog;
+    use crate::ui::core::widgets::controls::secondary_button;
     let p = progress.unwrap_or(0.0).clamp(0.0, 1.0);
     let pct = round_to_i64(p * 100.0);
-    let badge = container(icons::icon(Icon::WandSparkles, 16.0, Studio::ACCENT))
-        .center_x(32)
-        .center_y(32)
-        .style(|_| boxed(Some(alpha(Studio::ACCENT, 0.14)), 9.0, None));
+    // The confirm dialogs' icon badge.
+    let badge = container(icons::icon(Icon::WandSparkles, 14.0, Studio::ACCENT_BRIGHT))
+        .center_x(28)
+        .center_y(28)
+        .style(|_| boxed(Some(alpha(Studio::ACCENT, 0.14)), theme::radius::WELL, None));
     let card = container(column![
         row![
             badge,
             Space::new().width(12),
-            container(
-                text("Extracting the backing")
-                    .size(15)
-                    .font(font::BOLD)
-                    .color(Studio::TEXT_PRIMARY)
-            )
-            .width(Length::Fill),
+            container(confirm_dialog::title("Extracting the backing")).width(Length::Fill),
             studio_text(format!("{pct}%"))
-                .size(14)
-                .font(font::BOLD)
+                .size(theme::type_scale::TITLE)
+                .font(font::MEDIUM)
                 .tabular()
-                .color(Studio::ACCENT),
+                .color(Studio::TEXT_SECONDARY),
         ]
         .align_y(Vertical::Center),
-        Space::new().height(18),
+        Space::new().height(16),
         // The fill animates; the percentage changes at once.
         separation_fill(p),
-        Space::new().height(16),
+        Space::new().height(14),
         text("Pulling the instrumental out of the song to sing over.\nThis can take a minute or two.")
-            .size(12)
-            .line_height(1.45)
-            .color(Studio::TEXT_FAINT),
+            .size(theme::type_scale::BODY)
+            .line_height(1.5)
+            .color(Studio::TEXT_SECONDARY),
         Space::new().height(20),
-        container(studio_button("Cancel", Message::CancelSeparation).enabled(can_cancel))
-            .width(Length::Fill)
-            .align_x(Horizontal::Right),
+        container(secondary_button(
+            "Cancel",
+            can_cancel.then_some(Message::CancelSeparation)
+        ))
+        .width(Length::Fill)
+        .align_x(Horizontal::Right),
     ])
-    .width(380)
-    // 24 / 22 / 24 / 20 inside the 1 px border.
-    .padding(Padding {
-        top: 23.0,
-        right: 25.0,
-        bottom: 21.0,
-        left: 25.0,
-    })
-    .style(|_| container::Style {
-        shadow: Shadow {
-            color: Color::from_rgba8(0, 0, 0, 0x80 as f32 / 255.0),
-            offset: Vector::new(0.0, 16.0),
-            blur_radius: 40.0,
-        },
-        ..boxed(Some(Studio::SURFACE_RAISED), 16.0, Some(Studio::BORDER))
-    });
+    .width(confirm_dialog::CARD_WIDTH)
+    .padding(confirm_dialog::CARD_PADDING)
+    .style(theme::dialog_card);
     let barrier = container(card)
         .width(Length::Fill)
         .height(Length::Fill)
         .center_x(Length::Fill)
         .center_y(Length::Fill)
-        .style(fill(Color::from_rgba8(
-            0x0A,
-            0x0A,
-            0x0E,
-            0xC4 as f32 / 255.0,
-        )));
+        .style(fill(theme::DIALOG_BARRIER));
     holds_keyboard(opaque(visible_drop_target(barrier, |_| {
         Message::RefusedDrop(WAIT_FOR_SEPARATION)
     })))
@@ -1356,7 +1331,12 @@ fn drop_hint<'a>(icon: Icon, hint: &'static str, highlighted: bool) -> Element<'
     .height(64)
     .align((0.0, 0.0))
     .decoration(if highlighted {
-        Decoration::boxed(alpha(Studio::ACCENT, 0.08), 8.0, Studio::ACCENT, 1.5)
+        Decoration::boxed(
+            alpha(Studio::ACCENT, 0.08),
+            8.0,
+            alpha(Studio::ACCENT, 0.8),
+            1.0,
+        )
     } else {
         Decoration::boxed(Studio::PANEL, 8.0, Studio::BORDER, 1.0)
     })
@@ -1714,8 +1694,9 @@ impl canvas::Program<Message> for Scrollbar {
     }
 }
 
-/// The separation's progress bar: `Studio.inset`, the done part an accent
-/// gradient, radius 5.
+/// The separation's progress bar: a `CONTROL_ACTIVE` track, the done part
+/// `ACCENT` (the page's one primary emphasis while it runs), its ends
+/// round.
 struct ProgressBar {
     value: f32,
 }
@@ -1732,22 +1713,20 @@ impl<M> canvas::Program<M> for ProgressBar {
         _: mouse::Cursor,
     ) -> Vec<Geometry> {
         let mut frame = Frame::new(renderer, bounds.size());
+        let r = bounds.height / 2.0;
         frame.fill(
-            &Path::rounded_rectangle(Point::ORIGIN, bounds.size(), 5.0.into()),
-            Studio::INSET,
+            &Path::rounded_rectangle(Point::ORIGIN, bounds.size(), r.into()),
+            Studio::CONTROL_ACTIVE,
         );
         let w = self.value * bounds.width;
         if w > 0.0 {
-            let shade = gradient::Linear::new(Point::ORIGIN, Point::new(w, 0.0))
-                .add_stop(0.0, Studio::ACCENT)
-                .add_stop(1.0, Studio::ACCENT_BRIGHT);
             frame.fill(
                 &Path::rounded_rectangle(
                     Point::ORIGIN,
                     Size::new(w, bounds.height),
-                    5.0f32.min(w / 2.0).into(),
+                    r.min(w / 2.0).into(),
                 ),
-                shade,
+                Studio::ACCENT,
             );
         }
         vec![frame.into_geometry()]
@@ -1918,8 +1897,9 @@ mod animations {
 
     #[test]
     fn the_separation_bar_eases_its_fill_out_over_280_ms() {
-        let mut window = Frames::new(Size::new(200.0, 8.0));
-        let filled = |w: &Frames, x: f32| !near(w.pixel(Point::new(x, 4.0)), Studio::INSET);
+        let mut window = Frames::new(Size::new(200.0, 4.0));
+        let filled =
+            |w: &Frames, x: f32| !near(w.pixel(Point::new(x, 2.0)), Studio::CONTROL_ACTIVE);
         let t0 = Instant::now();
         window.frame(separation_fill(0.0), &[], t0);
         assert!(!filled(&window, 4.0), "empty");

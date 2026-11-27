@@ -213,7 +213,8 @@ fn a_practice_that_cannot_be_loaded_still_has_a_way_back() {
     })));
     settle(&mut app, task);
     assert!(shows(&app, NOT_LOADED));
-    back(&mut app);
+    // The bar shown with no workspace: the toolbar's back button.
+    click(&mut app, "Back");
     assert_eq!(app.routes(), [Some(Route::Home)]);
     assert_eq!(
         app.top().map(|(id, _)| id),
