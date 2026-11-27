@@ -258,7 +258,7 @@ pub fn panel<'a>(r: &Readouts, height: f32) -> Element<'a, Message> {
         .height(Length::Fill),
     )
     .width(150)
-    .height(m.bottom)
+    .height(m.bottom.min(MAP_MAX))
     .style(|_: &Theme| boxed(Some(CARD), 10.0, Some(CARD_EDGE)));
     let map = labelled(map, vowel_map_label(r.vowel));
     let bottom = row![map, status_column(&r.status, m.text_gap)]
@@ -424,6 +424,10 @@ pub const VOWELS: [(&str, &str, f32, f32); 7] = [
     ("o", "oh", 450.0, 880.0),
     ("u", "oo", 310.0, 870.0),
 ];
+
+/// The vowel map card's tallest: in a tall dock the card stays a card, not
+/// an empty column.
+pub const MAP_MAX: f32 = 124.0;
 
 /// The room the vowel map's caption keeps below it.
 const CAPTION: f32 = 14.0;
