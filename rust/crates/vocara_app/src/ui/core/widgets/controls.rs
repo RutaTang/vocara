@@ -528,6 +528,7 @@ pub struct PopupButton<'a, M> {
     on_press: Option<M>,
     width: Length,
     placeholder: bool,
+    max_width: Option<f32>,
 }
 
 /// A pop-up button reading `label`, pressing `on_press` (`None`:
@@ -541,6 +542,7 @@ pub fn popup_button<'a, M>(
         on_press,
         width: Length::Shrink,
         placeholder: false,
+        max_width: None,
     }
 }
 
@@ -556,18 +558,33 @@ impl<M> PopupButton<'_, M> {
         self.placeholder = placeholder;
         self
     }
+
+    /// At most `width` wide, however long its label: a longer label is
+    /// ellipsized and the chevron keeps its place (a user-named item in a
+    /// narrow pane).
+    pub fn max_width(mut self, width: f32) -> Self {
+        self.max_width = Some(width);
+        self
+    }
 }
+
+/// What a pop-up button's label leaves of its width: the padding (8 left,
+/// 6 right), the 8 px gap and the 10 px chevron.
+pub const POPUP_CHROME_WIDTH: f32 = 8.0 + 6.0 + 8.0 + 10.0;
 
 impl<'a, M: Clone + 'a> From<PopupButton<'a, M>> for Element<'a, M> {
     fn from(b: PopupButton<'a, M>) -> Self {
         let placeholder = b.placeholder;
-        let label = container(label_text(b.label, type_scale::LABEL)).width(
+        let mut label = container(label_text(b.label, type_scale::LABEL)).width(
             if matches!(b.width, Length::Shrink) {
                 Length::Shrink
             } else {
                 Length::Fill
             },
         );
+        if let Some(max) = b.max_width {
+            label = label.max_width((max - POPUP_CHROME_WIDTH).max(0.0));
+        }
         let content = row![
             label,
             line_icon_stroked(glyphs::UP_DOWN, 10.0, Studio::TEXT_FAINT, 1.0)
@@ -1591,6 +1608,26 @@ mod tests {
             dialog_button_colors(DialogButton::Primary, Disabled).1,
             Studio::TEXT_DISABLED
         );
+    }
+
+    #[test]
+    fn a_pop_up_button_with_a_long_label_keeps_to_its_max_width() {
+        let long = "Powerful belt, second verse, with the key change";
+        let mut ui = iced_test::simulator(Element::from(row![
+            popup_button(long, Some(Msg::Go)).max_width(140.0)
+        ]));
+        let label = ui.find(long).expect("the label").bounds();
+        assert!(
+            label.x + label.width <= 140.0 - POPUP_CHROME_WIDTH + 8.0 + 0.5,
+            "ellipsized inside the button: {label:?}"
+        );
+        // A short one stays as wide as its label.
+        let mut ui =
+            iced_test::simulator(Element::from(row![
+                popup_button("Tender", Some(Msg::Go)).max_width(140.0)
+            ]));
+        let label = ui.find("Tender").expect("the label").bounds();
+        assert!(label.width < 60.0, "{label:?}");
     }
 
     #[test]
