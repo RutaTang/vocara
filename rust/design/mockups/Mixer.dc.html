@@ -1,0 +1,671 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>After · Mixer dock</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet">
+<style>
+body{margin:0;background:#111114}
+button{font-family:inherit}
+.tn{font-variant-numeric:tabular-nums}
+</style>
+</helmet>
+<div style="width: 1440px; height: 900px; display: flex; flex-direction: column; background: #111114; color: #ECECF1; font-family: Inter, -apple-system, system-ui, sans-serif; font-size: 12px; line-height: 16px; overflow: hidden; -webkit-font-smoothing: antialiased">
+
+  <header style="height: 52px; flex: none; display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; padding: 0 14px 0 16px; background: #18181C; border-bottom: 1px solid #26262D">
+    <div style="display: flex; align-items: center; gap: 14px; min-width: 0">
+      <div style="display: flex; gap: 8px; flex: none" aria-hidden="true">
+        <span style="width: 12px; height: 12px; border-radius: 6px; background: #3A3A42"></span>
+        <span style="width: 12px; height: 12px; border-radius: 6px; background: #3A3A42"></span>
+        <span style="width: 12px; height: 12px; border-radius: 6px; background: #3A3A42"></span>
+      </div>
+      <button aria-label="Back to library" style="width: 28px; height: 28px; margin-left: 6px; border-radius: 6px; border: none; background: transparent; color: #A7A7B3; display: flex; align-items: center; justify-content: center; cursor: pointer">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 18l-6-6 6-6"></path></svg>
+      </button>
+      <div style="display: flex; align-items: baseline; gap: 8px; min-width: 0">
+        <span style="font-size: 13px; font-weight: 600; white-space: nowrap">River Song</span>
+        <span style="font-size: 12px; color: #80808D; white-space: nowrap">3 takes · 4 notes</span>
+      </div>
+    </div>
+
+    <div style="display: flex; align-items: center; gap: 8px">
+      <div role="group" aria-label="Transport" style="display: flex; align-items: center; height: 30px; border-radius: 7px; background: #222228; box-shadow: inset 0 0 0 1px #2E2E36">
+        <button aria-label="Go to start" style="width: 34px; height: 30px; border: none; background: transparent; color: #A7A7B3; display: flex; align-items: center; justify-content: center; cursor: pointer">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M6 5h2.2v14H6zM20 5v14L9.5 12z"></path></svg>
+        </button>
+        <button aria-label="Play" style="width: 34px; height: 30px; border: none; background: transparent; color: #ECECF1; display: flex; align-items: center; justify-content: center; cursor: pointer">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M7 4.5v15l12.5-7.5z"></path></svg>
+        </button>
+        <button aria-label="Stop" style="width: 34px; height: 30px; border: none; background: transparent; color: #A7A7B3; display: flex; align-items: center; justify-content: center; cursor: pointer">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="5" y="5" width="14" height="14" rx="1.5"></rect></svg>
+        </button>
+        <span style="width: 1px; height: 16px; background: #34343D"></span>
+        <button aria-label="Loop" aria-pressed="false" style="width: 34px; height: 30px; border: none; background: transparent; color: #A7A7B3; display: flex; align-items: center; justify-content: center; cursor: pointer">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 2.5l3.5 3.5-3.5 3.5"></path><path d="M3.5 11.5v-1A4.5 4.5 0 0 1 8 6h12.5"></path><path d="M7 21.5L3.5 18 7 14.5"></path><path d="M20.5 12.5v1A4.5 4.5 0 0 1 16 18H3.5"></path></svg>
+        </button>
+        <button aria-label="Follow playhead" aria-pressed="true" style="width: 34px; height: 30px; border: none; background: transparent; color: #ECECF1; display: flex; align-items: center; justify-content: center; cursor: pointer">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="7"></circle><circle cx="12" cy="12" r="2" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3"></path></svg>
+        </button>
+      </div>
+
+      <div style="height: 30px; padding: 0 12px; border-radius: 7px; background: #0C0C0F; box-shadow: inset 0 0 0 1px #26262D; display: flex; align-items: center; gap: 6px; font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 14px; letter-spacing: 0.2px" class="tn">
+        <span style="color: #ECECF1">00:12.4</span><span style="color: #5C5C68">/</span><span style="color: #80808D">00:48.0</span>
+      </div>
+
+      <div role="group" aria-label="Recording" style="display: flex; align-items: center; height: 30px; border-radius: 7px; background: #222228; box-shadow: inset 0 0 0 1px #2E2E36">
+        <button aria-label="Input monitoring" aria-pressed="false" style="width: 34px; height: 30px; border: none; background: transparent; color: #A7A7B3; display: flex; align-items: center; justify-content: center; cursor: pointer">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 15v-3a8 8 0 0 1 16 0v3"></path><rect x="3.5" y="14" width="4" height="6.5" rx="1.5"></rect><rect x="16.5" y="14" width="4" height="6.5" rx="1.5"></rect></svg>
+        </button>
+        <span style="width: 1px; height: 16px; background: #34343D"></span>
+        <button aria-label="Record" style="height: 30px; padding: 0 12px 0 10px; border: none; background: transparent; color: #ECECF1; display: flex; align-items: center; gap: 7px; font-size: 12px; font-weight: 500; cursor: pointer">
+          <span style="width: 10px; height: 10px; border-radius: 5px; background: #E5574B; box-shadow: 0 0 0 3px rgba(229,87,75,0.18)"></span>Record
+        </button>
+      </div>
+    </div>
+
+    <div style="display: flex; align-items: center; justify-content: flex-end; gap: 6px">
+      <button aria-label="Zoom out" style="width: 24px; height: 24px; border: none; background: transparent; color: #80808D; display: flex; align-items: center; justify-content: center; cursor: pointer">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M5 12h14"></path></svg>
+      </button>
+      <div style="width: 92px; height: 16px; position: relative" aria-hidden="true">
+        <div style="position: absolute; left: 0; right: 0; top: 7px; height: 2px; border-radius: 1px; background: #2E2E36"></div>
+        <div style="position: absolute; left: 0; width: 34px; top: 7px; height: 2px; border-radius: 1px; background: #8A8A96"></div>
+        <div style="position: absolute; left: 28px; top: 2px; width: 12px; height: 12px; border-radius: 6px; background: #ECECF1; box-shadow: 0 1px 2px rgba(0,0,0,0.5)"></div>
+      </div>
+      <button aria-label="Zoom in" style="width: 24px; height: 24px; border: none; background: transparent; color: #80808D; display: flex; align-items: center; justify-content: center; cursor: pointer">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M5 12h14M12 5v14"></path></svg>
+      </button>
+    </div>
+  </header>
+
+  <div style="flex: 1; min-height: 0; display: flex">
+
+    <aside aria-label="Inspector" style="width: 264px; flex: none; display: flex; flex-direction: column; background: #17171B; border-right: 1px solid #26262D">
+      <div style="height: 36px; flex: none; display: flex; align-items: center; justify-content: space-between; padding: 0 8px 0 14px; border-bottom: 1px solid #222228">
+        <span style="font-size: 12px; font-weight: 600">Inspector</span>
+        <button aria-label="Hide inspector" style="width: 24px; height: 24px; border: none; border-radius: 5px; background: transparent; color: #80808D; display: flex; align-items: center; justify-content: center; cursor: pointer">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2.5"></rect><path d="M9 4v16"></path></svg>
+        </button>
+      </div>
+
+      <div style="padding: 12px 14px 12px; display: flex; flex-direction: column; gap: 10px; border-bottom: 1px solid #222228">
+        <div style="display: flex; flex-direction: column; gap: 2px">
+          <div style="display: flex; align-items: center; gap: 8px">
+            <span style="width: 8px; height: 8px; border-radius: 2px; background: #D98C7E"></span>
+            <span style="font-size: 13px; font-weight: 600">Take 1</span>
+          </div>
+          <span style="font-size: 11px; color: #80808D; padding-left: 16px" class="tn">Interpretation 1 · 0:39 · Nov 21</span>
+        </div>
+        <div style="display: flex; align-items: center; justify-content: space-between">
+          <span style="font-size: 11px; color: #A7A7B3">Preset</span>
+          <button style="height: 22px; min-width: 118px; padding: 0 6px 0 8px; border-radius: 5px; border: none; background: #232329; box-shadow: inset 0 0 0 1px #2E2E36; color: #A7A7B3; font-size: 11px; display: flex; align-items: center; justify-content: space-between; gap: 8px; cursor: pointer">None
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 9l5-5 5 5M7 15l5 5 5-5"></path></svg>
+          </button>
+        </div>
+      </div>
+
+      <div style="flex: 1; min-height: 0; overflow: hidden; display: flex; flex-direction: column">
+        <sc-for list="{{ modules }}" as="m" hint-placeholder-count="4">
+          <section aria-label="{{ m.name }}" style="padding: 8px 14px 12px; border-bottom: 1px solid #1F1F25; opacity: {{ m.opacity }}">
+            <div style="height: 24px; display: flex; align-items: center; gap: 8px">
+              <span aria-hidden="true" style="width: 6px; height: 10px; flex: none; background-image: radial-gradient(#4A4A54 1px, transparent 1.2px); background-size: 3px 3.4px"></span>
+              <button aria-label="{{ m.powerLabel }}" aria-pressed="{{ m.on }}" style="width: 18px; height: 18px; flex: none; border-radius: 9px; border: none; background: {{ m.powerBg }}; color: {{ m.powerColor }}; display: flex; align-items: center; justify-content: center; cursor: pointer">
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" aria-hidden="true"><path d="M12 3v8"></path><path d="M6.3 7.3a8 8 0 1 0 11.4 0"></path></svg>
+              </button>
+              <span style="font-size: 12px; font-weight: 500; flex: 1">{{ m.name }}</span>
+              <span style="font-size: 11px; color: #80808D" class="tn">{{ m.badge }}</span>
+            </div>
+            <sc-if value="{{ m.isEq }}" hint-placeholder-val="{{ false }}">
+              <div style="margin-top: 6px; height: 92px; border-radius: 6px; background: #0F0F12; box-shadow: inset 0 0 0 1px #222228; position: relative; overflow: hidden">
+                <svg viewBox="0 0 236 92" style="position: absolute; inset: 0; width: 100%; height: 100%" role="img" aria-label="EQ curve: low cut, a gentle dip at 300 Hz and a presence lift near 3 kHz">
+                  <sc-for list="{{ eqGrid }}" as="g" hint-placeholder-count="4">
+                    <line x1="{{ g }}" x2="{{ g }}" y1="0" y2="92" stroke="#1C1C22" stroke-width="1"></line>
+                  </sc-for>
+                  <line x1="0" x2="236" y1="46" y2="46" stroke="#24242B" stroke-width="1"></line>
+                  <path d="{{ eqFill }}" fill="rgba(217,140,126,0.10)"></path>
+                  <path d="{{ eqCurve }}" fill="none" stroke="#E3A094" stroke-width="1.5" stroke-linejoin="round"></path>
+                  <sc-for list="{{ eqNodes }}" as="n" hint-placeholder-count="4">
+                    <circle cx="{{ n.x }}" cy="{{ n.y }}" r="3.5" fill="#ECECF1" stroke="#0F0F12" stroke-width="1.5"></circle>
+                  </sc-for>
+                </svg>
+                <div style="position: absolute; left: 6px; right: 6px; bottom: 3px; display: flex; justify-content: space-between; font-size: 9px; line-height: 12px; color: #6E6E7A" class="tn" aria-hidden="true"><span>20</span><span>100</span><span>1k</span><span>10k</span></div>
+              </div>
+            </sc-if>
+            <div style="display: flex; flex-direction: column; gap: 2px; margin-top: 4px">
+              <sc-for list="{{ m.params }}" as="p" hint-placeholder-count="3">
+                <div style="height: 22px; display: grid; grid-template-columns: 62px minmax(0, 1fr) 54px; align-items: center; gap: 8px">
+                  <span style="font-size: 11px; color: #A7A7B3">{{ p.label }}</span>
+                  <div style="height: 12px; position: relative" aria-hidden="true">
+                    <div style="position: absolute; left: 0; right: 0; top: 5px; height: 2px; border-radius: 1px; background: #2A2A31"></div>
+                    <div style="position: absolute; left: 0; width: {{ p.pct }}; top: 5px; height: 2px; border-radius: 1px; background: {{ p.fill }}"></div>
+                    <div style="position: absolute; left: {{ p.knob }}; top: 1px; width: 10px; height: 10px; border-radius: 5px; background: {{ p.knobColor }}; box-shadow: 0 1px 2px rgba(0,0,0,0.6)"></div>
+                  </div>
+                  <span style="font-size: 11px; color: #ECECF1; text-align: right" class="tn">{{ p.value }}</span>
+                </div>
+              </sc-for>
+            </div>
+          </section>
+        </sc-for>
+
+        <section aria-label="Sends and output" style="padding: 10px 14px; display: flex; flex-direction: column; gap: 8px">
+          <div style="height: 22px; display: grid; grid-template-columns: 62px minmax(0, 1fr) 54px; align-items: center; gap: 8px">
+            <span style="font-size: 11px; color: #A7A7B3">Send</span>
+            <button style="height: 22px; padding: 0 6px 0 8px; border-radius: 5px; border: none; background: #232329; box-shadow: inset 0 0 0 1px #2E2E36; color: #ECECF1; font-size: 11px; display: flex; align-items: center; justify-content: space-between; cursor: pointer">Vocal plate
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#80808D" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 9l5-5 5 5M7 15l5 5 5-5"></path></svg>
+            </button>
+            <span style="font-size: 11px; text-align: right" class="tn">−10 dB</span>
+          </div>
+          <div style="height: 22px; display: grid; grid-template-columns: 62px minmax(0, 1fr) 54px; align-items: center; gap: 8px">
+            <span style="font-size: 11px; color: #A7A7B3">Output</span>
+            <button style="height: 22px; padding: 0 6px 0 8px; border-radius: 5px; border: none; background: #232329; box-shadow: inset 0 0 0 1px #2E2E36; color: #ECECF1; font-size: 11px; display: flex; align-items: center; justify-content: space-between; cursor: pointer">Stereo Out
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#80808D" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 9l5-5 5 5M7 15l5 5 5-5"></path></svg>
+            </button>
+            <span></span>
+          </div>
+        </section>
+      </div>
+
+      <div style="flex: none; padding: 10px 14px 12px; border-top: 1px solid #222228; display: flex; align-items: center; gap: 10px">
+        <button aria-label="Mute Take 1" aria-pressed="false" style="width: 22px; height: 20px; border-radius: 4px; border: none; background: #26262D; color: #A7A7B3; font-size: 10px; font-weight: 600; cursor: pointer">M</button>
+        <button aria-label="Solo Take 1" aria-pressed="false" style="width: 22px; height: 20px; border-radius: 4px; border: none; background: #26262D; color: #A7A7B3; font-size: 10px; font-weight: 600; cursor: pointer">S</button>
+        <svg width="24" height="24" viewBox="0 0 24 24" role="img" aria-label="Pan centre">
+          <circle cx="12" cy="12" r="9.5" fill="#1D1D22" stroke="#34343D" stroke-width="1"></circle>
+          <line x1="12" y1="12" x2="12" y2="4.5" stroke="#ECECF1" stroke-width="1.6" stroke-linecap="round"></line>
+        </svg>
+        <div style="flex: 1; height: 12px; position: relative" aria-hidden="true">
+          <div style="position: absolute; left: 0; right: 0; top: 5px; height: 2px; border-radius: 1px; background: #2A2A31"></div>
+          <div style="position: absolute; left: 0; width: 72%; top: 5px; height: 2px; border-radius: 1px; background: #8A8A96"></div>
+          <div style="position: absolute; left: calc(72% - 5px); top: 1px; width: 10px; height: 10px; border-radius: 5px; background: #ECECF1; box-shadow: 0 1px 2px rgba(0,0,0,0.6)"></div>
+        </div>
+        <span style="font-size: 11px; width: 46px; text-align: right" class="tn">−1.4 dB</span>
+      </div>
+    </aside>
+
+    <main aria-label="Arrange" style="flex: 1; min-width: 0; display: flex; flex-direction: column; background: #121215">
+      <div style="height: 28px; flex: none; display: flex; background: #16161A; border-bottom: 1px solid #26262D">
+        <div style="width: 212px; flex: none; border-right: 1px solid #26262D"></div>
+        <div style="flex: 1; position: relative">
+          <sc-for list="{{ ticks }}" as="k" hint-placeholder-count="5">
+            <div style="position: absolute; left: {{ k.left }}; top: 0; bottom: 0; border-left: 1px solid #34343D">
+              <span style="position: absolute; left: 5px; top: 7px; font-size: 10px; color: #80808D; white-space: nowrap" class="tn">{{ k.label }}</span>
+            </div>
+          </sc-for>
+          <sc-for list="{{ minorTicks }}" as="k" hint-placeholder-count="20">
+            <div style="position: absolute; left: {{ k }}; bottom: 0; height: 5px; border-left: 1px solid #2A2A31"></div>
+          </sc-for>
+          <div style="position: absolute; left: 81%; top: 0; bottom: 0; width: 1px; background: #5C5C68"></div>
+          <svg width="11" height="8" viewBox="0 0 11 8" style="position: absolute; left: calc(24.8% - 5px); top: 0" aria-hidden="true"><path d="M0 0h11L5.5 8z" fill="#ECECF1"></path></svg>
+        </div>
+      </div>
+
+      <div style="flex: 1; min-height: 0; position: relative; overflow: hidden">
+        <div style="position: absolute; left: calc(212px + (100% - 212px) * 0.248); top: 0; bottom: 0; width: 1px; background: #ECECF1; z-index: 2; pointer-events: none"></div>
+
+        <div style="height: 30px; display: flex; align-items: center; justify-content: space-between; padding: 0 10px 0 14px; background: #121215">
+          <span style="font-size: 11px; font-weight: 600; color: #A7A7B3">Accompaniment</span>
+          <div role="radiogroup" aria-label="Backing source" style="display: flex; height: 22px; padding: 2px; border-radius: 6px; background: #1C1C21; box-shadow: inset 0 0 0 1px #2A2A31; box-sizing: border-box">
+            <button role="radio" aria-checked="true" style="height: 18px; padding: 0 10px; border-radius: 4px; border: none; background: #34343D; color: #ECECF1; font-size: 11px; font-weight: 500; cursor: pointer">Accompaniment</button>
+            <button role="radio" aria-checked="false" style="height: 18px; padding: 0 10px; border-radius: 4px; border: none; background: transparent; color: #A7A7B3; font-size: 11px; cursor: pointer">Original</button>
+          </div>
+        </div>
+        <div style="height: 60px; display: flex; border-top: 1px solid #1E1E24; border-bottom: 1px solid #1E1E24">
+          <div style="width: 212px; flex: none; box-sizing: border-box; padding: 8px 10px 8px 14px; display: flex; flex-direction: column; justify-content: space-between; background: #17171B; border-right: 1px solid #26262D; box-shadow: inset 3px 0 0 #8C8C99">
+            <div style="display: flex; align-items: center; justify-content: space-between">
+              <span style="font-size: 12px; font-weight: 500">River Song (backing)</span>
+              <button aria-label="Track menu" style="width: 20px; height: 18px; border: none; background: transparent; color: #80808D; cursor: pointer; padding: 0">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="1.8"></circle><circle cx="12" cy="12" r="1.8"></circle><circle cx="19" cy="12" r="1.8"></circle></svg>
+              </button>
+            </div>
+            <div style="display: flex; align-items: center; gap: 4px">
+              <button aria-label="Mute backing" style="width: 20px; height: 18px; border-radius: 4px; border: none; background: #26262D; color: #A7A7B3; font-size: 10px; font-weight: 600; cursor: pointer">M</button>
+              <button aria-label="Solo backing" style="width: 20px; height: 18px; border-radius: 4px; border: none; background: #26262D; color: #A7A7B3; font-size: 10px; font-weight: 600; cursor: pointer">S</button>
+              <div style="flex: 1; margin-left: 8px; height: 10px; position: relative" aria-hidden="true">
+                <div style="position: absolute; left: 0; right: 0; top: 4px; height: 2px; border-radius: 1px; background: #2A2A31"></div>
+                <div style="position: absolute; left: 0; width: 84%; top: 4px; height: 2px; border-radius: 1px; background: #8A8A96"></div>
+                <div style="position: absolute; left: calc(84% - 4px); top: 1px; width: 8px; height: 8px; border-radius: 4px; background: #ECECF1"></div>
+              </div>
+            </div>
+          </div>
+          <div style="flex: 1; position: relative; background-image: {{ gridBg }}">
+            <div style="position: absolute; left: 0; width: 81%; top: 4px; bottom: 4px; border-radius: 4px; background: rgba(140,140,153,0.10); box-shadow: inset 0 0 0 1px rgba(140,140,153,0.30); overflow: hidden">
+              <div style="height: 13px; padding: 0 6px; font-size: 10px; line-height: 13px; color: #C4C4CE; background: rgba(140,140,153,0.22)">River Song (backing)</div>
+              <svg viewBox="0 0 1000 36" preserveAspectRatio="none" style="width: 100%; height: 37px; display: block" aria-hidden="true"><path d="{{ backingWave }}" fill="#A0A0AC"></path></svg>
+            </div>
+          </div>
+        </div>
+
+        <div style="height: 30px; display: flex; align-items: center; justify-content: space-between; padding: 0 10px 0 14px">
+          <span style="font-size: 11px; font-weight: 600; color: #A7A7B3">Vocal takes</span>
+          <div style="display: flex; gap: 6px">
+            <button style="height: 22px; padding: 0 8px; border-radius: 5px; border: none; background: transparent; box-shadow: inset 0 0 0 1px #2E2E36; color: #ECECF1; font-size: 11px; display: flex; align-items: center; gap: 5px; cursor: pointer">
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>New take
+            </button>
+            <button style="height: 22px; padding: 0 6px 0 8px; border-radius: 5px; border: none; background: #232329; box-shadow: inset 0 0 0 1px #2E2E36; color: #ECECF1; font-size: 11px; display: flex; align-items: center; gap: 8px; cursor: pointer">Interpretation 1
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#80808D" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 9l5-5 5 5M7 15l5 5 5-5"></path></svg>
+            </button>
+          </div>
+        </div>
+
+        <sc-for list="{{ takes }}" as="t" hint-placeholder-count="3">
+          <div style="border-top: 1px solid #1E1E24">
+            <div style="height: 60px; display: flex">
+              <div style="width: 212px; flex: none; box-sizing: border-box; padding: 8px 10px 8px 14px; display: flex; flex-direction: column; justify-content: space-between; background: {{ t.headBg }}; border-right: 1px solid #26262D; box-shadow: inset 3px 0 0 {{ t.color }}">
+                <div style="display: flex; align-items: center; gap: 6px">
+                  <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#80808D" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" style="transform: rotate({{ t.chevron }})" aria-hidden="true"><path d="M9 6l6 6-6 6"></path></svg>
+                  <span style="font-size: 12px; font-weight: 500; flex: 1">{{ t.name }}</span>
+                  <button aria-label="Track menu" style="width: 20px; height: 18px; border: none; background: transparent; color: #80808D; cursor: pointer; padding: 0">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="1.8"></circle><circle cx="12" cy="12" r="1.8"></circle><circle cx="19" cy="12" r="1.8"></circle></svg>
+                  </button>
+                </div>
+                <div style="display: flex; align-items: center; gap: 4px">
+                  <button aria-label="Mute {{ t.name }}" aria-pressed="{{ t.muted }}" style="width: 20px; height: 18px; border-radius: 4px; border: none; background: {{ t.muteBg }}; color: {{ t.muteColor }}; font-size: 10px; font-weight: 600; cursor: pointer">M</button>
+                  <button aria-label="Solo {{ t.name }}" style="width: 20px; height: 18px; border-radius: 4px; border: none; background: #26262D; color: #A7A7B3; font-size: 10px; font-weight: 600; cursor: pointer">S</button>
+                  <div style="flex: 1; margin: 0 6px 0 8px; height: 10px; position: relative" aria-hidden="true">
+                    <div style="position: absolute; left: 0; right: 0; top: 4px; height: 2px; border-radius: 1px; background: #2A2A31"></div>
+                    <div style="position: absolute; left: 0; width: {{ t.vol }}; top: 4px; height: 2px; border-radius: 1px; background: #8A8A96"></div>
+                    <div style="position: absolute; left: {{ t.volKnob }}; top: 1px; width: 8px; height: 8px; border-radius: 4px; background: #ECECF1"></div>
+                  </div>
+                  <button aria-label="Notes on {{ t.name }}" style="width: 20px; height: 18px; border: none; border-radius: 4px; background: transparent; color: #80808D; cursor: pointer; padding: 0; display: flex; align-items: center; justify-content: center">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><path d="M5 3h10l4 4v14H5z"></path><path d="M9 12h6M9 16h4"></path></svg>
+                  </button>
+                  <button aria-label="Compare {{ t.name }} with the reference" style="width: 20px; height: 18px; border: none; border-radius: 4px; background: transparent; color: #80808D; cursor: pointer; padding: 0; display: flex; align-items: center; justify-content: center">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M3 12h3l2-5 4 10 3-7 2 2h4"></path></svg>
+                  </button>
+                </div>
+              </div>
+              <div style="flex: 1; position: relative; background-image: {{ gridBg }}">
+                <div style="position: absolute; left: {{ t.left }}; width: {{ t.width }}; top: 4px; bottom: 4px; border-radius: 4px; background: {{ t.clipBg }}; box-shadow: inset 0 0 0 1px {{ t.clipEdge }}; overflow: hidden; opacity: {{ t.opacity }}">
+                  <div style="height: 13px; padding: 0 6px; font-size: 10px; line-height: 13px; color: {{ t.labelColor }}; background: {{ t.clipHead }}">{{ t.name }}</div>
+                  <svg viewBox="0 0 1000 36" preserveAspectRatio="none" style="width: 100%; height: 37px; display: block" aria-hidden="true"><path d="{{ t.wave }}" fill="{{ t.waveColor }}"></path></svg>
+                  <sc-for list="{{ t.marks }}" as="k" hint-placeholder-count="2">
+                    <span style="position: absolute; left: {{ k }}; bottom: 3px; width: 5px; height: 5px; border-radius: 1px; background: #ECECF1; transform: rotate(45deg)"></span>
+                  </sc-for>
+                </div>
+              </div>
+            </div>
+
+            <sc-if value="{{ t.expanded }}" hint-placeholder-val="{{ false }}">
+              <div style="display: flex; border-top: 1px solid #1E1E24">
+                <div style="width: 212px; flex: none; box-sizing: border-box; padding: 8px 10px 10px 14px; background: #17171B; border-right: 1px solid #26262D; display: flex; flex-direction: column; gap: 4px">
+                  <span style="font-size: 11px; color: #A7A7B3">Pitch</span>
+                  <div style="display: flex; align-items: baseline; gap: 6px">
+                    <span style="font-size: 18px; font-weight: 600; letter-spacing: -0.2px" class="tn">100%</span>
+                    <span style="font-size: 11px; color: #80808D">in tune</span>
+                  </div>
+                  <span style="font-size: 11px; color: #80808D" class="tn">C4 – D5 · avg +3¢</span>
+                </div>
+                <div style="flex: 1; min-width: 0; display: flex; flex-direction: column">
+                  <div style="height: 28px; display: flex; align-items: center; padding: 0 8px; gap: 2px; border-bottom: 1px solid #1E1E24">
+                    <sc-for list="{{ lanes }}" as="l" hint-placeholder-count="6">
+                      <button role="tab" aria-selected="{{ l.selected }}" style="height: 20px; padding: 0 8px; border-radius: 4px; border: none; background: {{ l.bg }}; color: {{ l.color }}; font-size: 11px; font-weight: {{ l.weight }}; cursor: pointer">{{ l.label }}</button>
+                    </sc-for>
+                  </div>
+                  <div style="height: 104px; position: relative; background: #0F0F12">
+                    <span style="position: absolute; left: 6px; top: 6px; font-size: 9px; color: #6E6E7A" class="tn">C5</span>
+                    <span style="position: absolute; left: 6px; bottom: 6px; font-size: 9px; color: #6E6E7A" class="tn">C4</span>
+                    <svg viewBox="0 0 1000 104" preserveAspectRatio="none" style="position: absolute; inset: 0; width: 100%; height: 100%" role="img" aria-label="Sung pitch over the target notes, staying in tune between C4 and D5">
+                      <sc-for list="{{ semis }}" as="y" hint-placeholder-count="12">
+                        <line x1="0" x2="1000" y1="{{ y }}" y2="{{ y }}" stroke="#18181D" stroke-width="1" vector-effect="non-scaling-stroke"></line>
+                      </sc-for>
+                      <sc-for list="{{ targets }}" as="n" hint-placeholder-count="12">
+                        <rect x="{{ n.x }}" y="{{ n.y }}" width="{{ n.w }}" height="5" rx="1" fill="#26303A"></rect>
+                      </sc-for>
+                      <path d="{{ pitchPath }}" fill="none" stroke="#7CC4A6" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"></path>
+                    </svg>
+                  </div>
+                </div>
+              </div>
+            </sc-if>
+          </div>
+        </sc-for>
+
+        <div style="height: 30px; display: flex; align-items: center; justify-content: space-between; padding: 0 10px 0 14px; border-top: 1px solid #1E1E24">
+          <span style="font-size: 11px; font-weight: 600; color: #A7A7B3">FX buses</span>
+          <button style="height: 22px; padding: 0 8px; border-radius: 5px; border: none; background: transparent; box-shadow: inset 0 0 0 1px #2E2E36; color: #ECECF1; font-size: 11px; display: flex; align-items: center; gap: 5px; cursor: pointer">
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>New bus
+          </button>
+        </div>
+        <div style="height: 52px; display: flex; border-top: 1px solid #1E1E24; border-bottom: 1px solid #1E1E24">
+          <div style="width: 212px; flex: none; box-sizing: border-box; padding: 8px 10px 8px 14px; display: flex; flex-direction: column; justify-content: space-between; background: #17171B; border-right: 1px solid #26262D; box-shadow: inset 3px 0 0 #8FA3D9">
+            <span style="font-size: 12px; font-weight: 500">Vocal plate</span>
+            <span style="font-size: 11px; color: #80808D" class="tn">Reverb · 0.0 dB</span>
+          </div>
+          <div style="flex: 1; position: relative; background-image: {{ gridBg }}">
+            <svg viewBox="0 0 1000 44" preserveAspectRatio="none" style="position: absolute; left: 1.6%; width: 82%; top: 4px; height: 44px" aria-hidden="true"><path d="{{ busWave }}" fill="rgba(143,163,217,0.55)"></path></svg>
+          </div>
+        </div>
+        <div style="height: 30px; display: flex; align-items: center; padding: 0 10px 0 14px">
+          <span style="font-size: 11px; font-weight: 600; color: #A7A7B3">Master</span>
+        </div>
+        <div style="height: 52px; display: flex; border-top: 1px solid #1E1E24; border-bottom: 1px solid #1E1E24">
+          <div style="width: 212px; flex: none; box-sizing: border-box; padding: 8px 10px 8px 14px; display: flex; flex-direction: column; justify-content: space-between; background: #17171B; border-right: 1px solid #26262D; box-shadow: inset 3px 0 0 #B7B7C2">
+            <span style="font-size: 12px; font-weight: 500">Master</span>
+            <div style="display: flex; align-items: center; gap: 6px">
+              <div style="flex: 1; height: 4px; border-radius: 2px; background: #222228; overflow: hidden" aria-hidden="true"><div style="width: 68%; height: 4px; background: #7CC4A6"></div></div>
+              <span style="font-size: 11px; color: #80808D" class="tn">−0.9 dB</span>
+            </div>
+          </div>
+          <div style="flex: 1; position: relative; background-image: {{ gridBg }}">
+            <svg viewBox="0 0 1000 36" preserveAspectRatio="none" style="position: absolute; left: 0; width: 84%; top: 8px; height: 36px" aria-hidden="true"><path d="{{ masterWave }}" fill="rgba(183,183,194,0.55)"></path></svg>
+          </div>
+        </div>
+      </div>
+      <div style="height: 10px; flex: none; position: relative; background: #121215" aria-hidden="true">
+        <div style="position: absolute; left: 216px; width: 58%; top: 3px; height: 4px; border-radius: 2px; background: #3A3A43"></div>
+      </div>
+    </main>
+
+    <aside aria-label="Lyrics, notes and techniques" style="width: 292px; flex: none; display: flex; flex-direction: column; background: #17171B; border-left: 1px solid #26262D">
+      <div style="height: 36px; flex: none; display: flex; align-items: center; justify-content: space-between; padding: 0 8px; border-bottom: 1px solid #222228">
+        <div role="tablist" aria-label="Side panel" style="display: flex; gap: 2px">
+          <button role="tab" aria-selected="true" style="height: 24px; padding: 0 9px; border-radius: 5px; border: none; background: #2A2A31; color: #ECECF1; font-size: 12px; font-weight: 500; cursor: pointer">Lyrics</button>
+          <button role="tab" aria-selected="false" style="height: 24px; padding: 0 9px; border-radius: 5px; border: none; background: transparent; color: #A7A7B3; font-size: 12px; cursor: pointer">Notes <span style="color: #80808D" class="tn">4</span></button>
+          <button role="tab" aria-selected="false" style="height: 24px; padding: 0 9px; border-radius: 5px; border: none; background: transparent; color: #A7A7B3; font-size: 12px; cursor: pointer">Techniques</button>
+        </div>
+        <button aria-label="Hide side panel" style="width: 24px; height: 24px; border: none; border-radius: 5px; background: transparent; color: #80808D; display: flex; align-items: center; justify-content: center; cursor: pointer">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2.5"></rect><path d="M15 4v16"></path></svg>
+        </button>
+      </div>
+      <div style="height: 32px; flex: none; display: flex; align-items: center; justify-content: space-between; padding: 0 8px 0 14px">
+        <span style="font-size: 11px; color: #80808D">Synced · 8 lines</span>
+        <div style="display: flex; gap: 2px">
+          <sc-for list="{{ lyricTools }}" as="b" hint-placeholder-count="4">
+            <button aria-label="{{ b.label }}" style="width: 24px; height: 24px; border: none; border-radius: 5px; background: transparent; color: #A7A7B3; display: flex; align-items: center; justify-content: center; cursor: pointer">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{ b.d }}"></path></svg>
+            </button>
+          </sc-for>
+        </div>
+      </div>
+      <div style="flex: 1; min-height: 0; padding: 4px 8px; display: flex; flex-direction: column; gap: 1px">
+        <sc-for list="{{ lyrics }}" as="l" hint-placeholder-count="8">
+          <div style="display: grid; grid-template-columns: 34px minmax(0, 1fr); gap: 6px; padding: 6px 8px; border-radius: 6px; background: {{ l.bg }}">
+            <span style="font-size: 10px; line-height: 20px; color: {{ l.timeColor }}" class="tn">{{ l.time }}</span>
+            <span style="font-size: 13px; line-height: 20px; color: {{ l.color }}; font-weight: {{ l.weight }}">{{ l.text }}</span>
+          </div>
+        </sc-for>
+      </div>
+    </aside>
+  </div>
+
+  <section aria-label="Analysis and mixer" style="height: 340px; flex: none; display: flex; flex-direction: column; background: #17171B; border-top: 1px solid #26262D">
+    <div style="height: 32px; flex: none; display: flex; align-items: center; padding: 0 8px; gap: 2px; border-bottom: 1px solid #222228">
+      <sc-for list="{{ dock }}" as="d" hint-placeholder-count="11">
+        <sc-if value="{{ d.sep }}" hint-placeholder-val="{{ false }}">
+          <span style="width: 1px; height: 14px; background: #2E2E36; margin: 0 6px"></span>
+        </sc-if>
+        <button role="tab" aria-selected="false" style="height: 22px; padding: 0 8px; border-radius: 4px; border: none; background: transparent; color: #A7A7B3; font-size: 11px; cursor: pointer">{{ d.label }}</button>
+      </sc-for>
+      <span style="flex: 1"></span>
+      <button role="tab" aria-selected="true" style="height: 22px; padding: 0 8px; border-radius: 4px; border: none; background: #2A2A31; color: #ECECF1; font-size: 11px; font-weight: 500; display: flex; align-items: center; gap: 6px; cursor: pointer">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 4v16M12 4v16M18 4v16"></path><path d="M4 14h4M10 8h4M16 12h4"></path></svg>Mixer
+      </button>
+      <button aria-label="Hide analysis panel" style="width: 24px; height: 22px; border: none; border-radius: 4px; background: transparent; color: #80808D; display: flex; align-items: center; justify-content: center; cursor: pointer">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"></path></svg>
+      </button>
+    </div>
+    <div style="flex: 1; min-height: 0; display: flex; gap: 6px; padding: 10px 12px; overflow-x: auto; background: #131316">
+      <sc-for list="{{ strips }}" as="c" hint-placeholder-count="7">
+        <sc-if value="{{ c.gapBefore }}" hint-placeholder-val="{{ false }}">
+          <span style="width: 1px; flex: none; background: #26262D; margin: 0 6px"></span>
+        </sc-if>
+        <div aria-label="{{ c.name }} channel" style="width: {{ c.w }}; flex: none; box-sizing: border-box; border-radius: 6px; background: {{ c.bg }}; box-shadow: inset 0 0 0 1px {{ c.edge }}; display: flex; flex-direction: column; overflow: hidden">
+          <div style="height: 3px; flex: none; background: {{ c.color }}"></div>
+          <div style="height: 26px; flex: none; display: flex; align-items: center; justify-content: center; padding: 0 6px; font-size: 11px; font-weight: 500; color: {{ c.nameColor }}; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{ c.name }}</div>
+          <div style="display: flex; justify-content: center; gap: 3px; padding-bottom: 8px">
+            <sc-for list="{{ c.buttons }}" as="b" hint-placeholder-count="2">
+              <button aria-label="{{ b.aria }}" aria-pressed="{{ b.pressed }}" style="width: 22px; height: 18px; border-radius: 4px; border: none; background: {{ b.bg }}; color: {{ b.color }}; font-size: 10px; font-weight: 600; cursor: pointer">{{ b.label }}</button>
+            </sc-for>
+          </div>
+          <div style="display: flex; flex-direction: column; align-items: center; gap: 2px; padding-bottom: 6px">
+            <svg width="26" height="26" viewBox="0 0 26 26" role="img" aria-label="Pan {{ c.pan }}">
+              <path d="M5.6 20.4 A10 10 0 1 1 20.4 20.4" fill="none" stroke="#2A2A31" stroke-width="2.2" stroke-linecap="round"></path>
+              <path d="{{ c.panArc }}" fill="none" stroke="#A7A7B3" stroke-width="2.2" stroke-linecap="round"></path>
+              <circle cx="13" cy="13" r="6.5" fill="#202026" stroke="#34343D" stroke-width="1"></circle>
+              <line x1="13" y1="13" x2="{{ c.panX }}" y2="{{ c.panY }}" stroke="#ECECF1" stroke-width="1.6" stroke-linecap="round"></line>
+            </svg>
+            <span style="font-size: 10px; color: #80808D" class="tn">{{ c.pan }}</span>
+          </div>
+          <div style="flex: 1; min-height: 0; display: flex; justify-content: center; gap: 8px; padding: 4px 0 6px">
+            <div style="width: 22px; position: relative" aria-hidden="true">
+              <sc-for list="{{ scale }}" as="m" hint-placeholder-count="6">
+                <span style="position: absolute; right: 0; top: {{ m.top }}; width: 4px; height: 1px; background: #34343D"></span>
+              </sc-for>
+              <div style="position: absolute; left: 9px; top: 0; bottom: 0; width: 3px; border-radius: 2px; background: #0C0C0F"></div>
+              <div style="position: absolute; left: 0; top: {{ c.cap }}; width: 21px; height: 12px; border-radius: 3px; background: linear-gradient(#4A4A54, #34343D); box-shadow: 0 1px 2px rgba(0,0,0,0.6), inset 0 1px 0 rgba(255,255,255,0.08)">
+                <div style="position: absolute; left: 3px; right: 3px; top: 5.5px; height: 1px; background: #ECECF1"></div>
+              </div>
+            </div>
+            <div style="display: flex; gap: 2px" aria-hidden="true">
+              <sc-for list="{{ c.meters }}" as="v" hint-placeholder-count="2">
+                <div style="width: 4px; border-radius: 1px; background: #0C0C0F; position: relative; overflow: hidden">
+                  <div style="position: absolute; left: 0; right: 0; bottom: 0; height: {{ v }}; background: linear-gradient(to top, #4FAE82 0%, #4FAE82 70%, #D9B54A 86%, #E5574B 100%); background-size: 100% {{ c.meterScale }}; background-position: bottom"></div>
+                </div>
+              </sc-for>
+            </div>
+          </div>
+          <div style="height: 20px; flex: none; margin: 0 8px; border-radius: 4px; background: #0C0C0F; display: flex; align-items: center; justify-content: center; font-size: 11px; color: #ECECF1" class="tn">{{ c.db }}</div>
+          <div style="height: 30px; flex: none; display: flex; align-items: center; justify-content: center">
+            <sc-if value="{{ c.hasOut }}" hint-placeholder-val="{{ true }}">
+              <button style="height: 20px; padding: 0 8px; border-radius: 4px; border: none; background: #232329; box-shadow: inset 0 0 0 1px #2E2E36; color: #A7A7B3; font-size: 10px; cursor: pointer">{{ c.out }}</button>
+            </sc-if>
+          </div>
+        </div>
+      </sc-for>
+      <button aria-label="Add a bus" style="width: 40px; flex: none; border-radius: 6px; border: 1px dashed #34343D; background: transparent; color: #80808D; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; cursor: pointer; font-size: 10px">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>Bus
+      </button>
+    </div>
+  </section>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  rng(seed) {
+    let s = seed;
+    return () => { s = (s * 16807) % 2147483647; return (s - 1) / 2147483646; };
+  }
+  // A filled, symmetric waveform: phrases of syllables (vocal) or a steady pulse (backing).
+  wave(startS, endS, seed, kind, gain) {
+    const r = this.rng(seed);
+    const phrases = [[1.0, 8.6], [9.6, 17.2], [18.2, 26.0], [27.0, 35.4], [36.4, 40.0]];
+    const top = [];
+    const bot = [];
+    const mid = 18;
+    for (let x = 0; x <= 1000; x += 2) {
+      const t = startS + (endS - startS) * x / 1000;
+      let a;
+      if (kind === 'backing') {
+        const fade = Math.min(1, t / 2.5) * Math.min(1, Math.max(0, (40.5 - t) / 1.5));
+        const pulse = Math.pow(Math.abs(Math.sin(t * Math.PI * 1.4)), 6);
+        a = fade * (0.42 + 0.28 * pulse + 0.18 * r());
+      } else if (kind === 'bus') {
+        const p = phrases.find(([s, e]) => t >= s && t <= e + 1.6);
+        a = p ? (0.10 + 0.12 * r()) * (t > p[1] ? Math.max(0, 1 - (t - p[1]) / 1.6) : 1) : 0.01;
+      } else {
+        const p = phrases.find(([s, e]) => t >= s && t <= e);
+        if (!p) { a = 0.012 * r(); } else {
+          const u = (t - p[0]) / (p[1] - p[0]);
+          const env = Math.min(1, u * 8) * Math.min(1, (1 - u) * 6);
+          const syl = 0.45 + 0.55 * Math.pow(Math.abs(Math.sin((t - p[0]) * Math.PI * 1.9 + seed)), 0.7);
+          a = env * syl * (0.62 + 0.38 * r());
+        }
+      }
+      const h = Math.max(0.3, a * gain * mid);
+      top.push(x + ' ' + (mid - h).toFixed(2));
+      bot.push(x + ' ' + (mid + h).toFixed(2));
+    }
+    return 'M' + top.join(' L') + ' L' + bot.reverse().join(' L') + 'Z';
+  }
+  renderVals() {
+    const pct = (s) => (s / 50 * 100).toFixed(2) + '%';
+    const ticks = [0, 10, 20, 30, 40].map((s) => ({ left: pct(s), label: '0:' + String(s).padStart(2, '0') }));
+    const minorTicks = [];
+    for (let s = 2; s < 50; s += 2) if (s % 10) minorTicks.push(pct(s));
+    const gridBg = 'repeating-linear-gradient(90deg, transparent 0, transparent calc(20% - 1px), #18181D calc(20% - 1px), #18181D 20%)';
+
+    const mods = [
+      { name: 'Equalizer', on: true, isEq: true, badge: '4 bands', params: [] },
+      { name: 'Compressor', on: true, badge: 'GR −2.1 dB', params: [['Threshold', 0.62, '−18 dB'], ['Ratio', 0.28, '3.0 : 1'], ['Makeup', 0.05, '0.0 dB']] },
+      { name: 'De-esser', on: true, badge: '', params: [['Frequency', 0.34, '6.5 kHz'], ['Threshold', 0.52, '−28 dB'], ['Range', 0.48, '12 dB']] },
+      { name: 'Gate', on: false, badge: 'Bypassed', params: [] }
+    ];
+    const modules = mods.map((m) => ({
+      name: m.name, badge: m.badge, isEq: !!m.isEq,
+      on: m.on ? 'true' : 'false',
+      powerLabel: (m.on ? 'Bypass ' : 'Enable ') + m.name,
+      powerBg: m.on ? 'rgba(224,122,106,0.16)' : '#26262D',
+      powerColor: m.on ? '#EC9182' : '#6E6E7A',
+      opacity: m.on ? 1 : 0.55,
+      params: m.params.map(([label, v, value]) => ({
+        label, value, pct: (v * 100).toFixed(1) + '%', knob: 'calc(' + (v * 100).toFixed(1) + '% - 5px)',
+        fill: m.on ? '#8A8A96' : '#3A3A43', knobColor: m.on ? '#ECECF1' : '#8A8A96'
+      }))
+    }));
+
+    const eqY = (x) => {
+      const lf = -18 * Math.exp(-Math.pow((x - 4) / 16, 2));
+      const dip = -6 * Math.exp(-Math.pow((x - 92) / 18, 2));
+      const pres = 9 * Math.exp(-Math.pow((x - 168) / 20, 2));
+      const air = 3 * Math.exp(-Math.pow((x - 222) / 18, 2));
+      return 46 - (lf + dip + pres + air);
+    };
+    let eqCurve = '';
+    for (let x = 0; x <= 236; x += 2) eqCurve += (x ? ' L' : 'M') + x + ' ' + eqY(x).toFixed(2);
+    const eqFill = eqCurve + ' L236 46 L0 46 Z';
+    const eqNodes = [14, 92, 168, 222].map((x) => ({ x, y: eqY(x).toFixed(1) }));
+
+    const takeDefs = [
+      { name: 'Take 1', color: '#D98C7E', rgb: '217,140,126', s: 0.8, e: 40, seed: 7, selected: true, marks: ['18%', '42%', '63%'], vol: 0.72 },
+      { name: 'Take 2', color: '#C9A46E', rgb: '201,164,110', s: 0.8, e: 40, seed: 19, vol: 0.58, marks: ['71%'] },
+      { name: 'Chorus only', color: '#6FB39A', rgb: '111,179,154', s: 21.0, e: 40, seed: 31, vol: 0.80, muted: true, marks: [] }
+    ];
+    const takes = takeDefs.map((t) => ({
+      name: t.name, color: t.color, expanded: !!t.expanded,
+      chevron: t.expanded ? '90deg' : '0deg',
+      headBg: t.selected ? '#1D1D22' : '#17171B',
+      left: pct(t.s), width: pct(t.e - t.s),
+      clipBg: 'rgba(' + t.rgb + ',' + (t.selected ? 0.16 : 0.10) + ')',
+      clipEdge: t.selected ? '#E8A99D' : 'rgba(' + t.rgb + ',0.32)',
+      clipHead: 'rgba(' + t.rgb + ',' + (t.selected ? 0.34 : 0.22) + ')',
+      labelColor: t.selected ? '#FFFFFF' : '#D4D4DC',
+      waveColor: 'rgba(' + t.rgb + ',' + (t.muted ? 0.45 : 0.92) + ')',
+      opacity: t.muted ? 0.6 : 1,
+      wave: this.wave(t.s, t.e, t.seed, 'vocal', 0.95),
+      marks: t.marks,
+      muted: t.muted ? 'true' : 'false',
+      muteBg: t.muted ? 'rgba(229,87,75,0.20)' : '#26262D',
+      muteColor: t.muted ? '#F08A80' : '#A7A7B3',
+      vol: (t.vol * 100) + '%', volKnob: 'calc(' + (t.vol * 100) + '% - 4px)'
+    }));
+
+    const lanes = ['Pitch', 'Loudness', 'Spectrogram', 'Power', 'Notes', 'Techniques'].map((label, i) => ({
+      label, selected: i === 0 ? 'true' : 'false',
+      bg: i === 0 ? '#2A2A31' : 'transparent', color: i === 0 ? '#ECECF1' : '#A7A7B3', weight: i === 0 ? 500 : 400
+    }));
+
+    const yOf = (st) => 94 - st * 7;
+    const semis = [];
+    for (let st = 0; st <= 13; st++) semis.push(yOf(st));
+    const melody = [
+      [1.0, 0.9, 0], [2.0, 0.8, 2], [2.9, 1.6, 4], [4.6, 0.8, 2], [5.5, 2.6, 0],
+      [9.6, 0.9, 4], [10.6, 0.8, 5], [11.5, 1.4, 7], [13.0, 0.9, 5], [14.0, 2.8, 4],
+      [18.2, 0.8, 7], [19.1, 0.9, 9], [20.1, 1.6, 12], [21.8, 0.9, 9], [22.8, 2.9, 7],
+      [27.0, 0.9, 5], [28.0, 0.9, 4], [29.0, 1.5, 2], [30.6, 0.9, 4], [31.6, 3.6, 0],
+      [36.4, 1.0, 2], [37.5, 2.5, 0]
+    ];
+    const X = (s) => s / 50 * 1000;
+    const targets = melody.map(([s, d, st]) => ({ x: X(s).toFixed(1), w: X(d).toFixed(1), y: (yOf(st) - 2.5).toFixed(1) }));
+    const r = this.rng(5);
+    let pitchPath = '';
+    melody.forEach(([s, d, st], i) => {
+      const y0 = yOf(st);
+      const prev = i ? yOf(melody[i - 1][2]) : y0 + 6;
+      const steps = Math.max(6, Math.round(d * 14));
+      for (let k = 0; k <= steps; k++) {
+        const u = k / steps;
+        const scoop = (prev - y0) * Math.exp(-u * 9) * 0.6;
+        const vib = u > 0.4 ? Math.sin(u * d * 5.6 * Math.PI * 2) * 1.3 : 0;
+        const y = y0 + scoop + vib + (r() - 0.5) * 0.6;
+        const x = X(s + d * u);
+        const gap = melody[i - 1] && s - (melody[i - 1][0] + melody[i - 1][1]) > 0.5;
+        pitchPath += ((k === 0 && (i === 0 || gap)) ? 'M' : 'L') + x.toFixed(1) + ' ' + y.toFixed(2) + ' ';
+      }
+    });
+
+    const lyricLines = [
+      ['0:01', 'Water carries what I cannot hold'],
+      ['0:05', 'Silver ripples in the early cold'],
+      ['0:10', 'Every stone remembers where I stood'],
+      ['0:14', 'Every current runs the way it should'],
+      ['0:18', 'So I follow where the river bends'],
+      ['0:23', 'Past the bridges where the morning ends'],
+      ['0:27', 'Singing softly to the open sky'],
+      ['0:36', 'Let the river carry me on by']
+    ];
+    const lyrics = lyricLines.map(([time, text], i) => ({
+      time, text,
+      bg: i === 2 ? '#24242A' : 'transparent',
+      color: i === 2 ? '#FFFFFF' : (i < 2 ? '#80808D' : '#C4C4CE'),
+      timeColor: i === 2 ? '#EC9182' : '#6E6E7A',
+      weight: i === 2 ? 500 : 400
+    }));
+    const lyricTools = [
+      { label: 'Import lyrics', d: 'M12 3v12M7 10l5 5 5-5M5 21h14' },
+      { label: 'Edit lyrics', d: 'M4 20h4L19 9l-4-4L4 16zM14 6l4 4' },
+      { label: 'Sync lyrics to the song', d: 'M12 7v5l3 2M12 21a8 8 0 1 0 0-16 8 8 0 0 0 0 16zM9 2h6' },
+      { label: 'Focus view', d: 'M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5' }
+    ];
+    const dockLabels = ['Summary', '|', 'Pitch', 'Vibrato', 'Range', 'Register', '|', 'Spectrogram', 'Power', 'LTAS', 'Timbre', 'Vowel', 'Dynamics'];
+    const dock = [];
+    let sep = false;
+    dockLabels.forEach((l) => { if (l === '|') { sep = true; } else { dock.push({ label: l, sep }); sep = false; } });
+
+    const btn = (label, aria, on, kind) => ({ label, aria, pressed: on ? 'true' : 'false',
+      bg: on ? (kind === 'rec' ? 'rgba(229,87,75,0.24)' : (kind === 'mute' ? 'rgba(229,87,75,0.20)' : 'rgba(217,181,74,0.22)')) : '#26262D',
+      color: on ? (kind === 'solo' ? '#E3C46A' : '#F08A80') : '#A7A7B3' });
+    const capTop = (db) => { const y = Math.max(0, Math.min(1, (6 - db) / 48)); return 'calc(' + (y * 100).toFixed(1) + '% - 6px)'; };
+    const panGeom = (p) => {
+      const ang = (-135 + (p + 1) * 135) * Math.PI / 180;
+      const x = 13 + Math.sin(ang) * 5.5, y = 13 - Math.cos(ang) * 5.5;
+      const a0 = -Math.PI / 2, a1 = ang - Math.PI / 2;
+      const p0 = [13 + 10 * Math.cos(a0), 13 + 10 * Math.sin(a0)];
+      const p1 = [13 + 10 * Math.cos(a1), 13 + 10 * Math.sin(a1)];
+      const sweep = p >= 0 ? 1 : 0;
+      const arc = Math.abs(p) < 0.01 ? '' : 'M' + p0[0].toFixed(2) + ' ' + p0[1].toFixed(2) + ' A10 10 0 0 ' + sweep + ' ' + p1[0].toFixed(2) + ' ' + p1[1].toFixed(2);
+      return { panX: x.toFixed(2), panY: y.toFixed(2), panArc: arc };
+    };
+    const stripDefs = [
+      { name: 'Input', color: '#E5574B', db: 12, dbText: '+12.0', pan: 'C', p: 0, meters: ['46%'], buttons: [btn('R', 'Record arm input', true, 'rec'), btn('I', 'Monitor input', false)], out: '', w: '72px' },
+      { name: 'River Song', color: '#8C8C99', db: 0, dbText: '0.0', pan: 'C', p: 0, meters: ['58%', '55%'], buttons: [btn('M', 'Mute River Song', false, 'mute'), btn('S', 'Solo River Song', false, 'solo')], out: 'Master', gapBefore: true },
+      { name: 'Take 1', color: '#D98C7E', db: -1.4, dbText: '−1.4', pan: 'C', p: 0, meters: ['52%', '50%'], buttons: [btn('M', 'Mute Take 1', false, 'mute'), btn('S', 'Solo Take 1', false, 'solo')], out: 'Master', selected: true },
+      { name: 'Take 2', color: '#C9A46E', db: -3.1, dbText: '−3.1', pan: 'L20', p: -0.2, meters: ['0%', '0%'], buttons: [btn('M', 'Mute Take 2', false, 'mute'), btn('S', 'Solo Take 2', false, 'solo')], out: 'Master' },
+      { name: 'Chorus only', color: '#6FB39A', db: 0, dbText: '0.0', pan: 'C', p: 0, meters: ['0%', '0%'], buttons: [btn('M', 'Mute Chorus only', true, 'mute'), btn('S', 'Solo Chorus only', false, 'solo')], out: 'Master' },
+      { name: 'Vocal plate', color: '#8FA3D9', db: 0, dbText: '0.0', pan: 'C', p: 0, meters: ['24%', '22%'], buttons: [btn('M', 'Mute Vocal plate', false, 'mute'), btn('S', 'Solo Vocal plate', false, 'solo')], out: 'Master', gapBefore: true },
+      { name: 'Master', color: '#B7B7C2', db: -0.9, dbText: '−0.9', pan: 'C', p: 0, meters: ['62%', '60%'], buttons: [btn('M', 'Mute master', false, 'mute')], out: 'Stereo Out', gapBefore: true, w: '104px' }
+    ];
+    const strips = stripDefs.map((c) => ({
+      name: c.name, color: c.color, pan: c.pan, db: c.dbText, buttons: c.buttons, meters: c.meters,
+      w: c.w || '84px', gapBefore: !!c.gapBefore, out: c.out, hasOut: !!c.out,
+      bg: c.selected ? '#202026' : '#19191E', edge: c.selected ? '#4A4A54' : '#24242B',
+      nameColor: c.selected ? '#FFFFFF' : '#ECECF1', cap: capTop(c.db), meterScale: '100%',
+      ...panGeom(c.p)
+    }));
+    const scale = [0, 12.5, 25, 37.5, 50, 75, 100].map((t) => ({ top: t + '%' }));
+    return {
+      ticks, minorTicks, gridBg, modules, eqCurve, eqFill, eqNodes, eqGrid: [30, 78, 126, 174, 222],
+      backingWave: this.wave(0, 40.5, 3, 'backing', 0.95),
+      busWave: this.wave(0.8, 42, 11, 'bus', 1.0),
+      masterWave: this.wave(0, 42, 13, 'backing', 1.0),
+      takes, lanes, semis, targets, pitchPath, lyrics, lyricTools, dock, strips, scale
+    };
+  }
+}
+</script>
+</body>
+</html>
