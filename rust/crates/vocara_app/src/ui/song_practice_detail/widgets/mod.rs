@@ -18,6 +18,7 @@ pub mod technique_picker;
 pub mod timeline;
 pub mod track_context_menu;
 pub mod track_row;
+pub mod vocal_tract_view;
 pub mod voice_profile_view;
 pub mod voiceprint_view;
 
