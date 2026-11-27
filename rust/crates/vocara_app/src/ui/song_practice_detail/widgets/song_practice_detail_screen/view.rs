@@ -382,6 +382,8 @@ impl SongPracticeDetailScreen {
                     monitor_allowed: settings.monitor_allowed(),
                     suggest_headphones_mark: settings.suggest_headphones_mark(),
                     input_level: vm.recording().input_level(),
+                    monitoring: vm.recording().input_monitor_enabled(),
+                    taking: vm.is_recording() || vm.recording().is_starting_take(),
                 },
             };
             let selected = selected_track_ref(vm, practice).map(|t| &**t);
@@ -969,25 +971,14 @@ fn slot(layer: Option<Element<'_, Message>>) -> Element<'_, Message> {
 /// the practice could not be loaded, and Home's open guard, released only
 /// when this page pops, stayed set.
 fn no_workspace(child: Element<'_, Message>) -> Element<'_, Message> {
-    let back = button(
-        container(icons::icon(Icon::ChevronLeft, 20.0, Studio::TEXT_SECONDARY))
-            .center_x(30)
-            .center_y(30),
-    )
-    .padding(0)
-    .style(bare_button)
-    .on_press(Message::Back);
+    use crate::ui::core::widgets::toolbar;
+    // The page's toolbar with its back button alone, where the practice's
+    // toolbar puts it.
+    let bar = toolbar::page_toolbar(
+        row![Space::new().width(8), toolbar::back_button(Message::Back)].align_y(Vertical::Center),
+    );
     column![
-        container(back)
-            .width(Length::Fill)
-            .height(53)
-            .padding(Padding::from([0, 14]))
-            .align_y(Vertical::Center)
-            .style(fill(Studio::SURFACE)),
-        container(Space::new())
-            .width(Length::Fill)
-            .height(1)
-            .style(fill(Studio::BORDER)),
+        bar,
         container(child)
             .width(Length::Fill)
             .height(Length::Fill)

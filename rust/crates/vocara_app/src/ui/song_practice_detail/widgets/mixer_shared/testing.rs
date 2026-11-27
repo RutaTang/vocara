@@ -74,11 +74,6 @@ pub fn count<M>(ui: &mut Simulator<'_, M>, label: &str) -> usize {
         .count()
 }
 
-/// The text an icon is drawn as.
-pub fn glyph(icon: icons::Icon) -> String {
-    char::from(icon).to_string()
-}
-
 pub fn press() -> Event {
     Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left))
 }

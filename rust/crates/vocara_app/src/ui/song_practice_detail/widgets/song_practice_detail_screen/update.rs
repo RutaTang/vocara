@@ -355,6 +355,11 @@ impl SongPracticeDetailScreen {
     fn transport(&mut self, m: transport::Message, step: &mut Step) {
         let fx = match m {
             transport::Message::Back => return self.back(step),
+            // Guarded while a take is in flight, as a ruler click is.
+            transport::Message::GoToStart => {
+                self.vm.seek(std::time::Duration::ZERO);
+                return;
+            }
             transport::Message::TogglePlay => self.vm.playback_do(|p, h| p.toggle_play(h)),
             transport::Message::Stop => self.vm.playback_do(|p, h| p.stop(h)),
             transport::Message::StopRecording => self.vm.stop_recording(),
@@ -702,6 +707,13 @@ impl SongPracticeDetailScreen {
                 self.owed
                     .retain(|o| *o != Owed::MasterVolume(Source::Mixer(None)));
                 self.vm.mixer_do(|m, _| m.commit_master_volume())
+            }
+            // The input strip's R and I: the toolbar's Record and input
+            // monitoring.
+            X::StartRecording => return self.transport(transport::Message::StartRecording, step),
+            X::StopRecording => return self.transport(transport::Message::StopRecording, step),
+            X::ToggleInputMonitor => {
+                return self.transport(transport::Message::ToggleInputMonitor, step)
             }
             X::SetRecordGainDbLive { db } => {
                 self.vm.app_settings().set_record_gain_db_live(db);

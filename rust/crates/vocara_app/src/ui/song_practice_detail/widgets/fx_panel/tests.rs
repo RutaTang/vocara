@@ -22,9 +22,9 @@ use super::*;
 use crate::ui::core::widgets::pan_zoom::testing as pan_zoom;
 use crate::ui::song_practice_detail::widgets::mixer_shared::testing::*;
 
-/// The inspector's width (LeftPanel's `_panelWidth`), tall enough that the
-/// whole chain lays out.
-const W: f32 = 272.0;
+/// The inspector's content width (its 264 px less its 1 px border), tall
+/// enough that the whole chain lays out.
+const W: f32 = 263.0;
 const SIZE: Size = Size::new(W, 4000.0);
 
 fn track(fx: Option<&TrackFx>) -> FxPanel<'_> {
@@ -45,26 +45,35 @@ fn with(f: impl FnOnce(&mut TrackFx)) -> TrackFx {
     fx
 }
 
-/// The header toggle of the insert titled `title`: at the right end of its
-/// header row.
+/// The module's side padding.
+const PAD: f32 = 14.0;
+
+/// The power button of the module titled `title`: after the module's
+/// padding, the handle's 6 px dots and an 8 px gap, 18 px across.
 fn toggle_for(ui: &mut iced_test::Simulator<'_, Message>, title: &str) -> Point {
     let header = text_at(ui, title, 0).unwrap_or_else(|| panic!("{title} header"));
-    Point::new(W - 2.0 - 17.0, header.center_y())
+    Point::new(PAD + 6.0 + 8.0 + 9.0, header.center_y())
 }
 
-/// The slider labelled `label`: the middle of its track (between the 64 px
-/// label and the 8 + 42 px readout, inside the panel's 2 px padding).
+/// The slider labelled `label`: on its track (between the 62 px label and
+/// the 54 px value, 8 px from each, inside the module's padding).
 fn slider_at(ui: &mut iced_test::Simulator<'_, Message>, label: &str, fraction: f32) -> Point {
     let row = text_at(ui, label, 0).unwrap_or_else(|| panic!("{label} slider"));
-    let (left, right) = (2.0 + 64.0, W - 2.0 - 50.0);
+    let (left, right) = (PAD + 62.0 + 8.0, W - PAD - 54.0 - 8.0);
     Point::new(left + (right - left) * fraction, row.center_y())
 }
 
-/// The EQ graph's box, under its header.
+/// The EQ graph's well, under its module's header.
 fn eq_box(ui: &mut iced_test::Simulator<'_, Message>) -> Rectangle {
-    let header = text_at(ui, "EQUALIZER", 0).expect("the EQ header");
-    let top = header.center_y() - chain::HEADER_HEIGHT / 2.0 + chain::HEADER_HEIGHT + 8.0;
-    Rectangle::new(Point::new(2.0, top), Size::new(W - 4.0, EQ_HEIGHT))
+    let header = text_at(ui, "Equalizer", 0).expect("the EQ header");
+    let top = header.center_y() + MODULE_HEADER / 2.0 + EQ_GAP;
+    Rectangle::new(Point::new(PAD, top), Size::new(W - 2.0 * PAD, EQ_HEIGHT))
+}
+
+/// A drag handle's dots, on the module titled `title`.
+fn handle_for(ui: &mut iced_test::Simulator<'_, Message>, title: &str) -> Point {
+    let header = text_at(ui, title, 0).unwrap_or_else(|| panic!("{title} header"));
+    Point::new(PAD + 3.0, header.center_y())
 }
 
 fn commits(messages: &[Message]) -> usize {
@@ -102,11 +111,11 @@ fn small_rates_and_times_keep_a_decimal_in_their_readout() {
     assert_eq!(fx_value_label(0.6, "Hz"), "0.6 Hz");
     assert_eq!(fx_value_label(0.2, "ms"), "0.2 ms");
     assert_eq!(fx_value_label(120.0, "Hz"), "120 Hz");
-    assert_eq!(fx_value_label(2500.0, "Hz"), "2.5k");
+    assert_eq!(fx_value_label(2500.0, "Hz"), "2.5 kHz");
     assert_eq!(fx_value_label(40.0, "ms"), "40 ms");
-    // The other units.
-    assert_eq!(fx_value_label(4.0, ":1"), "4.0:1");
-    assert_eq!(fx_value_label(-18.4, "dB"), "-18 dB");
+    // The other units, with a true minus sign.
+    assert_eq!(fx_value_label(4.0, ":1"), "4.0 : 1");
+    assert_eq!(fx_value_label(-18.4, "dB"), "\u{2212}18 dB");
     assert_eq!(fx_value_label(0.255, ""), "26%");
 }
 
@@ -116,6 +125,37 @@ fn the_gr_readout_reads_the_reduction_as_a_cut() {
     assert_eq!(gr_readout(0.049), "0.0");
     assert_eq!(gr_readout(6.0), "-6.0");
     assert_eq!(gr_readout(12.34), "-12.3");
+    // The compressor's badge reads it with a true minus sign.
+    assert_eq!(gr_badge(0.0), "GR 0.0 dB");
+    assert_eq!(gr_badge(2.1), "GR \u{2212}2.1 dB");
+}
+
+#[test]
+fn the_badges_read_the_bands_and_a_bypassed_module() {
+    let fx = with(|fx| fx.eq_on = true);
+    let enabled = fx.eq.iter().filter(|b| b.enabled).count();
+    let mut ui = simulator(SIZE, view(track(Some(&fx))));
+    assert!(text_at(&mut ui, &bands_badge(&fx.eq), 0).is_some());
+    assert_eq!(bands_badge(&fx.eq), format!("{enabled} bands"));
+    // Every other module of the flat chain is off.
+    let mut bypassed = 0;
+    while text_at(&mut ui, BYPASSED, bypassed).is_some() {
+        bypassed += 1;
+    }
+    assert_eq!(bypassed, FxKind::VALUES.len() - 1);
+}
+
+#[test]
+fn the_preset_reads_the_chain_it_is_else_none() {
+    assert_eq!(current_preset(&TrackFx::flat()), Some("Flat"));
+    let custom = with(|fx| fx.comp_on = true);
+    assert_eq!(current_preset(&custom), None);
+    let mut ui = simulator(SIZE, view(track(Some(&custom))));
+    assert!(text_at(&mut ui, NO_PRESET, 0).is_some());
+    // A preset in another plugin order is still that preset.
+    let mut warm = FxPresets::vocal()[1].fx.clone();
+    warm.order.reverse();
+    assert_eq!(current_preset(&warm), Some(FxPresets::vocal()[1].name));
 }
 
 // ------------------------------------------------------------- the chain
@@ -124,15 +164,15 @@ fn the_gr_readout_reads_the_reduction_as_a_cut() {
 fn renders_every_insert_header_for_a_take_with_no_fx_yet() {
     let mut ui = simulator(SIZE, view(track(None)));
     for title in [
-        "EQUALIZER",
-        "COMPRESSOR",
-        "DE-ESSER",
-        "GATE",
-        "DELAY",
-        "SATURATION",
-        "DOUBLER",
-        "LIMITER",
-        "REVERB",
+        "Equalizer",
+        "Compressor",
+        "De-esser",
+        "Gate",
+        "Delay",
+        "Saturation",
+        "Doubler",
+        "Limiter",
+        "Reverb",
     ] {
         assert!(
             text_at(&mut ui, title, 0).is_some(),
@@ -144,7 +184,7 @@ fn renders_every_insert_header_for_a_take_with_no_fx_yet() {
 #[test]
 fn a_track_toggle_edits_the_track_and_commits() {
     let mut ui = simulator(SIZE, view(track(None)));
-    let at = toggle_for(&mut ui, "EQUALIZER");
+    let at = toggle_for(&mut ui, "Equalizer");
     ui.point_at(at);
     let _ = ui.simulate([press(), release()]);
     let messages: Vec<_> = ui.into_messages().collect();
@@ -165,7 +205,7 @@ fn a_track_toggle_edits_the_track_and_commits() {
 fn a_bus_toggle_edits_the_bus_and_commits() {
     let fx = TrackFx::flat();
     let mut ui = simulator(SIZE, view(bus(&fx)));
-    let at = toggle_for(&mut ui, "COMPRESSOR");
+    let at = toggle_for(&mut ui, "Compressor");
     ui.point_at(at);
     let _ = ui.simulate([press(), release()]);
     let messages: Vec<_> = ui.into_messages().collect();
@@ -215,8 +255,8 @@ fn every_insert_editor_renders_with_its_plugin_on() {
         "Threshold",
         "Ratio",
         "Makeup",
-        "GR",
-        "Freq",
+        "GR 0.0 dB",
+        "Frequency",
         "Range",
         "Attack",
         "Release",
@@ -249,7 +289,7 @@ fn choosing_a_preset_replaces_the_chain_but_keeps_the_order() {
         fx.send_db = -12.0;
     });
     let mut ui = simulator(SIZE, view(track(Some(&fx))));
-    ui.click(nth("Choose…", 0)).expect("the preset dropdown");
+    ui.click(nth(NO_PRESET, 0)).expect("the preset pop-up");
     let preset = &FxPresets::vocal()[0];
     ui.click(nth(preset.name, 0)).expect("the first preset");
     let messages: Vec<_> = ui.into_messages().collect();
@@ -272,7 +312,8 @@ fn choosing_a_preset_replaces_the_chain_but_keeps_the_order() {
 #[test]
 fn the_preset_menu_lists_every_preset_with_its_description() {
     let mut ui = simulator(SIZE, view(track(None)));
-    ui.click(nth("Choose…", 0)).expect("the preset dropdown");
+    // The flat chain is the "Flat" preset.
+    ui.click(nth("Flat", 0)).expect("the preset pop-up");
     for p in FxPresets::vocal() {
         assert!(text_at(&mut ui, p.name, 0).is_some(), "{}", p.name);
         assert!(text_at(&mut ui, p.description, 0).is_some(), "{}", p.name);
@@ -303,16 +344,16 @@ fn a_reverb_space_replaces_the_reverb_and_commits() {
 #[test]
 fn dragging_a_handle_reorders_the_take_chain() {
     let mut ui = simulator(SIZE, view(track(None)));
-    let eq = text_at(&mut ui, "EQUALIZER", 0).expect("EQ");
-    let handle = Point::new(2.0 + 8.0, eq.center_y());
-    // Down past the compressor's middle (each closed card is 36 px tall).
+    let handle = handle_for(&mut ui, "Equalizer");
+    // Down past the compressor's middle (each bypassed module is 45 px
+    // tall: its padding, its header and its hairline).
     drive(
         &mut ui,
         &drag_steps(
             handle,
             &[
-                Point::new(handle.x, handle.y + 20.0),
-                Point::new(handle.x, handle.y + 40.0),
+                Point::new(handle.x, handle.y + 25.0),
+                Point::new(handle.x, handle.y + 50.0),
             ],
         ),
     );
@@ -332,12 +373,11 @@ fn dragging_a_handle_reorders_the_take_chain() {
 fn dragging_a_handle_reorders_the_bus_chain_and_a_short_drag_nothing() {
     let fx = TrackFx::flat();
     let mut ui = simulator(SIZE, view(bus(&fx)));
-    let limiter = text_at(&mut ui, "LIMITER", 0).expect("limiter");
-    let handle = Point::new(2.0 + 8.0, limiter.center_y());
+    let handle = handle_for(&mut ui, "Limiter");
     // Up past the doubler's and the saturation's middles.
     drive(
         &mut ui,
-        &drag_steps(handle, &[Point::new(handle.x, handle.y - 80.0)]),
+        &drag_steps(handle, &[Point::new(handle.x, handle.y - 110.0)]),
     );
     let messages: Vec<_> = ui.into_messages().collect();
     let order = reordered(&FxKind::VALUES, 7, 5);
@@ -493,13 +533,13 @@ fn an_eq_band_drag_edits_live_and_commits_on_release() {
         1,
         "the pan's start moves nothing; its update does"
     );
-    // The band nearest where the pan started (x = 164 of 268: the 2 kHz
+    // The band nearest where the pan started (x = 147 of 235: the 2 kHz
     // peak), moved to the pointer: freq from x, gain from y.
     let local = Point::new(c.x + 40.0 - b.x, c.y - 15.0 - b.y);
     let band = edits[0].eq[3];
     assert!(band.enabled);
     assert!((band.freq - x_to_freq(f64::from(local.x), f64::from(b.width))).abs() < 1e-6);
-    assert!((band.gain_db - y_to_db(f64::from(local.y), 120.0)).abs() < 1e-6);
+    assert!((band.gain_db - y_to_db(f64::from(local.y), f64::from(EQ_HEIGHT))).abs() < 1e-6);
     assert!(band.gain_db > 0.0);
     assert!(edits[0].eq_on);
     assert_eq!(messages.last(), Some(&Message::CommitFx));
@@ -621,7 +661,7 @@ fn the_graph_maps_log_frequency_and_db() {
         enabled: false,
         ..EqBand::new(vocara_model::models::audio_fx::EqBandKind::Peaking, 500.0)
     };
-    let moved = band_dragged_to(&off, 600.0, 30.0, 300.0);
+    let moved = band_dragged_to(&off, 600.0, f64::from(EQ_HEIGHT) / 4.0, 300.0);
     assert!(moved.enabled);
     assert!((moved.freq - 18000.0).abs() < 1e-6);
     assert!((moved.gain_db - 7.5).abs() < 1e-12);
@@ -847,7 +887,7 @@ fn the_gain_reduction_meter_shows_the_reading_it_is_given() {
             ..bus(&fx)
         }),
     );
-    assert!(text_at(&mut ui, "-6.0", 0).is_some());
+    assert!(text_at(&mut ui, &gr_badge(6.0), 0).is_some());
 }
 
 #[test]
@@ -996,29 +1036,31 @@ fn a_held_slider_keeps_its_drag_through_another_cards_edit() {
 }
 
 #[test]
-fn a_toggle_changes_color_linearly_and_eases_its_thumb_over_130_ms() {
+fn a_power_button_changes_its_fill_linearly_over_130_ms() {
     use crate::ui::core::motion::Lerp;
     use crate::ui::core::widgets::animated::testing as anim;
+    use crate::ui::core::widgets::controls::power_colors;
 
-    let view = |on| fx_toggle(on, vec![Message::CommitFx]);
+    // A colour laid over the frames' background.
+    let over = |c: Color| Color {
+        r: c.r * c.a + anim::BACKGROUND.r * (1.0 - c.a),
+        g: c.g * c.a + anim::BACKGROUND.g * (1.0 - c.a),
+        b: c.b * c.a + anim::BACKGROUND.b * (1.0 - c.a),
+        a: 1.0,
+    };
+    let (off, _) = power_colors(false, false);
+    let (on, _) = power_colors(true, false);
+    let view = |on| power_toggle(on, vec![Message::CommitFx]);
     let mut window = anim::Frames::new(Size::new(40.0, 20.0));
-    let at = |w: &anim::Frames, x: f32, c: Color| anim::near(w.pixel(Point::new(x, 9.0)), c);
+    // Inside the circle, clear of the glyph.
+    let at = |w: &anim::Frames, c: Color| anim::near(w.pixel(Point::new(3.0, 9.0)), over(c));
     let t0 = Instant::now();
     window.frame(view(false), &[], t0);
-    assert!(at(&window, 9.0, Studio::TEXT_SECONDARY) && at(&window, 28.0, Studio::BORDER));
+    assert!(at(&window, off), "off");
     assert!(window.frame(view(true), &[], t0));
-    // The thumb turns white at once, and starts where it was.
-    assert!(at(&window, 9.0, Color::WHITE), "start");
-    assert!(at(&window, 28.0, Studio::BORDER), "start");
+    assert!(at(&window, off), "it starts where it was");
     window.frame(view(true), &[], t0 + 65 * anim::MS);
-    // Eased out, the thumb is past halfway (its middle at 9 + 16 × 0.68,
-    // where a linear one would be at 17): its right edge covers 25.
-    assert!(at(&window, 25.0, Color::WHITE), "the thumb eases out");
-    let track = Studio::BORDER.lerp(Studio::ACCENT, 0.5);
-    assert!(at(&window, 4.0, track), "the color is linear");
+    assert!(at(&window, off.lerp(on, 0.5)), "the fill is linear");
     assert!(!window.frame(view(true), &[], t0 + 130 * anim::MS));
-    assert!(
-        at(&window, 25.0, Color::WHITE) && at(&window, 4.0, Studio::ACCENT),
-        "end"
-    );
+    assert!(at(&window, on), "end");
 }

@@ -27,6 +27,7 @@ use vocara_model::util::dart_num::pow_f64;
 
 use super::*;
 use crate::ui::core::theme;
+use crate::ui::core::widgets::studio_controls::studio_fader;
 use crate::ui::song_practice_detail::widgets::live_ui::{move_to, press, release, LiveUi};
 
 /// The inspector pins its footer only above a minimum height: a real
@@ -185,10 +186,6 @@ fn tap(ui: &mut LiveUi, vm: &Vm, label: &str) -> Vec<Message> {
     tap_nth(ui, vm, label, 0)
 }
 
-fn glyph(icon: Icon) -> String {
-    char::from(icon).to_string()
-}
-
 fn ui() -> LiveUi {
     LiveUi::new(WINDOW)
 }
@@ -297,14 +294,12 @@ fn the_inspector_asks_again_for_the_metrics_it_shows_and_only_those() {
     );
 }
 
-/// Where the volume fader is: left of its dB readout.
+/// Where the volume slider is: left of its dB readout's column.
 fn volume_fader(ui: &mut LiveUi, vm: &Vm) -> Point {
     let readout = bounds(ui, vm, "0.0 dB");
-    let box_left = readout.x + readout.width - FADER_DB_READOUT_WIDTH;
-    Point::new(box_left - 8.0 - 30.0, readout.center_y())
+    let box_left = readout.x + readout.width - FOOTER_DB_WIDTH;
+    Point::new(box_left - 10.0 - 30.0, readout.center_y())
 }
-
-use crate::ui::core::widgets::studio_controls::FADER_DB_READOUT_WIDTH;
 
 fn volumes(messages: &[Message]) -> Vec<(String, f64)> {
     messages
@@ -344,17 +339,13 @@ fn another_take_selected_under_a_held_fader_gets_its_own() {
 fn a_selected_take_renders_its_channel_strip() {
     let vm = Vm::new().track(vocal("t1")).buses(vec![bus("a", "Reverb")]);
     let mut ui = ui();
-    assert_eq!(count(&mut ui, &vm, "OUTPUT"), 1);
-    // Its header: the name, and what it is.
+    assert_eq!(count(&mut ui, &vm, "Output"), 1);
+    // Its header: the name, and what it is (the number left out: the name
+    // already reads it).
     assert_eq!(count(&mut ui, &vm, "Take 1"), 1);
-    assert_eq!(
-        count(
-            &mut ui,
-            &vm,
-            "Take 1 · Interpretation 1  ·  00:05  ·  Jan 1"
-        ),
-        1
-    );
+    assert_eq!(count(&mut ui, &vm, "Interpretation 1 · 0:05 · Jan 1"), 1);
+    // The footer.
+    assert_eq!(count(&mut ui, &vm, "0.0 dB"), 1);
 }
 
 #[test]
@@ -367,7 +358,7 @@ fn a_backing_strip_plays_dry_and_routes_nowhere() {
         count(&mut ui, &vm, "Backing track plays dry, with no effects."),
         1
     );
-    assert_eq!(count(&mut ui, &vm, "OUTPUT"), 0);
+    assert_eq!(count(&mut ui, &vm, "Output"), 0);
     assert_eq!(count(&mut ui, &vm, "M"), 1);
 }
 
@@ -390,10 +381,11 @@ fn a_send_pulled_all_the_way_down_is_off_not_at_minus_48_db() {
         .track(with_sends(vocal("t1"), &["a"]))
         .buses(vec![bus("a", "Reverb")]);
     let mut ui = ui();
-    let chip = bounds(&mut ui, &vm, "Reverb");
-    // The fader starts after the 66 px chip (its text 7 px in) and 6 px.
-    let left = chip.x - 7.0 + 66.0 + 6.0;
-    let y = chip.center_y();
+    let target = bounds(&mut ui, &vm, "Reverb");
+    // The level's slider is under the target's pop-up (a 22 px row, then a
+    // 24 px one), from the 62 px label column and its 8 px gap.
+    let left = 14.0 + 62.0 + 8.0;
+    let y = target.center_y() + 11.0 + 12.0;
     ui.point_at(Point::new(left + 1.0, y));
     let messages = ui.run(vm.view(), [press(), move_to(left - 39.0, y), release()]);
     let levels = send_levels(&messages);
@@ -414,8 +406,9 @@ fn the_add_menu_offers_only_buses_no_slot_already_feeds() {
     // absence: if the menu offered it too there would be a second one.
     assert_eq!(count(&mut ui, &vm, "Reverb"), 1);
     let add = InspectorMenu::AddSend(Channel::Track("t1".into()));
+    // The empty slot's pop-up adds a send.
     assert_eq!(
-        tap(&mut ui, &vm, "Send"),
+        tap(&mut ui, &vm, EMPTY_SLOT),
         vec![Message::OpenMenu(add.clone())]
     );
     vm.open_menu = Some(add);
@@ -489,10 +482,9 @@ fn removing_a_send_passes_the_slot_index() {
         .buses(vec![bus("a", "Reverb"), bus("b", "Delay")]);
     let mut ui = ui();
     // One remove affordance per slot, in slot order.
-    let x = glyph(Icon::X);
-    assert_eq!(count(&mut ui, &vm, &x), 2);
+    assert_eq!(count(&mut ui, &vm, REMOVE_SEND), 2);
     assert_eq!(
-        tap_nth(&mut ui, &vm, &x, 1),
+        tap_nth(&mut ui, &vm, REMOVE_SEND, 1),
         vec![Message::RemoveTrackSend {
             track_id: "t1".into(),
             slot: 1,
@@ -503,10 +495,17 @@ fn removing_a_send_passes_the_slot_index() {
 #[test]
 fn the_add_affordance_disappears_at_the_send_cap() {
     let ids: Vec<String> = (0..MAX_SENDS).map(|i| format!("b{i}")).collect();
-    let buses = ids.iter().map(|b| bus(b, &format!("Bus {b}"))).collect();
+    let buses: Vec<Arc<FxBus>> = ids.iter().map(|b| bus(b, &format!("Bus {b}"))).collect();
     let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
-    let vm = Vm::new().track(with_sends(vocal("t1"), &refs)).buses(buses);
-    assert_eq!(count(&mut ui(), &vm, "Send"), 0);
+    let vm = Vm::new()
+        .track(with_sends(vocal("t1"), &refs))
+        .buses(buses.clone());
+    assert_eq!(count(&mut ui(), &vm, EMPTY_SLOT), 0);
+    // A slot short of the cap, the empty slot offers the bus left.
+    let vm = Vm::new()
+        .track(with_sends(vocal("t1"), &refs[1..]))
+        .buses(buses);
+    assert_eq!(count(&mut ui(), &vm, EMPTY_SLOT), 1);
 }
 
 // ------------------------------------------------------ take vs bus dispatch
@@ -570,7 +569,7 @@ fn the_add_send_menu_opens_under_its_chip() {
             bus("c", "Room"),
         ]);
     let mut ui = ui();
-    let chip = bounds(&mut ui, &vm, "Send");
+    let chip = bounds(&mut ui, &vm, EMPTY_SLOT);
     vm.open_menu = Some(InspectorMenu::AddSend(Channel::Track("t1".into())));
     let item = bounds(&mut ui, &vm, "Room");
     assert!(item.y - (chip.y + chip.height) < 30.0, "{chip:?} {item:?}");
@@ -579,9 +578,11 @@ fn the_add_send_menu_opens_under_its_chip() {
 
 #[test]
 fn a_buss_output_menu_opens_under_its_chip() {
+    // A panel shorter than the window, so the menu has room below it.
     let mut vm = Vm::new()
         .bus(bus("a", "Reverb"))
-        .buses(vec![bus("a", "Reverb"), bus("b", "Delay")]);
+        .buses(vec![bus("a", "Reverb"), bus("b", "Delay")])
+        .height(900.0);
     let mut ui = ui();
     let chip = bounds(&mut ui, &vm, STEREO_OUT);
     vm.open_menu = Some(InspectorMenu::Output(Channel::Bus("a".into())));
@@ -670,8 +671,9 @@ fn a_long_bus_name_stays_inside_a_buss_output_row() {
 
 /// Bounding the chip with a Flexible beside the row's Spacer split the free
 /// space in half: the chip came off the right edge, and ordinary names
-/// ellipsized with most of the row empty.
-fn expect_whole_and_flush_right(vm: &Vm, name: &str) {
+/// ellipsized with most of the row empty. The pop-up fills its column: its
+/// name starts 8 px in and shows whole, clear of the chevron.
+fn expect_whole_in_its_popup(vm: &Vm, name: &str) {
     let mut ui = ui();
     let shown = bounds(&mut ui, vm, name);
     let natural = iced_test::Simulator::<(), Theme, Renderer>::with_size(
@@ -686,38 +688,34 @@ fn expect_whole_and_flush_right(vm: &Vm, name: &str) {
         (shown.width - natural.width).abs() < 0.5,
         "\"{name}\" shows whole: {shown:?} vs {natural:?}"
     );
-    // The chip's chevron: the footer's 14 px padding, then the chip's 9 px
-    // padding and border.
-    let chevron = bounds(&mut ui, vm, &glyph(Icon::ChevronDown));
-    let right = chevron.x + chevron.width;
-    assert!(
-        (right - (CONTENT_W - 14.0 - 10.0)).abs() < 1.5,
-        "{chevron:?}"
-    );
-    assert!(shown.x + shown.width <= chevron.x - 4.0 + 0.5);
+    let popup_left = 14.0 + PARAMETER_LABEL_WIDTH + 8.0;
+    let popup_right = CONTENT_W - 14.0 - PARAMETER_VALUE_WIDTH - 8.0;
+    assert!((shown.x - (popup_left + 8.0)).abs() < 0.5, "{shown:?}");
+    // The chevron: 10 px, 6 px in from the right, 8 px after the name.
+    assert!(shown.x + shown.width <= popup_right - 6.0 - 10.0 - 8.0 + 0.5);
 }
 
 #[test]
-fn a_takes_output_chip_sits_flush_right_its_name_whole() {
+fn a_takes_output_popup_shows_its_name_whole() {
     let mut t = vocal("t1");
     t.bus_id = Some("a".into());
-    expect_whole_and_flush_right(
-        &Vm::new().track(t).buses(vec![bus("a", "Vocal Reverb")]),
-        "Vocal Reverb",
+    expect_whole_in_its_popup(
+        &Vm::new().track(t).buses(vec![bus("a", "Vocal plate")]),
+        "Vocal plate",
     );
 }
 
 #[test]
-fn a_buss_output_chip_sits_flush_right_its_name_whole() {
+fn a_buss_output_popup_shows_its_name_whole() {
     let routed = Arc::new(FxBus {
         output_bus_id: Some("a".into()),
         ..FxBus::new("b", "Delay", TrackFx::flat())
     });
-    expect_whole_and_flush_right(
+    expect_whole_in_its_popup(
         &Vm::new()
             .bus(routed.clone())
-            .buses(vec![bus("a", "Vocal Reverb"), routed]),
-        "Vocal Reverb",
+            .buses(vec![bus("a", "Vocal plate"), routed]),
+        "Vocal plate",
     );
 }
 
@@ -827,9 +825,9 @@ fn the_rail_and_the_header_toggle_the_inspector() {
         vec![Message::ToggleInspectorPanel]
     );
     let mut ui = ui();
-    assert_eq!(count(&mut ui, &vm, "INSPECTOR"), 1);
+    assert_eq!(count(&mut ui, &vm, "Inspector"), 1);
     assert_eq!(
-        tap(&mut ui, &vm, &glyph(Icon::PanelLeftClose)),
+        tap(&mut ui, &vm, "Hide inspector"),
         vec![Message::ToggleInspectorPanel]
     );
 }
@@ -1148,22 +1146,37 @@ fn a_take_is_numbered_among_the_interpretations_takes() {
     original.kind = AudioTrackKind::Reference;
     assert_eq!(
         take_subtitle(&original, &takes, Some("Tender")),
-        "Original  ·  00:05  ·  Jan 1"
+        "Original · 0:05 · Jan 1"
     );
     original.kind = AudioTrackKind::Accompaniment;
-    assert!(take_subtitle(&original, &takes, None).starts_with("Accompaniment  ·  "));
+    assert!(take_subtitle(&original, &takes, None).starts_with("Accompaniment · "));
+    // A take named for its number leaves the number out; a renamed one
+    // keeps it.
+    assert_eq!(
+        take_subtitle(&takes[0], &takes, Some("Tender")),
+        "Tender · 0:05 · Jan 1"
+    );
+    assert_eq!(take_subtitle(&takes[0], &takes, None), "0:05 · Jan 1");
+    let mut renamed = (*takes[1]).clone();
+    renamed.display_name = "Chorus only".into();
+    assert_eq!(
+        take_subtitle(&renamed, &takes, Some("Tender")),
+        "Take 2 · Tender · 0:05 · Jan 1"
+    );
+    assert_eq!(short_clock(754_000), "12:34");
     assert_eq!(fmt_date(&DateTime::utc_ymd(2026, 11, 23)), "Nov 23");
 }
 
 #[test]
 fn a_take_dot_is_its_tint_else_the_lane_default() {
+    use crate::ui::song_practice_detail::widgets::track_row::lane_accent;
     let mut t = vocal("t1");
-    assert_eq!(take_dot_color(&t), Studio::WAVEFORM);
+    assert_eq!(take_dot_color(&t), lane_accent(&t));
     t.color_value = Some(0xFF5B8DEF);
     assert_eq!(take_dot_color(&t), Color::from_rgb8(0x5B, 0x8D, 0xEF));
     let mut b = vocal("b");
     b.kind = AudioTrackKind::Accompaniment;
-    assert_eq!(take_dot_color(&b), Studio::ACCENT);
+    assert_eq!(take_dot_color(&b), lane_accent(&b));
 }
 
 #[test]

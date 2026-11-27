@@ -1,9 +1,15 @@
 //! Port of `ui/song_practice_detail/widgets/left_panel.dart`: the left
-//! inspector — a Logic-style channel strip for the selected take or FX bus
-//! (its FX inserts above, the channel-strip footer pinned below: sends,
-//! output routing, mute/solo, pan, the fader and its dB), collapsible to a
-//! thin rail — and [`voice_summary_view`], the take's voice-analysis
-//! summary the bottom dock's "Analysis Summary" tab hosts.
+//! inspector — a Logic-style channel strip for the selected take or FX bus,
+//! collapsible to a thin rail — and [`voice_summary_view`], the take's
+//! voice-analysis summary the bottom dock's "Analysis Summary" tab hosts.
+//!
+//! The inspector is drawn as the approved workspace mockup draws it
+//! (`DESIGN.md`): a 36 px "Inspector" header with its hide button; the
+//! channel's identity block (a colour square, the name, its meta); the FX
+//! panel (its preset row, then the effect modules); the routing (a "Send"
+//! row per aux send with its level, an empty slot that adds one, and
+//! "Output", each a pop-up button); and the channel footer pinned at the
+//! bottom (M, S, the pan knob, the volume as a thin slider, its dB).
 //!
 //! Plain data in ([`Inspector`], [`VoiceSummary`]: what the Dart widgets
 //! read off the detail view model, its mixer and its interpretations),
@@ -26,9 +32,9 @@
 //!   cannot act, so [`Inspector::analysis_heal`] says what the screen asks
 //!   for after each update while it holds.
 //! - `showStudioMenu(anchor, menuAnchorBelow(anchor), ...)`: the screen holds
-//!   which menu is open ([`Inspector::open_menu`]); the chip that opens it
-//!   is a [`menu_host`] anchored below the chip (each chip's own, so the
-//!   menu drops under the chip clicked). Picking a row reports its action;
+//!   which menu is open ([`Inspector::open_menu`]); the pop-up button that
+//!   opens it is a [`menu_host`] anchored below it (each its own, so the
+//!   menu drops under the button clicked). Picking a row reports its action;
 //!   the screen closes the menu on every message but [`Message::OpenMenu`]
 //!   ([`Message::closes_menu`]). A menu opened for one channel shows only
 //!   over that channel's strip.
@@ -53,8 +59,8 @@ use iced::widget::{
     button, canvas as canvas_widget, center, column, container, responsive, row, Column, Space,
 };
 use iced::{
-    mouse, Color, Element, Event, Length, Padding, Pixels, Point, Rectangle, Renderer, Size, Theme,
-    Vector,
+    mouse, Background, Color, Element, Event, Length, Padding, Pixels, Point, Rectangle, Renderer,
+    Size, Theme, Vector,
 };
 use vocara_model::models::audio_fx::{TrackSend, MAX_SENDS, SEND_OFF_DB};
 use vocara_model::models::audio_track::AudioTrack;
@@ -64,28 +70,33 @@ use vocara_model::models::voice_metrics::{
 };
 use vocara_model::util::dart_date_time::DateTime;
 use vocara_model::util::dart_num::round_to_i64;
-use vocara_model::util::format::format_clock_ms;
 
-use super::detail_transport_bar::flexible_row;
 use super::pitch_lane::{note_vibrato_of, pitch_in_tune_percent, pitch_notes_of, PitchNote};
 use super::track_context_menu::{
     argb, menu_host, studio_menu, MenuAnchor, StudioMenuItem, MENU_ANCHOR_BELOW_DY,
 };
+use super::track_row::lane_accent;
 use crate::ui::core::icons::{self, Icon};
-use crate::ui::core::theme::{alpha, bare_button, boxed, fill, font, Studio};
+use crate::ui::core::theme::{alpha, bare_button, boxed, fill, font, height, type_scale, Studio};
 use crate::ui::core::widgets::cap_label::cap_label;
+use crate::ui::core::widgets::controls::{
+    icon_button, labelled, msr_button, popup_button, thin_slider, MsrKind, PARAMETER_LABEL_WIDTH,
+    PARAMETER_VALUE_WIDTH,
+};
 use crate::ui::core::widgets::fading_scrollbar::{scrollable, Fading};
-use crate::ui::core::widgets::studio_controls::{fader_db_readout, studio_fader, studio_pan_knob};
+use crate::ui::core::widgets::line_icon::{self, glyphs, line_icon_inherit};
+use crate::ui::core::widgets::material_tooltip::material_tooltip;
+use crate::ui::core::widgets::studio_controls::{fader_db, studio_pan_knob};
 use crate::ui::core::widgets::studio_hint::spinner;
-use crate::ui::core::widgets::studio_text::{fill_spaced_text, studio_text};
+use crate::ui::core::widgets::studio_text::studio_text;
 use crate::ui::song_practice_detail::view_model::analysis_cache::DockTab;
 use crate::util::to_string_as_fixed;
 
 #[cfg(test)]
 mod tests;
 
-/// The open inspector's width (`_panelWidth`).
-pub const PANEL_WIDTH: f32 = 272.0;
+/// The open inspector's width (`DESIGN.md`, Geometry: 264).
+pub const PANEL_WIDTH: f32 = 264.0;
 
 /// The collapsed rail's width.
 pub const RAIL_WIDTH: f32 = 34.0;
@@ -140,11 +151,11 @@ pub enum Channel {
 /// Which of the strip's menus is open.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InspectorMenu {
-    /// The OUTPUT chip's destinations.
+    /// The Output pop-up's destinations.
     Output(Channel),
-    /// "+ Send"'s buses no slot feeds yet.
+    /// The empty send slot's buses: those no slot feeds yet.
     AddSend(Channel),
-    /// A send slot's target chip: its own target plus the unused ones.
+    /// A send slot's target pop-up: its own target plus the unused ones.
     RetargetSend(Channel, usize),
 }
 
@@ -153,7 +164,7 @@ pub enum InspectorMenu {
 pub enum Message {
     /// The rail, or the header's collapse button (`vm.toggleInspectorPanel`).
     ToggleInspectorPanel,
-    /// A chip was tapped: open its menu (`showStudioMenu`).
+    /// A pop-up button was pressed: open its menu (`showStudioMenu`).
     OpenMenu(InspectorMenu),
     /// A tap outside the open menu, or Escape.
     DismissMenu,
@@ -414,14 +425,11 @@ impl Inspector<'_> {
 
 // ------------------------------------------------------------- pure parts
 
-/// `_TakeHeader`'s dot: the take's own tint, else the accent for a backing
-/// and `Studio.waveform` for a take.
+/// The identity block's colour square: the channel's colour in the arrange
+/// (`track_row::lane_accent`: its own tint, else the lane's default), so
+/// the inspector, the lane and the mixer strip read as one channel.
 pub fn take_dot_color(track: &AudioTrack) -> Color {
-    match track.color_value {
-        Some(v) => argb(v),
-        None if track.is_backing() => Studio::ACCENT,
-        None => Studio::WAVEFORM,
-    }
+    lane_accent(track)
 }
 
 /// `_takeLabel`: "Take 2 · Interpretation 1" — the take's place among the
@@ -442,8 +450,10 @@ pub fn take_label(
     }
 }
 
-/// The line under a take's name: what it is (the take's label, or
-/// "Original" / "Accompaniment" for a backing), its length and its date.
+/// The line under a take's name ("Interpretation 1 · 0:39 · Nov 21"): what
+/// it is (the take's label, its number left out when the name already
+/// reads it; "Original" / "Accompaniment" for a backing), its length and
+/// its date.
 pub fn take_subtitle(
     track: &AudioTrack,
     vocal_takes: &[Arc<AudioTrack>],
@@ -456,16 +466,33 @@ pub fn take_subtitle(
             "Accompaniment".to_string()
         }
     } else {
-        take_label(&track.id, vocal_takes, interpretation)
+        let label = take_label(&track.id, vocal_takes, interpretation);
+        let name = track.display_name.as_str();
+        match label.strip_prefix(name) {
+            Some("") => String::new(),
+            Some(rest) if rest.starts_with(" · ") => rest[" · ".len()..].to_string(),
+            _ => label,
+        }
     };
-    format!(
-        "{sub}  ·  {}  ·  {}",
-        format_clock_ms(track.duration_ms()),
+    let rest = format!(
+        "{} · {}",
+        short_clock(track.duration_ms()),
         fmt_date(&track.created_at)
-    )
+    );
+    if sub.is_empty() {
+        rest
+    } else {
+        format!("{sub} · {rest}")
+    }
 }
 
-/// The OUTPUT chip's label: the destination bus's name, else
+/// A length as the meta line reads it: "0:39", "12:05" (minutes unpadded).
+pub fn short_clock(ms: i64) -> String {
+    let s = ms.max(0) / 1000;
+    format!("{}:{:02}", s / 60, s % 60)
+}
+
+/// The Output pop-up's label: the destination bus's name, else
 /// [`STEREO_OUT`].
 pub fn output_name(dest: Option<&str>, buses: &[Arc<FxBus>]) -> String {
     let mut name = STEREO_OUT.to_string();
@@ -511,9 +538,9 @@ pub fn send_fader_value(level_db: f64) -> f64 {
     ((level_db + 48.0) / 48.0).clamp(0.0, 1.0)
 }
 
-/// The buses "+ Send" offers: those no slot already feeds. Two sends into
-/// one bus feed it twice, so the bus hears the sum and neither fader reads
-/// what you hear.
+/// The buses the empty send slot offers: those no slot already feeds. Two
+/// sends into one bus feed it twice, so the bus hears the sum and neither
+/// fader reads what you hear.
 pub fn addable_targets<'b>(sends: &[TrackSend], targets: &[&'b FxBus]) -> Vec<&'b FxBus> {
     targets
         .iter()
@@ -522,12 +549,12 @@ pub fn addable_targets<'b>(sends: &[TrackSend], targets: &[&'b FxBus]) -> Vec<&'
         .collect()
 }
 
-/// Whether "+ Send" shows: a bus left to feed, and a free slot.
+/// Whether the empty send slot shows: a bus left to feed, and a free slot.
 pub fn can_add_send(sends: &[TrackSend], targets: &[&FxBus]) -> bool {
     !addable_targets(sends, targets).is_empty() && sends.len() < MAX_SENDS
 }
 
-/// The buses a slot's target chip offers: its own target, plus the ones no
+/// The buses a slot's target pop-up offers: its own target, plus the ones no
 /// slot feeds.
 pub fn retarget_options<'b>(
     sends: &[TrackSend],
@@ -713,6 +740,19 @@ pub fn register_widths(reg: &RegisterMap, width: f32) -> [f32; 3] {
 
 // --------------------------------------------------------------- the panel
 
+/// The inspector's inner hairlines: under the header and the channel
+/// block, above the routing and the footer (`#222228`).
+pub const HAIRLINE: Color = Color::from_rgb8(0x22, 0x22, 0x28);
+
+/// The header's height, its hairline included.
+pub const HEADER_HEIGHT: f32 = 36.0;
+
+/// The panel's side padding.
+const INSET: f32 = 14.0;
+
+/// The footer's dB readout's width.
+pub const FOOTER_DB_WIDTH: f32 = 46.0;
+
 /// The inspector: the strip [`PANEL_WIDTH`] wide, or the [`RAIL_WIDTH`]
 /// rail when closed. `fx_panel` builds the shown channel's FX panel (see
 /// the module docs); `on` wraps the inspector's messages in the screen's.
@@ -737,24 +777,30 @@ pub fn left_panel<'a, M: Clone + 'a>(
     } else {
         empty("Select a take or bus to inspect it.", true, false)
     };
-    let content = column![header(on), hline(), container(body).height(Length::Fill)]
-        .width(Length::Fill)
-        .height(Length::Fill);
+    let content = column![
+        header(on),
+        hline(HAIRLINE),
+        container(body).height(Length::Fill)
+    ]
+    .width(Length::Fill)
+    .height(Length::Fill);
     container(row![content, vline()])
         .width(PANEL_WIDTH)
         .height(Length::Fill)
-        .style(fill(Studio::SURFACE))
+        .style(fill(Studio::PANEL))
         .into()
 }
 
 /// `_Rail`: the thin collapsed rail (mirrors the right panel's rail,
-/// flipped) — the open-panel icon over a rotated "INSPECTOR"; a tap
-/// anywhere opens the strip.
+/// flipped) — the show-inspector icon over "Inspector" turned a quarter
+/// clockwise; a press anywhere on it opens the strip.
 fn rail<'a, M: Clone + 'a>(on: fn(Message) -> M) -> Element<'a, M> {
     let content = column![
+        Space::new().height(6),
+        container(line_icon_inherit(glyphs::PANEL_LEFT, line_icon::PANEL_SIZE))
+            .center_x(height::PANEL_BUTTON)
+            .center_y(height::PANEL_BUTTON),
         Space::new().height(12),
-        icons::icon(Icon::PanelLeftOpen, 15.0, Studio::TEXT_SECONDARY),
-        Space::new().height(18),
         // Clipped, not overflowing, where the dock leaves the panels less
         // height than the label.
         container(
@@ -773,19 +819,35 @@ fn rail<'a, M: Clone + 'a>(on: fn(Message) -> M) -> Element<'a, M> {
         .padding(0)
         .width(Length::Fill)
         .height(Length::Fill)
-        .style(bare_button)
+        .style(|_, status| {
+            let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+            button::Style {
+                background: hovered.then_some(Background::Color(Studio::SURFACE)),
+                text_color: if hovered {
+                    Studio::TEXT_PRIMARY
+                } else {
+                    Studio::TEXT_SECONDARY
+                },
+                ..button::Style::default()
+            }
+        })
         .on_press(on(Message::ToggleInspectorPanel));
-    container(row![face, vline()])
-        .width(RAIL_WIDTH)
-        .height(Length::Fill)
-        .style(fill(Studio::SURFACE))
-        .into()
+    container(row![
+        labelled(
+            material_tooltip(face, "Show inspector", 6.0),
+            "Show inspector"
+        ),
+        vline()
+    ])
+    .width(RAIL_WIDTH)
+    .height(Length::Fill)
+    .style(fill(Studio::PANEL))
+    .into()
 }
 
-/// The rail's "INSPECTOR", 11 px w700, 1.5 letter spacing, turned a quarter
-/// clockwise
-/// (`RotatedBox(quarterTurns: 1)`): it reads top to bottom from the top of
-/// its box, centred across the rail.
+/// The rail's "Inspector": 11 px semibold `TEXT_SECONDARY` (`DESIGN.md`,
+/// sentence case), turned a quarter clockwise: it reads top to bottom from
+/// the top of its box, centred across the rail.
 struct RailLabel;
 
 impl<M> canvas::Program<M> for RailLabel {
@@ -802,64 +864,52 @@ impl<M> canvas::Program<M> for RailLabel {
         let mut frame = Frame::new(renderer, bounds.size());
         frame.translate(Vector::new(bounds.width / 2.0, 0.0));
         frame.rotate(std::f32::consts::FRAC_PI_2);
-        fill_spaced_text(
-            &mut frame,
-            canvas::Text {
-                content: "INSPECTOR".to_string(),
-                position: Point::ORIGIN,
-                color: Studio::TEXT_SECONDARY,
-                size: Pixels(11.0),
-                // A `Text` under the app's Material theme: height 1.
-                line_height: 1.0.into(),
-                font: font::BOLD,
-                align_x: Alignment::Left,
-                align_y: Vertical::Center,
-                ..canvas::Text::default()
-            },
-            1.5,
-        );
+        frame.fill_text(canvas::Text {
+            content: "Inspector".to_string(),
+            position: Point::ORIGIN,
+            color: Studio::TEXT_SECONDARY,
+            size: Pixels(type_scale::LABEL),
+            line_height: Pixels(type_scale::LINE).into(),
+            font: font::SEMIBOLD,
+            align_x: Alignment::Left,
+            align_y: Vertical::Center,
+            ..canvas::Text::default()
+        });
         vec![frame.into_geometry()]
     }
 }
 
-/// `_Header`: "INSPECTOR" and the collapse button, 40 px tall.
+/// `_Header`: "Inspector" (12 px semibold) and the hide button, 36 px tall
+/// with its hairline.
 fn header<'a, M: Clone + 'a>(on: fn(Message) -> M) -> Element<'a, M> {
     container(
         row![
-            studio_text("INSPECTOR")
-                .size(11)
-                .font(font::BOLD)
-                .letter_spacing(0.6)
+            studio_text("Inspector")
+                .size(type_scale::BODY)
+                .font(font::SEMIBOLD)
+                .line_height(Pixels(type_scale::LINE))
                 .color(Studio::TEXT_PRIMARY),
             Space::new().width(Length::Fill),
-            button(
-                container(icons::icon(
-                    Icon::PanelLeftClose,
-                    15.0,
-                    Studio::TEXT_SECONDARY
-                ))
-                .padding(8)
-            )
-            .padding(0)
-            .style(bare_button)
-            .on_press(on(Message::ToggleInspectorPanel)),
+            icon_button(glyphs::PANEL_LEFT, on(Message::ToggleInspectorPanel))
+                .panel()
+                .tooltip("Hide inspector"),
         ]
         .align_y(Vertical::Center),
     )
-    .height(40)
+    .height(HEADER_HEIGHT - 1.0)
     .padding(Padding {
-        left: 14.0,
-        right: 6.0,
+        left: INSET,
+        right: 8.0,
         ..Padding::ZERO
     })
     .align_y(Vertical::Center)
     .into()
 }
 
-/// The body for a selected take: a fixed take header, then (for a vocal
-/// take, when the engine supports effects) the FX panel, else a note that
-/// the backing plays dry; the channel-strip footer pinned below. Analysis
-/// moved to the bottom dock's summary tab.
+/// The body for a selected take: its identity block, then (for a vocal
+/// take, when the engine supports effects) the FX panel and the routing
+/// (sends and output), else a note that the backing plays dry; the channel
+/// footer pinned below.
 fn take_body<'a, M: Clone + 'a>(
     insp: Inspector<'a>,
     track: &'a AudioTrack,
@@ -868,39 +918,35 @@ fn take_body<'a, M: Clone + 'a>(
 ) -> Element<'a, M> {
     let is_vocal = !track.is_backing() && insp.supports_effects;
     responsive(move |size| {
-        let header = container(take_header(insp, track))
-            .padding(Padding {
-                top: 12.0,
-                right: 14.0,
-                bottom: 0.0,
-                left: 14.0,
-            })
-            .width(Length::Fill);
-        let footer = channel_footer(
-            insp,
-            Strip {
-                channel: Channel::Track(track.id.clone()),
-                sends: &track.sends,
-                targets: insp.fx_buses.iter().map(Arc::as_ref).collect(),
-                dest: track.bus_id.as_deref(),
-                outputs: insp.fx_buses.iter().map(Arc::as_ref).collect(),
-                show_routing: is_vocal,
-                muted: track.muted,
-                soloed: track.soloed,
-                pan: track.pan,
-                volume: track.volume,
-            },
-            on,
+        let identity = identity_block(
+            take_dot_color(track),
+            &track.display_name,
+            take_subtitle(track, insp.vocal_takes, insp.active_interpretation),
+            // The FX panel's preset row closes the block.
+            !is_vocal,
         );
-        let dry = || empty("Backing track plays dry, with no effects.", false, false);
+        let strip = Strip {
+            channel: Channel::Track(track.id.clone()),
+            sends: &track.sends,
+            targets: insp.fx_buses.iter().map(Arc::as_ref).collect(),
+            dest: track.bus_id.as_deref(),
+            outputs: insp.fx_buses.iter().map(Arc::as_ref).collect(),
+            muted: track.muted,
+            soloed: track.soloed,
+            pan: track.pan,
+            volume: track.volume,
+        };
+        let routing = is_vocal.then(|| routing_section(insp, &strip, on));
+        let footer = channel_footer(&strip, on);
+        let dry = || empty("Backing track plays dry, with no effects.", true, false);
         if size.height < MIN_PINNED_HEIGHT {
             // Degenerate height (tiny window with the dock open): scroll the
             // whole strip. The FX panel needs a bounded height, so it gets a
             // fixed window inside the scrolling column.
             let middle: Element<'a, M> = if is_vocal {
-                container(container(fx_panel()).height(SCROLLED_FX_HEIGHT))
-                    .padding(fx_padding())
+                container(fx_panel())
                     .width(Length::Fill)
+                    .height(SCROLLED_FX_HEIGHT)
                     .into()
             } else {
                 container(dry())
@@ -908,11 +954,10 @@ fn take_body<'a, M: Clone + 'a>(
                     .height(SCROLLED_DRY_HEIGHT)
                     .into()
             };
-            scrolled(column![header, middle, footer])
+            scrolled(column![identity, middle].extend(routing).push(footer))
         } else {
             let middle: Element<'a, M> = if is_vocal {
                 container(fx_panel())
-                    .padding(fx_padding())
                     .width(Length::Fill)
                     .height(Length::Fill)
                     .into()
@@ -922,7 +967,9 @@ fn take_body<'a, M: Clone + 'a>(
                     .height(Length::Fill)
                     .into()
             };
-            column![header, middle, footer]
+            column![identity, middle]
+                .extend(routing)
+                .push(footer)
                 .width(Length::Fill)
                 .height(Length::Fill)
                 .into()
@@ -931,8 +978,8 @@ fn take_body<'a, M: Clone + 'a>(
     .into()
 }
 
-/// Inspector body for a selected FX bus: a header, the (bus-targeted) FX
-/// panel and the bus's channel-strip footer.
+/// Inspector body for a selected FX bus: its identity block, the
+/// (bus-targeted) FX panel, its routing and its channel footer.
 fn bus_body<'a, M: Clone + 'a>(
     insp: Inspector<'a>,
     bus: &'a FxBus,
@@ -940,14 +987,12 @@ fn bus_body<'a, M: Clone + 'a>(
     on: fn(Message) -> M,
 ) -> Element<'a, M> {
     responsive(move |size| {
-        let header = container(bus_header(bus))
-            .padding(Padding {
-                top: 12.0,
-                right: 14.0,
-                bottom: 0.0,
-                left: 14.0,
-            })
-            .width(Length::Fill);
+        let identity = identity_block(
+            bus.color_value.map_or(Studio::ACCENT, argb),
+            &bus.name,
+            "FX bus".to_string(),
+            false,
+        );
         // A bus never routes or sends into itself: the feedback loop is not
         // even offered.
         let others: Vec<&'a FxBus> = insp
@@ -956,51 +1001,38 @@ fn bus_body<'a, M: Clone + 'a>(
             .map(Arc::as_ref)
             .filter(|b| b.id != bus.id)
             .collect();
-        let footer = channel_footer(
-            insp,
-            Strip {
-                channel: Channel::Bus(bus.id.clone()),
-                sends: &bus.sends,
-                targets: others.clone(),
-                dest: bus.output_bus_id.as_deref(),
-                outputs: others,
-                show_routing: true,
-                muted: bus.muted,
-                soloed: bus.soloed,
-                pan: bus.pan,
-                volume: bus.volume,
-            },
-            on,
-        );
+        let strip = Strip {
+            channel: Channel::Bus(bus.id.clone()),
+            sends: &bus.sends,
+            targets: others.clone(),
+            dest: bus.output_bus_id.as_deref(),
+            outputs: others,
+            muted: bus.muted,
+            soloed: bus.soloed,
+            pan: bus.pan,
+            volume: bus.volume,
+        };
+        let routing = routing_section(insp, &strip, on);
+        let footer = channel_footer(&strip, on);
         // The take strip's degenerate-height fallback, for the same reason:
         // pinned, the header and footer overflowed a short panel and pushed
         // the bus's fader, mute/solo and pan under the dock.
         if size.height < MIN_PINNED_HEIGHT {
-            let fx = container(container(fx_panel()).height(SCROLLED_FX_HEIGHT))
-                .padding(fx_padding())
-                .width(Length::Fill);
-            scrolled(column![header, fx, footer])
+            let fx = container(fx_panel())
+                .width(Length::Fill)
+                .height(SCROLLED_FX_HEIGHT);
+            scrolled(column![identity, fx, routing, footer])
         } else {
             let fx = container(fx_panel())
-                .padding(fx_padding())
                 .width(Length::Fill)
                 .height(Length::Fill);
-            column![header, fx, footer]
+            column![identity, fx, routing, footer]
                 .width(Length::Fill)
                 .height(Length::Fill)
                 .into()
         }
     })
     .into()
-}
-
-fn fx_padding() -> Padding {
-    Padding {
-        top: 12.0,
-        right: 14.0,
-        bottom: 0.0,
-        left: 14.0,
-    }
 }
 
 /// The strip as one scrolling column.
@@ -1012,69 +1044,63 @@ fn scrolled<'a, M: 'a>(content: Column<'a, M>) -> Element<'a, M> {
         .into()
 }
 
-/// `_BusBody`'s header: the bus's dot and name, and "FX BUS".
-fn bus_header<'a, M: 'a>(bus: &'a FxBus) -> Element<'a, M> {
-    let dot_color = bus.color_value.map_or(Studio::ACCENT, argb);
-    row![
-        dot(dot_color),
-        Space::new().width(8),
-        studio_text(bus.name.as_str())
-            .size(15)
-            .font(font::BOLD)
-            .color(Studio::TEXT_PRIMARY)
-            .width(Length::Fill)
-            .ellipsis(1),
-        studio_text("FX BUS")
-            .size(9)
-            .font(font::BOLD)
-            .letter_spacing(0.8)
-            .color(Studio::TEXT_FAINT),
-    ]
-    .align_y(Vertical::Center)
-    .into()
-}
-
-/// `_TakeHeader`: take identity — color dot, name (two lines at most),
-/// interpretation/take #, duration + date.
-fn take_header<'a, M: 'a>(insp: Inspector<'a>, track: &'a AudioTrack) -> Element<'a, M> {
-    column![
+/// The selected channel's identity (`_TakeHeader`, `_BusBody`'s header):
+/// an 8 px colour square (radius 2) and the name in 13 px semibold, the
+/// meta under it in 11 px `TEXT_FAINT`, set in past the square. `closed`:
+/// nothing follows inside the block (no preset row), so it ends with its
+/// own padding and hairline.
+fn identity_block<'a, M: 'a>(
+    color: Color,
+    name: &'a str,
+    meta: String,
+    closed: bool,
+) -> Element<'a, M> {
+    let block = column![
         row![
-            dot(take_dot_color(track)),
-            Space::new().width(8),
-            studio_text(track.display_name.as_str())
-                .size(13.5)
-                .font(font::BOLD)
-                .line_height(1.25)
+            container(Space::new().width(8).height(8)).style(move |_| boxed(
+                Some(color),
+                2.0,
+                None
+            )),
+            studio_text(name)
+                .size(type_scale::TITLE)
+                .font(font::SEMIBOLD)
+                .line_height(Pixels(18.0))
                 .color(Studio::TEXT_PRIMARY)
                 .width(Length::Fill)
-                .ellipsis(2),
+                .ellipsis(1),
         ]
+        .spacing(8)
         .align_y(Vertical::Center),
-        Space::new().height(8),
-        text(take_subtitle(
-            track,
-            insp.vocal_takes,
-            insp.active_interpretation
-        ))
-        .size(11)
-        .color(Studio::TEXT_FAINT),
+        container(
+            studio_text(meta)
+                .size(type_scale::LABEL)
+                .line_height(Pixels(type_scale::LINE))
+                .tabular()
+                .color(Studio::TEXT_FAINT)
+                .ellipsis(1),
+        )
+        .padding(Padding {
+            left: 16.0,
+            ..Padding::ZERO
+        }),
     ]
-    .width(Length::Fill)
-    .into()
+    .spacing(2)
+    .width(Length::Fill);
+    let block = container(block).width(Length::Fill).padding(Padding {
+        top: 12.0,
+        right: INSET,
+        bottom: if closed { 12.0 } else { 0.0 },
+        left: INSET,
+    });
+    if closed {
+        column![block, hline(HAIRLINE)].into()
+    } else {
+        block.into()
+    }
 }
 
-/// A 9 px disc.
-fn dot<'a, M: 'a>(color: Color) -> Element<'a, M> {
-    disc(9.0, color)
-}
-
-fn disc<'a, M: 'a>(size: f32, color: Color) -> Element<'a, M> {
-    container(Space::new().width(size).height(size))
-        .style(move |_| boxed(Some(color), size / 2.0, None))
-        .into()
-}
-
-/// What a channel-strip footer shows and drives.
+/// What a channel's routing and footer show and drive.
 struct Strip<'a> {
     channel: Channel,
     sends: &'a [TrackSend],
@@ -1084,101 +1110,77 @@ struct Strip<'a> {
     dest: Option<&'a str>,
     /// The buses the output may route to.
     outputs: Vec<&'a FxBus>,
-    /// Sends and output routing (a vocal take, or a bus).
-    show_routing: bool,
     muted: bool,
     soloed: bool,
     pan: f64,
     volume: f64,
 }
 
-/// `_TrackChannelFooter` / `_BusChannelFooter`: the Logic-style channel-strip
-/// footer — sends and output routing (when shown), mute/solo on the left
-/// and pan on the right, then the fader filling the width with its level to
-/// the right. The same widgets for a take and a bus, through each one's own
-/// view-model methods: a take's pan and fader commit the take's volume, a
-/// bus's commit its FX.
-fn channel_footer<'a, M: Clone + 'a>(
-    insp: Inspector<'a>,
-    strip: Strip<'a>,
-    on: fn(Message) -> M,
-) -> Element<'a, M> {
+/// A number with a true minus sign (U+2212), as the design sets numbers.
+pub fn minus_sign(text: String) -> String {
+    text.replace('-', "\u{2212}")
+}
+
+/// The footer's level readout: "−1.4 dB", "0.0 dB", "−∞ dB".
+pub fn footer_db(volume: f64) -> String {
+    minus_sign(format!("{} dB", fader_db(volume)))
+}
+
+/// A send's level readout: "−10 dB", "−∞ dB" when off.
+pub fn send_db_label(level_db: f64) -> String {
+    minus_sign(format!("{} dB", fmt_send_db(level_db)))
+}
+
+/// `_TrackChannelFooter` / `_BusChannelFooter`: the channel footer pinned
+/// at the bottom — M and S, the pan knob, the volume as a thin slider and
+/// its dB — over a hairline. The same widgets for a take and a bus, through
+/// each one's own view-model methods: a take's pan and volume commit the
+/// take's volume, a bus's commit its FX.
+fn channel_footer<'a, M: Clone + 'a>(strip: &Strip<'a>, on: fn(Message) -> M) -> Element<'a, M> {
     let channel = strip.channel.clone();
-    let mut col = Column::new().width(Length::Fill);
-    if strip.show_routing {
-        if let Some(sends) = sends_section(insp, &strip, on) {
-            col = col.push(sends);
-        }
-        col = col
-            .push(
-                row![
-                    strip_label("OUTPUT"),
-                    // Flush right in the rest of the row, and bounded by it: a
-                    // long bus name gives way in the chip instead of running
-                    // past the inspector's edge.
-                    container(output_chip(insp, &strip, on))
-                        .width(Length::Fill)
-                        .align_x(Horizontal::Right),
-                ]
-                .align_y(Vertical::Center),
-            )
-            .push(Space::new().height(10));
-    }
     let pan_channel = channel.clone();
     let volume_channel = channel.clone();
-    col = col
-        // Mute / solo on the left, pan on the right.
-        .push(
-            row![
-                ms_toggle("M", strip.muted, Studio::RECORD, on(channel.toggle_mute())),
-                Space::new().width(8),
-                ms_toggle("S", strip.soloed, Studio::ACCENT, on(channel.toggle_solo())),
-                Space::new().width(Length::Fill),
-                studio_pan_knob(
-                    strip.pan,
-                    move |p| on(pan_channel.pan_live(p)),
-                    on(channel.mix_commit()),
-                ),
-            ]
-            .align_y(Vertical::Center),
+    let footer = row![
+        msr_button(MsrKind::Mute, strip.muted, Some(on(channel.toggle_mute()))).size(22.0, 20.0),
+        msr_button(MsrKind::Solo, strip.soloed, Some(on(channel.toggle_solo()))).size(22.0, 20.0),
+        studio_pan_knob(
+            strip.pan,
+            move |p| on(pan_channel.pan_live(p)),
+            on(channel.mix_commit()),
         )
-        .push(Space::new().height(14))
-        // The fader fills the width; its level reads to the right.
-        .push(
-            row![
-                container(studio_fader(
-                    strip.volume,
-                    move |v| on(volume_channel.volume_live(v)),
-                    on(channel.mix_commit()),
-                ))
-                .width(Length::Fill),
-                Space::new().width(8),
-                fader_db_readout(strip.volume),
-            ]
-            .align_y(Vertical::Center),
-        );
+        .size(24.0)
+        .show_label(false),
+        container(thin_slider(
+            strip.volume as f32,
+            move |v| on(volume_channel.volume_live(f64::from(v))),
+            on(channel.mix_commit()),
+        ))
+        .width(Length::Fill),
+        container(
+            studio_text(footer_db(strip.volume))
+                .size(type_scale::LABEL)
+                .line_height(Pixels(type_scale::LINE))
+                .tabular()
+                .color(Studio::TEXT_PRIMARY)
+                .width(Length::Fill)
+                .align_x(Horizontal::Right)
+                .wrapping(Wrapping::None),
+        )
+        .width(FOOTER_DB_WIDTH),
+    ]
+    .spacing(10)
+    .align_y(Vertical::Center);
     column![
-        hline(),
-        container(col).padding(Padding {
+        hline(HAIRLINE),
+        container(footer).width(Length::Fill).padding(Padding {
             top: 10.0,
-            right: 14.0,
+            right: INSET,
             bottom: 12.0,
-            left: 14.0,
+            left: INSET,
         }),
     ]
     .width(Length::Fill)
     .into()
-}
-
-/// `_StripLabel`: a caption for the footer's rows (9 px w700, 0.5 letter
-/// spacing, faint).
-fn strip_label<'a, M: 'a>(label: &'a str) -> Element<'a, M> {
-    studio_text(label)
-        .size(9)
-        .font(font::BOLD)
-        .letter_spacing(0.5)
-        .color(Studio::TEXT_FAINT)
-        .into()
 }
 
 /// The strip's `menu` when it is the open one, as a studio menu `width`
@@ -1192,29 +1194,139 @@ fn open_menu<'a, M: Clone + 'a>(
     (insp.open_menu == Some(menu)).then(|| studio_menu(items(), width))
 }
 
-/// A chip that opens `menu` below itself (`menuAnchorBelow(anchor)`).
-fn menu_chip<'a, M: Clone + 'a>(
-    chip: Element<'a, M>,
+/// A pop-up button (`DESIGN.md`) reading `label`, filling its column, that
+/// opens `menu` below itself (`menuAnchorBelow(anchor)`).
+fn menu_popup<'a, M: Clone + 'a>(
+    label: String,
+    placeholder: bool,
     menu: InspectorMenu,
     opened: Option<Element<'a, M>>,
     on: fn(Message) -> M,
 ) -> Element<'a, M> {
-    let trigger = button(chip)
-        .padding(0)
-        .style(bare_button)
-        .on_press(on(Message::OpenMenu(menu)));
+    let trigger = popup_button(label, Some(on(Message::OpenMenu(menu))))
+        .width(Length::Fill)
+        .placeholder(placeholder);
     menu_host(trigger, opened, on(Message::DismissMenu))
         .anchor(MenuAnchor::Below(MENU_ANCHOR_BELOW_DY))
         .into()
 }
 
-/// `_OutputChip` (and the bus footer's): "Stereo Out" or a bus name; tap to
-/// choose.
-fn output_chip<'a, M: Clone + 'a>(
+/// A routing row on the parameter row's grid: a 62 px label, the control,
+/// a 54 px value column.
+fn routing_row<'a, M: 'a>(
+    label: &'a str,
+    control: Element<'a, M>,
+    value: Element<'a, M>,
+) -> Element<'a, M> {
+    row![
+        container(
+            studio_text(label)
+                .size(type_scale::LABEL)
+                .line_height(Pixels(type_scale::LINE))
+                .color(Studio::TEXT_SECONDARY)
+                .ellipsis(1),
+        )
+        .width(PARAMETER_LABEL_WIDTH),
+        container(control).width(Length::Fill),
+        container(value)
+            .width(PARAMETER_VALUE_WIDTH)
+            .align_x(Horizontal::Right),
+    ]
+    .spacing(8)
+    .height(height::CONTROL)
+    .align_y(Vertical::Center)
+    .into()
+}
+
+/// The routing (`_SendsSection` and the output row), above the footer: a
+/// row per post-fader aux send — "Send", its target's pop-up, its level —
+/// with the level's slider and a remove button under it; an empty slot
+/// ("None") whose pop-up adds a send while a bus is left to feed and a slot
+/// is free; then "Output" and its destination's pop-up.
+fn routing_section<'a, M: Clone + 'a>(
     insp: Inspector<'a>,
     strip: &Strip<'a>,
     on: fn(Message) -> M,
 ) -> Element<'a, M> {
+    let sends = strip.sends;
+    let channel = &strip.channel;
+    let mut col = Column::new().spacing(8).width(Length::Fill);
+    for (i, send) in sends.iter().enumerate() {
+        let menu = InspectorMenu::RetargetSend(channel.clone(), i);
+        let opened = open_menu(
+            insp,
+            &menu,
+            || {
+                retarget_options(sends, i, &strip.targets)
+                    .iter()
+                    .map(|b| {
+                        StudioMenuItem::new(b.name.clone(), on(channel.retarget_send(i, &b.id)))
+                            .selected(b.id == send.bus_id)
+                    })
+                    .collect()
+            },
+            SEND_MENU_WIDTH,
+        );
+        let level_channel = channel.clone();
+        let target = menu_popup(
+            send_name(&send.bus_id, &strip.targets),
+            false,
+            menu,
+            opened,
+            on,
+        );
+        let level: Element<'a, M> = studio_text(send_db_label(send.level_db))
+            .size(type_scale::LABEL)
+            .line_height(Pixels(type_scale::LINE))
+            .tabular()
+            .color(Studio::TEXT_PRIMARY)
+            .wrapping(Wrapping::None)
+            .into();
+        let slider: Element<'a, M> = thin_slider(
+            send_fader_value(send.level_db) as f32,
+            move |v| on(level_channel.send_level(i, send_level_at(f64::from(v)))),
+            on(Message::CommitFx),
+        )
+        .into();
+        let remove: Element<'a, M> = icon_button(Icon::X, on(channel.remove_send(i)))
+            .panel()
+            .icon_size(12.0)
+            .tooltip(REMOVE_SEND)
+            .into();
+        col = col.push(column![
+            routing_row(if i == 0 { "Send" } else { "" }, target, level),
+            row![
+                Space::new().width(PARAMETER_LABEL_WIDTH),
+                container(slider).width(Length::Fill),
+                container(remove)
+                    .width(PARAMETER_VALUE_WIDTH)
+                    .align_x(Horizontal::Right),
+            ]
+            .spacing(8)
+            .height(height::PANEL_BUTTON)
+            .align_y(Vertical::Center),
+        ]);
+    }
+    if can_add_send(sends, &strip.targets) {
+        let addable = addable_targets(sends, &strip.targets);
+        let menu = InspectorMenu::AddSend(channel.clone());
+        let opened = open_menu(
+            insp,
+            &menu,
+            || {
+                addable
+                    .iter()
+                    .map(|b| StudioMenuItem::new(b.name.clone(), on(channel.add_send(&b.id))))
+                    .collect()
+            },
+            SEND_MENU_WIDTH,
+        );
+        col = col.push(routing_row(
+            if sends.is_empty() { "Send" } else { "" },
+            menu_popup(EMPTY_SLOT.to_string(), true, menu, opened, on),
+            Space::new().into(),
+        ));
+    }
     let menu = InspectorMenu::Output(strip.channel.clone());
     let dest = strip.dest;
     let opened = open_menu(
@@ -1233,170 +1345,38 @@ fn output_chip<'a, M: Clone + 'a>(
         },
         OUTPUT_MENU_WIDTH,
     );
-    let name = output_name(dest, insp.fx_buses);
-    // 9 / 5, and the chip's 1 px border: a decoration's border pads its
-    // child too.
-    let chip = container(flexible_row(
-        vec![
-            studio_text(name)
-                .size(11)
-                .color(Studio::TEXT_SECONDARY)
-                .ellipsis(1)
-                .into(),
-            Space::new().width(4).into(),
-            icons::icon(Icon::ChevronDown, 14.0, Studio::TEXT_FAINT).into(),
-        ],
-        0,
-    ))
-    .padding([6, 10])
-    .style(|_| boxed(Some(Studio::INSET), 6.0, Some(Studio::BORDER)));
-    menu_chip(chip.into(), menu, opened, on)
+    col = col.push(routing_row(
+        "Output",
+        menu_popup(output_name(dest, insp.fx_buses), false, menu, opened, on),
+        Space::new().into(),
+    ));
+    column![
+        hline(HAIRLINE),
+        container(col).width(Length::Fill).padding([10.0, INSET]),
+    ]
+    .width(Length::Fill)
+    .into()
 }
 
-/// `_SendsSection`: Logic-style sends — one row per post-fader aux send
-/// (target bus chip + an independent level fader + remove), plus a
-/// "+ Send" to add one. Nothing at all with no sends and none to add.
-fn sends_section<'a, M: Clone + 'a>(
-    insp: Inspector<'a>,
-    strip: &Strip<'a>,
-    on: fn(Message) -> M,
-) -> Option<Element<'a, M>> {
-    let sends = strip.sends;
-    let addable = addable_targets(sends, &strip.targets);
-    let can_add = can_add_send(sends, &strip.targets);
-    if sends.is_empty() && !can_add {
-        return None;
-    }
-    let channel = &strip.channel;
-    let mut heading =
-        row![strip_label("SENDS"), Space::new().width(Length::Fill)].align_y(Vertical::Center);
-    if can_add {
-        let menu = InspectorMenu::AddSend(channel.clone());
-        let opened = open_menu(
-            insp,
-            &menu,
-            || {
-                addable
-                    .iter()
-                    .map(|b| StudioMenuItem::new(b.name.clone(), on(channel.add_send(&b.id))))
-                    .collect()
-            },
-            SEND_MENU_WIDTH,
-        );
-        let chip = container(
-            row![
-                icons::icon(Icon::Plus, 11.0, Studio::TEXT_SECONDARY),
-                Space::new().width(3),
-                text("Send").size(10).color(Studio::TEXT_SECONDARY),
-            ]
-            .align_y(Vertical::Center),
-        )
-        // 7 / 3, and the chip's 1 px border.
-        .padding([4, 8])
-        .style(|_| boxed(Some(Studio::SURFACE_RAISED), 5.0, Some(Studio::BORDER)));
-        heading = heading.push(menu_chip(chip.into(), menu, opened, on));
-    }
-    let mut col = column![heading].width(Length::Fill);
-    for (i, send) in sends.iter().enumerate() {
-        let menu = InspectorMenu::RetargetSend(channel.clone(), i);
-        let opened = open_menu(
-            insp,
-            &menu,
-            || {
-                retarget_options(sends, i, &strip.targets)
-                    .iter()
-                    .map(|b| {
-                        StudioMenuItem::new(b.name.clone(), on(channel.retarget_send(i, &b.id)))
-                    })
-                    .collect()
-            },
-            SEND_MENU_WIDTH,
-        );
-        let chip = container(
-            studio_text(send_name(&send.bus_id, &strip.targets))
-                .size(10)
-                .color(Studio::TEXT_SECONDARY)
-                .ellipsis(1),
-        )
-        .width(Length::Fill)
-        // 6 / 3, and the chip's 1 px border.
-        .padding([4, 7])
-        .style(|_| boxed(Some(Studio::INSET), 4.0, Some(Studio::BORDER)));
-        let level_channel = channel.clone();
-        col = col.push(Space::new().height(6)).push(
-            row![
-                container(menu_chip(chip.into(), menu, opened, on)).width(66),
-                Space::new().width(6),
-                container(studio_fader(
-                    send_fader_value(send.level_db),
-                    move |v| on(level_channel.send_level(i, send_level_at(v))),
-                    on(Message::CommitFx),
-                ))
-                .width(Length::Fill),
-                Space::new().width(6),
-                container(
-                    studio_text(fmt_send_db(send.level_db))
-                        .size(9)
-                        .tabular()
-                        .color(Studio::TEXT_SECONDARY)
-                        .wrapping(Wrapping::None),
-                )
-                .width(26)
-                .align_x(Horizontal::Right),
-                Space::new().width(4),
-                button(icons::icon(Icon::X, 13.0, Studio::TEXT_FAINT))
-                    .padding(0)
-                    .style(bare_button)
-                    .on_press(on(channel.remove_send(i))),
-            ]
-            .align_y(Vertical::Center),
-        );
-    }
-    Some(col.push(Space::new().height(10)).into())
-}
+/// The empty send slot's pop-up text.
+pub const EMPTY_SLOT: &str = "None";
 
-/// `_MsToggle`: a small 30 × 22 mute/solo toggle, tinted `color` when on.
-fn ms_toggle<'a, M: Clone + 'a>(
-    label: &'a str,
-    active: bool,
-    color: Color,
-    on_tap: M,
-) -> Element<'a, M> {
-    let face = container(text(label).size(11).font(font::BOLD).color(if active {
-        color
-    } else {
-        Studio::TEXT_SECONDARY
-    }))
-    .center_x(30)
-    .center_y(22)
-    .style(move |_| {
-        boxed(
-            Some(if active {
-                alpha(color, 0.2)
-            } else {
-                Studio::SURFACE_RAISED
-            }),
-            5.0,
-            Some(if active {
-                alpha(color, 0.6)
-            } else {
-                Studio::BORDER
-            }),
-        )
-    });
-    button(face)
-        .padding(0)
-        .style(bare_button)
-        .on_press(on_tap)
+/// A send's remove button's tooltip.
+pub const REMOVE_SEND: &str = "Remove send";
+
+/// A `size` px disc (the scorecard's pass / warn dot).
+fn disc<'a, M: 'a>(size: f32, color: Color) -> Element<'a, M> {
+    container(Space::new().width(size).height(size))
+        .style(move |_| boxed(Some(color), size / 2.0, None))
         .into()
 }
 
-/// A 1 px `Studio.border` line across.
-fn hline<'a, M: 'a>() -> Element<'a, M> {
+/// A 1 px line across in `color`.
+fn hline<'a, M: 'a>(color: Color) -> Element<'a, M> {
     container(Space::new())
         .width(Length::Fill)
         .height(1)
-        .style(fill(Studio::BORDER))
+        .style(fill(color))
         .into()
 }
 
@@ -1428,6 +1408,7 @@ fn empty_line<'a, M: 'a>(label: &'a str, with_spinner: bool) -> Element<'a, M> {
     line = line.push(
         text(label)
             .size(12)
+            .line_height(Pixels(type_scale::LINE))
             .color(Studio::TEXT_FAINT)
             .align_x(Horizontal::Center),
     );
