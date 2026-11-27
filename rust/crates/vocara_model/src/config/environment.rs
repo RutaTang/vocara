@@ -12,14 +12,18 @@ use std::sync::OnceLock;
 ///   test -> com.rutatang.vocara.test
 ///   prod -> com.rutatang.vocara
 /// The store location (the drift db + asset pool, and with it the HLC device
-/// node) is keyed by bundle id AND build config. Each bundle id gets its own
-/// macOS sandbox container, so dev/test/prod coexist on one machine without
-/// clobbering each other. But debug bundles disable the sandbox (see
-/// `packaging/macos/Debug.entitlements`; deliberate dev-only choice so the
-/// prototype Python separation sidecar can be spawned), as does `cargo run`
-/// (no bundle at all), so the SAME bundle id resolves to the plain
-/// `~/Library/Application Support` path in debug and to the sandbox container
-/// in release: two disjoint stores with two HLC node ids.
+/// node) is keyed by bundle id: each one gets its own application support
+/// folder, `~/Library/Application Support/<bundle id>`, so dev/test/prod
+/// coexist on one machine without clobbering each other. No build is
+/// sandboxed any more (`packaging/macos/Release.entitlements`), so debug and
+/// release builds of one flavor share that folder. Releases up to 0.3.0 were
+/// sandboxed and kept theirs in their App Sandbox container instead — while
+/// debug bundles and `cargo run` used the plain folder, two disjoint stores
+/// with two HLC node ids for one bundle id. The first launch of a later
+/// release moves the container's library out
+/// (`vocara_services::sandbox_migration`); where the plain folder already
+/// holds a library of its own, that one opens and the container's is left
+/// as it is.
 ///
 /// Builds are flavor-only; an unflavored build (no flavor) is not a normal
 /// path but falls back to [`AppEnvironment::Dev`] for safety.

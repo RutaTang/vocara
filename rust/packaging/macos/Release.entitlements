@@ -1,22 +1,48 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Hardened-runtime entitlements for Vocara.app (rust/packaging/macos/bundle.sh
+  signs every bundle with this file; the release workflow re-signs the
+  notarized one with it, the hardened runtime and the Developer ID).
+  Deliberately as good as EMPTY: the hardened runtime applies in full. The
+  one key is a resource the user grants, not a protection weakened:
+    - com.apple.security.device.audio-input - the microphone (live
+      monitoring, recording takes, analysis input;
+      crates/vocara_services/src/mic_permission.rs): under the hardened
+      runtime a process may not open the microphone without it, whatever the
+      user answers. It only lets macOS ask them (with Info.plist's
+      NSMicrophoneUsageDescription).
+
+  Vocara is not App-Sandboxed, as of the first release after 0.3.0: like
+  Clew, it updates itself by replacing its own bundle in /Applications, which
+  a sandboxed app cannot do. So no sandbox entitlement is declared, and none
+  of the keys that only mean something inside the sandbox either.
+
+  What used to be here, and why it is gone:
+    - com.apple.security.app-sandbox. Every release up to 0.3.0 was
+      sandboxed and kept its data in its container
+      (~/Library/Containers/<bundle id>); the first launch of a later one
+      moves that library to ~/Library/Application Support/<bundle id>
+      (crates/vocara_services/src/sandbox_migration.rs).
+    - com.apple.security.network.client (the update check's outbound HTTP)
+      and com.apple.security.files.user-selected.read-only / .read-write
+      (the open and save panels' imports and exports): sandbox permissions.
+      An unsandboxed process reaches the network and the files the user
+      picks without them.
+  Nothing here was needed by the hardened runtime: the app JIT-compiles
+  nothing in process (Metal compiles shaders in Apple's own service), maps
+  no writable executable memory, and loads no third-party dylibs (one
+  statically linked executable; the Python separation sidecar of dev builds
+  is a separate process under its own signature).
+
+  Re-adding an entitlement takes a reproduced failure under the hardened
+  runtime, the narrowest key that fixes it, and a line here naming the
+  component that needs it. Re-adding the sandbox would put every user's
+  library back out of reach (it would resolve inside the container again).
+-->
 <plist version="1.0">
 <dict>
-	<!-- The shipping app is fully sandboxed (the in-process engine needs no
-	     external processes, unlike the DEBUG Python sidecar). -->
-	<key>com.apple.security.app-sandbox</key>
-	<true/>
-	<!-- Microphone: live monitoring, recording takes, and analysis input. -->
 	<key>com.apple.security.device.audio-input</key>
-	<true/>
-	<!-- Outbound HTTP: the in-app update check. -->
-	<key>com.apple.security.network.client</key>
-	<true/>
-	<!-- Open panels: importing songs/media the user picks. -->
-	<key>com.apple.security.files.user-selected.read-only</key>
-	<true/>
-	<!-- Save panels: exporting mixes/recordings to a user-chosen location. -->
-	<key>com.apple.security.files.user-selected.read-write</key>
 	<true/>
 </dict>
 </plist>

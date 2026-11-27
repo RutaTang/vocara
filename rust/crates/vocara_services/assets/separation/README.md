@@ -37,10 +37,11 @@ runs it. The first separation downloads the model (~tens of MB) automatically.
 > `VOCARA_PYTHON=/path/to/python3` set (it is baked in at compile time and
 > tried first).
 >
-> The app must also be **non-sandboxed** to spawn the sidecar: `cargo run` is
-> (it runs without a bundle), and a `packaging/macos/bundle.sh --debug` bundle
-> is signed with `Debug.entitlements`, which disables the sandbox for this
-> reason. Release bundles stay sandboxed; the shipping engine is in-process.
+> The app must also be **non-sandboxed** to spawn the sidecar (a sandboxed app
+> cannot exec it). No build is sandboxed any more, `cargo run` or a
+> `packaging/macos/bundle.sh` bundle alike; it is the flavor that picks this
+> prototype service (dev and test do, prod never: the shipping engine is
+> in-process).
 
 > Shipping note: **end users never run pip.** For distribution the same
 > stdout/exit contract is fulfilled by a bundled, self-contained engine (a
