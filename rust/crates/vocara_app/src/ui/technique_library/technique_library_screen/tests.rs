@@ -317,9 +317,10 @@ fn the_page_loads_then_shows_the_grid() {
 }
 
 #[test]
-fn a_cards_border_turns_coral_over_120_ms_under_the_pointer() {
+fn a_card_lifts_over_120_ms_under_the_pointer() {
     use crate::ui::core::motion::Lerp;
-    use crate::ui::core::widgets::animated::testing::{near, over, Frames, MS};
+    use crate::ui::core::widgets::animated::testing::{near, Frames, MS};
+    use crate::ui::home::widgets::practice_project_card::{FILL, FILL_HOVERED, OUTLINE_HOVERED};
     use iced::time::Instant;
 
     let twang = stored("Twang", &[]);
@@ -327,41 +328,47 @@ fn a_cards_border_turns_coral_over_120_ms_under_the_pointer() {
     let mut window = Frames::new(Size::new(280.0, 150.0));
     let view =
         || -> Element<'_, Message> { container(card(&twang, &vm)).width(280).height(150).into() };
-    // The left border, halfway down, over the card's face.
-    let edge = Point::new(0.0, 75.0);
-    let (rest, lit) = (Studio::BORDER, alpha(Studio::ACCENT, 0.6));
-    let shows = |w: &Frames, border: Color| near(w.pixel(edge), over(border, Studio::PANEL));
+    // The left outline, halfway down, and the fill in the card's padding
+    // at its bottom right.
+    let (edge, inside) = (Point::new(0.0, 75.0), Point::new(270.0, 144.0));
+    let shows = |w: &Frames, outline: Color, fill: Color| {
+        near(w.pixel(edge), outline) && near(w.pixel(inside), fill)
+    };
     let t0 = Instant::now();
     window.frame(view(), &[], t0);
-    assert!(shows(&window, rest));
+    assert!(shows(&window, Studio::BORDER, FILL));
     window.point_at(Point::new(140.0, 75.0));
     assert!(window.frame(view(), &[], t0));
-    assert!(shows(&window, rest), "start");
+    assert!(shows(&window, Studio::BORDER, FILL), "start");
     window.frame(view(), &[], t0 + 60 * MS);
     assert!(
-        shows(&window, rest.lerp(lit, 0.5)),
-        "middle: {:?}",
-        window.pixel(edge)
+        shows(
+            &window,
+            Studio::BORDER.lerp(OUTLINE_HOVERED, 0.5),
+            FILL.lerp(FILL_HOVERED, 0.5)
+        ),
+        "middle: {:?} {:?}",
+        window.pixel(edge),
+        window.pixel(inside)
     );
     assert!(!window.frame(view(), &[], t0 + 120 * MS));
-    assert!(shows(&window, lit), "end");
+    assert!(shows(&window, OUTLINE_HOVERED, FILL_HOVERED), "end");
 }
 
 #[test]
-fn the_grid_keeps_cards_at_most_300_wide() {
-    // 1392 px of content: five columns of 265.6.
+fn the_grid_keeps_cards_at_most_280_wide() {
+    // 1376 px of content inside the 32 px sides: five columns of 262.4.
     let (columns, width) = grid_columns(1440.0);
     assert_eq!(columns, 5);
-    assert!((width - 265.6).abs() < 1e-3);
-    // 1152 px: four of 276.
-    assert_eq!(grid_columns(1200.0), (4, 276.0));
+    assert!((width - 262.4).abs() < 1e-3);
+    // 1136 px: four of 272.
+    assert_eq!(grid_columns(1200.0), (4, 272.0));
     // Narrower than one card still gets one column.
-    assert_eq!(grid_columns(100.0), (1, 52.0));
+    assert_eq!(grid_columns(100.0), (1, 36.0));
 }
 
-// The card's tags wrap in rows, but a tag too long for one row wrapped
-// inside its chip as well, and three of them pushed the fixed-height card
-// past its cell.
+// The card's tags sit on one row, but a tag too long for it wrapped inside
+// its chip, and three of them pushed the fixed-height card past its cell.
 #[test]
 fn long_tags_stay_on_one_line_inside_their_card() {
     for size in [Size::new(1200.0, 800.0), WIDE] {
@@ -372,14 +379,20 @@ fn long_tags_stay_on_one_line_inside_their_card() {
         let mut h = Harness::library(vec![stored("Twang", &tags), stored("Belt", &tags)]);
         h.size = size;
         h.settle();
-        // The first row of cards: under the 56 px header and the grid's
-        // 24 px margin, 168 tall.
-        let card_bottom = 56.0 + GRID_PADDING + CARD_HEIGHT;
+        // The first row of cards: under the toolbar, the library's top
+        // padding, the heading and its gap.
+        let card_top = toolbar::HEIGHT + LIBRARY_PADDING.top + HEADING_HEIGHT + HEADING_GAP;
+        let card_bottom = card_top + CARD_HEIGHT;
+        let (_, card_width) = grid_columns(size.width);
         for tag in &long {
             let bounds = h.find(tag).unwrap_or_else(|| panic!("{tag} shown"));
-            assert!(bounds.height <= 10.5 * 1.3 + 0.5, "{tag}: one line");
+            assert!(bounds.height <= type_scale::LINE + 0.5, "{tag}: one line");
             assert!(
                 bounds.y + bounds.height <= card_bottom - 1.0,
+                "{tag} at {bounds:?} stays inside its card ({size:?})"
+            );
+            assert!(
+                bounds.x + bounds.width <= LIBRARY_PADDING.left + card_width,
                 "{tag} at {bounds:?} stays inside its card ({size:?})"
             );
         }
@@ -410,10 +423,9 @@ fn a_tapped_chip_filters_the_grid_and_a_hovered_card_offers_its_trash() {
     assert!(!h.shows("Curbing") && !h.shows("Mixed voice"));
     // 'Twang' carries the EVT tag, so it survives the filter.
     assert!(h.shows("Twang"));
-    // Its tag shows as the active one, and in the filter button.
-    // 21 cards carry it (each card draws its face twice: at rest and
-    // hovered), and the filter button names it.
-    assert_eq!(h.count("EVT"), 21 * 2 + 1);
+    // Its tag shows as the active one, and in the filter button: 21 cards
+    // carry it, and the filter button names it.
+    assert_eq!(h.count("EVT"), 21 + 1);
 
     // A tap on the card opens it; its trash (on the hovered face) deletes.
     h.delete_card("Twang");
@@ -500,7 +512,7 @@ fn the_tag_menu_lists_tags_and_filters_on_select() {
     assert!(h.screen.tag_menu_open());
     // The menu lists the tags with their counts, after "All tags" (the
     // card shows CVT too: the menu's entry is the last).
-    assert_eq!(h.count("CVT"), 3);
+    assert_eq!(h.count("CVT"), 2);
     assert_eq!(
         h.count("All tags"),
         2,
@@ -510,7 +522,7 @@ fn the_tag_menu_lists_tags_and_filters_on_select() {
 
     // Selecting a tag filters the grid and closes the menu.
     assert_eq!(
-        h.click_nth("CVT", 2),
+        h.click_nth("CVT", 1),
         vec![Message::PickTag(Some("CVT".into()))]
     );
     assert!(!h.screen.tag_menu_open());
@@ -557,8 +569,8 @@ fn the_open_tag_menu_follows_a_reload() {
     h.pending.extend(reload);
     h.settle();
     assert!(h.screen.tag_menu_open());
-    // The card's chip (twice) and the menu's entry.
-    assert_eq!(h.count("CVT"), 3);
+    // The card's tag and the menu's entry.
+    assert_eq!(h.count("CVT"), 2);
 }
 
 #[test]

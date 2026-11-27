@@ -4,12 +4,15 @@
 //! like EVT/CVT) are the only organizing axis, and a technique can carry
 //! many.
 //!
-//! The page: a header (back, title, then — once there is something to
-//! filter — the search box and the tag filter, and "New technique" flush
-//! right), and below it the spinner, the read error with Retry, the empty
-//! state, "No techniques match this filter." or the grid of cards. A card
-//! opens its technique; hovered, it shows its trash (delete, after a
-//! confirmation); its tag chips filter the library.
+//! The page, drawn as the library is (`DESIGN.md`, the approved
+//! `Home.dc.html`): its unified toolbar (back, the title, then — once there
+//! is something to search — the search field, and the New technique icon
+//! button at its right end); below it the spinner, the read error with
+//! Retry, the empty state, or the "Techniques" heading with its count and
+//! the tag filter (a pop-up button) over the grid of cards, or "No
+//! techniques match this filter." A card opens its technique; hovered, it
+//! lifts and shows its trash (delete, after a confirmation); its tags
+//! filter the library.
 //!
 //! The view model's work runs off the UI thread ([`task`]); what it reports
 //! comes back as [`Message::Landed`]. The Dart screen's own `await`s keep
@@ -18,8 +21,10 @@
 //! next confirmed one run, and the return from a technique's page reloads
 //! the list and opens card taps again.
 //!
-//! A card's border turns coral while the pointer is over it, over 120 ms,
-//! linear (the Dart `AnimatedContainer`).
+//! A card is the library's (`DESIGN.md`, Cards): radius 8, `#18181C` with
+//! an inset `Studio::BORDER` outline; under the pointer it lifts to
+//! `#1C1C21` with a `#3A3A43` outline and a soft shadow, over 120 ms,
+//! linear (the Dart `AnimatedContainer`'s timing).
 //!
 //! The page draws its snack bars itself, over its bottom edge, while
 //! it is on top; once it leaves (or is covered) the app keeps them up over
@@ -46,12 +51,11 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::ui::core::text;
 use iced::alignment::{Horizontal, Vertical};
 use iced::widget::{
     button, center, column, container, hover, responsive, row, stack, Column, Row, Space,
 };
-use iced::{Background, Border, Element, Length, Padding, Shadow, Task, Theme};
+use iced::{Element, Length, Padding, Task};
 use vocara_model::models::technique::Technique;
 use vocara_model::util::dart_string;
 use vocara_store::sync::sync_engine::RemoteApplied;
@@ -66,15 +70,18 @@ use super::widgets::technique_dialogs::NewTechniqueDialog;
 use crate::router::{Navigation, Route};
 use crate::services::Services;
 use crate::ui::core::icons::{self, Icon};
-use crate::ui::core::theme::{self, alpha, bare_button, font, Studio};
-use crate::ui::core::widgets::animated::{animated_container, ink_hover, Decoration};
+use crate::ui::core::theme::{self, bare_button, boxed, font, height, radius, type_scale, Studio};
+use crate::ui::core::widgets::animated::animated_container;
 use crate::ui::core::widgets::confirm_dialog::ConfirmDialog;
+use crate::ui::core::widgets::controls::{icon_button, popup_button};
 use crate::ui::core::widgets::fading_scrollbar::{no_scrollbar, scrollable, Fading};
-use crate::ui::core::widgets::studio_button::{studio_button, StudioButtonVariant};
+use crate::ui::core::widgets::line_icon::glyphs;
+use crate::ui::core::widgets::studio_button::studio_button;
 use crate::ui::core::widgets::studio_hint::spinner;
 use crate::ui::core::widgets::studio_text::studio_text;
 use crate::ui::core::widgets::text_field::text_input;
 use crate::ui::core::widgets::toolbar;
+use crate::ui::home::widgets::practice_project_card::{card_look, FILL_HOVERED};
 use crate::ui::snack::{fixed_bar, SnackEvent, SnackQueue, SnackStyle};
 use crate::ui::{Screen, SnackBar, Update};
 
@@ -86,19 +93,42 @@ pub const DELETE_FAILED: &str = "Couldn't delete the technique.";
 /// How long a snack bar shows (Material's default, 4 s).
 pub const SNACK_DURATION: Duration = Duration::from_millis(4000);
 
-/// The grid's padding (all round).
-pub const GRID_PADDING: f32 = 24.0;
-/// How long a card's border takes to change (`AnimatedContainer`).
+/// The library's padding, as Home's: 28 above the heading, 32 at the sides
+/// and the bottom.
+pub const LIBRARY_PADDING: Padding = Padding {
+    top: 28.0,
+    right: 32.0,
+    bottom: 32.0,
+    left: 32.0,
+};
+/// The space between the heading and the first row of cards.
+pub const HEADING_GAP: f32 = 16.0;
+/// The heading row's height (the 15 px heading's 20 px line; the 22 px
+/// tag filter beside it).
+pub const HEADING_HEIGHT: f32 = 22.0;
+/// How long a card takes to lift (`AnimatedContainer`).
 pub const CARD_ANIMATION: Duration = Duration::from_millis(120);
 
-/// The widest a card gets (`maxCrossAxisExtent`).
-pub const CARD_MAX_WIDTH: f32 = 300.0;
-/// Every card's height (`mainAxisExtent`).
-pub const CARD_HEIGHT: f32 = 168.0;
+/// The widest a card gets (`maxCrossAxisExtent`, Home's).
+pub const CARD_MAX_WIDTH: f32 = 280.0;
+/// Every card's height (`mainAxisExtent`): the name, two lines of summary
+/// and the tag row in the card's padding (10 + 18 + 4 + 32 + 10 + 18 + 12).
+pub const CARD_HEIGHT: f32 = 104.0;
 /// The space between cards, both ways.
 pub const CARD_SPACING: f32 = 16.0;
 /// At most this many tags show on a card, then a "+N" marker.
 pub const MAX_CHIPS: usize = 3;
+/// The widest a tag on a card gets before it is ellipsized.
+pub const TAG_MAX_WIDTH: f32 = 112.0;
+/// The tag row's height.
+pub const TAG_HEIGHT: f32 = 18.0;
+
+/// The search field's width in the toolbar.
+pub const SEARCH_WIDTH: f32 = 220.0;
+/// The widest the tag filter's pop-up button gets.
+pub const TAG_FILTER_MAX_WIDTH: f32 = 200.0;
+/// The tag menu's width.
+pub const MENU_WIDTH: f32 = 220.0;
 
 /// The search field's id.
 pub const SEARCH: iced::widget::Id = iced::widget::Id::new("technique-library-search");
@@ -429,108 +459,49 @@ impl TechniqueLibraryScreen {
 
     // ---------------------------------------------------------------- view
 
-    /// The page's toolbar (`widgets::toolbar`): the back button, the
-    /// title, and the search, tag filter and New technique at its right.
+    /// The page's toolbar (`widgets::toolbar`, as the library's): the back
+    /// button and the title, then — once there is something to search — the
+    /// search field, and the New technique icon button at its right end.
     fn header(&self) -> Element<'_, Message> {
         let mut bar = row![
             toolbar::back_button(Message::Back),
-            Space::new().width(8),
+            Space::new().width(4),
             toolbar::title("Technique library"),
-            // The space absorbs the slack so the search + tag filter + New
-            // technique cluster sits flush right. The tag filter is a
-            // dropdown (not inline chips) so it stays compact no matter how
-            // many tags.
             Space::new().width(Length::Fill),
         ]
         .height(Length::Fill)
         .align_y(Vertical::Center);
-        // Search + tag filter only appear once there's something to filter.
+        // The search only appears once there's something to search.
         if !self.vm.all().is_empty() {
             bar = bar
-                .push(search_box(self.vm.query()))
-                .push(Space::new().width(10))
-                .push(self.tag_filter())
-                .push(Space::new().width(12));
+                .push(search_field(self.vm.query()))
+                .push(Space::new().width(10));
         }
-        bar = bar.push(
-            studio_button("New technique", Message::NewTechnique)
-                .icon(Icon::Plus)
-                .variant(StudioButtonVariant::Accent),
-        );
+        bar = bar.push(icon_button(glyphs::PLUS, Message::NewTechnique).tooltip("New technique"));
         toolbar::page_toolbar(bar)
     }
 
-    /// The tag filter: a compact dropdown button showing the active filter,
-    /// which opens an anchored, scrollable menu of all tags. Scales to any
-    /// number of tags without widening the header.
+    /// The tag filter: a pop-up button naming the active filter, which
+    /// opens an anchored, scrollable menu of all tags. Scales to any number
+    /// of tags without widening the row.
     fn tag_filter(&self) -> Element<'_, Message> {
-        let active = self.vm.active_tag().is_some();
         let label = match self.vm.active_tag() {
             None => "All tags",
             Some(UNTAGGED_FILTER) => "Untagged",
             Some(tag) => tag,
         };
-        let (fill, border, icon, fg) = if active {
-            (
-                alpha(Studio::ACCENT, 0.16),
-                alpha(Studio::ACCENT, 0.55),
-                Studio::ACCENT_BRIGHT,
-                Studio::ACCENT_BRIGHT,
-            )
-        } else {
-            (
-                Studio::SURFACE_RAISED,
-                Studio::BORDER,
-                Studio::TEXT_SECONDARY,
-                Studio::TEXT_PRIMARY,
-            )
-        };
-        let content = row![
-            icons::icon(Icon::Tag, 13.0, icon),
-            Space::new().width(7),
-            container(
-                studio_text(label)
-                    .size(13)
-                    .font(font::SEMIBOLD)
-                    .color(fg)
-                    .ellipsis(1),
-            )
-            .max_width(150),
-            Space::new().width(6),
-            icons::icon(Icon::ChevronDown, 14.0, Studio::TEXT_SECONDARY),
-        ]
-        .align_y(Vertical::Center);
-        // 11 / 8 of padding inside the 1 px border (a decoration's border
-        // pads its child; an iced border does not).
-        let trigger = button(
-            container(content)
-                .height(Length::Fill)
-                .align_y(Vertical::Center),
+        let trigger = container(
+            popup_button(label, Some(Message::OpenTagMenu))
+                .placeholder(self.vm.active_tag().is_none()),
         )
-        .height(34)
-        .padding(Padding {
-            left: 12.0,
-            right: 9.0,
-            ..Padding::ZERO
-        })
-        .style(move |_: &Theme, _| button::Style {
-            background: Some(Background::Color(fill)),
-            text_color: fg,
-            border: Border {
-                color: border,
-                width: 1.0,
-                radius: 8.0.into(),
-            },
-            shadow: Shadow::default(),
-            snap: false,
-        })
-        .on_press(Message::OpenTagMenu);
+        .max_width(TAG_FILTER_MAX_WIDTH);
         let menu = self.tag_menu.then(|| self.tag_menu());
         Anchored::new(trigger, menu, Message::DismissTagMenu).into()
     }
 
-    /// The tag filter's menu: "All tags", "Untagged" when some technique has
-    /// no tag, then every tag with its count.
+    /// The tag filter's menu (`DESIGN.md`, Menus): "All tags", "Untagged"
+    /// when some technique has no tag, then every tag with its count; the
+    /// active filter checked.
     fn tag_menu(&self) -> Element<'_, Message> {
         let vm = &self.vm;
         let mut items = Column::new().width(Length::Fill).push(menu_item(
@@ -550,8 +521,8 @@ impl TechniqueLibraryScreen {
         }
         let facets = vm.tag_facets();
         if !facets.is_empty() {
-            // `Divider(height: 9, thickness: 1)`.
-            items = items.push(container(rule()).height(9).align_y(Vertical::Center));
+            // A 1 px separator, 4 above and below.
+            items = items.push(container(rule()).padding([4, 6]));
         }
         for facet in facets {
             let active = vm.is_tag_active(&facet.tag);
@@ -562,13 +533,43 @@ impl TechniqueLibraryScreen {
                 Message::PickTag(Some(facet.tag)),
             ));
         }
-        container(no_scrollbar(scrollable(items)))
-            .width(240)
+        container(no_scrollbar(scrollable(items.padding(4))))
+            .width(MENU_WIDTH)
             .max_height(440)
-            .padding(1)
             .style(theme::menu)
             .clip(true)
             .into()
+    }
+
+    /// The heading over the cards, as the library's "Practices": the 15 px
+    /// "Techniques" and how many there are in `TEXT_FAINT` ("3 of 9" while
+    /// a filter or a search narrows them), the tag filter at its right.
+    fn heading(&self) -> Element<'_, Message> {
+        let vm = &self.vm;
+        let (shown, all) = (vm.filtered().len(), vm.all().len());
+        let count = if shown == all {
+            all.to_string()
+        } else {
+            format!("{shown} of {all}")
+        };
+        row![
+            studio_text("Techniques")
+                .size(type_scale::HEADING)
+                .font(font::SEMIBOLD)
+                .line_height(iced::Pixels(20.0))
+                .color(Studio::TEXT_PRIMARY),
+            Space::new().width(8),
+            studio_text(count)
+                .size(type_scale::BODY)
+                .line_height(iced::Pixels(type_scale::LINE))
+                .tabular()
+                .color(Studio::TEXT_FAINT),
+            Space::new().width(Length::Fill),
+            self.tag_filter(),
+        ]
+        .height(HEADING_HEIGHT)
+        .align_y(Vertical::Center)
+        .into()
     }
 
     fn body(&self) -> Element<'_, Message> {
@@ -589,17 +590,24 @@ impl TechniqueLibraryScreen {
             return empty_state();
         }
         if vm.filtered().is_empty() {
-            return center(
-                text("No techniques match this filter.")
-                    .size(13)
-                    .color(Studio::TEXT_FAINT),
-            )
+            // The heading stays, so the filter can still be changed.
+            return column![
+                container(self.heading()).padding(Padding {
+                    bottom: 0.0,
+                    ..LIBRARY_PADDING
+                }),
+                center(
+                    studio_text("No techniques match this filter.")
+                        .size(type_scale::BODY)
+                        .line_height(iced::Pixels(18.0))
+                        .color(Studio::TEXT_FAINT),
+                ),
+            ]
             .into();
         }
-        grid(vm)
+        grid(self)
     }
 }
-
 impl Screen for TechniqueLibraryScreen {
     type Message = Message;
 
@@ -655,7 +663,7 @@ impl Screen for TechniqueLibraryScreen {
     }
 }
 
-/// A full-width 1 px line in `Studio.border`.
+/// A full-width 1 px line in `Studio::BORDER`.
 fn rule<'a>() -> Element<'a, Message> {
     container(Space::new())
         .width(Length::Fill)
@@ -664,94 +672,101 @@ fn rule<'a>() -> Element<'a, Message> {
         .into()
 }
 
-/// The search box: 240 × 34, a search glyph before the field. The box's
-/// height is fixed, so the field's own inset ([`theme::FIELD_PADDING`])
-/// moves its text in from the sides only: the field stays centred.
-fn search_box(query: &str) -> Element<'_, Message> {
-    container(
-        row![
-            icons::icon(Icon::Search, 14.0, Studio::TEXT_FAINT),
-            Space::new().width(8),
-            text_input("Search techniques", query)
-                .id(SEARCH)
-                .on_input(Message::Query)
-                .size(13)
-                .line_height(1.0)
-                .padding(theme::FIELD_PADDING)
-                .caret_color(Studio::ACCENT)
-                .style(theme::studio_input),
-        ]
-        .align_y(Vertical::Center),
-    )
-    .width(240)
-    .height(34)
-    // 10 inside the 1 px border.
-    .padding([0, 11])
-    .align_y(Vertical::Center)
-    .style(theme::inset(8.0))
-    .into()
+/// The search field (`DESIGN.md`, Text fields): 28 px, the field's own
+/// well (its outline the accent at 60 % while focused), a 13 px search
+/// glyph in `TEXT_FAINT` inside it at the left, 12 px text.
+fn search_field(query: &str) -> Element<'_, Message> {
+    let input = text_input("Search techniques", query)
+        .id(SEARCH)
+        .on_input(Message::Query)
+        .size(theme::FIELD_TEXT_SIZE)
+        .line_height(iced::Pixels(type_scale::LINE))
+        .padding(Padding {
+            left: 28.0,
+            ..theme::FIELD_PADDING
+        })
+        .caret_color(Studio::ACCENT)
+        .style(theme::field);
+    // The glyph over the field's left inset; it takes no input, so a press
+    // on it lands on the field.
+    let glyph = container(icons::icon(Icon::Search, 13.0, Studio::TEXT_FAINT))
+        .padding(Padding {
+            left: 9.0,
+            ..Padding::ZERO
+        })
+        .center_y(theme::FIELD_HEIGHT);
+    stack![input, glyph].width(SEARCH_WIDTH).into()
 }
 
-/// One row in the tag menu, styled like the app's other studio menus
-/// (full-bleed hover). The active filter is shown by its accent label
-/// color; the count stays pinned to the right so every row's count lines
-/// up.
+/// One row of the tag menu (`DESIGN.md`, Menus): 24 px, radius 4, a
+/// `HOVER` fill under the pointer; the label at 12 px with a check before
+/// the active filter, its count in `TEXT_FAINT` pinned to the right so
+/// every row's count lines up.
 fn menu_item<'a>(
     label: String,
     count: usize,
     active: bool,
     on_tap: Message,
 ) -> Element<'a, Message> {
-    let color = if active {
-        Studio::ACCENT
+    let check: Element<'a, Message> = if active {
+        icons::icon(Icon::Check, 12.0, Studio::TEXT_PRIMARY).into()
     } else {
-        Studio::TEXT_PRIMARY
+        Space::new().width(12).into()
     };
-    let row = button(
+    button(
         row![
+            check,
+            Space::new().width(6),
             studio_text(label)
-                .size(13)
-                .font(if active {
-                    font::SEMIBOLD
-                } else {
-                    font::REGULAR
-                })
-                .color(color)
+                .size(type_scale::BODY)
+                .line_height(iced::Pixels(type_scale::LINE))
+                .font(if active { font::MEDIUM } else { font::REGULAR })
+                .color(Studio::TEXT_PRIMARY)
                 .width(Length::Fill)
                 .ellipsis(1),
             Space::new().width(10),
-            text(count.to_string()).size(12).color(if active {
-                Studio::ACCENT
-            } else {
-                Studio::TEXT_FAINT
-            }),
+            studio_text(count.to_string())
+                .size(type_scale::LABEL)
+                .line_height(iced::Pixels(type_scale::LINE))
+                .tabular()
+                .color(Studio::TEXT_FAINT),
         ]
+        .height(Length::Fill)
         .align_y(Vertical::Center),
     )
     .width(Length::Fill)
-    .padding([9, 14])
-    .style(bare_button)
-    .on_press(on_tap);
-    // An `InkWell(hoverColor: Studio.hover)`.
-    ink_hover(row, Studio::HOVER, 0.0)
+    .height(height::PANEL_BUTTON)
+    .padding([0, 8])
+    .style(|_, status| iced::widget::button::Style {
+        border: iced::Border {
+            radius: radius::SMALL.into(),
+            ..iced::Border::default()
+        },
+        ..theme::menu_item(&iced::Theme::Dark, status)
+    })
+    .on_press(on_tap)
+    .into()
 }
 
-/// How the grid lays out at a content `width`: the column count and the
-/// card width (`SliverGridDelegateWithMaxCrossAxisExtent`: as many columns
-/// as keep each card at most 300 wide).
+/// How the grid lays out at a content `width` (the page's, its padding
+/// included): the column count and the card width
+/// (`SliverGridDelegateWithMaxCrossAxisExtent`: as many columns as keep
+/// each card at most 280 wide, as Home's).
 pub fn grid_columns(width: f32) -> (usize, f32) {
-    let extent = (width - 2.0 * GRID_PADDING).max(0.0);
+    let extent = (width - LIBRARY_PADDING.left - LIBRARY_PADDING.right).max(0.0);
     let columns = ((extent / (CARD_MAX_WIDTH + CARD_SPACING)).ceil() as usize).max(1);
     let usable = (extent - CARD_SPACING * (columns - 1) as f32).max(0.0);
     (columns, usable / columns as f32)
 }
 
-/// The cards, in rows of [`grid_columns`], scrolling under a 24 px margin.
-fn grid(vm: &TechniqueLibraryViewModel) -> Element<'_, Message> {
+/// The heading, then the cards in rows of [`grid_columns`], all in the
+/// library's padding, scrolling vertically.
+fn grid(screen: &TechniqueLibraryScreen) -> Element<'_, Message> {
+    let vm = &*screen.vm;
     responsive(move |size| {
         let (columns, width) = grid_columns(size.width);
         let filtered = vm.filtered();
-        let mut rows = Column::new().spacing(CARD_SPACING).padding(GRID_PADDING);
+        let mut rows = Column::new().spacing(CARD_SPACING);
         for chunk in filtered.chunks(columns) {
             let mut cells = Row::new().spacing(CARD_SPACING);
             for technique in chunk {
@@ -763,239 +778,259 @@ fn grid(vm: &TechniqueLibraryViewModel) -> Element<'_, Message> {
             }
             rows = rows.push(cells);
         }
-        scrollable(rows)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .fading()
-            .into()
+        let content = column![screen.heading(), Space::new().height(HEADING_GAP), rows];
+        scrollable(
+            container(content)
+                .padding(LIBRARY_PADDING)
+                .width(Length::Fill),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .fading()
+        .into()
     })
     .into()
 }
 
-/// A technique's card: at rest, and — while the pointer is over it — with
-/// its trash and its coral border, which comes in over 120 ms.
+/// A technique's card (`DESIGN.md`, Cards, as the library's): its name,
+/// its summary and its tags, lifting under the pointer over 120 ms, its
+/// trash at the top right while hovered.
 fn card<'a>(t: &'a Technique, vm: &TechniqueLibraryViewModel) -> Element<'a, Message> {
-    animated_container(
-        hover(card_face(t, vm, false), card_face(t, vm, true)),
-        CARD_ANIMATION,
+    let tap = button(card_face(t, vm))
+        .padding(0)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(bare_button)
+        .on_press(Message::Open(t.id.clone()));
+    // The outline over the face: drawn above the content.
+    let card = animated_container(tap, CARD_ANIMATION)
+        .border_above()
+        .style(card_look);
+    // The trash at the top right, on the lifted card's fill so a long name
+    // runs under it.
+    let trash = container(
+        container(
+            icon_button(
+                Icon::Trash2,
+                Message::Delete {
+                    id: t.id.clone(),
+                    name: t.name.clone(),
+                },
+            )
+            .panel()
+            .tooltip("Delete technique"),
+        )
+        .style(|_| boxed(Some(FILL_HOVERED), radius::CONTROL, None)),
     )
-    .border_above()
-    .style(|hovered| {
-        let border = if hovered {
-            alpha(Studio::ACCENT, 0.6)
-        } else {
-            Studio::BORDER
-        };
-        Decoration::boxed(Studio::PANEL, 10.0, border, 1.0)
-    })
-    .into()
+    .padding(6)
+    .width(Length::Fill)
+    .align_x(Horizontal::Right);
+    hover(card, trash)
 }
 
-fn card_face<'a>(
-    t: &'a Technique,
-    vm: &TechniqueLibraryViewModel,
-    hovered: bool,
-) -> Element<'a, Message> {
-    let mut title = row![studio_text(t.name.as_str())
-        .size(16)
+/// The card's content: the name (13 px semibold), the summary (12 px
+/// `TEXT_SECONDARY`, two lines at most), then the tags and, at the right,
+/// the examples it has (an audio or video glyph and their count).
+fn card_face<'a>(t: &'a Technique, vm: &TechniqueLibraryViewModel) -> Element<'a, Message> {
+    let name = studio_text(t.name.as_str())
+        .size(type_scale::TITLE)
         .font(font::SEMIBOLD)
+        .line_height(iced::Pixels(18.0))
         .color(Studio::TEXT_PRIMARY)
         .width(Length::Fill)
-        .ellipsis(1)]
-    .align_y(Vertical::Center);
+        .ellipsis(1);
+    let subtitle = dart_string::trim(&t.summary);
+    let summary: Element<'a, Message> = if subtitle.is_empty() {
+        Space::new().into()
+    } else {
+        // Two lines at most, the second ellipsized.
+        studio_text(subtitle)
+            .size(type_scale::BODY)
+            .line_height(iced::Pixels(type_scale::LINE))
+            .color(Studio::TEXT_SECONDARY)
+            .width(Length::Fill)
+            .ellipsis(2)
+            .into()
+    };
+    let mut meta = Row::new()
+        .push(
+            container(tag_row(&t.tags, vm))
+                .width(Length::Fill)
+                .height(TAG_HEIGHT)
+                .clip(true),
+        )
+        .height(TAG_HEIGHT)
+        .align_y(Vertical::Center);
     if !t.media.is_empty() {
         let kind = if t.media.iter().any(|m| m.is_video()) {
             Icon::Video
         } else {
             Icon::Music2
         };
-        title = title
+        meta = meta
             .push(Space::new().width(8))
-            .push(icons::icon(kind, 13.0, Studio::TEXT_FAINT));
+            .push(icons::icon(kind, 12.0, Studio::TEXT_FAINT));
         if t.media.len() > 1 {
-            title = title.push(Space::new().width(2)).push(
-                text(t.media.len().to_string())
-                    .size(11)
-                    .font(font::SEMIBOLD)
+            meta = meta.push(Space::new().width(3)).push(
+                studio_text(t.media.len().to_string())
+                    .size(type_scale::LABEL)
+                    .line_height(iced::Pixels(type_scale::LINE))
+                    .tabular()
                     .color(Studio::TEXT_FAINT),
             );
         }
     }
-    if hovered {
-        title = title.push(Space::new().width(8)).push(
-            button(icons::icon(Icon::Trash2, 15.0, Studio::TEXT_FAINT))
-                .padding(0)
-                .style(bare_button)
-                .on_press(Message::Delete {
-                    id: t.id.clone(),
-                    name: t.name.clone(),
-                }),
-        );
-    }
-    let subtitle = dart_string::trim(&t.summary);
-    let summary: Element<'a, Message> = if subtitle.is_empty() {
-        Space::new().into()
-    } else {
-        // Three lines at most, the third ellipsized.
-        studio_text(subtitle)
-            .size(12.5)
-            .line_height(1.35)
-            .color(Studio::TEXT_SECONDARY)
-            .width(Length::Fill)
-            .ellipsis(3)
-            .into()
-    };
-    let mut content = column![
-        title,
-        Space::new().height(6),
-        // The summary absorbs the slack and is clipped, so the card content
-        // can never overflow its fixed grid-cell height regardless of
-        // summary length or how many rows the tags wrap to.
+    container(column![
+        name,
+        Space::new().height(4),
+        // The summary absorbs the slack and is clipped, so the card's
+        // content never overflows its fixed grid-cell height.
         container(summary)
             .width(Length::Fill)
             .height(Length::Fill)
             .clip(true),
-    ];
-    if !t.tags.is_empty() {
-        content = content
-            .push(Space::new().height(8))
-            .push(tag_chips(&t.tags, vm));
-    }
-    // 16 of padding inside the 1 px border (the card's, drawn over the
-    // face).
-    button(
-        container(content)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .padding(17)
-            .clip(true),
-    )
-    .padding(0)
+        Space::new().height(10),
+        meta,
+    ])
     .width(Length::Fill)
     .height(Length::Fill)
-    .style(move |_: &Theme, _| button::Style {
-        background: Some(Background::Color(Studio::PANEL)),
-        text_color: Studio::TEXT_PRIMARY,
-        border: Border {
-            radius: 10.0.into(),
-            ..Border::default()
-        },
-        shadow: Shadow::default(),
-        snap: false,
+    .padding(Padding {
+        top: 10.0,
+        right: 12.0,
+        bottom: 12.0,
+        left: 12.0,
     })
-    .on_press(Message::Open(t.id.clone()))
+    .clip(true)
     .into()
 }
 
-/// The small tag chips on a card: up to three, then a "+N" overflow marker.
-/// Tapping one filters the library to that tag.
-fn tag_chips<'a>(tags: &'a [String], vm: &TechniqueLibraryViewModel) -> Element<'a, Message> {
-    let mut chips = Row::new().spacing(6).width(Length::Fill);
+/// The tags on a card: up to three, then a "+N" overflow marker, on one
+/// line (a tag past the row's end is ellipsized). Tapping one filters the
+/// library to it.
+fn tag_row<'a>(tags: &'a [String], vm: &TechniqueLibraryViewModel) -> Element<'a, Message> {
+    let mut row = Row::new().spacing(4).align_y(Vertical::Center);
     for tag in tags.iter().take(MAX_CHIPS) {
-        chips = chips.push(mini_tag(tag, vm.is_tag_active(tag)));
+        row = row.push(container(tag_chip(tag, vm.is_tag_active(tag))).max_width(TAG_MAX_WIDTH));
     }
     let overflow = tags.len().saturating_sub(MAX_CHIPS);
     if overflow > 0 {
-        chips = chips.push(
-            text(format!("+{overflow}"))
-                .size(11)
-                .color(Studio::TEXT_FAINT),
+        row = row.push(
+            container(
+                studio_text(format!("+{overflow}"))
+                    .size(type_scale::LABEL)
+                    .line_height(iced::Pixels(type_scale::LINE))
+                    .tabular()
+                    .color(Studio::TEXT_FAINT),
+            )
+            .padding([0, 2]),
         );
     }
-    chips.wrap().vertical_spacing(6).into()
+    row.into()
 }
 
-fn mini_tag(label: &str, active: bool) -> Element<'_, Message> {
-    let (fill, border, fg) = if active {
-        (
-            alpha(Studio::ACCENT, 0.16),
-            alpha(Studio::ACCENT, 0.45),
-            Studio::ACCENT_BRIGHT,
-        )
-    } else {
-        (
-            Studio::SURFACE_RAISED,
-            Studio::BORDER,
-            Studio::TEXT_SECONDARY,
-        )
-    };
-    // One line: the wrap bounds a chip to the card's width, and a long tag
-    // wrapped inside its chip grew the card past its fixed height.
+/// A tag (`DESIGN.md`: small, neutral): 18 px, radius 4, 11 px
+/// `TEXT_SECONDARY` on `CONTROL` (`TEXT_PRIMARY` under the pointer); the
+/// tag the library is filtered by on `SEGMENT_SELECTED` in `TEXT_PRIMARY`.
+/// One line: a long tag is ellipsized.
+fn tag_chip(label: &str, active: bool) -> Element<'_, Message> {
     button(
-        studio_text(label)
-            .size(10.5)
-            .font(font::SEMIBOLD)
-            .color(fg)
-            .ellipsis(1),
+        container(
+            studio_text(label)
+                .size(type_scale::LABEL)
+                .line_height(iced::Pixels(type_scale::LINE))
+                .ellipsis(1),
+        )
+        .center_y(Length::Fill),
     )
-    // 7 / 2 inside the 1 px border.
-    .padding([3, 8])
+    .height(TAG_HEIGHT)
+    .padding([0, 6])
     .clip(true)
-    .style(move |_: &Theme, _| button::Style {
-        background: Some(Background::Color(fill)),
-        text_color: fg,
-        border: Border {
-            color: border,
-            width: 1.0,
-            radius: 5.0.into(),
-        },
-        shadow: Shadow::default(),
-        snap: false,
+    .style(move |_, status| {
+        let hovered = matches!(
+            status,
+            iced::widget::button::Status::Hovered | iced::widget::button::Status::Pressed
+        );
+        iced::widget::button::Style {
+            background: Some(iced::Background::Color(if active {
+                Studio::SEGMENT_SELECTED
+            } else if hovered {
+                Studio::CONTROL_ACTIVE
+            } else {
+                Studio::CONTROL
+            })),
+            text_color: if active || hovered {
+                Studio::TEXT_PRIMARY
+            } else {
+                Studio::TEXT_SECONDARY
+            },
+            border: iced::Border {
+                radius: radius::SMALL.into(),
+                ..iced::Border::default()
+            },
+            shadow: iced::Shadow::default(),
+            snap: true,
+        }
     })
-    // The chip takes the tap: it does not also open the card.
+    // The tag takes the tap: it does not also open the card.
     .on_press(Message::TapTag(label.to_string()))
     .into()
+}
+
+/// A centred icon, heading and line (the empty and error states, as the
+/// library's), with an optional action under them.
+fn state_message<'a>(
+    icon: Icon,
+    heading: &'a str,
+    line: &'a str,
+    action: Option<Element<'a, Message>>,
+) -> Element<'a, Message> {
+    let mut content = column![
+        icons::icon(icon, 32.0, Studio::TEXT_DISABLED),
+        Space::new().height(14),
+        studio_text(heading)
+            .size(type_scale::HEADING)
+            .line_height(iced::Pixels(20.0))
+            .font(font::SEMIBOLD)
+            .color(Studio::TEXT_PRIMARY),
+        Space::new().height(6),
+        studio_text(line)
+            .size(type_scale::BODY)
+            .line_height(iced::Pixels(18.0))
+            .color(Studio::TEXT_SECONDARY)
+            .width(380)
+            .align_x(Horizontal::Center),
+    ]
+    .align_x(Horizontal::Center);
+    if let Some(action) = action {
+        content = content.push(Space::new().height(18)).push(action);
+    }
+    center(content).into()
 }
 
 /// Shown when the technique list fails to load — distinct from the empty
 /// state so a read error is never mistaken for a lost library. Offers a
 /// Retry that re-runs the load.
 fn error_state<'a>() -> Element<'a, Message> {
-    center(
-        column![
-            icons::icon(Icon::TriangleAlert, 48.0, Studio::TEXT_FAINT),
-            Space::new().height(16),
-            text("Could not load your techniques")
-                .size(20)
-                .font(font::SEMIBOLD)
-                .color(Studio::TEXT_PRIMARY),
-            Space::new().height(8),
-            text("Something went wrong reading your library. Your data is safe.")
-                .size(13)
-                .align_x(Horizontal::Center)
-                .color(Studio::TEXT_SECONDARY),
-            Space::new().height(20),
-            studio_button("Retry", Message::Retry).icon(Icon::RefreshCw),
-        ]
-        .align_x(Horizontal::Center),
+    state_message(
+        Icon::TriangleAlert,
+        "Could not load your techniques",
+        "Something went wrong reading your library. Your data is safe.",
+        Some(
+            studio_button("Retry", Message::Retry)
+                .icon(Icon::RefreshCw)
+                .into(),
+        ),
     )
-    .into()
 }
 
+/// No techniques yet. No inline button: the toolbar's New technique is the
+/// single, always-present way to add one.
 fn empty_state<'a>() -> Element<'a, Message> {
-    center(
-        column![
-            container(icons::icon(Icon::Library, 26.0, Studio::ACCENT))
-                .center_x(56)
-                .center_y(56)
-                .style(|_| theme::boxed(Some(alpha(Studio::ACCENT, 0.1)), 14.0, None)),
-            Space::new().height(16),
-            text("Build your technique library")
-                .size(20)
-                .font(font::SEMIBOLD)
-                .color(Studio::TEXT_PRIMARY),
-            Space::new().height(8),
-            text(
-                "Collect the techniques you train, in your own words. Add a technique, tag it \
-                 however your method does, and attach audio or video examples.",
-            )
-            .size(13)
-            .line_height(1.45)
-            .width(380)
-            .align_x(Horizontal::Center)
-            .color(Studio::TEXT_SECONDARY),
-        ]
-        .align_x(Horizontal::Center),
+    state_message(
+        Icon::Library,
+        "Build your technique library",
+        "Collect the techniques you train, in your own words. Add a technique, tag it \
+         however your method does, and attach audio or video examples.",
+        None,
     )
-    .into()
 }
