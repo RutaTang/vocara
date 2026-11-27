@@ -28,7 +28,7 @@
 //! set actually changed). Toasts (Dart's floating SnackBars) and the license
 //! page (a `MaterialPageRoute` pushed over Settings, sliding in and back out
 //! over it as the app's pages do, `slide::cupertino`) draw inside the page,
-//! under the window drag bar; the studio dialogs (the repair confirmation,
+//! under the page's toolbar; the studio dialogs (the repair confirmation,
 //! the update download dialog) go through the app's dialog stack. A toast
 //! still up when Settings leaves stays up over Home for the time it has left
 //! (the app's, `app::messenger`), as under Dart's app-wide
@@ -83,6 +83,7 @@ use crate::ui::core::widgets::material_switch::material_switch;
 use crate::ui::core::widgets::slide::{cupertino, slide, PAGE_TRANSITION};
 use crate::ui::core::widgets::studio_hint::spinner;
 use crate::ui::core::widgets::studio_text::studio_text;
+use crate::ui::core::widgets::toolbar;
 use crate::ui::home::widgets::update_notice::UpdateDownloadDialog;
 use crate::ui::snack::{SnackEvent, SnackQueue, SnackStyle, SnackTimer};
 use crate::ui::{Screen, SnackBar, Update};
@@ -1156,39 +1157,17 @@ impl SettingsScreen {
     }
 }
 
-/// `_Header`: 56 tall on `Studio.surface` with its bottom border: the back
-/// chevron and "Settings".
+/// The page's toolbar (`widgets::toolbar`): the back button and
+/// "Settings".
 fn header<'a>() -> Element<'a, Message> {
-    // `_IconButton`: 34 square, an 18 px chevron, a click cursor.
-    let back = button(
-        container(icons::icon(Icon::ChevronLeft, 18.0, Studio::TEXT_SECONDARY))
-            .center_x(34)
-            .center_y(34),
+    toolbar::page_toolbar(
+        row![
+            toolbar::back_button(Message::Back),
+            Space::new().width(8),
+            toolbar::title("Settings"),
+        ]
+        .align_y(Vertical::Center),
     )
-    .padding(0)
-    .style(bare_button)
-    .on_press(Message::Back);
-    let bar = row![
-        back,
-        Space::new().width(6),
-        studio_text("Settings")
-            .size(18)
-            .font(font::BOLD)
-            .letter_spacing(0.3)
-            .color(Studio::TEXT_PRIMARY),
-    ]
-    .align_y(Vertical::Center);
-    container(column![
-        container(bar)
-            .padding(Padding::from([0, 12]))
-            .height(55)
-            .align_y(Vertical::Center),
-        rule(),
-    ])
-    .width(Length::Fill)
-    .height(56)
-    .style(theme::fill(Studio::SURFACE))
-    .into()
 }
 
 /// A full-width 1 px line in `Studio.border`.
@@ -1407,25 +1386,18 @@ fn warning_banner<'a>(message: &'a str) -> Element<'a, Message> {
 /// percentage.
 fn reverb_card<'a>(wet: f64) -> Element<'a, Message> {
     let value = wet.clamp(0.0, 1.0);
-    // Flutter's track sits the overlay radius (12) in from each end; iced's
-    // runs edge to edge with the thumb's centre a radius (6) in.
+    // The design's thin slider (`DESIGN.md`, Slider): its track runs edge
+    // to edge with the knob's centre a radius (5) in; the 24 px row keeps
+    // its hit area.
     let reverb = container(material_slider(
         slider(0.0..=1.0, value, |wet| {
             Message::Choose(Choice::MonitorReverb(wet))
         })
         .step(0.01)
         .height(24)
-        .style(clear_style(6.0)),
+        .style(clear_style(SliderLook::STUDIO.thumb_radius)),
         value as f32,
-        SliderLook {
-            track_height: 3.0,
-            active_track: Studio::ACCENT,
-            inactive_track: Studio::INSET,
-            thumb: Studio::ACCENT,
-            thumb_radius: 6.0,
-            // `RoundSliderOverlayShape(overlayRadius: 12)`.
-            overlay_radius: 12.0,
-        },
+        SliderLook::STUDIO,
     ))
     .id(REVERB_SLIDER)
     .padding(Padding::from([0, 6]))

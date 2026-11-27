@@ -18,7 +18,7 @@
 //!
 //! media_kit's fullscreen pushed a route on the root navigator — the same
 //! video, with controls of its own (the fullscreen theme, the same values),
-//! filling the window over everything, the window drag bar included — and
+//! filling the window over everything, the page toolbar included — and
 //! made the window natively fullscreen (`toggleFullScreen:` when it was
 //! not; leaving does the reverse when it is). Here the player keeps a
 //! `fullscreen` flag: the page shows [`TechniqueVideoPlayer::fullscreen_view`]

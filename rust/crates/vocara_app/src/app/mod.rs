@@ -6,8 +6,11 @@
 //! shows the matching fatal window instead of the app (`FatalOpenApp`). Once
 //! the library is open it builds the [`Services`] and the [`Router`] at the
 //! start location (`/`, or the `VOCARA_START` deep link) and hosts the
-//! screens: every page under the window drag bar, a studio dialog over the
-//! whole window when a screen asks for one.
+//! screens: every page with its own unified toolbar at the top, which is
+//! also the window's title bar (`widgets::toolbar`: the app watches its
+//! empty area for the window's drag and zoom, and tells it the environment
+//! badge), a studio dialog over the whole window when a screen asks for
+//! one.
 //!
 //! A snack bar outlives the page that showed it, as under Dart's app-wide
 //! `ScaffoldMessenger`: a page draws its own while it is on top, and the app
@@ -20,8 +23,8 @@
 //! and only the drawing follows: the page going is drawn as it goes (from
 //! the app, or from its lingering), taking no input. The slide moves the
 //! page's layout with its drawing, so a tap during it lands where the page
-//! is drawn, as Flutter hit-tested the moving page. The window drag bar,
-//! the same on every page, stays put.
+//! is drawn, as Flutter hit-tested the moving page. Each page's toolbar
+//! slides with it.
 //!
 //! A studio dialog comes in and goes as Flutter's `DialogRoute` did (150
 //! ms, `confirm_dialog::DialogMotion`): its barrier and card fade in, and a
@@ -44,7 +47,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use iced::futures::SinkExt;
-use iced::widget::{column, container, stack, Space};
+use iced::widget::{container, stack, Space};
 use iced::{window, Element, Length, Size, Subscription, Task, Theme};
 use vocara_model::diagnostics::DiagnosticsLog;
 use vocara_services::quit_request::QuitRequests;
@@ -63,7 +66,7 @@ use crate::ui::core::widgets::confirm_dialog::{
 use crate::ui::core::widgets::fatal_open_screen::{self, FatalOpenScreen};
 use crate::ui::core::widgets::focus_traversal::focus_scope;
 use crate::ui::core::widgets::slide::{cupertino, inert, slide};
-use crate::ui::core::widgets::window_drag_bar::window_drag_bar;
+use crate::ui::core::widgets::toolbar;
 use crate::ui::home::widgets::update_notice::open_url_task;
 use crate::ui::snack::SnackEvent;
 use crate::ui::{home, settings, song_practice_detail, technique_library};
@@ -186,7 +189,7 @@ pub enum Message {
     QuitRequested,
     /// The quit guard finished its work: exit.
     QuitGuardDone,
-    /// The drag bar: start a window drag / toggle maximize.
+    /// The toolbar's empty area: start a window drag / toggle maximize.
     DragWindow,
     ToggleMaximize,
     /// The screenshot hook: time to capture, and the capture.
@@ -382,6 +385,8 @@ impl App {
             ),
             Message::Library,
         );
+        // Every page's toolbar ends with the environment's badge.
+        toolbar::set_environment_badge(&boot.environment.badge());
         let app = App {
             boot,
             window: None,
@@ -469,6 +474,9 @@ impl App {
                 // opened). Once; on the main thread, where iced runs update
                 // on macOS.
                 vocara_services::app_menu::install();
+                // The empty unified toolbar that centres the traffic lights
+                // in the pages' 52 px toolbars (macOS; nothing elsewhere).
+                vocara_services::window_toolbar::install();
                 if self.window.is_some() {
                     return Task::none();
                 }
@@ -759,23 +767,22 @@ impl App {
                 if let Some(snack_bar) = running.messenger.view() {
                     content = content.push(snack_bar);
                 }
-                // The window drag bar sits at the top of every page; dialogs
-                // render above it, their barrier covering the whole window.
-                let chrome = column![
-                    window_drag_bar(
-                        &running.services.environment.badge(),
-                        Message::DragWindow,
-                        Message::ToggleMaximize
-                    ),
-                    container(content).height(Length::Fill),
-                ];
+                // Each page draws its toolbar at its top; the app turns a
+                // drag or a double click on the toolbar's empty area into
+                // the window's. Dialogs render above, their barrier covering
+                // the whole window.
+                let chrome = toolbar::drag_region(
+                    container(content).width(Length::Fill).height(Length::Fill),
+                    Message::DragWindow,
+                    Message::ToggleMaximize,
+                );
                 let mut layers = stack![container(chrome)
                     .width(Length::Fill)
                     .height(Length::Fill)
                     .style(theme::page)];
                 // What the page on top shows over the whole window (a route
                 // on the root navigator: a video's fullscreen), over the
-                // drag bar and the snack bars, under the dialogs. Its slot
+                // toolbar and the snack bars, under the dialogs. Its slot
                 // stays when empty, so the dialogs keep theirs.
                 let (top, page) = running.router.top();
                 layers = layers.push(page.overlay(top).unwrap_or_else(|| {
@@ -1039,7 +1046,9 @@ fn write_png(shot: &window::Screenshot, path: &std::path::Path) -> Result<(), St
 
 /// The window: 1440 × 900 (at least 960 × 600), centred, closed through the
 /// quit guard; on macOS the title bar is hidden and transparent over a
-/// full-size content view, the traffic lights floating over the drag bar.
+/// full-size content view, and once the window is open it takes an empty
+/// unified toolbar (`vocara_services::window_toolbar`), which centres the
+/// traffic lights in the 52 px toolbar every page draws.
 pub fn window_settings() -> window::Settings {
     window::Settings {
         size: Size::new(1440.0, 900.0),

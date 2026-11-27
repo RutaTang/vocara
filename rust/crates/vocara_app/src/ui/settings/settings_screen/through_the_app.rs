@@ -66,10 +66,6 @@ fn shows(app: &App, label: &str) -> bool {
     ui(app).find(label).is_ok()
 }
 
-fn glyph(icon: Icon) -> String {
-    char::from(icon).to_string()
-}
-
 fn settings_page(app: &App) -> (PageId, &SettingsScreen) {
     match app.top() {
         Some((id, Page::Settings(settings))) => (id, settings),
@@ -101,7 +97,7 @@ fn reverb_percent(app: &App) -> String {
 fn home_to_settings_and_back_round_trips_through_the_settings_screen() {
     let mut app = boot(None, Services::detached);
     let (home, _) = app.top().expect("running");
-    click(&mut app, &glyph(Icon::Settings));
+    click(&mut app, "Settings");
     assert_eq!(app.routes(), [Some(Route::Home), Some(Route::Settings)]);
 
     // The settings surface lays out its device + monitoring sections.
@@ -115,7 +111,7 @@ fn home_to_settings_and_back_round_trips_through_the_settings_screen() {
     assert!(!shows(&app, "New practice"), "Home is covered");
 
     // The back chevron returns to the same Home.
-    click(&mut app, &glyph(Icon::ChevronLeft));
+    click(&mut app, "Back");
     assert_eq!(app.routes(), [Some(Route::Home)]);
     assert!(shows(&app, "New practice"));
     assert_eq!(app.top().map(|(id, _)| id), Some(home));
@@ -185,7 +181,7 @@ fn a_toast_up_as_settings_leaves_stays_up_on_home_until_its_time_is_up() {
     assert_eq!(settings_page(&app).1.toast(), Some(REPORT));
 
     // The root of the stack (a deep link): Back goes Home.
-    click(&mut app, &glyph(Icon::ChevronLeft));
+    click(&mut app, "Back");
     assert_eq!(app.routes(), [Some(crate::router::Route::Home)]);
     assert!(shows(&app, REPORT), "Home shows it");
     let timer = app.snack_timer().expect("its timer runs");

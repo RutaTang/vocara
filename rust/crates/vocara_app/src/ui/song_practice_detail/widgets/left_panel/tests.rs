@@ -765,8 +765,7 @@ fn fx_view(vm: &Vm) -> Element<'_, Message> {
         iced::widget::column![
             text("FX"),
             container(
-                studio_fader(0.5, Studio::ACCENT, Fx::Level, Fx::End)
-                    .map(|_| Message::ShowDockTab(DockTab::Mixer))
+                studio_fader(0.5, Fx::Level, Fx::End).map(|_| Message::ShowDockTab(DockTab::Mixer))
             )
             .width(200),
         ]
@@ -1014,10 +1013,10 @@ fn an_in_tune_straight_take_reads_as_such() {
         "VOICE SUMMARY",
         "A3 – E5",
         "19 st",
-        "RANGE",
-        "IN TUNE",
+        "Range",
+        "In tune",
         "100%",
-        "REGISTER",
+        "Register",
         "chest 40 · mix 35 · head 25",
     ] {
         assert!(shown.contains(&t.to_string()), "{t} in {shown:?}");
@@ -1091,11 +1090,11 @@ fn a_tap_on_a_cell_opens_its_dock_tab() {
         ..summary(&take)
     };
     for (label, tab) in [
-        ("IN TUNE", DockTab::Pitch),
-        ("CLARITY", DockTab::Timbre),
-        ("RANGE", DockTab::Range),
-        ("REGISTER", DockTab::Registers),
-        ("DYNAMICS", DockTab::Dynamics),
+        ("In tune", DockTab::Pitch),
+        ("Clarity", DockTab::Timbre),
+        ("Range", DockTab::Range),
+        ("Register", DockTab::Registers),
+        ("Dynamics", DockTab::Dynamics),
     ] {
         let mut ui = iced_test::simulator(voice_summary_view(s));
         ui.click(label).expect("on the summary");

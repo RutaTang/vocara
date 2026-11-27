@@ -44,8 +44,7 @@ use iced::alignment::Vertical;
 use iced::time::Instant;
 use iced::widget::{container, stack};
 use iced::{
-    mouse, Color, Element, Event, Length, Padding, Rectangle, Renderer, Shadow, Size, Subscription,
-    Theme, Vector,
+    mouse, Element, Event, Length, Padding, Rectangle, Renderer, Size, Subscription, Theme,
 };
 
 use crate::ui::core::motion::{self, Controller, Curve};
@@ -423,32 +422,37 @@ fn timer_stream(timer: &SnackTimer) -> impl iced::futures::Stream<Item = SnackEv
     .chain(iced::futures::stream::pending())
 }
 
-/// Material 3's fixed snack bar with the text `message`, as a `SnackBar`
-/// with no shape, color or padding of its own drew it under forui's theme:
-/// the inverse surface, forui's rounded shape ([`theme::SNACK_BAR_RADIUS`]),
-/// 14 px text, 24 / 14 of padding, elevation 6. It slides rather than
+/// A fixed snack bar with the text `message`: the toast card
+/// ([`theme::toast`]: a raised surface, radius 8, an inset outline, a soft
+/// shadow), 12 px primary text, 24 / 14 of padding. It slides rather than
 /// fades.
 pub fn fixed_bar(message: &str) -> Element<'_, Infallible> {
     container(
         crate::ui::core::text(message)
-            .size(14)
-            .line_height(1.0)
+            .size(theme::TOAST_TEXT_SIZE)
+            .line_height(iced::Pixels(theme::type_scale::LINE))
             .color(theme::SNACK_BAR_DEFAULT_TEXT),
     )
     .width(Length::Fill)
     .padding([14, 24])
-    .style(|_| container::Style {
-        shadow: Shadow {
-            color: Color::from_rgba8(0, 0, 0, 0.3),
-            offset: Vector::new(0.0, 3.0),
-            blur_radius: 6.0,
-        },
-        ..theme::boxed(
-            Some(theme::SNACK_BAR_DEFAULT_BACKGROUND),
-            theme::SNACK_BAR_RADIUS,
-            None,
-        )
-    })
+    .style(theme::toast)
+    .into()
+}
+
+/// A floating snack bar (a toast) with the text `message`: the toast card
+/// ([`theme::toast`]), 12 px primary text, 14 / 16 of padding. The queue
+/// sets it 16 in from the page's edges at its bottom
+/// ([`FLOATING_MARGIN`]); a page and the app draw it alike.
+pub fn floating_bar(message: &str) -> Element<'_, Infallible> {
+    container(
+        crate::ui::core::text(message)
+            .size(theme::TOAST_TEXT_SIZE)
+            .line_height(iced::Pixels(theme::type_scale::LINE))
+            .color(theme::SNACK_BAR_DEFAULT_TEXT),
+    )
+    .width(Length::Fill)
+    .padding(Padding::from([14, 16]))
+    .style(theme::toast)
     .into()
 }
 

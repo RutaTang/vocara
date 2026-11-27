@@ -1,6 +1,10 @@
 //! Port of `ui/core/widgets/studio_controls.dart`: the mixer's controls —
 //! the rotary pan knob, the horizontal volume fader, the fixed-width value
-//! readouts, the on/off toggle and the round and mini icon buttons.
+//! readouts, the on/off toggle and the round and mini icon buttons. The pan
+//! knob, the fader and the mini button are drawn as `DESIGN.md` draws them
+//! (the knob's 270° track and neutral value arc, the thin slider's track
+//! and knob, the `CONTROL` mini button); the rest of the design's controls
+//! are in [`super::controls`].
 //!
 //! Pointer devices: Dart limited the drags to every pointer kind but the
 //! trackpad (`kPointerDragDevices`), because a two-finger trackpad swipe — how
@@ -76,7 +80,10 @@ pub struct StudioPanKnob<'a, M> {
     accent: Color,
 }
 
-/// A 30 px knob with its label, in the coral accent.
+/// The knob's default size (`DESIGN.md`: 24 to 26 px).
+pub const PAN_KNOB_SIZE: f32 = 26.0;
+
+/// A 26 px knob with its label, its value arc in `TEXT_SECONDARY`.
 pub fn studio_pan_knob<'a, M>(
     value: f64,
     on_changed: impl Fn(f64) -> M + 'a,
@@ -86,9 +93,9 @@ pub fn studio_pan_knob<'a, M>(
         value,
         on_changed: Box::new(on_changed),
         on_commit,
-        size: 30.0,
+        size: PAN_KNOB_SIZE,
         show_label: true,
-        accent: Studio::ACCENT,
+        accent: Studio::TEXT_SECONDARY,
     }
 }
 
@@ -103,6 +110,8 @@ impl<M> StudioPanKnob<'_, M> {
         self
     }
 
+    /// The value arc's colour (`TEXT_SECONDARY` by default: the design
+    /// draws every knob neutral).
     pub fn accent(mut self, accent: Color) -> Self {
         self.accent = accent;
         self
@@ -134,10 +143,9 @@ impl<'a, M: Clone + 'a> From<StudioPanKnob<'a, M>> for Element<'a, M> {
         if knob.show_label {
             content = content.push(iced::widget::Space::new().height(2)).push(
                 studio_text(pan_label(knob.value))
-                    .size(9)
-                    .font(font::SEMIBOLD)
+                    .size(crate::ui::core::theme::type_scale::AXIS)
                     .tabular()
-                    .color(Studio::TEXT_SECONDARY)
+                    .color(Studio::TEXT_FAINT)
                     .width(size + 8.0)
                     .align_x(Horizontal::Center),
             );
@@ -194,7 +202,10 @@ impl<'a, M: Clone + 'a> From<StudioPanKnob<'a, M>> for Element<'a, M> {
     }
 }
 
-/// Paints the knob face: a raised disc, a strong rim and the indicator.
+/// Paints the knob (`DESIGN.md`, Pan knob; drawn in a 26-unit box scaled
+/// to the knob's size): a 270° track (radius 10, 2.2 wide, `#2A2A31`), the
+/// value arc from the top (centre) to the value in `accent`, a 6.5 radius
+/// cap (`#202026` with a `#34343D` rim) and a `TEXT_PRIMARY` pointer.
 pub struct PanKnobPainter {
     pub value: f64,
     pub accent: Color,
@@ -207,6 +218,10 @@ pub fn pan_indicator(value: f64) -> Vector {
     Vector::new(angle.sin() as f32, -(angle.cos() as f32))
 }
 
+/// The cap's fill and rim.
+const KNOB_CAP: Color = Color::from_rgb8(0x20, 0x20, 0x26);
+const KNOB_RIM: Color = Color::from_rgb8(0x34, 0x34, 0x3D);
+
 impl<M> canvas::Program<M> for PanKnobPainter {
     type State = ();
 
@@ -218,24 +233,50 @@ impl<M> canvas::Program<M> for PanKnobPainter {
         bounds: Rectangle,
         _: mouse::Cursor,
     ) -> Vec<Geometry> {
+        use iced::widget::canvas::path::Arc;
+        use iced::Radians;
         let mut frame = Frame::new(renderer, bounds.size());
+        let unit = bounds.width.min(bounds.height) / 26.0;
         let c = Point::new(bounds.width / 2.0, bounds.height / 2.0);
-        let r = bounds.width / 2.0 - 1.0;
-        let disc = Path::circle(c, r);
-        frame.fill(&disc, Studio::SURFACE_RAISED);
-        frame.stroke(
-            &disc,
+        let arc = |from: f32, to: f32| {
+            Path::new(|b| {
+                b.arc(Arc {
+                    center: c,
+                    radius: 10.0 * unit,
+                    start_angle: Radians(from),
+                    end_angle: Radians(to),
+                });
+            })
+        };
+        let line = |color: Color, width: f32| {
             Stroke::default()
-                .with_color(Studio::BORDER_STRONG)
-                .with_width(1.5),
+                .with_color(color)
+                .with_width(width * unit)
+                .with_line_cap(LineCap::Round)
+        };
+        // Angles from the +x axis, clockwise on screen: the top is -90°.
+        let top = -std::f32::consts::FRAC_PI_2;
+        let sweep = 0.75 * std::f32::consts::PI;
+        frame.stroke(
+            &arc(top - sweep, top + sweep),
+            line(Studio::CONTROL_ACTIVE, 2.2),
+        );
+        let value = self.value.clamp(-1.0, 1.0) as f32;
+        if value.abs() >= 0.01 {
+            let to = top + value * sweep;
+            let (from, to) = if value < 0.0 { (to, top) } else { (top, to) };
+            frame.stroke(&arc(from, to), line(self.accent, 2.2));
+        }
+        let cap = Path::circle(c, 6.5 * unit);
+        frame.fill(&cap, KNOB_CAP);
+        frame.stroke(
+            &cap,
+            Stroke::default().with_color(KNOB_RIM).with_width(unit),
         );
         let dir = pan_indicator(self.value);
         frame.stroke(
-            &Path::line(c, c + dir * (r - 3.0)),
-            Stroke::default()
-                .with_color(self.accent)
-                .with_width(2.0)
-                .with_line_cap(LineCap::Round),
+            &Path::line(c, c + dir * (5.5 * unit)),
+            line(Studio::TEXT_PRIMARY, 1.6),
         );
         vec![frame.into_geometry()]
     }
@@ -251,8 +292,10 @@ pub fn fader_value_at(dx: f32, width: f32) -> f64 {
     (f64::from(dx) / f64::from(width)).clamp(0.0, 1.0)
 }
 
-/// `StudioFader`: a thin horizontal volume fader (track line, filled
-/// portion, thumb) as wide as its parent allows and 16 px tall.
+/// `StudioFader`: a thin horizontal volume fader as wide as its parent
+/// allows and 16 px tall, drawn as the design's slider with the track
+/// header's 8 px knob (`controls::draw_thin_slider`: a 2 px track, the
+/// neutral fill, the knob and its shadow).
 ///
 /// It takes its pointer on contact: a click jumps the level and commits it,
 /// and a press held still before it slides stays the fader's (as a tap racing
@@ -262,13 +305,11 @@ pub fn fader_value_at(dx: f32, width: f32) -> f64 {
 /// the release commits.
 pub fn studio_fader<'a, M: Clone + 'a>(
     value: f64,
-    accent: Color,
     on_changed: impl Fn(f64) -> M + 'a,
     on_change_end: M,
 ) -> Element<'a, M> {
     canvas_widget(Fader {
         value: value.clamp(0.0, 1.0),
-        accent,
         on_changed: Box::new(on_changed),
         on_change_end,
     })
@@ -279,7 +320,6 @@ pub fn studio_fader<'a, M: Clone + 'a>(
 
 struct Fader<'a, M> {
     value: f64,
-    accent: Color,
     on_changed: Box<dyn Fn(f64) -> M + 'a>,
     on_change_end: M,
 }
@@ -335,29 +375,17 @@ impl<M: Clone> canvas::Program<M> for Fader<'_, M> {
         _: mouse::Cursor,
     ) -> Vec<Geometry> {
         let mut frame = Frame::new(renderer, bounds.size());
-        let mid = bounds.height / 2.0;
-        let x = self.value as f32 * bounds.width;
-        let line = |color| {
-            Stroke::default()
-                .with_color(color)
-                .with_width(3.0)
-                .with_line_cap(LineCap::Round)
-        };
-        frame.stroke(
-            &Path::line(Point::new(0.0, mid), Point::new(bounds.width, mid)),
-            line(Studio::GRID_STRONG),
-        );
-        frame.stroke(
-            &Path::line(Point::new(0.0, mid), Point::new(x, mid)),
-            line(self.accent),
-        );
-        let thumb = Path::circle(Point::new(x, mid), 5.0);
-        frame.fill(&thumb, self.accent);
-        frame.stroke(
-            &thumb,
-            Stroke::default()
-                .with_color(Studio::BACKGROUND)
-                .with_width(1.5),
+        // The level reads at the pointer's x across the whole width
+        // (`fader_value_at`); the knob is drawn there, held inside the ends.
+        let knob = super::controls::KNOB_SMALL;
+        let x = (self.value as f32 * bounds.width).clamp(knob / 2.0, bounds.width - knob / 2.0);
+        let shown = super::controls::thin_slider_value(x, bounds.width, knob);
+        super::controls::draw_thin_slider(
+            &mut frame,
+            bounds.size(),
+            shown,
+            knob,
+            super::controls::SLIDER_FILL,
         );
         vec![frame.into_geometry()]
     }
@@ -713,26 +741,43 @@ impl<'a, M: Clone + 'a> From<StudioRoundButton<M>> for Element<'a, M> {
     }
 }
 
-/// `StudioMiniButton`: a small bordered icon button used in track headers
-/// (24 × 22, radius 4, a 13 px icon in `color`, default
-/// `Studio.textSecondary`).
+/// `StudioMiniButton`: a small icon button used in track headers
+/// (`DESIGN.md`'s 20 px header buttons: 22 × 20, radius 4, a `CONTROL`
+/// fill, `CONTROL_ACTIVE` under the pointer, a 12 px icon in `color`,
+/// default `Studio::TEXT_SECONDARY`).
 pub fn studio_mini_button<'a, M: Clone + 'a>(
     icon: Icon,
     on_tap: M,
     color: Color,
 ) -> Element<'a, M> {
-    let face = container(icons::icon(icon, 13.0, color))
-        .center_x(24)
-        .center_y(22)
-        .style(|_| {
-            crate::ui::core::theme::boxed(Some(Studio::SURFACE_RAISED), 4.0, Some(Studio::BORDER))
-        });
+    let face = container(icons::icon(icon, 12.0, color))
+        .center_x(MINI_BUTTON.width)
+        .center_y(MINI_BUTTON.height);
     button(face)
         .padding(0)
-        .style(bare_button)
+        .style(|_, status| {
+            let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+            button::Style {
+                background: Some(Background::Color(if hovered {
+                    Studio::CONTROL_ACTIVE
+                } else {
+                    Studio::CONTROL
+                })),
+                text_color: Studio::TEXT_PRIMARY,
+                border: Border {
+                    radius: crate::ui::core::theme::radius::SMALL.into(),
+                    ..Border::default()
+                },
+                shadow: Shadow::default(),
+                snap: true,
+            }
+        })
         .on_press(on_tap)
         .into()
 }
+
+/// A mini button's size.
+pub const MINI_BUTTON: Size = Size::new(22.0, 20.0);
 
 #[cfg(test)]
 mod tests {
@@ -863,14 +908,68 @@ mod tests {
 
     fn fader() -> Element<'static, Msg> {
         // A 200 px fader at the window's left edge, as the Dart test sized it.
-        container(row![container(studio_fader(
-            0.5,
-            Color::from_rgb(1.0, 0.0, 0.0),
-            Msg::Level,
-            Msg::End
-        ))
-        .width(200)])
+        container(row![
+            container(studio_fader(0.5, Msg::Level, Msg::End)).width(200)
+        ])
         .into()
+    }
+
+    #[test]
+    fn the_fader_draws_the_design_s_slider_with_an_8_px_knob() {
+        use crate::ui::core::widgets::animated::testing::{near, Frames};
+        use crate::ui::core::widgets::controls::{SLIDER_FILL, SLIDER_TRACK};
+
+        let mut window = Frames::new(Size::new(200.0, 16.0));
+        window.frame(fader(), &[], Instant::now());
+        // The 2 px track at the middle row: filled before the knob, plain
+        // after it; the knob at half the width.
+        assert!(near(window.pixel(Point::new(40.0, 7.0)), SLIDER_FILL));
+        assert!(near(window.pixel(Point::new(160.0, 7.0)), SLIDER_TRACK));
+        assert!(near(
+            window.pixel(Point::new(100.0, 8.0)),
+            Studio::TEXT_PRIMARY
+        ));
+        // Nothing above the track but the knob.
+        assert!(!near(window.pixel(Point::new(40.0, 3.0)), SLIDER_FILL));
+    }
+
+    #[test]
+    fn the_knob_draws_its_track_value_arc_cap_and_pointer() {
+        use crate::ui::core::widgets::animated::testing::{near, Frames, BACKGROUND};
+
+        let knob = |value: f64| -> Element<'static, Msg> {
+            container(
+                canvas_widget(PanKnobPainter {
+                    value,
+                    accent: Studio::TEXT_SECONDARY,
+                })
+                .width(26)
+                .height(26),
+            )
+            .into()
+        };
+        let mut window = Frames::new(Size::new(26.0, 26.0));
+        window.frame(knob(0.0), &[], Instant::now());
+        // The track at the left of the ring (radius 10 from the centre),
+        // the cap's middle under the pointer's root, the gap at the bottom.
+        assert!(near(
+            window.pixel(Point::new(3.0, 13.0)),
+            Studio::CONTROL_ACTIVE
+        ));
+        assert!(
+            near(window.pixel(Point::new(13.0, 23.0)), BACKGROUND),
+            "the gap"
+        );
+        assert!(
+            window.ink(Point::new(12.0, 8.0), Point::new(14.0, 11.0)) > 0xB0,
+            "pointer"
+        );
+        // Panned hard left: the value arc lights the ring's left.
+        window.frame(knob(-1.0), &[], Instant::now());
+        assert!(near(
+            window.pixel(Point::new(3.0, 13.0)),
+            Studio::TEXT_SECONDARY
+        ));
     }
 
     // A two-finger trackpad swipe pans the timeline; with the cursor over a

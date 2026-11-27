@@ -1,12 +1,19 @@
-//! The app's look: the [`Studio`] palette (port of
-//! `ui/core/themes/studio.dart`), forui's zinc-dark palette the Material
-//! layer was themed with ([`Zinc`], port of `ui/core/themes/theme.dart`'s
-//! `appTheme = FThemes.zinc.dark`), the iced [`Theme`] built from them, the
-//! app font (forui's Inter, which `toApproximateMaterialTheme` made the
-//! whole app's font), and style functions that reproduce the looks the
-//! screens build by hand on top of Material: surfaces, cards, the dialog
-//! card and barrier, menus, tooltips, snack bars, the borderless studio text
-//! fields and the desktop scrollbar.
+//! The app's look: the design system's tokens (`rust/DESIGN.md`): the
+//! [`Studio`] palette and track colours, the [`type_scale`], [`radius`]
+//! and [`height`] scales; forui's zinc-dark palette the Flutter app's
+//! Material layer was themed with ([`Zinc`], port of
+//! `ui/core/themes/theme.dart`'s `appTheme = FThemes.zinc.dark`, kept only
+//! for the looks that still copy a third party's: the text field's
+//! Cupertino menu, the licence page Flutter's `LicensePage` drew, the
+//! Material switch and the desktop scrollbar); the iced [`Theme`]; the app
+//! font (Inter); and the style functions every screen shares: surfaces,
+//! cards, the dialog card and barrier, menus, tooltips, toasts, text fields
+//! and the scrollbar.
+//!
+//! The values follow `DESIGN.md`, deliberately departing from the Flutter
+//! app's look (`PORTING.md`, Design refresh); behaviour and layouts do not
+//! change. Where a comment elsewhere says a value matches Flutter, the
+//! tokens here win.
 //!
 //! Flutter's `color.withValues(alpha: a)` *replaces* the alpha; [`alpha`] is
 //! its counterpart (not iced's `scale_alpha`, which multiplies).
@@ -17,59 +24,215 @@ use iced::font::{Family, Weight};
 use iced::widget::{button, container, scrollable, text_input};
 use iced::{Background, Border, Color, Font, Padding, Shadow, Theme, Vector};
 
-/// Dark "studio" palette — charcoal panels with a warm coral accent, modeled
-/// on a modern DAW. Tracks are neutral gray by default; the selected track and
-/// primary actions use the coral accent.
+/// The design system's colour tokens (`rust/DESIGN.md`, Colour tokens):
+/// charcoal surfaces with one coral accent used for meaning. Dark only.
+///
+/// The values follow `DESIGN.md`, which deliberately departs from the
+/// Flutter app's look (`PORTING.md`, Design refresh): where a comment
+/// elsewhere says a colour matches Flutter, this palette wins.
 pub struct Studio;
 
 impl Studio {
     // Surfaces, darkest to lightest.
-    pub const BACKGROUND: Color = Color::from_rgb8(0x13, 0x13, 0x16);
-    /// Rails.
-    pub const SURFACE: Color = Color::from_rgb8(0x1B, 0x1B, 0x21);
-    /// Track rows.
-    pub const PANEL: Color = Color::from_rgb8(0x1A, 0x1A, 0x20);
-    pub const SURFACE_RAISED: Color = Color::from_rgb8(0x24, 0x24, 0x2C);
-    /// LCD, note lane.
-    pub const INSET: Color = Color::from_rgb8(0x0E, 0x0E, 0x12);
-    pub const HOVER: Color = Color::from_rgb8(0x22, 0x22, 0x2A);
+    /// Window, arrange and page background.
+    pub const BACKGROUND: Color = Color::from_rgb8(0x11, 0x11, 0x14);
+    /// The unified toolbar (title bar) at the top of every page.
+    pub const TOOLBAR: Color = Color::from_rgb8(0x18, 0x18, 0x1C);
+    /// Inspector, right panel, dock, track headers.
+    pub const PANEL: Color = Color::from_rgb8(0x17, 0x17, 0x1B);
+    /// A selected track header.
+    pub const PANEL_SELECTED: Color = Color::from_rgb8(0x1D, 0x1D, 0x22);
+    /// Cards, mixer strips.
+    pub const SURFACE: Color = Color::from_rgb8(0x1B, 0x1B, 0x20);
+    /// Pop-up buttons, raised controls, toolbar groups.
+    pub const SURFACE_RAISED: Color = Color::from_rgb8(0x23, 0x23, 0x29);
+    /// A segmented control's background.
+    pub const SEGMENTED: Color = Color::from_rgb8(0x1C, 0x1C, 0x21);
+    /// A segmented control's selected segment.
+    pub const SEGMENT_SELECTED: Color = Color::from_rgb8(0x34, 0x34, 0x3D);
+    /// M / S / R buttons and an inactive power button.
+    pub const CONTROL: Color = Color::from_rgb8(0x26, 0x26, 0x2D);
+    /// A selected tab.
+    pub const CONTROL_ACTIVE: Color = Color::from_rgb8(0x2A, 0x2A, 0x31);
+    /// Time display, meters, value fields.
+    pub const INSET: Color = Color::from_rgb8(0x0C, 0x0C, 0x0F);
+    /// Graph and lane wells, text fields, a library card's waveform band.
+    pub const WELL: Color = Color::from_rgb8(0x0F, 0x0F, 0x12);
+    /// Row and button hover.
+    pub const HOVER: Color = Color::from_rgb8(0x22, 0x22, 0x28);
 
     // Lines.
-    pub const GRID: Color = Color::from_rgb8(0x25, 0x25, 0x2D);
-    pub const GRID_STRONG: Color = Color::from_rgb8(0x34, 0x34, 0x3E);
-    pub const BORDER: Color = Color::from_rgb8(0x2A, 0x2A, 0x33);
-    pub const BORDER_STRONG: Color = Color::from_rgb8(0x3A, 0x3A, 0x45);
+    /// Arrange bar lines, semitone lines.
+    pub const GRID: Color = Color::from_rgb8(0x18, 0x18, 0x1D);
+    /// Ruler major ticks, dividers inside groups.
+    pub const GRID_STRONG: Color = Color::from_rgb8(0x34, 0x34, 0x3D);
+    /// Panel and toolbar hairlines (1 px).
+    pub const BORDER: Color = Color::from_rgb8(0x26, 0x26, 0x2D);
+    /// Row separators inside the arrange.
+    pub const BORDER_SUBTLE: Color = Color::from_rgb8(0x1E, 0x1E, 0x24);
+    /// Control outlines (an inset 1 px outline).
+    pub const BORDER_STRONG: Color = Color::from_rgb8(0x2E, 0x2E, 0x36);
 
     // Text.
-    pub const TEXT_PRIMARY: Color = Color::from_rgb8(0xEA, 0xEA, 0xF0);
-    pub const TEXT_SECONDARY: Color = Color::from_rgb8(0x95, 0x95, 0xA2);
-    pub const TEXT_FAINT: Color = Color::from_rgb8(0x5E, 0x5E, 0x6B);
+    /// Names, values, body.
+    pub const TEXT_PRIMARY: Color = Color::from_rgb8(0xEC, 0xEC, 0xF1);
+    /// Labels, inactive tabs, icons.
+    pub const TEXT_SECONDARY: Color = Color::from_rgb8(0xA7, 0xA7, 0xB3);
+    /// Metadata, ruler labels, units (at least 4.5:1 on `BACKGROUND`).
+    pub const TEXT_FAINT: Color = Color::from_rgb8(0x80, 0x80, 0x8D);
+    /// Axis labels, disabled text (10 px and up only).
+    pub const TEXT_DISABLED: Color = Color::from_rgb8(0x6E, 0x6E, 0x7A);
 
     // Accent (coral) + status.
+    /// Selection, primary emphasis.
     pub const ACCENT: Color = Color::from_rgb8(0xE0, 0x7A, 0x6A);
-    pub const ACCENT_BRIGHT: Color = Color::from_rgb8(0xEC, 0x8C, 0x7E);
-    pub const RECORD: Color = Color::from_rgb8(0xE3, 0x60, 0x4E);
-    /// Warm white, reads on gray + coral.
-    pub const PLAYHEAD: Color = Color::from_rgb8(0xF2, 0xEF, 0xE9);
+    /// Accent text and icons on dark (power on, the current lyric's time).
+    pub const ACCENT_BRIGHT: Color = Color::from_rgb8(0xEC, 0x91, 0x82);
+    /// Text on an `ACCENT` fill (a dialog's primary button).
+    pub const ON_ACCENT: Color = Color::from_rgb8(0x1B, 0x0F, 0x0D);
+    /// The record dot, armed and muted states.
+    pub const RECORD: Color = Color::from_rgb8(0xE5, 0x57, 0x4B);
+    /// Text and glyphs on a `RECORD` tint (mute on, record on).
+    pub const RECORD_TEXT: Color = Color::from_rgb8(0xF0, 0x8A, 0x80);
+    /// The playhead line and its ruler marker.
+    pub const PLAYHEAD: Color = Color::from_rgb8(0xEC, 0xEC, 0xF1);
     pub const LCD: Color = Color::from_rgb8(0xEF, 0xEF, 0xF3);
+    /// Meter upper range, solo on.
+    pub const WARN: Color = Color::from_rgb8(0xD9, 0xB5, 0x4A);
+    /// Text on a `WARN` tint (solo on).
+    pub const WARN_TEXT: Color = Color::from_rgb8(0xE3, 0xC4, 0x6A);
+    /// A meter's low range.
+    pub const METER_LOW: Color = Color::from_rgb8(0x4F, 0xAE, 0x82);
+    /// A sung pitch off its target by more than the tolerance.
+    pub const OUT_OF_TUNE: Color = Color::from_rgb8(0xF2, 0xA6, 0x5A);
 
     // Waveform when the track is not selected.
     pub const WAVEFORM: Color = Color::from_rgb8(0x6A, 0x6A, 0x77);
-    pub const TOGGLE_OFF: Color = Color::from_rgb8(0x3A, 0x3A, 0x45);
+    pub const TOGGLE_OFF: Color = Color::from_rgb8(0x3A, 0x3A, 0x43);
 
     // Semantic analysis colors shared by the dock views. Chest is warm, head is
     // cool; mix is derived by lerping the two at the usage site.
     pub const REGISTER_CHEST: Color = Color::from_rgb8(0xE0, 0x82, 0x5A);
     pub const REGISTER_HEAD: Color = Color::from_rgb8(0x5B, 0x8D, 0xEF);
-    /// Pitch within tolerance / healthy.
-    pub const IN_TUNE: Color = Color::from_rgb8(0x52, 0xB7, 0x88);
+    /// Pitch within tolerance / healthy: the sung pitch line.
+    pub const IN_TUNE: Color = Color::from_rgb8(0x7C, 0xC4, 0xA6);
     /// Metric in the good range.
-    pub const GOOD: Color = Color::from_rgb8(0x63, 0xC0, 0x89);
+    pub const GOOD: Color = Color::from_rgb8(0x7C, 0xC4, 0xA6);
+
+    // Track colours: one muted colour per track, of equal lightness, for the
+    // header stripe, the clip and its waveform (`DESIGN.md`, Track colours).
+    pub const TRACK_CORAL: Color = Color::from_rgb8(0xD9, 0x8C, 0x7E);
+    pub const TRACK_OCHRE: Color = Color::from_rgb8(0xC9, 0xA4, 0x6E);
+    pub const TRACK_SAGE: Color = Color::from_rgb8(0x6F, 0xB3, 0x9A);
+    pub const TRACK_PERIWINKLE: Color = Color::from_rgb8(0x8F, 0xA3, 0xD9);
+    pub const TRACK_LILAC: Color = Color::from_rgb8(0xB4, 0x8F, 0xD0);
+    /// The backing track's (neutral).
+    pub const TRACK_BACKING: Color = Color::from_rgb8(0x8C, 0x8C, 0x99);
+    /// The master's.
+    pub const TRACK_MASTER: Color = Color::from_rgb8(0xB7, 0xB7, 0xC2);
+    /// A selected clip's outline.
+    pub const CLIP_SELECTED_OUTLINE: Color = Color::from_rgb8(0xE8, 0xA9, 0x9D);
+
+    /// The vocal tracks' colours, in the order tracks take them.
+    pub const TRACK_COLORS: [Color; 5] = [
+        Self::TRACK_CORAL,
+        Self::TRACK_OCHRE,
+        Self::TRACK_SAGE,
+        Self::TRACK_PERIWINKLE,
+        Self::TRACK_LILAC,
+    ];
+
+    /// The colour of the `index`th vocal track (the palette, repeating).
+    pub const fn track_color(index: usize) -> Color {
+        Self::TRACK_COLORS[index % Self::TRACK_COLORS.len()]
+    }
 }
 
-/// forui's `FThemes.zinc.dark` colors (forui 0.17), which themed the chrome
-/// (home, dialogs, buttons) through `toApproximateMaterialTheme()`; the DAW
-/// timeline uses the dedicated [`Studio`] palette.
+/// How a clip is drawn in its track colour (`DESIGN.md`, Track colours):
+/// the alphas the colour takes for each part.
+pub mod clip {
+    /// The clip's fill.
+    pub const FILL: f32 = 0.10;
+    /// A selected clip's fill.
+    pub const FILL_SELECTED: f32 = 0.16;
+    /// The clip's 1 px outline (selected: `Studio::CLIP_SELECTED_OUTLINE`).
+    pub const OUTLINE: f32 = 0.32;
+    /// The 13 px header band holding the name.
+    pub const HEADER: f32 = 0.22;
+    /// A selected clip's header band.
+    pub const HEADER_SELECTED: f32 = 0.34;
+    /// The header band's height.
+    pub const HEADER_HEIGHT: f32 = 13.0;
+    /// The waveform.
+    pub const WAVEFORM: f32 = 0.92;
+    /// A muted clip's waveform (the clip itself at [`MUTED_OPACITY`]).
+    pub const WAVEFORM_MUTED: f32 = 0.45;
+    /// A muted clip's opacity.
+    pub const MUTED_OPACITY: f32 = 0.60;
+}
+
+/// The type scale (`DESIGN.md`, Type): every text size the app uses. No
+/// in-between sizes. Weights are [`font`]'s; numbers take tabular figures
+/// (`studio_text`'s `tabular`).
+pub mod type_scale {
+    /// Axis, ruler and small units (10 px regular, tabular).
+    pub const AXIS: f32 = 10.0;
+    /// Labels, meta, values, dock tabs, control text (11 px).
+    pub const LABEL: f32 = 11.0;
+    /// Body, track and effect names, panel titles, toolbar buttons (12 px).
+    pub const BODY: f32 = 12.0;
+    /// Lyrics, list rows, page titles in a toolbar, card titles (13 px).
+    pub const TITLE: f32 = 13.0;
+    /// The time display (14 px monospaced medium).
+    pub const TIME: f32 = 14.0;
+    /// A page heading ("Practices"): 15 px semibold.
+    pub const HEADING: f32 = 15.0;
+    /// A big readout (pitch %, a metric's value): 18 px semibold, tabular.
+    pub const READOUT: f32 = 18.0;
+    /// The line height of 11 and 12 px text, in pixels.
+    pub const LINE: f32 = 16.0;
+}
+
+/// The corner radii (`DESIGN.md`, Geometry). Round only for knobs, dots
+/// and the power button.
+pub mod radius {
+    /// M / S buttons, clips, small controls, a selected segment.
+    pub const SMALL: f32 = 4.0;
+    /// Pop-up buttons, ghost buttons, tabs.
+    pub const CONTROL: f32 = 5.0;
+    /// Segmented controls, wells, text fields, toolbar icon buttons, dialog
+    /// buttons, tooltips.
+    pub const WELL: f32 = 6.0;
+    /// Toolbar groups.
+    pub const GROUP: f32 = 7.0;
+    /// Cards, panels' rounded boxes, menus.
+    pub const CARD: f32 = 8.0;
+    /// Dialogs.
+    pub const DIALOG: f32 = 10.0;
+}
+
+/// Control heights (`DESIGN.md`, Geometry).
+pub mod height {
+    /// M / S buttons, tab buttons in a strip.
+    pub const MINI: f32 = 20.0;
+    /// Pop-up buttons, segmented controls, ghost buttons, parameter rows.
+    pub const CONTROL: f32 = 22.0;
+    /// Panel icon buttons, panel tabs.
+    pub const PANEL_BUTTON: f32 = 24.0;
+    /// Toolbar icon buttons, dialog buttons, single-line text fields.
+    pub const TOOLBAR_BUTTON: f32 = 28.0;
+    /// Toolbar groups, the time display.
+    pub const TOOLBAR_GROUP: f32 = 30.0;
+    /// The unified toolbar (its bottom hairline included).
+    pub const TOOLBAR: f32 = 52.0;
+}
+
+/// forui's `FThemes.zinc.dark` colors (forui 0.17), which themed the
+/// Flutter app's chrome (home, dialogs, buttons) through
+/// `toApproximateMaterialTheme()`. Retired for the chrome (`DESIGN.md`):
+/// dialogs, menus, tooltips, text fields, toasts and buttons draw with
+/// [`Studio`]; only the looks that copy a third party's keep it (the module
+/// docs).
 pub struct Zinc;
 
 impl Zinc {
@@ -172,14 +335,15 @@ pub mod font {
     ];
 }
 
-/// The app's iced theme: forui zinc-dark's colors, with the scaffold
-/// background the app set (`scaffoldBackgroundColor: Studio.background`).
+/// The app's iced theme: the page background and the primary text colour;
+/// the rest of the palette (what iced's own default styles read) as forui
+/// zinc-dark's.
 pub fn app_theme() -> Theme {
     Theme::custom(
         "Vocara",
         iced::theme::Palette {
             background: Studio::BACKGROUND,
-            text: Zinc::FOREGROUND,
+            text: Studio::TEXT_PRIMARY,
             primary: Zinc::PRIMARY,
             success: Studio::GOOD,
             warning: Studio::REGISTER_CHEST,
@@ -233,48 +397,71 @@ pub fn page(_: &Theme) -> container::Style {
     boxed(Some(Studio::BACKGROUND), 0.0, None)
 }
 
-/// The inset well (LCD, lanes, text-field wells): `Studio.inset`, radius
-/// [`radius`], `Studio.border` outline.
+/// The inset well (LCD, lanes, text-field wells): `Studio::INSET`, radius
+/// [`radius`], an inset `Studio::BORDER` outline (an iced border is drawn
+/// inside the box and takes no room).
 pub fn inset(radius: f32) -> impl Fn(&Theme) -> container::Style {
     move |_| boxed(Some(Studio::INSET), radius, Some(Studio::BORDER))
 }
 
-/// A raised card: `Studio.surfaceRaised`, radius [`radius`], `Studio.border`.
-pub fn card(radius: f32) -> impl Fn(&Theme) -> container::Style {
-    move |_| boxed(Some(Studio::SURFACE_RAISED), radius, Some(Studio::BORDER))
+/// A graph or lane well (`DESIGN.md`: the EQ graph, the pitch lane, a
+/// library card's waveform band): `Studio::WELL`, radius [`radius`], an
+/// inset `Studio::BORDER_STRONG` outline.
+pub fn well(radius: f32) -> impl Fn(&Theme) -> container::Style {
+    move |_| boxed(Some(Studio::WELL), radius, Some(Studio::BORDER_STRONG))
 }
 
-/// The studio dialog card (`confirm_dialog.dart`): `Studio.surfaceRaised`,
-/// radius 16, `Studio.border`, shadow `0x80000000` blurred 40 at (0, 16).
-pub fn dialog_card(_: &Theme) -> container::Style {
-    container::Style {
-        shadow: Shadow {
-            color: Color::from_rgba8(0, 0, 0, 0x80 as f32 / 255.0),
-            offset: Vector::new(0.0, 16.0),
-            blur_radius: 40.0,
-        },
-        ..boxed(Some(Studio::SURFACE_RAISED), 16.0, Some(Studio::BORDER))
+/// A raised card: `Studio::SURFACE_RAISED`, radius [`radius`], an inset
+/// `Studio::BORDER_STRONG` outline.
+pub fn card(radius: f32) -> impl Fn(&Theme) -> container::Style {
+    move |_| {
+        boxed(
+            Some(Studio::SURFACE_RAISED),
+            radius,
+            Some(Studio::BORDER_STRONG),
+        )
     }
 }
 
-/// The studio dialogs' barrier color (`Color(0xB0000000)`).
-pub const DIALOG_BARRIER: Color = Color::from_rgba8(0, 0, 0, 0xB0 as f32 / 255.0);
+/// The soft shadow under a floating surface (dialogs, menus, toasts, a
+/// hovered card): black at 45 %, blurred 24, 8 down.
+pub const FLOATING_SHADOW: Shadow = Shadow {
+    color: Color::from_rgba(0.0, 0.0, 0.0, 0.45),
+    offset: Vector::new(0.0, 8.0),
+    blur_radius: 24.0,
+};
+
+/// The studio dialog card (`DESIGN.md`, Dialogs): `Studio::SURFACE`,
+/// radius 10, an inset `Studio::BORDER_STRONG` outline, a soft shadow.
+pub fn dialog_card(_: &Theme) -> container::Style {
+    container::Style {
+        shadow: FLOATING_SHADOW,
+        ..boxed(
+            Some(Studio::SURFACE),
+            radius::DIALOG,
+            Some(Studio::BORDER_STRONG),
+        )
+    }
+}
+
+/// The studio dialogs' barrier color: black at 50 %.
+pub const DIALOG_BARRIER: Color = Color::from_rgba(0.0, 0.0, 0.0, 0.5);
 
 /// The modal barrier under a studio dialog.
 pub fn dialog_barrier(_: &Theme) -> container::Style {
     boxed(Some(DIALOG_BARRIER), 0.0, None)
 }
 
-/// A context menu (`track_context_menu.dart`): `Studio.surfaceRaised`,
-/// radius 10, `Studio.border`, Material elevation 10's shadow.
+/// A menu or a pop-up's list (`DESIGN.md`, Menus): `Studio::SURFACE`,
+/// radius 8, an inset `Studio::BORDER_STRONG` outline, a soft shadow.
 pub fn menu(_: &Theme) -> container::Style {
     container::Style {
-        shadow: Shadow {
-            color: Color::from_rgba8(0, 0, 0, 0.45),
-            offset: Vector::new(0.0, 6.0),
-            blur_radius: 20.0,
-        },
-        ..boxed(Some(Studio::SURFACE_RAISED), 10.0, Some(Studio::BORDER))
+        shadow: FLOATING_SHADOW,
+        ..boxed(
+            Some(Studio::SURFACE),
+            radius::CARD,
+            Some(Studio::BORDER_STRONG),
+        )
     }
 }
 
@@ -292,34 +479,51 @@ pub fn menu_item(_: &Theme, status: button::Status) -> button::Style {
     }
 }
 
-/// Material 3's default tooltip under the zinc color scheme: the inverse
-/// surface (`onSurface`, zinc foreground) with the surface color as text,
-/// radius 4. Pair with [`TOOLTIP_PADDING`] and [`TOOLTIP_TEXT_SIZE`].
+/// A tooltip (`DESIGN.md`, Tooltips): `Studio::SURFACE`, radius 6, an
+/// inset `Studio::BORDER_STRONG` outline, `TEXT_PRIMARY` text. No shadow:
+/// the tip fades as one layer (`material_tooltip`), which a shadow
+/// reaching past it would not. Pair with [`TOOLTIP_PADDING`] and
+/// [`TOOLTIP_TEXT_SIZE`].
 pub fn tooltip(_: &Theme) -> container::Style {
     container::Style {
-        text_color: Some(Zinc::BACKGROUND),
-        ..boxed(Some(Zinc::FOREGROUND), 4.0, None)
+        text_color: Some(Studio::TEXT_PRIMARY),
+        ..boxed(
+            Some(Studio::SURFACE),
+            radius::WELL,
+            Some(Studio::BORDER_STRONG),
+        )
     }
 }
 
-/// Material 3 desktop tooltip padding (horizontal 8, vertical 4).
+/// A tooltip's padding (vertical 4, horizontal 8).
 pub const TOOLTIP_PADDING: [f32; 2] = [4.0, 8.0];
 
-/// Material 3 tooltip text: `bodySmall`, forui `typography.xs` (12 px).
-pub const TOOLTIP_TEXT_SIZE: f32 = 12.0;
+/// A tooltip's text: the 11 px label size.
+pub const TOOLTIP_TEXT_SIZE: f32 = type_scale::LABEL;
 
-/// A snack bar's corner radius when it sets no shape of its own: forui's
-/// `snackBarTheme` gives every snack bar, fixed or floating,
-/// `RoundedRectangleBorder(borderRadius: style.borderRadius)` (no border
-/// side), which `SnackBar` takes before Material 3's own defaults (a
-/// floating radius 4, a square fixed bar). forui's radius is
-/// `FLerpBorderRadius.all(Radius.circular(8), min: 24)`: 8 on a box at
-/// least 24 tall, which every snack bar is.
-pub const SNACK_BAR_RADIUS: f32 = 8.0;
+/// A toast's (snack bar's) corner radius: a card's.
+pub const SNACK_BAR_RADIUS: f32 = radius::CARD;
 
-/// Material 3's default snack-bar colors under the zinc scheme.
-pub const SNACK_BAR_DEFAULT_BACKGROUND: Color = Zinc::FOREGROUND;
-pub const SNACK_BAR_DEFAULT_TEXT: Color = Zinc::BACKGROUND;
+/// A toast's colours when it sets none of its own: a raised surface with
+/// primary text (`DESIGN.md`'s floating surfaces).
+pub const SNACK_BAR_DEFAULT_BACKGROUND: Color = Studio::SURFACE_RAISED;
+pub const SNACK_BAR_DEFAULT_TEXT: Color = Studio::TEXT_PRIMARY;
+
+/// A toast's text size: the 12 px body size.
+pub const TOAST_TEXT_SIZE: f32 = type_scale::BODY;
+
+/// A toast (snack bar) card: `SNACK_BAR_DEFAULT_BACKGROUND`, radius 8, an
+/// inset `Studio::BORDER_STRONG` outline, the floating shadow.
+pub fn toast(_: &Theme) -> container::Style {
+    container::Style {
+        shadow: FLOATING_SHADOW,
+        ..boxed(
+            Some(SNACK_BAR_DEFAULT_BACKGROUND),
+            SNACK_BAR_RADIUS,
+            Some(Studio::BORDER_STRONG),
+        )
+    }
+}
 
 // ---------------------------------------------------------------------- text
 
@@ -365,13 +569,23 @@ pub const FIELD_PADDING: Padding = Padding {
     left: 10.0,
 };
 
-/// The studio text field (`TextField` with `InputDecoration(isCollapsed,
-/// border: none)` inside an inset well, as `confirm_dialog.dart` and
-/// `studio_field.dart` build it): no fill or border of its own (the well
-/// draws them), `Studio.textPrimary` text, `Studio.textFaint` hint, faint
-/// text when disabled, and the selection color a macOS field took
-/// (`CupertinoTheme.primaryColor`, the Material primary, at 40 %). The
-/// coral `cursorColor` is the field's own (`text_field`'s `caret_color`).
+/// Selected text in a field: the accent at 35 %.
+pub const SELECTION: Color = alpha(Studio::ACCENT, 0.35);
+
+/// A single-line text field's height (`DESIGN.md`, Text fields).
+pub const FIELD_HEIGHT: f32 = height::TOOLBAR_BUTTON;
+
+/// A text field's text size: the 12 px body size.
+pub const FIELD_TEXT_SIZE: f32 = type_scale::BODY;
+
+/// A focused field's outline: the accent at 60 %.
+pub const FIELD_FOCUS: Color = alpha(Studio::ACCENT, 0.60);
+
+/// The studio text field inside a well its container draws: no fill or
+/// border of its own, `TEXT_PRIMARY` text, a `TEXT_FAINT` hint, faint text
+/// when disabled, [`SELECTION`]. The coral caret is the field's own
+/// (`text_field`'s `caret_color`). A field that draws its own well takes
+/// [`field`] instead.
 pub fn studio_input(_: &Theme, status: text_input::Status) -> text_input::Style {
     let disabled = matches!(status, text_input::Status::Disabled);
     text_input::Style {
@@ -384,7 +598,44 @@ pub fn studio_input(_: &Theme, status: text_input::Status) -> text_input::Style 
         } else {
             Studio::TEXT_PRIMARY
         },
-        selection: alpha(Zinc::PRIMARY, 0.40),
+        selection: SELECTION,
+    }
+}
+
+/// A text field drawing its own well (`DESIGN.md`, Text fields): 28 px
+/// single-line with [`FIELD_PADDING`] and 12 px text, `Studio::WELL`,
+/// radius 6, an inset `Studio::BORDER_STRONG` outline, [`FIELD_FOCUS`]
+/// while focused; [`studio_input`]'s text colours.
+pub fn field(theme: &Theme, status: text_input::Status) -> text_input::Style {
+    let focused = matches!(status, text_input::Status::Focused { .. });
+    text_input::Style {
+        background: Background::Color(Studio::WELL),
+        border: Border {
+            color: if focused {
+                FIELD_FOCUS
+            } else {
+                Studio::BORDER_STRONG
+            },
+            width: 1.0,
+            radius: Radius::from(radius::WELL),
+        },
+        ..studio_input(theme, status)
+    }
+}
+
+/// The well around a field that cannot draw its own (a multi-line editor):
+/// [`field`]'s, focused or not.
+pub fn field_well(focused: bool) -> impl Fn(&Theme) -> container::Style {
+    move |_| {
+        boxed(
+            Some(Studio::WELL),
+            radius::WELL,
+            Some(if focused {
+                FIELD_FOCUS
+            } else {
+                Studio::BORDER_STRONG
+            }),
+        )
     }
 }
 
@@ -471,13 +722,93 @@ mod tests {
     use super::*;
 
     #[test]
-    fn studio_palette_matches_the_dart_hex_values() {
-        assert_eq!(Studio::BACKGROUND.into_rgba8(), [0x13, 0x13, 0x16, 0xFF]);
-        assert_eq!(Studio::ACCENT.into_rgba8(), [0xE0, 0x7A, 0x6A, 0xFF]);
-        assert_eq!(Studio::PLAYHEAD.into_rgba8(), [0xF2, 0xEF, 0xE9, 0xFF]);
-        assert_eq!(Studio::GOOD.into_rgba8(), [0x63, 0xC0, 0x89, 0xFF]);
-        assert_eq!(DIALOG_BARRIER.into_rgba8(), [0, 0, 0, 0xB0]);
+    fn studio_palette_matches_the_design_tokens() {
+        let hex = |c: Color| {
+            let [r, g, b, _] = c.into_rgba8();
+            format!("#{r:02X}{g:02X}{b:02X}")
+        };
+        // DESIGN.md's colour table, row by row.
+        for (token, want) in [
+            (Studio::BACKGROUND, "#111114"),
+            (Studio::TOOLBAR, "#18181C"),
+            (Studio::PANEL, "#17171B"),
+            (Studio::PANEL_SELECTED, "#1D1D22"),
+            (Studio::SURFACE, "#1B1B20"),
+            (Studio::SURFACE_RAISED, "#232329"),
+            (Studio::SEGMENTED, "#1C1C21"),
+            (Studio::CONTROL, "#26262D"),
+            (Studio::CONTROL_ACTIVE, "#2A2A31"),
+            (Studio::SEGMENT_SELECTED, "#34343D"),
+            (Studio::INSET, "#0C0C0F"),
+            (Studio::WELL, "#0F0F12"),
+            (Studio::HOVER, "#222228"),
+            (Studio::GRID, "#18181D"),
+            (Studio::GRID_STRONG, "#34343D"),
+            (Studio::BORDER, "#26262D"),
+            (Studio::BORDER_SUBTLE, "#1E1E24"),
+            (Studio::BORDER_STRONG, "#2E2E36"),
+            (Studio::TEXT_PRIMARY, "#ECECF1"),
+            (Studio::TEXT_SECONDARY, "#A7A7B3"),
+            (Studio::TEXT_FAINT, "#80808D"),
+            (Studio::TEXT_DISABLED, "#6E6E7A"),
+            (Studio::ACCENT, "#E07A6A"),
+            (Studio::ACCENT_BRIGHT, "#EC9182"),
+            (Studio::ON_ACCENT, "#1B0F0D"),
+            (Studio::RECORD, "#E5574B"),
+            (Studio::RECORD_TEXT, "#F08A80"),
+            (Studio::PLAYHEAD, "#ECECF1"),
+            (Studio::IN_TUNE, "#7CC4A6"),
+            (Studio::GOOD, "#7CC4A6"),
+            (Studio::METER_LOW, "#4FAE82"),
+            (Studio::WARN, "#D9B54A"),
+            (Studio::WARN_TEXT, "#E3C46A"),
+        ] {
+            assert_eq!(hex(token), want);
+        }
+        assert_eq!(
+            Studio::TRACK_COLORS.map(hex),
+            ["#D98C7E", "#C9A46E", "#6FB39A", "#8FA3D9", "#B48FD0"]
+        );
+        assert_eq!(hex(Studio::TRACK_BACKING), "#8C8C99");
+        assert_eq!(hex(Studio::TRACK_MASTER), "#B7B7C2");
+        assert_eq!(Studio::track_color(6), Studio::TRACK_OCHRE, "repeats");
+        // The barrier is black at 50 %.
+        assert_eq!(DIALOG_BARRIER.into_rgba8(), [0, 0, 0, 0x80]);
         assert_eq!(Zinc::BARRIER.into_rgba8(), [0, 0, 0, 0x7A]);
+    }
+
+    #[test]
+    fn text_on_the_background_meets_its_contrast() {
+        // WCAG's relative luminance and contrast ratio.
+        let luminance = |c: Color| {
+            let lin = |v: f32| {
+                if v <= 0.03928 {
+                    v / 12.92
+                } else {
+                    ((v + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * lin(c.r) + 0.7152 * lin(c.g) + 0.0722 * lin(c.b)
+        };
+        let contrast = |a: Color, b: Color| {
+            let (x, y) = (luminance(a), luminance(b));
+            (x.max(y) + 0.05) / (x.min(y) + 0.05)
+        };
+        // DESIGN.md: TEXT_FAINT is at least 4.5:1 on the background.
+        assert!(contrast(Studio::TEXT_FAINT, Studio::BACKGROUND) >= 4.5);
+        assert!(contrast(Studio::TEXT_SECONDARY, Studio::PANEL) >= 4.5);
+    }
+
+    #[test]
+    fn a_field_draws_its_well_and_its_focus() {
+        let theme = app_theme();
+        let rest = field(&theme, text_input::Status::Active);
+        assert_eq!(rest.background, Background::Color(Studio::WELL));
+        assert_eq!(rest.border.color, Studio::BORDER_STRONG);
+        assert_eq!(rest.border.radius, Radius::from(6.0));
+        let focused = field(&theme, text_input::Status::Focused { is_hovered: false });
+        assert_eq!(focused.border.color, alpha(Studio::ACCENT, 0.6));
+        assert_eq!(focused.placeholder, Studio::TEXT_FAINT);
     }
 
     #[test]
@@ -490,7 +821,7 @@ mod tests {
     #[test]
     fn the_theme_uses_the_scaffold_background() {
         assert_eq!(app_theme().palette().background, Studio::BACKGROUND);
-        assert_eq!(app_theme().palette().text, Zinc::FOREGROUND);
+        assert_eq!(app_theme().palette().text, Studio::TEXT_PRIMARY);
     }
 
     #[test]

@@ -4,7 +4,7 @@
 //! the user confirmed) and [`StudioPrompt`] (`showStudioPrompt`: a single
 //! line of text, returns the trimmed text, or nothing on cancel / empty).
 //!
-//! A dialog is a modal over the whole window, drag bar included, as a
+//! A dialog is a modal over the whole window, the page toolbars included, as a
 //! Flutter dialog route sat above every page: the screen asks the app to show
 //! it (`ui::Update::dialog`), the app draws it over the page and routes the
 //! [`DialogResult`] back to the screen as one of its messages. The pieces are
@@ -19,7 +19,7 @@
 //! keyboard: nothing beneath sees a key.
 //!
 //! The app's custom modals go through the same stack, so they too cover the
-//! drag bar as a Flutter dialog route did: the update download dialog
+//! page toolbar as a Flutter dialog route did: the update download dialog
 //! ([`Dialog::UpdateDownload`], Home's banner and Settings), the new
 //! technique dialog ([`Dialog::NewTechnique`], the technique library) and
 //! the example rename ([`Dialog::RenameExample`], a technique page). They
@@ -42,25 +42,28 @@ use std::time::Duration;
 use crate::ui::core::text;
 use iced::alignment::{Horizontal, Vertical};
 use iced::widget::{center, column, container, opaque, row, stack, Space};
-use iced::{keyboard, widget, Background, Color, Element, Event, Length, Padding};
+use iced::{keyboard, widget, Background, Color, Element, Event, Length, Pixels};
 
+use super::controls::{dialog_button, secondary_button, DialogButton};
 use super::focus_traversal::focus_scope;
 use super::gesture::{any_tap_event, AnyTap};
-use super::studio_button::{studio_button, StudioButtonVariant};
 use super::studio_text::studio_text;
 use super::wrap::Wrap;
 use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::motion::{Controller, Curve, Status};
-use crate::ui::core::theme::{self, faded, font, Studio};
+use crate::ui::core::theme::{self, faded, font, type_scale, Studio};
 use crate::ui::core::widgets::opacity_layer::opacity_layer;
 use crate::ui::home::widgets::update_notice::{DialogOutcome, UpdateDownloadDialog};
 use crate::ui::technique_library::widgets::media::technique_media_section::RenameExampleDialog;
 use crate::ui::technique_library::widgets::technique_dialogs::NewTechniqueDialog;
 
 /// `showConfirmDialog(title: ..., body: ..., ...)`. Defaults as in Dart:
-/// "Delete" / "Cancel", destructive (red confirm button), no icon. The title
-/// is held to two lines so a long song name can't blow up the dialog; an
-/// optional icon renders in an accent-tinted badge before it.
+/// "Delete" / "Cancel", destructive (a red confirm button), no icon. The
+/// title is held to two lines so a long song name can't blow up the
+/// dialog; an optional icon renders in an accent-tinted badge before it.
+/// Drawn as `DESIGN.md`'s dialogs: a 13 px semibold title, a 12 px
+/// `TEXT_SECONDARY` body, the buttons right-aligned (secondary, then the
+/// primary or destructive one).
 #[derive(Debug, Clone)]
 pub struct ConfirmDialog {
     pub title: String,
@@ -359,31 +362,62 @@ impl DialogState {
     }
 }
 
-/// The card's outer geometry: 400 wide, 22 padding inside its 1 px border
-/// (a Flutter `Container`'s padding includes its decoration's border; an
-/// iced border takes no room), inside a 24 margin.
-fn card<'a>(content: Element<'a, Message>) -> Element<'a, Message> {
+/// A dialog card's width.
+pub const CARD_WIDTH: f32 = 400.0;
+
+/// The card's padding inside its inset outline.
+pub const CARD_PADDING: f32 = 20.0;
+
+/// The card (`DESIGN.md`, Dialogs: `theme::dialog_card`, a `SURFACE` card,
+/// radius 10, an inset `BORDER_STRONG` outline, a soft shadow): 400 wide,
+/// 20 of padding, inside a 24 margin.
+pub fn card<'a, M: 'a>(content: Element<'a, M>) -> Element<'a, M> {
     container(
         container(content)
-            .width(400)
-            .padding(23)
+            .width(CARD_WIDTH)
+            .padding(CARD_PADDING)
             .style(theme::dialog_card),
     )
     .padding(24)
     .into()
 }
 
-fn buttons<'a>(
-    cancel: &str,
-    confirm: &str,
-    confirm_variant: StudioButtonVariant,
-) -> Element<'a, Message> {
+/// A dialog's title: 13 px semibold `TEXT_PRIMARY`.
+pub fn title<'a, M: 'a>(text: &'a str) -> Element<'a, M> {
+    studio_text(text)
+        .size(type_scale::TITLE)
+        .font(font::SEMIBOLD)
+        .line_height(Pixels(18.0))
+        .color(Studio::TEXT_PRIMARY)
+        .width(Length::Fill)
+        .ellipsis(2)
+        .into()
+}
+
+/// A field's label: sentence case, 11 px `TEXT_SECONDARY`.
+pub fn field_label<'a, M: 'a>(text: &'a str) -> Element<'a, M> {
+    studio_text(text)
+        .size(type_scale::LABEL)
+        .line_height(Pixels(type_scale::LINE))
+        .color(Studio::TEXT_SECONDARY)
+        .into()
+}
+
+/// The buttons, right-aligned: the secondary (cancel) then the primary
+/// (confirm), 8 apart.
+pub fn buttons<'a, M: Clone + 'a>(
+    cancel: &'a str,
+    on_cancel: M,
+    confirm: &'a str,
+    on_confirm: Option<M>,
+    kind: DialogButton,
+) -> Element<'a, M> {
     row![
         Space::new().width(Length::Fill),
-        studio_button(cancel, Message::Cancel),
-        studio_button(confirm, Message::Confirm).variant(confirm_variant),
+        secondary_button(cancel, Some(on_cancel)),
+        dialog_button(confirm, on_confirm, kind),
     ]
-    .spacing(10)
+    .spacing(8)
     .into()
 }
 
@@ -391,85 +425,70 @@ fn confirm_card(d: &ConfirmDialog) -> Element<'_, Message> {
     let mut heading = row![].align_y(Vertical::Top);
     if let Some(icon) = d.icon {
         heading = heading.push(
-            container(icons::icon(icon, 15.0, Studio::ACCENT))
-                .center_x(30)
-                .center_y(30)
-                .style(move |_| theme::boxed(Some(theme::alpha(Studio::ACCENT, 0.14)), 8.0, None)),
+            container(icons::icon(icon, 14.0, Studio::ACCENT_BRIGHT))
+                .center_x(28)
+                .center_y(28)
+                .style(move |_| {
+                    theme::boxed(
+                        Some(theme::alpha(Studio::ACCENT, 0.14)),
+                        theme::radius::WELL,
+                        None,
+                    )
+                }),
         );
         heading = heading.push(Space::new().width(12));
     }
-    heading = heading.push(
-        // Two lines at most, the second ellipsized past them.
-        studio_text(d.title.as_str())
-            .size(15)
-            .font(font::BOLD)
-            .line_height(1.3)
-            .color(Studio::TEXT_PRIMARY)
-            .width(Length::Fill)
-            .ellipsis(2),
-    );
+    // Two lines at most, the second ellipsized past them.
+    heading = heading.push(title(d.title.as_str()));
     let mut content = column![heading];
     if let Some(body) = &d.body {
-        content = content.push(Space::new().height(12)).push(
+        content = content.push(Space::new().height(8)).push(
             text(body.as_str())
-                .size(13)
-                .line_height(1.5)
+                .size(type_scale::BODY)
+                .line_height(Pixels(18.0))
                 .color(Studio::TEXT_SECONDARY),
         );
     }
-    let variant = if d.destructive {
-        StudioButtonVariant::Danger
+    let kind = if d.destructive {
+        DialogButton::Destructive
     } else {
-        StudioButtonVariant::Accent
+        DialogButton::Primary
     };
-    content = content.push(Space::new().height(22)).push(buttons(
+    content = content.push(Space::new().height(20)).push(buttons(
         &d.cancel_label,
+        Message::Cancel,
         &d.confirm_label,
-        variant,
+        Some(Message::Confirm),
+        kind,
     ));
     card(content.into())
 }
 
 fn prompt_card<'a>(p: &'a StudioPrompt, value: &str, input: widget::Id) -> Element<'a, Message> {
-    let mut content = column![
-        text(p.title.as_str())
-            .size(15)
-            .font(font::BOLD)
-            .color(Studio::TEXT_PRIMARY),
-        Space::new().height(16),
-    ];
+    let mut content = column![title(p.title.as_str()), Space::new().height(14)];
     if !p.label.is_empty() {
         content = content
-            .push(
-                studio_text(p.label.to_uppercase())
-                    .size(10.5)
-                    .font(font::BOLD)
-                    .letter_spacing(0.6)
-                    .color(Studio::TEXT_FAINT),
-            )
+            .push(field_label(p.label.as_str()))
             .push(Space::new().height(6));
     }
     let field = super::text_field::text_input(&p.hint, value)
         .id(input)
         .on_input(Message::Input)
         .on_submit(Message::Confirm)
-        .size(14)
-        .line_height(1.0)
+        .size(theme::FIELD_TEXT_SIZE)
+        .line_height(Pixels(type_scale::LINE))
         .padding(theme::FIELD_PADDING)
         .caret_color(Studio::ACCENT)
-        .style(theme::studio_input);
+        .style(theme::field);
     content = content
-        .push(
-            container(field)
-                // 10 by 12 inside the well's 1 px border.
-                .padding(Padding::from([11, 13]))
-                .style(theme::inset(8.0)),
-        )
-        .push(Space::new().height(22))
+        .push(field)
+        .push(Space::new().height(20))
         .push(buttons(
             &p.cancel_label,
+            Message::Cancel,
             &p.confirm_label,
-            StudioButtonVariant::Accent,
+            Some(Message::Confirm),
+            DialogButton::Primary,
         ));
     card(content.into())
 }
@@ -965,15 +984,15 @@ mod tests {
 
         crate::ui::core::widgets::studio_text::testing::load_fonts();
         let title = "Delete the take “Verse two, third pass, with the harmony \
-                     line and the ad-libs” and every clip recorded into it?";
+                     line, the ad-libs, the breath before the bridge and the \
+                     long held note at its end” and every clip recorded into it?";
         let state = DialogState::new(ConfirmDialog::new(title).body("This cannot be undone."));
         let mut ui = iced_test::simulator(state.view());
         // Found by its full text, as a Flutter finder reads `Text.data`...
         let full = ui.find(title).expect("the title").bounds();
-        // ...it shows two lines (15 px at 1.3: 19.5, which SkParagraph's
-        // ascent and descent, scaled to it, round up to 20), the second
+        // ...it shows two lines (13 px on an 18 px line), the second
         // ending in "…".
-        assert!((full.height - 2.0 * 20.0).abs() < 0.01, "{full:?}");
+        assert!((full.height - 2.0 * 18.0).abs() < 0.01, "{full:?}");
         let shown = ui
             .find(|candidate: Candidate<'_>| match candidate {
                 Candidate::Text { content, .. } if content.ends_with('\u{2026}') => {
@@ -989,18 +1008,19 @@ mod tests {
         let state = DialogState::new(ConfirmDialog::new("Delete?"));
         let mut ui = iced_test::simulator(state.view());
         let short = ui.find("Delete?").expect("the title").bounds();
-        assert!((short.height - 20.0).abs() < 0.01, "{short:?}");
+        assert!((short.height - 18.0).abs() < 0.01, "{short:?}");
     }
 
     #[test]
-    fn the_prompt_shows_its_label_upper_cased_and_its_buttons() {
+    fn the_prompt_shows_its_label_in_sentence_case_and_its_buttons() {
         let mut state = DialogState::new(
             StudioPrompt::new("New practice")
                 .label("Name")
                 .hint("Song title"),
         );
         let messages = run(&mut state, |ui| {
-            assert!(ui.find("NAME").is_ok());
+            assert!(ui.find("Name").is_ok());
+            assert!(ui.find("NAME").is_err());
             assert!(ui.find("New practice").is_ok());
             ui.click("Create").expect("confirm button");
         });
@@ -1009,21 +1029,20 @@ mod tests {
 
     #[test]
     fn the_prompt_card_and_its_field_sit_inside_their_borders() {
-        // A 400-wide card centred in the 1024-wide window, 22 inside its
-        // 1 px border; the well 10 by 12 inside its own; the field
-        // forui's content padding less compact density's (10 across, 6
-        // down): a 14 px line and 12.
+        // A 400-wide card centred in the 1024-wide window, 20 inside its
+        // inset outline; the field draws its own 28 px well across it: a
+        // 16 px line and 6 above and below.
         let state = DialogState::new(StudioPrompt::new("Rename").hint("Song title"));
         let mut ui = iced_test::simulator(state.view());
         let title = ui.find("Rename").expect("the title").bounds();
         let field = ui.find("Song title").expect("the field").bounds();
-        let card_left = (1024.0 - 400.0) / 2.0;
-        assert_eq!(title.x, card_left + 23.0, "{title:?}");
-        assert_eq!(field.x, card_left + 23.0 + 13.0, "{field:?}");
-        assert_eq!(field.width, 400.0 - 2.0 * 23.0 - 2.0 * 13.0, "{field:?}");
-        assert_eq!(field.height, 14.0 + 12.0, "{field:?}");
-        // The title (15 px), 16, then the well's top border and padding.
-        assert_eq!(field.y - title.y, 15.0 + 16.0 + 11.0, "{field:?}");
+        let card_left = (1024.0 - CARD_WIDTH) / 2.0;
+        assert_eq!(title.x, card_left + CARD_PADDING, "{title:?}");
+        assert_eq!(field.x, card_left + CARD_PADDING, "{field:?}");
+        assert_eq!(field.width, CARD_WIDTH - 2.0 * CARD_PADDING, "{field:?}");
+        assert_eq!(field.height, theme::FIELD_HEIGHT, "{field:?}");
+        // The title (an 18 px line), then 14.
+        assert_eq!(field.y - title.y, 18.0 + 14.0, "{field:?}");
     }
 
     #[test]

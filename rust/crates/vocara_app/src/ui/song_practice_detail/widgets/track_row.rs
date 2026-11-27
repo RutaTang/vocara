@@ -626,7 +626,6 @@ fn header<'a, M>(r: &TrackRow<'a, M>, accent: Color) -> Element<'a, Message> {
         Space::new().width(10),
         container(studio_fader(
             track.volume,
-            accent,
             Message::Volume,
             Message::VolumeCommit
         ))

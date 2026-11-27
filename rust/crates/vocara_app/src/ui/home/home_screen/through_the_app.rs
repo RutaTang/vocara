@@ -54,9 +54,15 @@ fn click(app: &mut App, label: &str) {
     }
 }
 
-/// The practice page's back chevron (its transport bar's).
+/// The page's back button: a toolbar's, labelled "Back", or the practice
+/// page's chevron (its transport bar's).
 fn back(app: &mut App) {
-    click(app, &char::from(Icon::ChevronLeft).to_string());
+    let label = if shows(app, "Back") {
+        "Back".to_string()
+    } else {
+        char::from(Icon::ChevronLeft).to_string()
+    };
+    click(app, &label);
 }
 
 fn shows(app: &App, label: &str) -> bool {

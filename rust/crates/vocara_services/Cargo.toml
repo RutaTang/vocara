@@ -124,9 +124,10 @@ ureq = { workspace = true, features = ["rustls", "gzip"] }
 rfd.workspace = true
 
 # The microphone permission prompt (AVFoundation), see mic_permission.rs,
-# the quit requests, the menu bar and the open and save panels (AppKit), see
-# quit_request.rs, app_menu.rs and file_panels.rs, and the example players'
-# AVPlayer backend (with `device`), see media_player.rs.
+# the quit requests, the menu bar, the window's toolbar and the open and
+# save panels (AppKit), see quit_request.rs, app_menu.rs, window_toolbar.rs
+# and file_panels.rs, and the example players' AVPlayer backend (with
+# `device`), see media_player.rs.
 [target.'cfg(target_os = "macos")'.dependencies]
 ureq = { workspace = true, features = ["native-tls", "gzip"] }
 objc2 = "0.6"
@@ -158,6 +159,8 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
     # NSApplicationActivationPolicy (file_panels.rs).
     "NSRunningApplication",
     "NSSavePanel",
+    # The window's empty unified toolbar (window_toolbar.rs).
+    "NSToolbar",
     "NSWindow",
 ] }
 # Not only with `device`: the menu bar needs it too.

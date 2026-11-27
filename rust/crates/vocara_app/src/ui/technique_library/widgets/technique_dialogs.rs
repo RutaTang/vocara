@@ -204,7 +204,7 @@ mod tests {
         // Still open, still titled.
         let mut ui = iced_test::simulator(dialog.view());
         assert!(ui.find("New technique").is_ok());
-        assert!(ui.find("NAME").is_ok());
+        assert!(ui.find("Name").is_ok());
     }
 
     #[test]

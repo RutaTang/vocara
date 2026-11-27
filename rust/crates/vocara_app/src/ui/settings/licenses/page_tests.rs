@@ -17,7 +17,6 @@ use iced_test::runtime::user_interface::{self, UserInterface};
 use iced_test::selector::{Candidate, Selector, Target};
 use iced_winit::gesture::{self, Phase, Wheel};
 
-use super::back_button::{HOVERED, PRESSED};
 use super::list_tile::{two_line, SUBTITLE_SIZE, TITLE_SIZE};
 use super::sheet::SCROLLED_UNDER_TINT;
 use super::*;
@@ -30,13 +29,12 @@ use crate::ui::home::testing::run_task;
 /// A millisecond.
 const MS: Duration = Duration::from_millis(1);
 
-/// A 1440 × 900 window: the page under the drag bar is 872 tall.
-const SIZE: Size = Size::new(1440.0, 872.0);
+/// A 1440 × 900 window: the page is all of it.
+const SIZE: Size = Size::new(1440.0, 900.0);
 
-/// Where the detail card starts: `56 · h / (h + 28)`, under the 28 px drag
-/// bar.
+/// Where the detail card starts: right under the page's toolbar.
 fn card_top() -> f32 {
-    56.0 * SIZE.height / (SIZE.height + 28.0)
+    crate::ui::core::widgets::toolbar::HEIGHT
 }
 
 /// The card's left and right edges: from the master's 320 to the gutter
@@ -47,8 +45,8 @@ const CARD_RIGHT: f32 = 1440.0 - 28.0;
 /// The about block's height: 24 + 20 + 14 + 18 + 12 + 18 + 14 + 24.
 const ABOUT: f32 = 144.0;
 
-/// The app bar's height (two toolbar rows).
-const APP_BAR: f32 = 112.0;
+/// The app bar's height: the page's toolbar and the 56 px action row.
+const APP_BAR: f32 = crate::ui::core::widgets::toolbar::HEIGHT + 56.0;
 
 /// "first" (three licenses, the first long enough to scroll), "second"
 /// (two) and enough more packages (one each) to scroll the list.
@@ -274,20 +272,18 @@ fn settled(window: &mut Window) -> (LicensesPage, Instant) {
 
 // ------------------------------------------------------------ the titles
 
-// `AppBar._getEffectiveCenterTitle`: macOS centres the title of an app
-// bar with fewer than two actions; the page's bar has none, the detail's
-// `SliverAppBar` none either.
+// The page's title sits in its toolbar after the back button (as every
+// page's does); the detail's `SliverAppBar` centres its own (macOS centres
+// the title of an app bar with fewer than two actions).
 #[test]
-fn the_app_bar_and_the_detail_header_centre_their_titles() {
+fn the_toolbar_and_the_detail_header_place_their_titles() {
+    use crate::ui::core::widgets::toolbar::{HEIGHT, LEADING_INSET};
     let mut window = Window::new();
     let (page, _) = settled(&mut window);
     let title = window.find(&page, "Licenses", 0);
+    assert!(close(title.x, LEADING_INSET + 28.0 + 8.0), "{title:?}");
     assert!(
-        (title.center_x() - SIZE.width / 2.0).abs() < 0.5,
-        "{title:?}"
-    );
-    assert!(
-        close(title.y, 19.0) && close(title.height, 18.0),
+        (title.center_y() - (HEIGHT - 1.0) / 2.0).abs() < 1.0,
         "{title:?}"
     );
 
@@ -441,64 +437,50 @@ fn a_pressed_row_highlights_and_lets_go_once_picked() {
 // -------------------------------------------------------- the back button
 
 #[test]
-fn the_back_button_is_the_m3_app_bars_under_forui() {
+fn the_back_button_is_the_toolbar_s() {
+    use crate::ui::core::widgets::toolbar::{HEIGHT, LEADING_INSET};
     let mut window = Window::new();
     let (mut page, t) = settled(&mut window);
-    // The 40 px button in the 56 px leading slot: 8..48 both ways.
-    let left = Point::new(12.0, 28.0);
-    let right = Point::new(44.0, 28.0);
-    let outside = Point::new(6.0, 28.0);
-    let corner = Point::new(8.0, 8.0);
-    assert!(near(window.pixel(left), Studio::SURFACE), "at rest");
-    // The icon: `arrow_back_ios_new_rounded`, its stroke at the tip, its
-    // notch clear.
-    let ink = window.ink(Point::new(23.0, 27.0), Point::new(26.0, 30.0));
-    assert!(ink >= 0xD0, "the arrow's tip: {ink:#x}");
-    // Its rounded ends, up and down at 16.88 of 24 (in the 24 px box at 16).
-    for y in [19.0, 36.0] {
-        let end = window.ink(Point::new(31.0, y), Point::new(34.0, y + 2.0));
-        assert!(end >= 0xD0, "an end at {y}: {end:#x}");
-    }
-    assert!(near(window.pixel(Point::new(30.0, 28.0)), Studio::SURFACE));
-    assert!(near(window.pixel(Point::new(36.0, 28.0)), Studio::SURFACE));
+    // The 28 px icon button first in the toolbar, centred on its row.
+    let middle = (HEIGHT - 1.0) / 2.0;
+    let centre = Point::new(LEADING_INSET + 14.0, middle);
+    let inside = Point::new(LEADING_INSET + 3.0, middle);
+    // Where its tooltip's text will show, 6 under it.
+    let tip = (
+        Point::new(LEADING_INSET - 8.0, middle + 14.0 + 7.0),
+        Point::new(LEADING_INSET + 36.0, middle + 14.0 + 22.0),
+    );
+    let before = window.ink(tip.0, tip.1);
+    assert!(near(window.pixel(inside), Studio::TOOLBAR), "at rest");
+    // The chevron, in `TEXT_SECONDARY`.
+    let ink = window.ink(
+        Point::new(centre.x - 4.0, centre.y - 4.0),
+        Point::new(centre.x + 2.0, centre.y + 4.0),
+    );
+    assert!(ink >= 0x80, "the chevron: {ink:#x}");
 
-    window.point_at(Point::new(28.0, 28.0));
+    window.point_at(centre);
     window.frame(&mut page, &[], t);
+    assert!(near(window.pixel(inside), Studio::HOVER), "the hover fill");
     assert!(
-        near(window.pixel(left), Zinc::SECONDARY),
-        "forui's ghost background, at once"
+        near(
+            window.pixel(Point::new(LEADING_INSET - 2.0, middle)),
+            Studio::TOOLBAR
+        ),
+        "28 wide"
     );
-    window.frame(&mut page, &[], t + 25 * MS);
-    let half = Color {
-        a: HOVERED.a / 2.0,
-        ..HOVERED
-    };
-    assert!(
-        near(window.pixel(left), over(half, Zinc::SECONDARY)),
-        "half"
-    );
-    window.frame(&mut page, &[], t + 50 * MS);
-    let hovered = over(HOVERED, Zinc::SECONDARY);
-    assert!(near(window.pixel(left), hovered), "in");
-    assert!(near(window.pixel(right), hovered));
-    assert!(near(window.pixel(outside), Studio::SURFACE), "40 wide");
-    assert!(near(window.pixel(corner), Studio::SURFACE), "rounded 8");
 
-    // Its tooltip, 24 below its centre, faded in over 150 ms.
+    // Its tooltip, faded in over 150 ms: its text's light ink.
     window.frame(&mut page, &[], t + 150 * MS);
+    let ink = window.ink(tip.0, tip.1);
     assert!(
-        near(window.pixel(Point::new(28.0, 53.0)), Zinc::FOREGROUND),
-        "Back"
+        ink >= 0xC0 && ink > before,
+        "Back: {ink:#x} over {before:#x}"
     );
 
     let t1 = t + 200 * MS;
     window.frame(&mut page, &[press()], t1);
-    window.frame(&mut page, &[], t1 + 200 * MS);
-    assert!(
-        near(window.pixel(left), over(PRESSED, hovered)),
-        "pressed: 10 % over the hover"
-    );
-    let reported = window.frame(&mut page, &[release()], t1 + 250 * MS);
+    let reported = window.frame(&mut page, &[release()], t1 + 50 * MS);
     assert_eq!(reported, vec![Message::Back]);
 }
 
@@ -762,7 +744,9 @@ fn a_finger_on_the_trackpad_stops_the_sheets_fling_over_the_card_alone() {
         &[pad.momentum(Phase::Began, 0.0, 300.0, up)],
         up + 16 * MS,
     );
-    let changed = up + 32 * MS;
+    // Read while the fling is still on its way: 24 ms in, short of the
+    // sheet's full height (it has 22 px left to go under the toolbar).
+    let changed = up + 24 * MS;
     window.frame_sent(
         &mut page,
         &[pad.momentum(Phase::Changed, 0.0, 300.0, changed)],

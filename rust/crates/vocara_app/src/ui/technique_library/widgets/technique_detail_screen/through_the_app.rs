@@ -44,7 +44,7 @@ fn settings() -> iced::Settings {
     settings.fonts = font::FACES
         .iter()
         .copied()
-        .chain([icons::FONT_BYTES])
+        .chain([crate::ui::core::icons::FONT_BYTES])
         .map(Cow::Borrowed)
         .collect();
     settings
@@ -68,7 +68,7 @@ fn nth(label: &str, n: usize) -> impl FnMut(Candidate<'_>) -> Option<Target> + S
 }
 
 fn chevron() -> String {
-    char::from(Icon::ChevronLeft).to_string()
+    "Back".to_string()
 }
 
 /// A library holding "Twang" (and its id).
@@ -277,7 +277,7 @@ fn edit_then_save_persists_through_the_repository() {
         shows(&app, EDIT_TITLE),
         "tapping Edit opens the editor form"
     );
-    assert!(shows(&app, "NAME") && shows(&app, "SUMMARY"));
+    assert!(shows(&app, "Name") && shows(&app, "Summary"));
     send(
         &mut app,
         Message::Field(LineField::Name, "Belted Twang".into()),
@@ -504,7 +504,7 @@ fn a_library_snack_bar_waits_behind_it() {
 
 // ------------------------------------------------ a video in fullscreen
 
-/// What a drag on the window drag bar sends.
+/// What a drag on the page toolbar's empty area sends.
 fn drag_the_bar(app: &App) -> Vec<app::Message> {
     use iced::mouse;
     let mut ui = ui(app);
@@ -520,7 +520,7 @@ fn drag_the_bar(app: &App) -> Vec<app::Message> {
 }
 
 // media_kit's fullscreen route sat on the root navigator: over every page
-// and the window drag bar, taking the clicks and keys it covered.
+// and the page toolbar, taking the clicks and keys it covered.
 #[test]
 fn a_fullscreen_video_covers_the_whole_window_and_takes_its_keys() {
     use crate::ui::technique_library::view_model::technique_detail_view_model::tests::support::{

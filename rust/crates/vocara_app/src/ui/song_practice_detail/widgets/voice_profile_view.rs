@@ -93,7 +93,7 @@ pub fn range_view<'a, M: 'a>(src: &dyn AnalysisSource) -> Element<'a, M> {
             return studio_hint(RANGE_EMPTY_HINT).into();
         };
         let mut stats = row![stat(
-            "RANGE",
+            "Range",
             format!("{} – {}", note_name_for_midi(low), note_name_for_midi(high)),
             format!("{} semitones", high - low),
             Studio::TEXT_PRIMARY,
@@ -101,7 +101,7 @@ pub fn range_view<'a, M: 'a>(src: &dyn AnalysisSource) -> Element<'a, M> {
         .spacing(28);
         if let (Some(lo), Some(hi)) = (p.tess_lo_midi, p.tess_hi_midi) {
             stats = stats.push(stat(
-                "TESSITURA",
+                "Tessitura",
                 format!("{} – {}", note_name_for_midi(lo), note_name_for_midi(hi)),
                 "comfortable zone".to_string(),
                 Studio::TEXT_PRIMARY,
@@ -109,7 +109,7 @@ pub fn range_view<'a, M: 'a>(src: &dyn AnalysisSource) -> Element<'a, M> {
         }
         if let Some(passaggio) = p.passaggio_midi {
             stats = stats.push(stat(
-                "PASSAGGIO",
+                "Passaggio",
                 note_name_for_midi(passaggio),
                 passaggio_shift(p.passaggio_jump_db).to_string(),
                 Studio::RECORD,
@@ -122,7 +122,7 @@ pub fn range_view<'a, M: 'a>(src: &dyn AnalysisSource) -> Element<'a, M> {
                     .vertical_spacing(12)
                     .align_x(Horizontal::Center),
                 Space::new().height(18),
-                cap_label("RANGE  ·  tessitura highlighted, passaggio marked"),
+                cap_label("Range · tessitura highlighted, passaggio marked"),
                 Space::new().height(6),
                 canvas_widget(RangeBarPainter { p })
                     .width(Length::Fill)
@@ -191,12 +191,12 @@ pub fn dynamics_view<'a, M: 'a>(src: &dyn AnalysisSource) -> Element<'a, M> {
             column![
                 dynamics_stats(p.dynamic_range_db(), p.soft_db, p.loud_db, None),
                 Space::new().height(16),
-                cap_label("LOUDNESS OVER TIME"),
+                cap_label("Loudness over time"),
                 Space::new().height(6),
                 curve,
                 Space::new().height(10),
                 row![
-                    cap_label("SPAN"),
+                    cap_label("Span"),
                     Space::new().width(12),
                     canvas_widget(DynBarPainter {
                         soft_db: p.soft_db,
@@ -230,7 +230,7 @@ fn dynamics_stats<'a, M: 'a>(
     lead: Option<Element<'a, M>>,
 ) -> Element<'a, M> {
     let range = stat(
-        "DYNAMIC RANGE",
+        "Dynamic range",
         format!("{} dB", round_to_i64(range_db)),
         "soft → loud".to_string(),
         Studio::TEXT_PRIMARY,
@@ -244,13 +244,13 @@ fn dynamics_stats<'a, M: 'a>(
     row![
         first,
         stat(
-            "SOFTEST",
+            "Softest",
             format!("{} dBFS", round_to_i64(soft_db)),
             "5th pct".to_string(),
             Studio::TEXT_PRIMARY,
         ),
         stat(
-            "LOUDEST",
+            "Loudest",
             format!("{} dBFS", round_to_i64(loud_db)),
             "95th pct".to_string(),
             Studio::TEXT_PRIMARY,
@@ -282,7 +282,7 @@ fn live_dynamics_panel<'a, M: 'a>(monitor: &MonitorService) -> Element<'a, M> {
         column![
             dynamics_stats(d.range_db, d.soft_db, d.loud_db, Some(dot.into())),
             Space::new().height(16),
-            cap_label("LOUDNESS (LIVE)"),
+            cap_label("Loudness (live)"),
             Space::new().height(6),
             container(
                 canvas_widget(LiveLoudnessPainter { loud })

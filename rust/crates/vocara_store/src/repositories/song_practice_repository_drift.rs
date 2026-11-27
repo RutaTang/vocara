@@ -20,7 +20,9 @@ use vocara_model::models::audio_track::{AudioClip, AudioTrack, AudioTrackKind};
 use vocara_model::models::fx_bus::FxBus;
 use vocara_model::models::lyric_line::LyricLine;
 use vocara_model::models::practice_note::PracticeNote;
-use vocara_model::models::practice_summary::PracticeSummary;
+use vocara_model::models::practice_summary::{
+    PracticePreview, PracticeSummary, PreviewClip, PreviewSource,
+};
 use vocara_model::models::song_practice::SongPractice;
 use vocara_model::models::take_version::TakeVersion;
 use vocara_model::models::technique_marker::TechniqueMarker;
@@ -1765,6 +1767,130 @@ impl SongPracticeRepository for SongPracticeRepositoryDrift {
                     id: p.id,
                     title: p.title,
                 }
+            })
+            .collect())
+    }
+
+    fn list_practice_previews(&self) -> Result<Vec<PracticePreview>> {
+        // Three cheap reads (no blob but the chosen tracks' peaks): the
+        // practices, their live vocal and backing tracks, and those tracks'
+        // live clips with their assets' content hashes.
+        let practices: Vec<(String, i64, Option<String>)> = self.db.query(
+            "SELECT id, timeline_duration_ms, active_interpretation_id FROM practices \
+             WHERE deleted_at IS NULL",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?;
+        // (track, practice, vocal, interpretation), in the tracks' order.
+        let tracks: Vec<(String, String, bool, Option<String>)> = self.db.query(
+            "SELECT id, practice_id, kind = 'vocal', interpretation_id FROM tracks \
+             WHERE deleted_at IS NULL AND kind IN ('vocal', 'accompaniment') \
+             ORDER BY practice_id, order_index, created_at, id",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )?;
+        // (start, duration, content hash) per track, in the clips' order.
+        let mut clips: HashMap<String, Vec<(i64, i64, String)>> = HashMap::new();
+        for (track, start, duration, hash) in self.db.query(
+            "SELECT c.track_id, c.start_ms, c.duration_ms, a.content_hash FROM clips c \
+             JOIN assets a ON a.id = c.asset_id WHERE c.deleted_at IS NULL \
+             ORDER BY c.track_id, c.order_index, c.id",
+            [],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, String>(3)?,
+                ))
+            },
+        )? {
+            clips
+                .entry(track)
+                .or_default()
+                .push((start, duration, hash));
+        }
+        // Each practice's clips' end, over every track it has.
+        let mut ends: HashMap<&str, i64> = HashMap::new();
+        for (track, practice, _, _) in &tracks {
+            for (start, duration, _) in clips.get(track).map_or(&[][..], Vec::as_slice) {
+                let end = ends.entry(practice.as_str()).or_default();
+                *end = (*end).max(start + duration);
+            }
+        }
+        // The track each card draws: the first take with audio (the active
+        // interpretation's first), else the first backing with audio.
+        let active: HashMap<&str, Option<&str>> = practices
+            .iter()
+            .map(|(id, _, active)| (id.as_str(), active.as_deref()))
+            .collect();
+        let mut chosen: HashMap<&str, (&str, PreviewSource, bool)> = HashMap::new();
+        for (track, practice, vocal, interpretation) in &tracks {
+            if !clips.contains_key(track) {
+                continue;
+            }
+            let source = if *vocal {
+                PreviewSource::Take
+            } else {
+                PreviewSource::Backing
+            };
+            let in_active = *vocal
+                && active.get(practice.as_str()).copied().flatten() == interpretation.as_deref();
+            let better = match chosen.get(practice.as_str()) {
+                None => true,
+                Some((_, PreviewSource::Backing, _)) => source == PreviewSource::Take,
+                Some((_, PreviewSource::Take, was_active)) => {
+                    source == PreviewSource::Take && in_active && !was_active
+                }
+            };
+            if better {
+                chosen.insert(practice.as_str(), (track.as_str(), source, in_active));
+            }
+        }
+        // Their peaks, from the waveform cache.
+        let hashes: Vec<String> = chosen
+            .values()
+            .flat_map(|(track, _, _)| clips.get(*track).into_iter().flatten())
+            .map(|(_, _, hash)| hash.clone())
+            .collect::<IndexSet<_>>()
+            .into_iter()
+            .collect();
+        let mut peaks: HashMap<String, Vec<f64>> = HashMap::new();
+        for chunk in AssetStore::in_chunks(&hashes) {
+            let mut params: Vec<&dyn rusqlite::types::ToSql> = chunk
+                .iter()
+                .map(|h| h as &dyn rusqlite::types::ToSql)
+                .collect();
+            params.push(&WAVEFORM_ALGO_VERSION);
+            for w in self.db.select::<WaveformCacheRow>(
+                &format!(
+                    "content_hash IN ({}) AND algo_version = ?{}",
+                    placeholders(chunk.len()),
+                    chunk.len() + 1
+                ),
+                &*params,
+            )? {
+                peaks.insert(w.content_hash, decode_peaks(&w.peaks));
+            }
+        }
+        Ok(practices
+            .iter()
+            .map(|(id, timeline, _)| {
+                let length = (*timeline).max(ends.get(id.as_str()).copied().unwrap_or(0));
+                let Some((track, source, _)) = chosen.get(id.as_str()) else {
+                    return PracticePreview::compose(id.clone(), length, None, &[]);
+                };
+                let drawn: Vec<PreviewClip> = clips
+                    .get(*track)
+                    .into_iter()
+                    .flatten()
+                    .map(|(start, duration, hash)| PreviewClip {
+                        start_ms: *start,
+                        duration_ms: *duration,
+                        peaks: peaks.get(hash).cloned().unwrap_or_default(),
+                    })
+                    .collect();
+                PracticePreview::compose(id.clone(), length, Some(*source), &drawn)
             })
             .collect())
     }

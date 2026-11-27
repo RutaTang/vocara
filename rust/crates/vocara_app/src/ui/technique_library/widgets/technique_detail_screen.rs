@@ -73,7 +73,7 @@ use std::time::{Duration, Instant};
 
 use crate::ui::core::text;
 use iced::alignment::Vertical;
-use iced::widget::{button, center, column, container, stack, Column, Row, Space};
+use iced::widget::{center, column, container, stack, Column, Row, Space};
 use iced::{widget, Element, Font, Length, Padding, Subscription, Task};
 use vocara_model::models::technique::Technique;
 use vocara_model::models::technique_media::TechniqueMedia;
@@ -94,8 +94,8 @@ use super::technique_analysis_section as analysis;
 use crate::app::library::RemoteAppliedBroadcast;
 use crate::router::{Navigation, Route};
 use crate::services::Services;
-use crate::ui::core::icons::{self, Icon};
-use crate::ui::core::theme::{self, alpha, bare_button, boxed, font, Studio};
+use crate::ui::core::icons::Icon;
+use crate::ui::core::theme::{self, alpha, boxed, font, Studio};
 use crate::ui::core::widgets::confirm_dialog::ConfirmDialog;
 use crate::ui::core::widgets::fading_scrollbar::{scrollable, Fading};
 use crate::ui::core::widgets::spectrogram_painter::{release_spectrogram_images, RenderRequest};
@@ -103,6 +103,7 @@ use crate::ui::core::widgets::studio_button::{studio_button, StudioButtonVariant
 use crate::ui::core::widgets::studio_hint::spinner;
 use crate::ui::core::widgets::studio_text::studio_text;
 use crate::ui::core::widgets::text_field::editor as text_editor;
+use crate::ui::core::widgets::toolbar;
 use crate::ui::snack::{fixed_bar, SnackEvent, SnackQueue, SnackStyle};
 use crate::ui::song_practice_detail::widgets::voiceprint_view::{
     self as voiceprint, VoiceprintState,
@@ -1006,32 +1007,13 @@ impl TechniqueDetailScreen {
         // through Cancel/Save, so there's no "back" affordance to confuse it.
         if !self.editing {
             bar = bar
-                .push(
-                    button(
-                        container(icons::icon(Icon::ChevronLeft, 20.0, Studio::TEXT_SECONDARY))
-                            .center_x(32)
-                            .center_y(32),
-                    )
-                    .padding(0)
-                    .style(bare_button)
-                    .on_press(Message::Back),
-                )
-                .push(Space::new().width(6));
-        } else {
-            bar = bar.push(Space::new().width(8));
+                .push(toolbar::back_button(Message::Back))
+                .push(Space::new().width(8));
         }
         // Filling (not shrinking with a spacer) so the title takes the
         // middle and the action buttons sit flush against the right edge.
         bar = bar
-            .push(
-                studio_text(title)
-                    .size(18)
-                    .font(font::BOLD)
-                    .letter_spacing(0.3)
-                    .color(Studio::TEXT_PRIMARY)
-                    .width(Length::Fill)
-                    .ellipsis(1),
-            )
+            .push(container(toolbar::title(title)).width(Length::Fill))
             .push(Space::new().width(12));
         if self.editing {
             bar = bar
@@ -1059,19 +1041,8 @@ impl TechniqueDetailScreen {
                         .variant(StudioButtonVariant::Danger),
                 );
         }
-        column![
-            container(bar)
-                .width(Length::Fill)
-                .height(55)
-                .padding(Padding {
-                    left: 12.0,
-                    right: 16.0,
-                    ..Padding::ZERO
-                })
-                .style(theme::fill(Studio::SURFACE)),
-            rule(),
-        ]
-        .into()
+        // The page's toolbar (`widgets::toolbar`).
+        toolbar::page_toolbar(bar)
     }
 
     fn content(&self) -> Element<'_, Message> {

@@ -33,11 +33,11 @@ fn click(app: &mut App, label: &str) {
     }
 }
 
-/// Clicks the page's back chevron (the technique pages' headers have no
-/// "Back" label; the placeholders' Back buttons carry the same glyph).
+/// Clicks the page's back button (the toolbar's, labelled "Back"; the
+/// placeholders' Back buttons read the same).
 fn back(app: &mut App) {
-    let chevron = char::from(crate::ui::core::icons::Icon::ChevronLeft).to_string();
-    click(app, &chevron);
+    let chevron = "Back";
+    click(app, chevron);
 }
 
 fn shows(app: &App, label: &str) -> bool {
@@ -51,7 +51,7 @@ fn the_app_boots_to_the_home_screen() {
     assert!(app.routes().is_empty(), "nothing until the library is open");
     let app = boot(None);
     assert_eq!(app.routes(), vec![Some(Route::Home)]);
-    // The home header title, under the drag bar with its badge.
+    // The home header title, in its toolbar with the badge.
     assert!(shows(&app, "Vocara"));
     assert!(shows(&app, "DEV"));
     assert_eq!(app.title(), "Vocara — DEV");
@@ -61,9 +61,9 @@ fn the_app_boots_to_the_home_screen() {
 fn navigates_home_to_settings_and_back() {
     let mut app = boot(None);
     let (home, _) = app.top().expect("running");
-    // The header's settings button (an icon with a "Settings" tooltip).
-    let settings = char::from(crate::ui::core::icons::Icon::Settings).to_string();
-    click(&mut app, &settings);
+    // The toolbar's settings button (an icon labelled by its tooltip).
+    let settings = "Settings";
+    click(&mut app, settings);
     assert_eq!(app.routes(), vec![Some(Route::Home), Some(Route::Settings)]);
     assert!(shows(&app, "Settings"));
     assert!(!shows(&app, "New practice"), "Home is covered");
@@ -445,7 +445,10 @@ fn a_popped_page_slides_back_out_and_the_one_beneath_back_in() {
     let t0 = Instant::now();
     let _ = app.update(Message::Navigate(Navigation::Pop));
     assert_eq!(app.routes(), vec![Some(Route::Home)], "at once");
-    assert!(!shows(&app, "Settings"), "the page going takes no part");
+    assert!(
+        !shows(&app, "Repair library"),
+        "the page going takes no part"
+    );
     assert!(shows(&app, "New practice"), "Home is on top again");
     let (primary, secondary, _) = route_at(&app, t0).expect("a transition");
     assert!(close(primary, 0.0) && close(secondary, -1.0 / 3.0), "start");

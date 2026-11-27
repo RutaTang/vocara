@@ -166,14 +166,14 @@ fn an_empty_library_shows_the_empty_state_and_the_header() {
     // The three header affordances are always present on Home.
     assert!(home.shows("New practice"));
     assert!(home.shows("Techniques"));
-    assert!(home.shows(&glyph(Icon::Settings)));
+    assert!(home.shows("Settings"));
 }
 
 #[test]
 fn the_header_pushes_the_technique_library_and_settings() {
     let mut home = Home::over(FakePractices::with(Vec::new()));
     home.click("Techniques");
-    home.click(&glyph(Icon::Settings));
+    home.click("Settings");
     assert_eq!(
         home.navigations,
         [
@@ -273,16 +273,16 @@ fn a_created_practice_opens_after_the_loading_dialog() {
 
 #[test]
 fn the_loading_card_pads_its_content_inside_its_border() {
-    // 26 by 24 inside the card's 1 px border: the 52 disc, 16, then the
-    // label (13.5 px at height 1: SkParagraph's line of 14), the card
+    // 20 by 16 inside the dialog card (its outline inset, taking no room):
+    // the 40 disc, 12, then the label (13 px on an 18 px line), the card
     // centred in the 1024 × 768 window.
     let mut ui = iced_test::simulator(opening_dialog(Fade::SHOWN));
     let label = ui.find("Loading practice").expect("the label").bounds();
-    assert_eq!(label.height, 14.0, "{label:?}");
-    let height = 2.0 * 27.0 + 52.0 + 16.0 + 14.0;
+    assert_eq!(label.height, 18.0, "{label:?}");
+    let height = 2.0 * 20.0 + 40.0 + 12.0 + 18.0;
     let card_top = (768.0 - height) / 2.0;
     assert!(
-        (label.y - (card_top + 27.0 + 52.0 + 16.0)).abs() < 1e-3,
+        (label.y - (card_top + 20.0 + 40.0 + 12.0)).abs() < 1e-3,
         "{label:?}"
     );
 }

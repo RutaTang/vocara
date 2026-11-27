@@ -50,7 +50,7 @@ fn settings() -> iced::Settings {
     settings.fonts = font::FACES
         .iter()
         .copied()
-        .chain([icons::FONT_BYTES])
+        .chain([crate::ui::core::icons::FONT_BYTES])
         .map(Cow::Borrowed)
         .collect();
     settings
@@ -395,19 +395,19 @@ fn a_failed_load_shows_the_error_state_not_an_endless_spinner() {
 #[test]
 fn edit_opens_the_form_with_cancel_and_save_in_the_header() {
     let mut h = Harness::loaded(Setup::new(twang(ID, vec![])));
-    assert!(h.shows(&glyph(Icon::ChevronLeft)));
+    assert!(h.shows("Back"));
     h.edit();
     // Edit mode shows the "Edit technique" title and drops the back chevron
     // — Cancel/Save are the exits.
     assert!(h.shows(EDIT_TITLE));
-    assert!(!h.shows(&glyph(Icon::ChevronLeft)));
+    assert!(!h.shows("Back"));
     assert!(h.shows("Cancel"));
     assert!(h.shows("Save"));
     assert!(!h.shows("Delete"));
     // Media is addable while editing too.
     assert!(h.shows("EXAMPLES"));
     assert!(h.shows(ADD_FIRST));
-    assert!(h.shows("NAME"));
+    assert!(h.shows("Name"));
     assert_eq!(h.screen.form().map(EditForm::name), Some("Twang"));
 }
 

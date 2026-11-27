@@ -1,6 +1,14 @@
-//! Port of `ui/home/widgets/home_screen.dart`: the dark collection of song
-//! practices — the header (New practice, Techniques, Settings), the update
-//! banner, and the practice grid with its loading, empty and error states.
+//! Port of `ui/home/widgets/home_screen.dart`: the library of song
+//! practices, drawn as `DESIGN.md`'s library (the approved `Home.dc.html`):
+//! the page's unified toolbar (the app's name, then the New practice,
+//! Techniques and Settings icon buttons), the update banner, and under a
+//! "Practices" heading with its count, the grid of practice cards with
+//! their loading, empty and error states.
+//!
+//! The cards' waveforms and lengths ([`PracticePreview`]) come from the
+//! library's waveform cache, read off the UI thread after every list read
+//! (`SongPracticeRepository::list_practice_previews`); until they have come,
+//! a card draws its band empty, so the library never waits on them.
 //!
 //! The view model ([`HomeViewModel`]) holds the list and its commands; this
 //! screen runs their effects off the UI thread and lands their outcomes, and
@@ -16,8 +24,8 @@
 //! library's broadcast, for as long as the page is on the stack (covered or
 //! not, as the Dart view model listened).
 //!
-//! Two Flutter overlays draw inside the page here, under the window drag
-//! bar: the "Loading practice" dialog (a non-dismissible `showDialog` with
+//! Two Flutter overlays draw inside the page here, under its toolbar: the
+//! "Loading practice" dialog (a non-dismissible `showDialog` with
 //! no result to give, which the app's dialog stack cannot close on a timer)
 //! and the SnackBar. The dialog comes in and goes as its `DialogRoute` did
 //! (`confirm_dialog::DialogMotion`): it fades out over the library as the
@@ -32,7 +40,7 @@
 //! `ScaffoldMessenger`. It fades in and out as Material's floating snack bar
 //! did, its 2.8 s counted from the end of its entrance (`ui::snack`).
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::convert::Infallible;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
@@ -41,11 +49,13 @@ use std::time::{Duration, Instant};
 use crate::ui::core::text;
 use iced::alignment::{Horizontal, Vertical};
 use iced::futures::{stream, Stream, StreamExt};
-use iced::widget::{button, center, column, container, opaque, responsive, row, stack, Space};
-use iced::{Color, Element, Length, Padding, Shadow, Subscription, Task, Theme, Vector};
-use vocara_model::models::practice_summary::PracticeSummary;
+use iced::widget::{center, column, container, opaque, responsive, row, stack, Space};
+use iced::{Color, Element, Length, Padding, Subscription, Task, Theme};
+use vocara_model::models::practice_summary::{PracticePreview, PracticeSummary};
+use vocara_model::util::dart_date_time::DateTime;
 use vocara_services::recording_finalizer::RecordingFinalizer;
 use vocara_services::update_check_service::UpdateCheckService;
+use vocara_store::repositories::SongPracticeRepository;
 use vocara_store::sync::sync_engine::RemoteApplied;
 
 use super::view_model::{Effect, HomeViewModel, Landing};
@@ -57,14 +67,16 @@ use crate::router::Route;
 use crate::services::Services;
 use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::motion;
-use crate::ui::core::theme::{self, alpha, bare_button, boxed, font, Studio};
+use crate::ui::core::theme::{self, alpha, boxed, font, type_scale, Studio};
 use crate::ui::core::widgets::confirm_dialog::{barrier, ConfirmDialog, DialogMotion, Fade};
+use crate::ui::core::widgets::controls::icon_button;
 use crate::ui::core::widgets::fading_scrollbar::{scrollable, Fading};
-use crate::ui::core::widgets::material_tooltip::material_tooltip;
+use crate::ui::core::widgets::line_icon::glyphs;
 use crate::ui::core::widgets::slide::inert;
-use crate::ui::core::widgets::studio_button::{studio_button, StudioButtonVariant};
+use crate::ui::core::widgets::studio_button::studio_button;
 use crate::ui::core::widgets::studio_hint::spinner;
 use crate::ui::core::widgets::studio_text::studio_text;
+use crate::ui::core::widgets::toolbar;
 use crate::ui::snack::{SnackEvent, SnackQueue, SnackStyle, SnackTimer};
 use crate::ui::{Screen, SnackBar, Update};
 
@@ -79,12 +91,19 @@ pub const OPENING_HOLD: Duration = Duration::from_millis(1500);
 /// How long a failure toast stays up.
 pub const SNACK_DURATION: Duration = Duration::from_millis(2800);
 
-/// The practice grid's geometry (`SliverGridDelegateWithMaxCrossAxisExtent`
-/// and the `GridView`'s padding).
+/// The practice grid's geometry (`SliverGridDelegateWithMaxCrossAxisExtent`,
+/// as the Flutter grid: cards at most 280 wide, 16 apart; five across a
+/// 1440 px window) and the library's padding (28 above the heading, 32 at
+/// the sides and the bottom).
 const GRID_MAX_CARD_WIDTH: f32 = 280.0;
-const GRID_CARD_HEIGHT: f32 = 150.0;
+const GRID_CARD_HEIGHT: f32 = super::widgets::practice_project_card::HEIGHT;
 const GRID_SPACING: f32 = 16.0;
-const GRID_PADDING: f32 = 24.0;
+const LIBRARY_PADDING: Padding = Padding {
+    top: 28.0,
+    right: 32.0,
+    bottom: 32.0,
+    left: 32.0,
+};
 
 /// The toasts.
 const CREATE_FAILED: &str = "Could not create the practice. Please try again.";
@@ -140,6 +159,8 @@ pub enum Message {
     Retry,
     /// A command's outcome came back.
     Landed(Landing),
+    /// The cards' previews came back (after a list read).
+    Previews(Vec<PracticePreview>),
     /// Nothing of practice `id` is landing any more (a save that outlived
     /// its screen has settled).
     Settled(String),
@@ -178,6 +199,11 @@ struct Opening {
 /// The home page (see the module docs).
 pub struct HomeScreen {
     vm: HomeViewModel,
+    /// The library, for the cards' previews.
+    repository: Arc<dyn SongPracticeRepository>,
+    /// The cards' previews, by practice id (none until the first read of
+    /// them lands).
+    previews: HashMap<String, PracticePreview>,
     updates: Arc<UpdateCheckService>,
     remote_applied: Arc<RemoteAppliedBroadcast>,
     finalizer: Arc<RecordingFinalizer>,
@@ -242,6 +268,8 @@ impl HomeScreen {
         let (vm, first) = HomeViewModel::new(services.song_repo.clone());
         let screen = HomeScreen {
             vm,
+            repository: services.song_repo.clone(),
+            previews: HashMap::new(),
             updates: services.update_check.clone(),
             remote_applied: services.library.remote_applied.clone(),
             finalizer: RecordingFinalizer::instance(),
@@ -344,7 +372,17 @@ impl HomeScreen {
         self.snacks.show(bar, Instant::now());
     }
 
+    /// Reads the cards' previews off the UI thread.
+    fn load_previews(&self) -> Task<Message> {
+        let repository = Arc::clone(&self.repository);
+        Task::perform(
+            crate::util::blocking(move || repository.list_practice_previews()),
+            |outcome| Message::Previews(outcome.ok().and_then(Result::ok).unwrap_or_default()),
+        )
+    }
+
     fn landed(&mut self, landing: Landing) -> Update<Message> {
+        let listed = matches!(&landing, Landing::Loaded(Ok(_)));
         let created = match &landing {
             Landing::Created(outcome) => match &**outcome {
                 Ok(practice) => Some(practice.id.clone()),
@@ -368,42 +406,34 @@ impl HomeScreen {
         if let Some(id) = created {
             self.open_detail(id);
         }
-        Update::task(run_all(effects))
+        // Each list read brings the cards' previews after it.
+        let mut task = run_all(effects);
+        if listed {
+            task = Task::batch([task, self.load_previews()]);
+        }
+        Update::task(task)
     }
 
+    /// The page's toolbar (`DESIGN.md`, the library): the app's name, then
+    /// its three actions as toolbar icon buttons of one optical size, in
+    /// `TEXT_SECONDARY`, each with its tooltip.
     fn header(&self) -> Element<'_, Message> {
-        let bar = row![
-            studio_text("Vocara")
-                .size(18)
-                .font(font::BOLD)
-                .letter_spacing(0.3)
-                .color(Studio::TEXT_PRIMARY),
-            Space::new().width(Length::Fill),
-            studio_button("New practice", Message::NewPractice)
-                .icon(Icon::Plus)
-                .variant(StudioButtonVariant::Accent),
-            Space::new().width(10),
-            studio_button("Techniques", Message::OpenTechniques).icon(Icon::Library),
-            Space::new().width(10),
-            header_icon_button(Icon::Settings, "Settings", Message::OpenSettings),
-        ]
-        .align_y(Vertical::Center);
-        // 56 tall on `Studio.surface`, `Border(bottom: Studio.border)`: the
-        // line takes the last pixel.
-        container(column![
-            container(bar)
-                .padding(Padding::from([0, 24]))
-                .height(55)
-                .align_y(Vertical::Center),
-            container(Space::new())
-                .width(Length::Fill)
-                .height(1)
-                .style(theme::fill(Studio::BORDER)),
-        ])
-        .width(Length::Fill)
-        .height(56)
-        .style(theme::fill(Studio::SURFACE))
-        .into()
+        toolbar::page_toolbar(
+            row![
+                // 12 past the toolbar's inset (92 px in, past the traffic
+                // lights).
+                container(toolbar::title("Vocara")).padding(Padding {
+                    left: 12.0,
+                    ..Padding::ZERO
+                }),
+                Space::new().width(Length::Fill),
+                icon_button(glyphs::PLUS, Message::NewPractice).tooltip("New practice"),
+                icon_button(glyphs::TECHNIQUES, Message::OpenTechniques).tooltip("Techniques"),
+                icon_button(glyphs::SETTINGS, Message::OpenSettings).tooltip("Settings"),
+            ]
+            .spacing(14)
+            .align_y(Vertical::Center),
+        )
     }
 
     fn body(&self) -> Element<'_, Message> {
@@ -420,7 +450,7 @@ impl HomeScreen {
         if vm.projects().is_empty() {
             return empty_state();
         }
-        practice_grid(vm.projects())
+        practice_grid(vm.projects(), &self.previews)
     }
 }
 
@@ -479,6 +509,10 @@ impl Screen for HomeScreen {
             }
             Message::Retry => run_all([self.vm.execute_load()]).into(),
             Message::Landed(landing) => self.landed(landing),
+            Message::Previews(previews) => {
+                self.previews = previews.into_iter().map(|p| (p.id.clone(), p)).collect();
+                Update::none()
+            }
             // A load running now may have read before the landing: refresh
             // owes one after it.
             Message::Settled(_) => run_all([self.vm.refresh()]).into(),
@@ -632,23 +666,6 @@ fn feed_stream(feed: &Feed) -> impl Stream<Item = RemoteApplied> {
     feed.0.subscribe()
 }
 
-/// `_HeaderIconButton`: a bare icon button for the home chrome — 34 px
-/// square on `Studio.surfaceRaised`, radius 7, `Studio.border`, a 16 px
-/// icon, a click cursor and a tooltip.
-fn header_icon_button<'a>(icon: Icon, tip: &'a str, on_tap: Message) -> Element<'a, Message> {
-    let target = button(
-        container(icons::icon(icon, 16.0, Studio::TEXT_SECONDARY))
-            .center_x(34)
-            .center_y(34)
-            .style(|_: &Theme| boxed(Some(Studio::SURFACE_RAISED), 7.0, Some(Studio::BORDER))),
-    )
-    .padding(0)
-    .style(bare_button)
-    .on_press(on_tap);
-    // Material's tooltip sits 24 px below the target's centre.
-    material_tooltip(target, tip, 24.0 - 34.0 / 2.0).into()
-}
-
 /// How many cards fit across `width` (`SliverGridDelegateWithMax
 /// CrossAxisExtent`: at most 280 wide each, at least one).
 pub fn grid_columns(width: f32) -> usize {
@@ -660,11 +677,37 @@ pub fn grid_columns(width: f32) -> usize {
     }
 }
 
-/// The card grid: cards at most 280 wide and 150 tall, 16 apart, inside a
-/// 24 padding, scrolling vertically.
-fn practice_grid(projects: &[PracticeSummary]) -> Element<'_, Message> {
+/// The library: the "Practices" heading (15 px semibold, its count in
+/// `TEXT_FAINT`, "Most recent first" at its right), then the grid of cards
+/// at most 280 wide and [`GRID_CARD_HEIGHT`] tall, 16 apart, all in the
+/// library's padding, scrolling vertically.
+fn practice_grid<'a>(
+    projects: &'a [PracticeSummary],
+    previews: &'a HashMap<String, PracticePreview>,
+) -> Element<'a, Message> {
     responsive(move |size| {
-        let columns = grid_columns((size.width - 2.0 * GRID_PADDING).max(0.0));
+        let now = DateTime::now();
+        let columns =
+            grid_columns((size.width - LIBRARY_PADDING.left - LIBRARY_PADDING.right).max(0.0));
+        let heading = row![
+            studio_text("Practices")
+                .size(type_scale::HEADING)
+                .font(font::SEMIBOLD)
+                .line_height(iced::Pixels(20.0))
+                .color(Studio::TEXT_PRIMARY),
+            Space::new().width(8),
+            studio_text(projects.len().to_string())
+                .size(type_scale::BODY)
+                .line_height(iced::Pixels(type_scale::LINE))
+                .tabular()
+                .color(Studio::TEXT_FAINT),
+            Space::new().width(Length::Fill),
+            studio_text("Most recent first")
+                .size(type_scale::LABEL)
+                .line_height(iced::Pixels(type_scale::LINE))
+                .color(Studio::TEXT_FAINT),
+        ]
+        .align_y(Vertical::Bottom);
         let mut rows = column![].spacing(GRID_SPACING);
         for chunk in projects.chunks(columns) {
             let mut cells = row![].spacing(GRID_SPACING).height(GRID_CARD_HEIGHT);
@@ -672,6 +715,8 @@ fn practice_grid(projects: &[PracticeSummary]) -> Element<'_, Message> {
                 cells = cells.push(
                     container(practice_project_card(
                         practice,
+                        previews.get(&practice.id),
+                        &now,
                         Message::Open(practice.id.clone()),
                         Message::Delete {
                             id: practice.id.clone(),
@@ -688,11 +733,15 @@ fn practice_grid(projects: &[PracticeSummary]) -> Element<'_, Message> {
             }
             rows = rows.push(cells);
         }
-        scrollable(container(rows).padding(GRID_PADDING).width(Length::Fill))
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .fading()
-            .into()
+        scrollable(
+            container(column![heading, Space::new().height(16), rows])
+                .padding(LIBRARY_PADDING)
+                .width(Length::Fill),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .fading()
+        .into()
     })
     .into()
 }
@@ -705,26 +754,28 @@ fn state_message<'a>(
     action: Option<Element<'a, Message>>,
 ) -> Element<'a, Message> {
     let mut content = column![
-        icons::icon(icon, 48.0, Studio::TEXT_FAINT),
-        Space::new().height(16),
+        icons::icon(icon, 32.0, Studio::TEXT_DISABLED),
+        Space::new().height(14),
         text(heading)
-            .size(20)
+            .size(type_scale::HEADING)
+            .line_height(iced::Pixels(20.0))
             .font(font::SEMIBOLD)
             .color(Studio::TEXT_PRIMARY),
-        Space::new().height(8),
+        Space::new().height(6),
         text(line)
-            .size(13)
+            .size(type_scale::BODY)
+            .line_height(iced::Pixels(18.0))
             .color(Studio::TEXT_SECONDARY)
             .align_x(Horizontal::Center),
     ]
     .align_x(Horizontal::Center);
     if let Some(action) = action {
-        content = content.push(Space::new().height(20)).push(action);
+        content = content.push(Space::new().height(18)).push(action);
     }
     center(content).into()
 }
 
-/// No practices yet. No inline button — the header's "New practice" is the
+/// No practices yet. No inline button — the toolbar's "New practice" is the
 /// single, always-present way to create one.
 fn empty_state<'a>() -> Element<'a, Message> {
     state_message(
@@ -756,37 +807,27 @@ fn error_state<'a>() -> Element<'a, Message> {
 /// load rather than a jump to a blank screen), at `fade`. Its barrier is not
 /// dismissible: it takes every tap.
 fn opening_dialog<'a>(fade: Fade) -> Element<'a, Message> {
-    // Accent disc behind the spinner — reads as a deliberate, branded
-    // loader.
-    let disc = container(spinner(24.0, 2.6, Studio::ACCENT))
-        .padding(14)
-        .width(52)
-        .height(52)
-        .style(|_: &Theme| boxed(Some(alpha(Studio::ACCENT, 0.1)), 26.0, None));
+    // The accent's spinner on a faint accent disc, on the dialog card.
+    let disc = container(spinner(20.0, 2.2, Studio::ACCENT))
+        .padding(10)
+        .width(40)
+        .height(40)
+        .style(|_: &Theme| boxed(Some(alpha(Studio::ACCENT, 0.1)), 20.0, None));
     let card = container(
         column![
             disc,
-            Space::new().height(16),
+            Space::new().height(12),
             studio_text("Loading practice")
-                .size(13.5)
+                .size(type_scale::TITLE)
+                .line_height(iced::Pixels(18.0))
                 .font(font::SEMIBOLD)
-                .letter_spacing(0.2)
                 .color(Studio::TEXT_PRIMARY),
         ]
         .align_x(Horizontal::Center),
     )
     .width(168)
-    // 26 by 24 inside the card's 1 px border (a Flutter `Container`'s
-    // padding includes its decoration's border).
-    .padding(Padding::from([27, 25]))
-    .style(|_: &Theme| container::Style {
-        shadow: Shadow {
-            color: alpha(Color::BLACK, 0.4),
-            offset: Vector::new(0.0, 10.0),
-            blur_radius: 28.0,
-        },
-        ..boxed(Some(Studio::SURFACE_RAISED), 16.0, Some(Studio::BORDER))
-    });
+    .padding(Padding::from([20, 16]))
+    .style(theme::dialog_card);
     let barrier = barrier::<Message>(alpha(Color::BLACK, 0.28), fade.barrier, None);
     stack![barrier, center(opaque(fade.card(card)))].into()
 }
@@ -800,23 +841,11 @@ fn snack_message(event: SnackEvent) -> Message {
     }
 }
 
-/// The failure toast: a floating SnackBar (set 16 in from the page's edges
-/// at its bottom by the queue, `snack::FLOATING_MARGIN`),
-/// `Studio.surfaceRaised`, radius 8, `Studio.border`, 13 px text. (The
-/// app draws it too, once the page has handed it over.)
+/// The failure toast: the shared floating snack bar
+/// (`snack::floating_bar`, set 16 in from the page's edges at its bottom by
+/// the queue). (The app draws it too, once the page has handed it over.)
 fn snack_bar(message: &str) -> Element<'_, Infallible> {
-    let bar = container(text(message).size(13).color(Studio::TEXT_PRIMARY))
-        .width(Length::Fill)
-        .padding(Padding::from([14, 16]))
-        .style(|_: &Theme| container::Style {
-            shadow: Shadow {
-                color: alpha(Color::BLACK, 0.4),
-                offset: Vector::new(0.0, 3.0),
-                blur_radius: 8.0,
-            },
-            ..boxed(Some(Studio::SURFACE_RAISED), 8.0, Some(Studio::BORDER))
-        });
-    bar.into()
+    crate::ui::snack::floating_bar(message)
 }
 
 #[cfg(test)]

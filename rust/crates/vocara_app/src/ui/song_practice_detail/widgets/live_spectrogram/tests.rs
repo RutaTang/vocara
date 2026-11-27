@@ -12,7 +12,7 @@ use iced::{Settings, Size};
 use iced_test::Simulator;
 
 use super::*;
-use crate::ui::core::theme::app_theme;
+use crate::ui::core::theme::{app_theme, Studio};
 
 /// A rendered frame: its physical size and RGBA bytes.
 pub(crate) struct Raster {
@@ -115,7 +115,8 @@ fn a_monitor_without_columns_shows_the_hint_over_the_well() {
         assert!(!shows_a_ridge(&r));
         // The well's inset colour away from the grid lines and the hint.
         let [red, green, blue, _] = r.at(4, r.height - 4);
-        assert_eq!([red, green, blue], [0x0E, 0x0E, 0x12]);
+        let [wr, wg, wb, _] = Studio::INSET.into_rgba8();
+        assert_eq!([red, green, blue], [wr, wg, wb]);
     }
 }
 

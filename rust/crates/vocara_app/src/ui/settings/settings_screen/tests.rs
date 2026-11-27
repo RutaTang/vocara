@@ -417,7 +417,7 @@ fn the_page_lays_out_its_sections_under_the_header() {
 #[test]
 fn the_back_chevron_pops_or_goes_home() {
     let mut page = Setup::new().mount();
-    page.click(&glyph(Icon::ChevronLeft));
+    page.click("Back");
     assert_eq!(page.navigations, [Navigation::PopOrGo(Route::Home)]);
 }
 

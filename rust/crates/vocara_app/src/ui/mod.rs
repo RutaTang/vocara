@@ -54,7 +54,7 @@ pub trait Screen {
     /// Handles one of the screen's messages.
     fn update(&mut self, message: Self::Message, services: &Services) -> Update<Self::Message>;
 
-    /// The page's content (the app puts the window drag bar above it).
+    /// The page's content, its unified toolbar (`widgets::toolbar`) at its top.
     fn view(&self) -> Element<'_, Self::Message>;
 
     /// What the page shows over the whole window — above the window drag

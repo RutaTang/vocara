@@ -58,14 +58,12 @@
 //!   package's detail comes in like any other (the switcher started on an
 //!   empty child; `_initDefaultDetailPage`'s post-frame callback re-keys
 //!   it).
-//! - **The app bar**: the `BackButton` (`licenses/back_button.rs`:
-//!   Material 3's 40 px icon button under forui's icon-button theme, the
-//!   "Back" tooltip, `Icons.arrow_back_ios_new_rounded`) in the 56 px
-//!   leading slot and "Licenses" centred on the bar's width: macOS centres
-//!   an app bar's title under fewer than two actions, and the bar has none.
-//!   Once the package list scrolls under it (its
-//!   `ScrollNotificationObserver`), the bar takes the scheme's surface tint
-//!   (8 % of `primary`) at once.
+//! - **The app bar**: the page's unified toolbar (`widgets::toolbar`,
+//!   `DESIGN.md`: the back button and "Licenses" after it, past the
+//!   traffic lights), over the master/detail scaffold's empty 56 px action
+//!   row. Once the package list scrolls under it (its
+//!   `ScrollNotificationObserver`), that row takes the scheme's surface
+//!   tint (8 % of `primary`) at once.
 //! - **The package rows** are two-line `ListTile`s at the desktop's compact
 //!   density (`licenses/list_tile.rs`): 64 tall, the title's baseline 32
 //!   down, the subtitle's 48; the selected one on the theme's
@@ -74,9 +72,9 @@
 //!   `hoverColor` under the pointer (fading over 50 ms), its
 //!   `highlightColor` while pressed (over 200 ms).
 //! - **The detail** sits on a `DraggableScrollableSheet`
-//!   (`licenses/sheet.rs`): its card starts `56 · h / (h + 28)` down the
-//!   page (the sheet's size is a share of the window's height, the page the
-//!   window less the drag bar), and a trackpad's two-finger drag grows it
+//!   (`licenses/sheet.rs`): its card starts right under the toolbar (the
+//!   sheet's size is a share of the page's height, the page the whole
+//!   window), and a trackpad's two-finger drag grows it
 //!   to the page's full height before the list scrolls (shrinking it back
 //!   after the list is at its top), its flick flinging the sheet and then
 //!   the list as Flutter's simulation did, where a mouse wheel only
@@ -118,7 +116,7 @@ use crate::ui::core::text;
 use iced::alignment::Horizontal;
 use iced::border::Radius;
 use iced::widget::text::{LineHeight, Wrapping};
-use iced::widget::{button, column, container, stack, Column, Space};
+use iced::widget::{button, column, container, row, stack, Column, Space};
 use iced::{Background, Border, Color, Element, Length, Padding, Shadow, Task, Theme, Vector};
 use serde::Deserialize;
 use vocara_services::update_check_service::UpdateCheckService;
@@ -130,12 +128,11 @@ use crate::ui::core::widgets::fading_scrollbar::{scrollable, Fading};
 use crate::ui::core::widgets::opacity_layer::opacity_layer;
 use crate::ui::core::widgets::slide::slide;
 use crate::ui::core::widgets::studio_hint::spinner;
+use crate::ui::core::widgets::toolbar;
 
-pub mod back_button;
 pub mod list_tile;
 pub mod sheet;
 
-use back_button::back_button;
 use list_tile::two_line_tile;
 use sheet::{keyed_stack, scroll_watch, sheet, SCROLLED_UNDER_TINT};
 
@@ -929,38 +926,30 @@ pub fn scrolled_under(color: Color) -> Color {
     }
 }
 
-/// The app bar: the back button in the 56 px leading slot and "Licenses"
-/// centred on the bar's width (`NavigationToolbar(centerMiddle: true)`:
-/// macOS centres an app bar's title under fewer than two actions, and the
-/// page's has none), over an empty second toolbar row (the master/detail
-/// scaffold's action row). Once the package list is scrolled under it, its
-/// `Studio.surface` takes the surface tint, at once (the bar's `Material`
-/// does not animate its color).
+/// The app bar: the page's toolbar (the back button, then "Licenses"),
+/// over an empty second row (the master/detail scaffold's action row).
+/// Once the package list is scrolled under it, that row's `Studio.surface`
+/// takes the surface tint, at once (the bar's `Material` does not animate
+/// its color).
 fn app_bar<'a>(scrolled: bool) -> Element<'a, Message> {
     let background = if scrolled {
         scrolled_under(Studio::SURFACE)
     } else {
         Studio::SURFACE
     };
-    // The title stays clear of the leading slot (56 + 16) on any window
-    // the app allows (960 wide and up), so it is never pushed off centre.
-    let title = container(
-        text("Licenses")
-            .size(18)
-            .color(Studio::TEXT_PRIMARY)
-            .wrapping(Wrapping::None),
-    )
-    .center_x(Length::Fill)
-    .center_y(TOOLBAR_HEIGHT);
-    let leading = container(container(back_button(Message::Back)).id(BACK))
-        .center_x(TOOLBAR_HEIGHT)
-        .center_y(TOOLBAR_HEIGHT);
-    container(column![
-        stack![title, leading].height(TOOLBAR_HEIGHT),
-        Space::new().height(TOOLBAR_HEIGHT),
-    ])
+    let bar = row![
+        container(toolbar::back_button(Message::Back)).id(BACK),
+        Space::new().width(8),
+        toolbar::title("Licenses"),
+    ]
+    .align_y(iced::alignment::Vertical::Center);
+    column![
+        toolbar::page_toolbar(bar),
+        container(Space::new().height(TOOLBAR_HEIGHT))
+            .width(Length::Fill)
+            .style(theme::fill(background)),
+    ]
     .width(Length::Fill)
-    .style(theme::fill(background))
     .into()
 }
 
