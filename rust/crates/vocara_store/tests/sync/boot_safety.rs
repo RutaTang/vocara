@@ -204,10 +204,25 @@ fn a_repair_started_between_two_pages_of_a_pull_run_waits_for_the_run() {
     assert_eq!(interp_deleted_at(), None, "page 1 landed");
 
     let repair = {
-        let (device, events) = (device.clone(), events.clone());
+        let (device, events, practice_id) = (device.clone(), events.clone(), practice_id.clone());
         std::thread::spawn(move || {
-            repair_library(&device);
+            // Persistence.repairLibrary's pass, noting what it found when it
+            // got the engine: whether the run's last page (the practice's
+            // revive) had landed by then.
+            let checker = device.checker();
+            let db = device.db.clone();
+            let saw_whole_run = device
+                .engine
+                .run_exclusive(|| {
+                    let practice_live =
+                        col::<Option<i64>>(&db, "practices", &practice_id, "deleted_at")
+                            .unwrap()
+                            .is_none();
+                    db.transaction(|| checker.repair()).map(|_| practice_live)
+                })
+                .unwrap();
             events.lock().push("repair-done");
+            saw_whole_run
         })
     };
     std::thread::sleep(Duration::from_millis(25));
@@ -215,8 +230,16 @@ fn a_repair_started_between_two_pages_of_a_pull_run_waits_for_the_run() {
 
     resume.send(()).unwrap();
     assert!(!pull.join().unwrap().failed());
-    repair.join().unwrap();
-    assert_eq!(*events.lock(), ["pull-done", "repair-done"]);
+    // The repair ran only once the run was over. (Not which thread logs
+    // first: the pull thread logs after `pump_pull` returns, by which time
+    // the repair may already hold the engine and finish.)
+    assert!(
+        repair.join().unwrap(),
+        "the repair ran between the run's pages"
+    );
+    let mut done = events.lock().clone();
+    done.sort_unstable();
+    assert_eq!(done, ["pull-done", "repair-done"]);
     assert_eq!(
         interp_deleted_at(),
         None,

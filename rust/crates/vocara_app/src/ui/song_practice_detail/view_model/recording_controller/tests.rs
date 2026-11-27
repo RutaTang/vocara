@@ -2529,10 +2529,13 @@ fn flow_a_rec_pressed_during_a_quit_that_spent_its_budget_is_still_cancelled() {
     // registered between the two had no budget of its own there (the first
     // run had spent the quit's), so the exit left at once and the empty take
     // REC had saved stayed for good.
+    // Budgets wide enough that a loaded machine's slow arming still lands
+    // inside the exit's run (100 ms flaked under CI-like load); the wedged
+    // finalizer below spends the first run's whole budget all the same.
     let f = Arc::new(
         RecordingFinalizer::for_testing()
-            .with_per_finalizer_budget(ms(100))
-            .with_total_budget(ms(100)),
+            .with_per_finalizer_budget(ms(400))
+            .with_total_budget(ms(400)),
     );
     let ready = Gate::new();
     let mic = FakeMic::flow(&f, None, Some(&ready));
