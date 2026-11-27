@@ -10,35 +10,44 @@
 //! For a voiced frame it minimises, over the postures in the search box,
 //!
 //! ```text
-//! J(p) = Σᵢ wᵢ·(ln Fᵢ(p) − ln F̂ᵢ)²  +  Σⱼ ((pⱼ − p̄ⱼ) / (vⱼ·Δt))²  +  λ·d²(p)
+//! J(p) = Σᵢ wᵢ·(ln Fᵢ(p) − ln F̂ᵢ)²  +  S(p − p̄)  +  λ·d²(p)  +  λᵥ·dᵥ²(p)
 //! ```
 //!
 //! - the data: each measured formant F̂ᵢ (i = 1..3) against the model's, in log-frequency,
 //!   weighted wᵢ = c / σᵢ² by the frame's confidence c and the formant's expected error σᵢ
-//!   (5 % each). Where F0 is high a formant within two harmonics of it is
-//!   read off a sparse spectrum, and its σ grows (to three times at F̂ᵢ = F0);
-//! - the smoothness: a random walk from the previous estimate p̄, each articulator moving
-//!   about vⱼ cm/s ([`InversionConfig::speed`]) over the time Δt since the last fitted frame, so
-//!   a jittery formant track gives a smooth articulation track, and after a pause the posture is
-//!   free to jump;
-//! - the prior: the squared Mahalanobis distance d² from CHIMERA's sung vowels
-//!   ([`crate::posture::Prior`]), weighted λ = [`InversionConfig::prior_weight`], so the four
-//!   directions three formants cannot see stay plausible.
+//!   (5 % each). Where F0 is high a formant within two harmonics of it is read off a sparse
+//!   spectrum, and its σ grows (to three times at F̂ᵢ = F0);
+//! - the smoothness S: a random walk from the previous estimate p̄, each articulator moving
+//!   about vⱼ cm/s ([`InversionConfig::speed`]) over the time Δt since the last fitted frame,
+//!   so a jittery formant track gives a smooth articulation track and after a pause the posture
+//!   is free to jump. In coordinates zⱼ = (pⱼ − p̄ⱼ)/(vⱼ·Δt) it is full along the directions the
+//!   weighted formants see (the rows of the Jacobian) and only ε of that
+//!   ([`InversionConfig::null_space_stiffness`]) along the four they cannot, where the priors
+//!   move the posture: smoothness everywhere held a glide's end in whatever compensating
+//!   posture it reached. And where the previous posture misses the new formants by more than
+//!   their noise (χ² per formant over 2), the singer moved faster than the walk expects: Δt
+//!   stretches by that excess (its weight falls by its square, at most a hundredfold); without
+//!   it a fast ɑ→i glide left the fit 6 % off, in a posture it never left;
+//! - the priors ([`crate::posture`]): λ·d², the squared Mahalanobis distance from CHIMERA's sung
+//!   vowels ([`InversionConfig::prior_weight`]), and λᵥ·dᵥ², the distance to the body's nearest
+//!   calibrated vowel ([`InversionConfig::vowel_prior_weight`]), so the directions three
+//!   formants cannot see stay plausible and near the vowels a singer sings.
 //!
 //! The minimisation:
 //!
 //! 1. **Start.** The candidates are the previous estimate and the codebook's entries nearest
 //!    the measured formants ([`crate::codebook`]); each one's J is exact (its formants are
-//!    known), and the least is the start x₀.
+//!    known). An entry becomes the start x₀ only if it beats the previous estimate by a margin
+//!    (near the estimate the refinement finds what the entry would, and a new start costs a
+//!    Jacobian: without the margin, noise made entries win on a third of the frames).
 //! 2. **Local model.** ln F around x₀ is linear: its Jacobian by forward differences (seven
 //!    model evaluations) when x₀ is new, else the previous frame's, kept current by Broyden's
 //!    update after every evaluation.
 //! 3. **Refine.** Nelder–Mead ([`crate::optimize`]) minimises J with the local model, inside a
 //!    trust region around x₀ (and the search box), warm-started at x₀. The model is evaluated
-//!    at the result: if J really fell, the result is taken (and the region grows when the local
-//!    model predicted well); if not, the region shrinks and step 3 runs again. Up to
-//!    [`InversionConfig::max_steps`] such steps per frame, which a held vowel needs only until
-//!    it has converged.
+//!    at the result: if J really fell, the result is taken, and if the local model predicted
+//!    the fall well the frame is done (the region grows); if not, the region shrinks and step 3
+//!    runs again, up to [`InversionConfig::max_steps`] times a frame.
 //!
 //! A frame whose confidence is below [`InversionConfig::min_confidence`], or without F1 and F2,
 //! is not fitted: the estimate holds and relaxes towards CHIMERA's neutral posture with time
@@ -50,12 +59,19 @@
 //! and [`TractEstimate::confidence`] combines it with the frame's own: c·exp(−(residual/8 %)²),
 //! fading while the estimate is held. A UI should call an estimate uncertain below about 0.5.
 //!
-//! # Cost
+//! # Accuracy and cost
+//!
+//! Round trips through the model (`tests/inversion.rs`, 26 sung-vowel postures a body, none a
+//! codebook entry) give the formants back within 0.2 % on average and 0.8 % at worst; the jaw
+//! within 1.5–1.7 mm on average, the tongue's height and frontness within 0.05–0.08 of their
+//! 0–1 scales, the lips' rounding within 0.11–0.20 ([`crate::components`]). ±3 % formant noise
+//! moves a held posture about 0.3 mm a frame.
 //!
 //! A frame costs at most 1 + 7 + [`InversionConfig::max_steps`] model evaluations (a new start
-//! needs a Jacobian), usually one or two once the fit has converged, plus the Nelder–Mead on
-//! the local model (no model evaluations). Nothing allocates per frame once the codebook is
-//! built. Measured: `tests/inversion.rs`'s ignored timing test.
+//! needs a Jacobian), usually one, plus the Nelder–Mead on the local model (no model
+//! evaluations): 0.3–0.45 ms on average, 1.5–2.4 ms at the 99th percentile (release; the
+//! ignored `timing_inversion` test). Nothing allocates per frame once the codebook is built
+//! (`tests/no_alloc.rs`).
 
 // Small fixed-size linear algebra (seven articulators, three formants) reads clearer indexed.
 #![allow(clippy::needless_range_loop)]
