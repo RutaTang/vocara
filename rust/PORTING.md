@@ -34,8 +34,11 @@ wrong. Port the behavior, not the shape:
     (`SyncWriter.contentHashOf` canonicalization);
   - the HLC packed encoding, the ULID format, the oplog semantics;
   - the on-disk locations (application support directory per bundle id:
-    `com.rutatang.vocara`, `.dev`, `.test`), the diagnostics log format and
-    rotation, the library lock file.
+    `com.rutatang.vocara`, `.dev`, `.test`; the Flutter release's, like every
+    Rust release's up to 0.3.0, inside its App Sandbox container, which
+    `vocara_services::sandbox_migration` moves the library out of now that
+    the app is unsandboxed), the diagnostics log format and rotation, the
+    library lock file.
 - The Dart unit tests are ported with the code they test, as Rust tests in
   the same crate. A test that cannot apply (a Flutter widget detail with no
   iced counterpart) is replaced by one that checks the same behavior through

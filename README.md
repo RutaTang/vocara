@@ -27,7 +27,11 @@ client, file by file, and the conventions the code follows.
 ## Environments (build flavors)
 
 The macOS app ships in three environments, each a **distinct bundle id** so they
-coexist on one machine with separate stores (database + assets):
+coexist on one machine with separate stores (database + assets), each in
+`~/Library/Application Support/<bundle id>`. The app is not App-Sandboxed (it
+updates by replacing its own bundle); releases up to 0.3.0 were, and kept their
+store in their sandbox container, which the first launch of a later release
+moves it out of ([release runbook](docs/release-runbook.md#leaving-the-app-sandbox)):
 
 | Flavor | Bundle id                  | Purpose                          |
 | ------ | -------------------------- | -------------------------------- |
