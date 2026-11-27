@@ -84,10 +84,6 @@ fn sim<'a>(view: impl Into<Element<'a, Message>>) -> iced_test::Simulator<'a, Me
     iced_test::Simulator::with_size(Settings::default(), WINDOW, view)
 }
 
-fn glyph(icon: Icon) -> String {
-    char::from(icon).to_string()
-}
-
 // ---------------------------------------------------- track_row_test
 
 #[test]
@@ -341,16 +337,17 @@ fn a_clip_drag_whose_lane_scrolls_out_of_the_lane_list_still_commits_its_moves()
 }
 
 /// The volume fader's box in a vocal take's header at the window's
-/// top-left: past the 3 px bar and the 9 px padding, the M and S keys and
-/// their gaps (54 px); before the two mini buttons (22 px each) and their
-/// gaps (58 px), the 8 px padding and the 1 px border; 16 px tall, centred
-/// on the 22 px control row at the bottom of the padded column.
+/// top-left: past the 3 px stripe and the 11 px padding, the M and S keys
+/// and their gaps (52 px); before the 4 px gap, the two 24 px icon buttons,
+/// the 10 px padding and the 1 px border; 16 px tall, centred on the 24 px
+/// control row at the bottom of the padded column (over the row's 1 px
+/// line).
 fn fader_box() -> Rectangle {
-    let left = 3.0 + 9.0 + 54.0;
-    let right = TRACK_HEADER_W - 1.0 - 8.0 - 58.0;
+    let left = 3.0 + 11.0 + 52.0;
+    let right = TRACK_HEADER_W - 1.0 - 10.0 - 48.0 - 4.0;
     let row_bottom = TRACK_ROW_HEIGHT - 1.0 - 8.0;
     Rectangle::new(
-        Point::new(left, row_bottom - 11.0 - 8.0),
+        Point::new(left, row_bottom - 12.0 - 8.0),
         Size::new(right - left, 16.0),
     )
 }
@@ -513,24 +510,19 @@ fn a_lane_with_no_room_for_its_body_builds_without_its_clips() {
 
 // ------------------------------------------- viewport waveform alignment
 
-/// The x of the topmost vertex of `outline` (the apex of a lone spike);
-/// several at the same height average.
-fn apex_x(outline: &[(f64, f64)]) -> f64 {
+/// The left and right x of the topmost vertices of `outline` (a lone
+/// spike's top).
+fn top_span(outline: &[(f64, f64)]) -> (f64, f64) {
     let top = outline
         .iter()
         .map(|&(_, y)| y)
         .fold(f64::INFINITY, f64::min);
-    let xs: Vec<f64> = outline
+    outline
         .iter()
         .filter(|&&(_, y)| (y - top).abs() < 1e-9)
-        .map(|&(x, _)| x)
-        .collect();
-    let (lo, hi) = xs
-        .iter()
-        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), &x| {
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), &(x, _)| {
             (lo.min(x), hi.max(x))
-        });
-    (lo + hi) / 2.0
+        })
 }
 
 #[test]
@@ -549,11 +541,13 @@ fn a_clip_sliced_at_the_viewport_edge_draws_its_transient_at_the_true_timeline_p
     assert_eq!(v.width, 500.0);
     let painter = WaveformPainter::sliced(clip_peaks(&clip), v.slice, Color::WHITE);
     let shape = painter.shape(size).expect("painted");
-    // The spike's true position is (5000 − 4500) / 5000 of the box.
-    // Anchoring the slice at the box edge instead would draw it at 1/5 of
-    // the width (100), one half-peak (500 ms) late against the ruler.
-    let apex = apex_x(&shape.outline);
-    assert!((apex - 50.0).abs() <= 2.0, "{apex}");
+    // The spike's bucket, 5000..6000 ms, is (5000 − 4500) / 5000 of the box
+    // in: 50 to 150. Anchoring the slice at the box edge instead would draw
+    // it from 1/5 of the width (100), one half-peak (500 ms) late against
+    // the ruler.
+    let (left, right) = top_span(&shape.outline);
+    assert!((left - 50.0).abs() <= 1.0, "{left}");
+    assert!((right - 150.0).abs() <= 1.0, "{right}");
 }
 
 #[test]
@@ -579,7 +573,8 @@ fn the_live_forming_clip_keeps_its_absolute_sample_to_column_mapping() {
     // box edge would draw it half a peak (~15 px here) late, and it would
     // freeze on screen while panning.
     let expected = (1525.0 - 1025.0) / 50.0 * pps;
-    let apex = apex_x(&outline);
+    let (left, right) = top_span(&outline);
+    let apex = (left + right) / 2.0;
     assert!((apex - expected).abs() <= 3.0, "{apex} vs {expected}");
 }
 
@@ -669,13 +664,16 @@ fn a_selected_lane_highlights_its_selected_clip_or_all_of_them() {
 }
 
 #[test]
-fn a_lane_takes_its_tint_its_backing_accent_or_its_take_color() {
+fn a_lane_takes_its_tint_its_backing_neutral_or_its_take_color() {
     let mut track = take("t1", 1000, Vec::new());
-    assert_eq!(lane_accent(&track), default_take_color("t1"));
+    // The takes in order: coral, ochre, sage, periwinkle, lilac, coral...
+    assert_eq!(take_color(&track, 0), Studio::TRACK_CORAL);
+    assert_eq!(take_color(&track, 1), Studio::TRACK_OCHRE);
+    assert_eq!(take_color(&track, 5), Studio::TRACK_CORAL);
     track.color_value = Some(0xFF5B8DEF);
-    assert_eq!(lane_accent(&track), argb(0xFF5B8DEF));
+    assert_eq!(take_color(&track, 1), argb(0xFF5B8DEF));
     let backing = AudioTrack::new("acc", AudioTrackKind::Accompaniment, "Backing", created());
-    assert_eq!(lane_accent(&backing), Studio::ACCENT);
+    assert_eq!(take_color(&backing, 0), Studio::TRACK_BACKING);
 }
 
 #[test]
@@ -704,7 +702,7 @@ fn a_fader_tick_leaves_the_clips_waveforms_cached() {
 fn a_tap_on_the_header_or_the_lanes_empty_stretch_selects_the_lane() {
     let track = clips_take(&[("a".into(), 4000)]);
     let mut ui = sim(row_of(&track));
-    ui.click("TAKE 1").expect("the label");
+    ui.click("Take 1").expect("the label");
     ui.point_at(Point::new(780.0, TRACK_ROW_HEIGHT / 2.0));
     let _ = ui.simulate(iced_test::simulator::click());
     assert_eq!(
@@ -726,7 +724,7 @@ fn right_clicks_open_the_lane_and_clip_menus() {
         let _ = ui.simulate(right_click());
     }
     // The ⋯ button, on the press.
-    let ellipsis = ui.find(glyph(Icon::Ellipsis)).expect("the ⋯ button");
+    let ellipsis = ui.find(TRACK_MENU).expect("the ⋯ button");
     ui.point_at(ellipsis.bounds().center());
     let _ = ui.simulate([press()]);
     assert_eq!(
@@ -774,10 +772,8 @@ fn a_note_marker_opens_its_note() {
 fn the_add_buttons_are_for_vocal_takes_only() {
     let track = take("t1", 5000, Vec::new());
     let mut ui = sim(row_of(&track));
-    ui.click(glyph(Icon::StickyNote).as_str())
-        .expect("add note");
-    ui.click(glyph(Icon::Waypoints).as_str())
-        .expect("add technique");
+    ui.click(ADD_NOTE).expect("add note");
+    ui.click(ADD_TECHNIQUE).expect("add technique");
     assert_eq!(
         ui.into_messages().collect::<Vec<_>>(),
         vec![Message::AddNote, Message::AddTechnique]
@@ -785,20 +781,19 @@ fn the_add_buttons_are_for_vocal_takes_only() {
     let backing = AudioTrack::new("acc", AudioTrackKind::Accompaniment, "Backing", created())
         .with_audio("/b.wav", 0, 5000, Vec::new());
     let mut ui = sim(track_row(&backing, "Backing", VIEWPORT_MS, 0, |m| m));
-    assert!(ui.find(glyph(Icon::StickyNote).as_str()).is_err());
-    assert!(ui.find(glyph(Icon::Waypoints).as_str()).is_err());
-    assert!(ui.find("BACKING").is_ok());
+    assert!(ui.find(ADD_NOTE).is_err());
+    assert!(ui.find(ADD_TECHNIQUE).is_err());
+    // The name as typed.
+    assert!(ui.find("Backing").is_ok());
 }
 
 #[test]
 fn the_chevron_folds_the_lanes_and_without_a_toggle_selects_the_lane() {
     let track = take("t1", 5000, Vec::new());
     let mut ui = sim(row_of(&track).expand(true, false, true));
-    ui.click(glyph(Icon::ChevronRight).as_str())
-        .expect("the chevron");
+    ui.click(SHOW_LANES).expect("the chevron");
     let mut ui2 = sim(row_of(&track).expand(true, true, false));
-    ui2.click(glyph(Icon::ChevronDown).as_str())
-        .expect("the chevron");
+    ui2.click(HIDE_LANES).expect("the chevron");
     assert_eq!(
         ui.into_messages().collect::<Vec<_>>(),
         vec![Message::ToggleExpand]
@@ -809,7 +804,7 @@ fn the_chevron_folds_the_lanes_and_without_a_toggle_selects_the_lane() {
     );
     // No chevron on a take that cannot fold out.
     let mut ui = sim(row_of(&track));
-    assert!(ui.find(glyph(Icon::ChevronRight).as_str()).is_err());
+    assert!(ui.find(SHOW_LANES).is_err());
 }
 
 #[test]
@@ -936,9 +931,10 @@ fn the_dragged_lane_shows_its_label_under_the_pointer() {
         (0..3).all(|i| (i32::from(a[i]) - i32::from(b[i])).abs() <= tolerance)
     };
     let header =
-        |frame: &crate::ui::song_practice_detail::widgets::live_ui::Frame| frame.pixel(150, 37);
+        |frame: &crate::ui::song_practice_detail::widgets::live_ui::Frame| frame.pixel(120, 20);
     let mut ui = LiveUi::new(WINDOW);
-    assert_eq!(ui.find_all(view(), "TAKE 1").len(), 1);
+    // The header's name and the clip's.
+    assert_eq!(ui.find_all(view(), "Take 1").len(), 2);
     let before = ui.snapshot(view());
     assert!(
         near(header(&before), Studio::PANEL, 1),
@@ -948,10 +944,10 @@ fn the_dragged_lane_shows_its_label_under_the_pointer() {
     ui.point_at(Point::new(100.0, 20.0));
     ui.run(view(), [press()]);
     assert_eq!(hold(&mut ui, view), vec![Message::LaneDragStart]);
-    // The header's label, and the ghost's at the press.
-    let labels = ui.find_all(view(), "TAKE 1");
-    assert_eq!(labels.len(), 2);
-    let ghost = labels[1].bounds();
+    // The header's and the clip's names, and the ghost's at the press.
+    let labels = ui.find_all(view(), "Take 1");
+    assert_eq!(labels.len(), 3);
+    let ghost = labels[2].bounds();
     assert!(ghost.x > 100.0 && ghost.y > 20.0, "{ghost:?}");
 
     // The ghost follows the pointer, and the row reads at 35 % meanwhile.
@@ -964,15 +960,16 @@ fn the_dragged_lane_shows_its_label_under_the_pointer() {
         a: 1.0,
     };
     assert!(near(header(&frame), veiled, 1), "{:?}", header(&frame));
-    // Inside the chip, just under its top-left corner's border.
+    // Inside the chip (a menu's card), just under its top-left corner's
+    // outline.
     assert!(
-        near(frame.pixel(506, 303), Studio::SURFACE_RAISED, 2),
+        near(frame.pixel(506, 303), Studio::SURFACE, 2),
         "{:?}",
         frame.pixel(506, 303)
     );
 
     ui.run(view(), [release()]);
-    assert_eq!(ui.find_all(view(), "TAKE 1").len(), 1);
+    assert_eq!(ui.find_all(view(), "Take 1").len(), 2);
     let after = ui.snapshot(view());
     assert!(near(header(&after), Studio::PANEL, 1));
     assert!(near(after.pixel(506, 303), Studio::BACKGROUND, 1));
@@ -1032,7 +1029,7 @@ fn a_lane_dropped_on_another_reports_the_move_to_the_one_below_the_pointer() {
     );
     // Its drop line: the row's content 2 px lower.
     let shown = |ui: &mut LiveUi, drop_on| {
-        ui.find(two_lanes(&t1, &t2, dragged, drop_on), "TAKE 2")
+        ui.find(two_lanes(&t1, &t2, dragged, drop_on), "Take 2")
             .expect("the label")
             .bounds()
             .y

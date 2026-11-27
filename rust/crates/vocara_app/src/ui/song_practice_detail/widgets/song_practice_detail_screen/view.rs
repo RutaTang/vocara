@@ -8,9 +8,6 @@ use std::convert::Infallible;
 use std::sync::Arc;
 
 use crate::ui::core::text;
-use iced::advanced::layout::{self, Layout};
-use iced::advanced::widget::{tree, Operation, Tree};
-use iced::advanced::{overlay, renderer, Clipboard, Shell, Widget};
 use iced::alignment::{Horizontal, Vertical};
 use iced::widget::canvas::{self, gradient, Frame, Geometry, Path};
 use iced::widget::{
@@ -35,16 +32,20 @@ use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::motion::Curve;
 use crate::ui::core::theme::{self, alpha, bare_button, boxed, fill, font, Studio};
 use crate::ui::core::widgets::animated::{animated, animated_container, Decoration};
+use crate::ui::core::widgets::controls::{
+    ghost_button, msr_button, popup_button, segmented, MsrKind,
+};
 use crate::ui::core::widgets::fading_scrollbar::{scrollable, Fading};
 use crate::ui::core::widgets::holds_keyboard::holds_keyboard;
+use crate::ui::core::widgets::line_icon::glyphs;
 use crate::ui::core::widgets::pan_zoom::{self, Held, Scroll};
 use crate::ui::core::widgets::slide::inert;
 use crate::ui::core::widgets::studio_button::studio_button;
-use crate::ui::core::widgets::studio_controls::{fader_db_readout, studio_fader};
+use crate::ui::core::widgets::studio_controls::studio_fader;
 use crate::ui::core::widgets::studio_hint::spinner;
 use crate::ui::core::widgets::studio_text::studio_text;
 use crate::ui::core::widgets::visible_drop_target::visible_drop_target;
-use crate::ui::core::widgets::waveform_painter::{PlayheadPainter, TimelineGridPainter};
+use crate::ui::core::widgets::waveform_painter::{crisp, PlayheadPainter, TimelineGridPainter};
 use crate::ui::core::widgets::wrap::Wrap;
 use crate::ui::song_practice_detail::view_model::analysis_source::AnalysisSource;
 use crate::ui::song_practice_detail::view_model::interpretations_controller::InterpretationsController;
@@ -72,7 +73,8 @@ use crate::ui::song_practice_detail::widgets::track_context_menu::{
     StudioMenuItem, TrackMenu,
 };
 use crate::ui::song_practice_detail::widgets::track_row::{
-    ms_toggle, track_menu_button, track_row, TIMELINE_H_MARGIN, TRACK_HEADER_W, TRACK_ROW_HEIGHT,
+    header_frame, header_name, take_color, track_menu_button, track_row, TIMELINE_H_MARGIN,
+    TRACK_HEADER_W,
 };
 
 /// What `vm.lyricsAsText()` gives a view (only the update side reads it).
@@ -422,11 +424,12 @@ impl SongPracticeDetailScreen {
             loop_start_ms: playback.loop_start_ms(),
             loop_end_ms: playback.loop_end_ms(),
             loop_enabled: playback.loop_enabled(),
+            song_end_ms: practice.timeline_duration_ms,
         })
         .map(Message::Ruler);
         let list = scrollable(
             container(self.lane_list(practice, dur, view_start)).padding(Padding {
-                bottom: 28.0,
+                bottom: 16.0,
                 ..Padding::ZERO
             }),
         )
@@ -465,9 +468,14 @@ impl SongPracticeDetailScreen {
     ) -> Element<'a, Message> {
         let vm = &*self.vm;
         let reference = vm.mixer().play_reference();
+        let playhead = SectionPlayhead {
+            position_ms: ms(vm.position()),
+            span_ms: dur,
+            view_start_ms: view_start,
+        };
         let mut list = keyed_column::<LaneKey, Message>()
             .width(Length::Fill)
-            .push(LaneKey::BackingHeader, backing_header(reference));
+            .push(LaneKey::BackingHeader, backing_header(reference, playhead));
         // Backing region: its own drop zone, so only it highlights when a
         // file is dragged over it. Drop fills the empty backing slot; any
         // extra files become new takes.
@@ -477,8 +485,16 @@ impl SongPracticeDetailScreen {
             practice.accompaniment.as_deref()
         };
         let backing_lane = match backing {
-            Some(track) => self.lane(track, DropZone::Backing, dur, view_start, practice),
+            Some(track) => self.lane(
+                track,
+                take_color(track, 0),
+                DropZone::Backing,
+                dur,
+                view_start,
+                practice,
+            ),
             None => self.drop_hint_zone(
+                playhead,
                 DropZone::Backing,
                 if reference { Icon::Disc3 } else { Icon::Music },
                 if reference {
@@ -490,11 +506,12 @@ impl SongPracticeDetailScreen {
         };
         list = list
             .push(LaneKey::Backing, backing_lane)
-            .push(LaneKey::TakesHeader, self.takes_header(practice));
+            .push(LaneKey::TakesHeader, self.takes_header(practice, playhead));
         if self.shown.vocal_takes.is_empty() && !vm.is_recording() {
             list = list.push(
                 LaneKey::NewTakeZone,
                 self.drop_hint_zone(
+                    playhead,
                     DropZone::NewTake,
                     Icon::Mic,
                     "Record a take, drag in vocal audio, or click to browse",
@@ -505,17 +522,24 @@ impl SongPracticeDetailScreen {
             // lane adds it as a new clip on THAT take (only that lane
             // highlights). The live recording draws on the armed lane itself
             // (Logic / Cubase), so there's no separate REC lane.
-            for t in &self.shown.vocal_takes {
+            for (i, t) in self.shown.vocal_takes.iter().enumerate() {
                 list = list.push(
                     LaneKey::Take(id_key(&t.id)),
-                    self.lane(t, DropZone::Take(t.id.clone()), dur, view_start, practice),
+                    self.lane(
+                        t,
+                        take_color(t, i),
+                        DropZone::Take(t.id.clone()),
+                        dur,
+                        view_start,
+                        practice,
+                    ),
                 );
             }
         }
         // FX BUSES — DAW group lanes (Cubase-style), between the takes and
         // the master. Only on the native FX engine.
         if vm.mixer().supports_effects() {
-            list = list.push(LaneKey::BusesHeader, buses_header());
+            list = list.push(LaneKey::BusesHeader, buses_header(playhead));
             // Keyed by bus, as the take rows are: unkeyed, a bus deleted
             // above one whose fader was being dragged handed the rest of the
             // drag to the next.
@@ -529,9 +553,12 @@ impl SongPracticeDetailScreen {
         // Keyed too: matched by position, a lane added or removed above
         // rebuilt the row mid-drag and the rest of the master fader's drag
         // did nothing.
-        list.push(LaneKey::MasterHeader, section_label("MASTER TRACK", 18.0))
-            .push(LaneKey::Master, self.master_row(practice, dur, view_start))
-            .into()
+        list.push(
+            LaneKey::MasterHeader,
+            section_row(section_label("Master"), Space::new().into(), playhead),
+        )
+        .push(LaneKey::Master, self.master_row(practice, dur, view_start))
+        .into()
     }
 
     /// `_Lane`: `track`'s row in its own file drop zone, highlighted while a
@@ -539,13 +566,14 @@ impl SongPracticeDetailScreen {
     fn lane<'a>(
         &'a self,
         track: &'a AudioTrack,
+        color: Color,
         zone: DropZone,
         dur: i64,
         view_start: i64,
         practice: &'a SongPractice,
     ) -> Element<'a, Message> {
         let hover = self.drop_hover.as_ref() == Some(&zone);
-        let row = container(self.row(track, dur, view_start, practice)).padding(Padding {
+        let row = container(self.row(track, color, dur, view_start, practice)).padding(Padding {
             left: TIMELINE_H_MARGIN,
             right: TIMELINE_H_MARGIN,
             ..Padding::ZERO
@@ -558,13 +586,12 @@ impl SongPracticeDetailScreen {
                 container(Space::new())
                     .width(Length::Fill)
                     .height(Length::Fill)
-                    .style(|_| container::Style {
-                        border: iced::Border {
-                            color: Studio::ACCENT,
-                            width: 1.5,
-                            radius: 0.0.into(),
-                        },
-                        ..boxed(Some(alpha(Studio::ACCENT, 0.08)), 0.0, None)
+                    .style(|_| {
+                        boxed(
+                            Some(alpha(Studio::ACCENT, 0.06)),
+                            0.0,
+                            Some(alpha(Studio::ACCENT, 0.6)),
+                        )
                     }),
             );
         }
@@ -576,6 +603,7 @@ impl SongPracticeDetailScreen {
     fn row<'a>(
         &'a self,
         track: &'a AudioTrack,
+        color: Color,
         dur: i64,
         view_start: i64,
         practice: &'a SongPractice,
@@ -597,6 +625,7 @@ impl SongPracticeDetailScreen {
             },
         )
         .view_start_ms(view_start)
+        .color(color)
         .selected(selected)
         .armed(!track.is_backing() && is_target)
         .selected_clip_id(if selected {
@@ -613,7 +642,7 @@ impl SongPracticeDetailScreen {
             row = row.recording(recording.recording_peaks(), recording.live_take_start_ms());
         }
         if expanded {
-            row = row.sub_lanes(self.lanes_view(track, dur, view_start));
+            row = row.sub_lanes(self.lanes_view(track, color, dur, view_start));
         }
         let menu = match &self.menu {
             Some(OpenMenu::Track(t)) if *t == track.id => {
@@ -651,6 +680,7 @@ impl SongPracticeDetailScreen {
     fn lanes_view<'a>(
         &'a self,
         track: &'a AudioTrack,
+        color: Color,
         dur: i64,
         view_start: i64,
     ) -> Element<'a, Message> {
@@ -669,6 +699,7 @@ impl SongPracticeDetailScreen {
         let image: &LaneImage = self.lane_images.get(id).unwrap_or(&self.no_image);
         let lanes = analysis_lanes(track, vm.analysis().lanes_for(id), dur, ms(vm.position()))
             .view_start_ms(view_start)
+            .color(color)
             .metrics(metrics_loading, metrics)
             .spectrogram(spectrogram_loading, spectrogram, image)
             .lacks_data(!vm.analysis().live_monitor() && lacks, vm.revision());
@@ -683,6 +714,7 @@ impl SongPracticeDetailScreen {
     /// browses for its files.
     fn drop_hint_zone<'a>(
         &'a self,
+        playhead: SectionPlayhead,
         zone: DropZone,
         icon: Icon,
         hint: &'static str,
@@ -695,93 +727,37 @@ impl SongPracticeDetailScreen {
             .on_press(Message::Browse(zone.clone()));
         let padded = container(tap).padding(Padding {
             top: 4.0,
-            right: 14.0,
-            bottom: 10.0,
+            right: 10.0,
+            bottom: 8.0,
             left: 14.0,
         });
-        drop_zone(padded.into(), zone)
+        // The playhead goes on across the box, as across the rows.
+        drop_zone(with_playhead(padded.into(), playhead), zone)
     }
 
-    /// `TakesHeader`: the "VOCAL TAKES" label plus "+ New take" and a
-    /// dropdown that switches between the song's interpretations.
-    fn takes_header<'a>(&'a self, practice: &'a SongPractice) -> Element<'a, Message> {
+    /// `TakesHeader`: the "Vocal takes" section row, with the "New take"
+    /// ghost button and the pop-up of the song's interpretations (its menu
+    /// switches between them).
+    fn takes_header<'a>(
+        &'a self,
+        practice: &'a SongPractice,
+        playhead: SectionPlayhead,
+    ) -> Element<'a, Message> {
         let active = practice.active_version();
         let name = active.map_or("Interpretation", |v| v.name.as_str());
-        let face = container(
-            row![
-                icons::icon(Icon::Drama, 13.0, Studio::ACCENT_BRIGHT),
-                Space::new().width(7),
-                // On a narrow centre pane the name gives way (ellipsized)
-                // rather than pushing the chevron off the row.
-                Reserve::new(
-                    container(
-                        studio_text(name)
-                            .size(12)
-                            .font(font::BOLD)
-                            .color(Studio::TEXT_PRIMARY)
-                            .ellipsis(1),
-                    )
-                    .max_width(170),
-                    4.0 + 14.0,
-                ),
-                Space::new().width(4),
-                icons::icon(Icon::ChevronDown, 14.0, Studio::TEXT_FAINT),
-            ]
-            .align_y(Vertical::Center),
-        )
-        .padding(Padding {
-            top: 6.0,
-            right: 9.0,
-            bottom: 6.0,
-            left: 11.0,
-        })
-        .style(theme::inset(7.0));
-        // Opened at the press (`onTapDown`).
-        let dropdown = mouse_area(face)
-            .on_press(Message::OpenInterpretations)
-            .interaction(mouse::Interaction::Pointer);
+        // On a narrow centre pane a long name gives way (ellipsized) rather
+        // than pushing the chevron off the row.
+        let dropdown = popup_button(name, Some(Message::OpenInterpretations))
+            .max_width(INTERPRETATION_MAX_WIDTH);
         let menu = (self.menu == Some(OpenMenu::Interpretations))
             .then(|| self.interpretations_menu(practice));
         let dropdown = menu_host(dropdown, menu, Message::DismissMenu);
-        let new_take = button(
-            container(
-                row![
-                    icons::icon(Icon::Plus, 13.0, Studio::TEXT_SECONDARY),
-                    Space::new().width(5),
-                    text("New take").size(11.5).color(Studio::TEXT_SECONDARY),
-                ]
-                .align_y(Vertical::Center),
-            )
-            .padding(Padding::from([5, 10]))
-            .style(theme::card(6.0)),
+        let new_take = ghost_button("New take", Some(glyphs::PLUS), Some(Message::NewTake));
+        section_row(
+            section_label("Vocal takes"),
+            row![new_take, dropdown].spacing(6).into(),
+            playhead,
         )
-        .padding(0)
-        .style(bare_button)
-        .on_press(Message::NewTake);
-        container(
-            row![
-                studio_text("VOCAL TAKES")
-                    .size(11)
-                    .font(font::BOLD)
-                    .letter_spacing(0.8)
-                    .color(Studio::TEXT_FAINT),
-                Space::new().width(10),
-                container(
-                    row![new_take, Space::new().width(10), dropdown].align_y(Vertical::Center)
-                )
-                .width(Length::Fill)
-                .align_x(Horizontal::Right),
-            ]
-            .align_y(Vertical::Center),
-        )
-        .padding(Padding {
-            top: 16.0,
-            right: 14.0,
-            bottom: 10.0,
-            left: 14.0,
-        })
-        .width(Length::Fill)
-        .into()
     }
 
     /// The interpretation dropdown's menu: one row per interpretation, then
@@ -815,10 +791,10 @@ impl SongPracticeDetailScreen {
         studio_menu(items, 224.0).map(Message::InterpretationMenu)
     }
 
-    /// `_BusRow`: an FX bus lane — its header (name, mute, solo, fader; a
-    /// tap selects the bus for the inspector, a right-click or ⋯ opens its
-    /// menu), and its timeline area: the composite of every take routed
-    /// into it.
+    /// `_BusRow`: an FX bus lane — its header (the stripe, name and ⋯; mute,
+    /// solo, the level and its dB; a tap selects the bus for the inspector,
+    /// a right-click or ⋯ opens its menu), and its timeline area: the
+    /// composite of every take routed into it.
     fn bus_row<'a>(
         &'a self,
         bus: &'a FxBus,
@@ -828,37 +804,31 @@ impl SongPracticeDetailScreen {
     ) -> Element<'a, Message> {
         let vm = &*self.vm;
         let selected = vm.selected_bus_id() == Some(bus.id.as_str());
-        let accent = bus.color_value.map_or(Studio::ACCENT, argb);
+        let accent = bus.color_value.map_or(Studio::TRACK_PERIWINKLE, argb);
         let id = bus.id.clone();
         let fader_id = bus.id.clone();
-        let content = container(column![
+        let content = column![
             row![
-                studio_text(bus.name.as_str())
-                    .size(11.5)
-                    .font(font::BOLD)
-                    .letter_spacing(0.2)
-                    .color(accent)
-                    .width(Length::Fill)
-                    .ellipsis(1),
+                header_name(bus.name.as_str()),
                 track_menu_button(Message::OpenBusMenu(id.clone())),
             ]
             .align_y(Vertical::Center),
             Space::new().height(Length::Fill),
             row![
-                ms_toggle(
-                    "M",
+                msr_button(
+                    MsrKind::Mute,
                     bus.muted,
-                    Studio::RECORD,
-                    Message::ToggleBusMute(id.clone())
-                ),
+                    Some(Message::ToggleBusMute(id.clone()))
+                )
+                .size(20.0, 18.0),
                 Space::new().width(4),
-                ms_toggle(
-                    "S",
+                msr_button(
+                    MsrKind::Solo,
                     bus.soloed,
-                    Studio::ACCENT,
-                    Message::ToggleBusSolo(id.clone())
-                ),
-                Space::new().width(10),
+                    Some(Message::ToggleBusSolo(id.clone()))
+                )
+                .size(20.0, 18.0),
+                Space::new().width(8),
                 container(studio_fader(
                     bus.volume,
                     move |volume| Message::SetBusVolumeLive {
@@ -868,39 +838,15 @@ impl SongPracticeDetailScreen {
                     Message::CommitFx,
                 ))
                 .width(Length::Fill),
-                Space::new().width(8),
-                fader_db_readout(bus.volume),
+                Space::new().width(6),
+                level_readout(bus.volume),
             ]
             .align_y(Vertical::Center),
-        ])
-        .padding(Padding {
-            top: 8.0,
-            right: 8.0,
-            bottom: 8.0,
-            left: 9.0,
-        })
+        ]
         .width(Length::Fill)
         .height(Length::Fill);
-        let header = container(row![
-            container(Space::new())
-                .width(3)
-                .height(Length::Fill)
-                .style(fill(accent)),
-            content,
-            container(Space::new())
-                .width(1)
-                .height(Length::Fill)
-                .style(fill(Studio::BORDER)),
-        ])
-        .width(TRACK_HEADER_W)
-        .height(Length::Fill)
-        .style(fill(if selected {
-            Studio::SURFACE_RAISED
-        } else {
-            Studio::PANEL
-        }));
         let header = mouse_area(
-            button(header)
+            button(header_frame(content, accent, selected))
                 .padding(0)
                 .style(bare_button)
                 .on_press(Message::SelectBus(id.clone())),
@@ -921,13 +867,13 @@ impl SongPracticeDetailScreen {
             dur,
             accent,
             ms(vm.position()),
+            4.0,
         );
-        let row = timeline_row(menu_host(header, menu, Message::DismissMenu).into(), lane);
-        row
+        timeline_row(menu_host(header, menu, Message::DismissMenu).into(), lane)
     }
 
     /// `_MasterRow`: the master bus lane — its header carries the overall
-    /// output fader, and its timeline area shows a live composite of the
+    /// output level, and its timeline area shows a live composite of the
     /// audible mix (recomputed as tracks/levels change and while recording).
     fn master_row<'a>(
         &'a self,
@@ -937,12 +883,8 @@ impl SongPracticeDetailScreen {
     ) -> Element<'a, Message> {
         let vm = &*self.vm;
         let volume = practice.master_volume;
-        let content = container(column![
-            studio_text("MASTER")
-                .size(11.5)
-                .font(font::BOLD)
-                .letter_spacing(0.4)
-                .color(Studio::ACCENT),
+        let content = column![
+            header_name("Master"),
             Space::new().height(Length::Fill),
             row![
                 container(studio_fader(
@@ -951,43 +893,25 @@ impl SongPracticeDetailScreen {
                     Message::CommitMasterVolume,
                 ))
                 .width(Length::Fill),
-                Space::new().width(8),
-                fader_db_readout(volume),
+                Space::new().width(6),
+                level_readout(volume),
             ]
             .align_y(Vertical::Center),
-        ])
-        .padding(Padding {
-            top: 10.0,
-            right: 8.0,
-            bottom: 10.0,
-            left: 9.0,
-        })
+        ]
         .width(Length::Fill)
         .height(Length::Fill);
-        let header = container(row![
-            container(Space::new())
-                .width(3)
-                .height(Length::Fill)
-                .style(fill(Studio::ACCENT)),
-            content,
-            container(Space::new())
-                .width(1)
-                .height(Length::Fill)
-                .style(fill(Studio::BORDER)),
-        ])
-        .width(TRACK_HEADER_W)
-        .height(Length::Fill)
-        .style(fill(Studio::PANEL));
+        let header = header_frame(content, Studio::TRACK_MASTER, false);
         let peaks = vm.with_mixer(|m, h| m.master_waveform_peaks(h));
         let lane = envelope_lane(
             peaks,
             practice.timeline_duration_ms,
             view_start,
             dur,
-            Studio::ACCENT,
+            Studio::TRACK_MASTER,
             ms(vm.position()),
+            8.0,
         );
-        timeline_row(header.into(), lane)
+        timeline_row(header, lane)
     }
 
     /// `_TimelineScrollbar`: a draggable horizontal scrollbar under the
@@ -1001,7 +925,7 @@ impl SongPracticeDetailScreen {
         view_start: i64,
     ) -> Element<'a, Message> {
         if practice.timeline_duration_ms <= 0 {
-            return Space::new().height(14).into();
+            return Space::new().height(SCROLLBAR_HEIGHT).into();
         }
         // The view's own extent, which reaches past the timeline while a
         // take runs beyond its end: the practice's alone pinned the thumb at
@@ -1017,7 +941,7 @@ impl SongPracticeDetailScreen {
             .width(Length::Fill)
             .height(Length::Fill),
         ])
-        .height(14)
+        .height(SCROLLBAR_HEIGHT)
         .padding(Padding {
             left: TIMELINE_H_MARGIN,
             right: TIMELINE_H_MARGIN,
@@ -1026,6 +950,12 @@ impl SongPracticeDetailScreen {
         .into()
     }
 }
+
+/// The widest the interpretation pop-up grows, however long its name.
+pub const INTERPRETATION_MAX_WIDTH: f32 = 200.0;
+
+/// The timeline scrollbar's strip under the lanes.
+pub const SCROLLBAR_HEIGHT: f32 = 10.0;
 
 // ------------------------------------------------------------ the pieces
 
@@ -1202,165 +1132,232 @@ pub(super) fn snack_bar(message: &str) -> Element<'_, Infallible> {
     crate::ui::snack::floating_bar(message)
 }
 
-/// A section label of the lane list ("MASTER TRACK", "FX BUSES"' text): 11
-/// px w700, 0.8 letter spacing.
-fn section_label<'a>(label: &'static str, top: f32) -> Element<'a, Message> {
-    container(
-        studio_text(label)
-            .size(11)
-            .font(font::BOLD)
-            .letter_spacing(0.8)
-            .color(Studio::TEXT_FAINT),
+/// A section row's height (`DESIGN.md`, Section rows).
+pub const SECTION_ROW_HEIGHT: f32 = 30.0;
+
+/// What a section row needs to carry the playhead across its timeline part.
+#[derive(Debug, Clone, Copy)]
+struct SectionPlayhead {
+    position_ms: i64,
+    span_ms: i64,
+    view_start_ms: i64,
+}
+
+/// A section label of the lane list ("Accompaniment", "Vocal takes", "FX
+/// buses", "Master"): 11 px semibold `TEXT_SECONDARY`, sentence case.
+fn section_label<'a>(label: &'static str) -> Element<'a, Message> {
+    studio_text(label)
+        .size(theme::type_scale::LABEL)
+        .line_height(iced::Pixels(theme::type_scale::LINE))
+        .font(font::SEMIBOLD)
+        .color(Studio::TEXT_SECONDARY)
+        .into()
+}
+
+/// A section row (`DESIGN.md`): 30 px, its `label` 14 px in, `controls` on
+/// the right 10 px in, a 1 px `BORDER_SUBTLE` line under it; the playhead
+/// crosses its timeline part, over the controls, taking no input.
+fn section_row<'a>(
+    label: Element<'a, Message>,
+    controls: Element<'a, Message>,
+    playhead: SectionPlayhead,
+) -> Element<'a, Message> {
+    let content = container(
+        row![label, Space::new().width(Length::Fill), controls].align_y(Vertical::Center),
     )
     .padding(Padding {
-        top,
-        right: 14.0,
-        bottom: 10.0,
+        top: 0.0,
+        right: 10.0,
+        bottom: 0.0,
         left: 14.0,
     })
     .width(Length::Fill)
+    .height(Length::Fill)
+    .align_y(Vertical::Center);
+    column![
+        container(with_playhead(content.into(), playhead)).height(Length::Fill),
+        container(Space::new())
+            .width(Length::Fill)
+            .height(1)
+            .style(fill(Studio::BORDER_SUBTLE)),
+    ]
+    .width(Length::Fill)
+    .height(SECTION_ROW_HEIGHT)
     .into()
 }
 
-/// `_BackingHeader`: the section label plus the segmented Accompaniment ⇄
-/// Original toggle that one-click switches which backing plays (and is
-/// shown). Switching is seamless — the playhead doesn't move.
-fn backing_header<'a>(reference: bool) -> Element<'a, Message> {
-    let seg = |label: &'static str, active: bool, value: bool| {
-        button(
-            container(
-                studio_text(label)
-                    .size(11)
-                    .font(font::BOLD)
-                    .letter_spacing(0.3)
-                    .color(if active {
-                        Studio::ACCENT_BRIGHT
-                    } else {
-                        Studio::TEXT_SECONDARY
-                    }),
-            )
-            .padding(Padding::from([4, 12]))
-            .style(move |_| {
-                boxed(
-                    Some(if active {
-                        alpha(Studio::ACCENT, 0.18)
-                    } else {
-                        Color::TRANSPARENT
-                    }),
-                    5.0,
-                    None,
-                )
-            }),
-        )
-        .padding(0)
-        .style(bare_button)
-        .on_press(Message::SetPlayReference(value))
-    };
-    let toggle = container(row![
-        seg("Accompaniment", !reference, false),
-        seg("Original", reference, true),
+/// `content` with the playhead over its timeline part (right of the header
+/// column), taking no input.
+fn with_playhead(content: Element<'_, Message>, playhead: SectionPlayhead) -> Element<'_, Message> {
+    let line = container(row![
+        Space::new().width(TIMELINE_H_MARGIN + TRACK_HEADER_W),
+        canvas_widget(PlayheadPainter {
+            position_ms: playhead.position_ms,
+            timeline_duration_ms: playhead.span_ms,
+            color: Studio::PLAYHEAD,
+            show_head: false,
+            start_ms: playhead.view_start_ms,
+        })
+        .width(Length::Fill)
+        .height(Length::Fill),
+        Space::new().width(TIMELINE_H_MARGIN),
     ])
-    // 2 inside the 1 px border.
-    .padding(3)
-    .style(theme::inset(7.0));
-    container(
-        row![
-            studio_text(if reference {
-                "REFERENCE · ORIGINAL"
-            } else {
-                "ACCOMPANIMENT"
-            })
-            .size(11)
-            .font(font::BOLD)
-            .letter_spacing(0.8)
-            .color(Studio::TEXT_FAINT),
-            Space::new().width(Length::Fill),
-            toggle,
-        ]
-        .align_y(Vertical::Center),
-    )
-    .padding(Padding {
-        top: 12.0,
-        right: 14.0,
-        bottom: 8.0,
-        left: 14.0,
-    })
     .width(Length::Fill)
-    .into()
+    .height(Length::Fill);
+    stack![content, line].into()
 }
 
-/// `_BusesHeader`: the "FX BUSES" label and "+ New bus".
-fn buses_header<'a>() -> Element<'a, Message> {
-    let new_bus = button(
-        container(
-            row![
-                icons::icon(Icon::Plus, 13.0, Studio::TEXT_SECONDARY),
-                Space::new().width(5),
-                text("New bus").size(11.5).color(Studio::TEXT_SECONDARY),
-            ]
-            .align_y(Vertical::Center),
-        )
-        .padding(Padding::from([5, 10]))
-        .style(theme::card(6.0)),
+/// `_BackingHeader`: the section row with the Accompaniment ⇄ Original
+/// segmented control that one-click switches which backing plays (and is
+/// shown). Switching is seamless — the playhead doesn't move.
+fn backing_header<'a>(reference: bool, playhead: SectionPlayhead) -> Element<'a, Message> {
+    let toggle = segmented(
+        &[(false, "Accompaniment"), (true, "Original")],
+        reference,
+        Message::SetPlayReference,
+    );
+    section_row(
+        section_label(if reference {
+            "Reference · original"
+        } else {
+            "Accompaniment"
+        }),
+        toggle.into(),
+        playhead,
     )
-    .padding(0)
-    .style(bare_button)
-    .on_press(Message::NewBus);
+}
+
+/// `_BusesHeader`: the "FX buses" section row and "New bus".
+fn buses_header<'a>(playhead: SectionPlayhead) -> Element<'a, Message> {
+    section_row(
+        section_label("FX buses"),
+        ghost_button("New bus", Some(glyphs::PLUS), Some(Message::NewBus)),
+        playhead,
+    )
+}
+
+/// A level's readout beside a header's slider: "−0.9 dB", 11 px tabular
+/// `TEXT_FAINT`, right-aligned in 46 px.
+fn level_readout<'a>(volume: f64) -> Element<'a, Message> {
+    use crate::ui::core::widgets::studio_controls::{fader_db, FADER_DB_READOUT_WIDTH};
     container(
-        row![
-            studio_text("FX BUSES")
-                .size(11)
-                .font(font::BOLD)
-                .letter_spacing(0.8)
-                .color(Studio::TEXT_FAINT),
-            Space::new().width(Length::Fill),
-            new_bus,
-        ]
-        .align_y(Vertical::Center),
+        studio_text(format!("{} dB", fader_db(volume).replace('-', "−")))
+            .size(theme::type_scale::LABEL)
+            .line_height(iced::Pixels(theme::type_scale::LINE))
+            .tabular()
+            .color(Studio::TEXT_FAINT)
+            .wrapping(iced::widget::text::Wrapping::None),
     )
-    .padding(Padding {
-        top: 18.0,
-        right: 14.0,
-        bottom: 10.0,
-        left: 14.0,
-    })
-    .width(Length::Fill)
+    .width(FADER_DB_READOUT_WIDTH)
+    .align_x(Horizontal::Right)
     .into()
 }
 
 /// How long a drop hint's box takes to light up or go back.
 pub const DROP_HINT_ANIMATION: std::time::Duration = std::time::Duration::from_millis(120);
 
-/// `_DropHint`: an icon and a line, lit up (accent border + tint) while a
-/// file is dragged over the area, so the drop target is the box itself —
-/// not the whole background. The box's tint and border change over 120 ms,
-/// linear (its `AnimatedContainer`); the icon and line at once.
+/// The drop hint's box height.
+pub const DROP_HINT_HEIGHT: f32 = 52.0;
+
+/// The drop hint's fill at rest (none: the accent at 0 %, so the light-up
+/// eases only its opacity) and while a file is over it.
+pub const DROP_HINT_REST: Color = alpha(Studio::ACCENT, 0.0);
+pub const DROP_HINT_LIT: Color = alpha(Studio::ACCENT, 0.06);
+
+/// `_DropHint`: a dashed box with an icon and a line, lit up (an accent
+/// tint and outline) while a file is dragged over the area, so the drop
+/// target is the box itself — not the whole background. The box's tint
+/// changes over 120 ms, linear (its `AnimatedContainer`); the outline, the
+/// icon and the line at once.
 fn drop_hint<'a>(icon: Icon, hint: &'static str, highlighted: bool) -> Element<'a, Message> {
     let color = if highlighted {
-        Studio::ACCENT
+        Studio::ACCENT_BRIGHT
     } else {
         Studio::TEXT_FAINT
     };
-    animated_container(
+    let content = animated_container(
         row![
-            icons::icon(icon, 16.0, color),
+            icons::icon(icon, 14.0, color),
             Space::new().width(8),
             // Cut short rather than overflowing: at the smallest window with
             // both side panels open the centre pane is under 400 px wide.
-            studio_text(hint).size(13).color(color).ellipsis(1),
+            studio_text(hint)
+                .size(theme::type_scale::BODY)
+                .color(color)
+                .ellipsis(1),
         ]
         .align_y(Vertical::Center),
         DROP_HINT_ANIMATION,
     )
     .width(Length::Fill)
-    .height(64)
+    .height(DROP_HINT_HEIGHT)
     .align((0.0, 0.0))
-    .decoration(if highlighted {
-        Decoration::boxed(alpha(Studio::ACCENT, 0.08), 8.0, Studio::ACCENT, 1.5)
-    } else {
-        Decoration::boxed(Studio::PANEL, 8.0, Studio::BORDER, 1.0)
-    })
+    .decoration(Decoration::boxed(
+        if highlighted {
+            DROP_HINT_LIT
+        } else {
+            DROP_HINT_REST
+        },
+        theme::radius::WELL,
+        Color::TRANSPARENT,
+        0.0,
+    ));
+    stack![
+        content,
+        canvas_widget(DashedOutline {
+            color: if highlighted {
+                alpha(Studio::ACCENT, 0.7)
+            } else {
+                Studio::BORDER_STRONG
+            },
+        })
+        .width(Length::Fill)
+        .height(Length::Fill),
+    ]
+    .width(Length::Fill)
+    .height(DROP_HINT_HEIGHT)
     .into()
+}
+
+/// A 1 px dashed outline (4 on, 3 off) round its box, radius 6.
+struct DashedOutline {
+    color: Color,
+}
+
+impl<M> canvas::Program<M> for DashedOutline {
+    type State = ();
+
+    fn draw(
+        &self,
+        _: &(),
+        renderer: &Renderer,
+        _: &Theme,
+        bounds: Rectangle,
+        _: mouse::Cursor,
+    ) -> Vec<Geometry> {
+        let mut frame = Frame::new(renderer, bounds.size());
+        let outline = Path::rounded_rectangle(
+            Point::new(0.5, 0.5),
+            Size::new(
+                (bounds.width - 1.0).max(0.0),
+                (bounds.height - 1.0).max(0.0),
+            ),
+            theme::radius::WELL.into(),
+        );
+        frame.stroke(
+            &outline,
+            canvas::Stroke {
+                line_dash: canvas::LineDash {
+                    segments: &[4.0, 3.0],
+                    offset: 0,
+                },
+                ..canvas::Stroke::default()
+                    .with_color(self.color)
+                    .with_width(1.0)
+            },
+        );
+        vec![frame.into_geometry()]
+    }
 }
 
 /// `_AudioDropZone`: a file drop target with its own hover state, taking a
@@ -1380,8 +1377,12 @@ fn drop_zone(content: Element<'_, Message>, zone: DropZone) -> Element<'_, Messa
     .into()
 }
 
-/// A 74 px timeline row inset to the lanes: `header` over the header
-/// column, `lane` across the timeline, a 1 px line under both.
+/// The bus and master rows' height, their 1 px bottom line included.
+pub const BUS_ROW_HEIGHT: f32 = 52.0;
+
+/// A 52 px timeline row inset to the lanes: `header` over the header
+/// column, `lane` across the timeline, a 1 px `BORDER_SUBTLE` line under
+/// both.
 fn timeline_row<'a>(
     header: Element<'a, Message>,
     lane: Element<'a, Message>,
@@ -1391,10 +1392,10 @@ fn timeline_row<'a>(
         container(Space::new())
             .width(Length::Fill)
             .height(1)
-            .style(fill(Studio::BORDER)),
+            .style(fill(Studio::BORDER_SUBTLE)),
     ])
     .width(Length::Fill)
-    .height(TRACK_ROW_HEIGHT)
+    .height(BUS_ROW_HEIGHT)
     .padding(Padding {
         left: TIMELINE_H_MARGIN,
         right: TIMELINE_H_MARGIN,
@@ -1403,8 +1404,11 @@ fn timeline_row<'a>(
     .into()
 }
 
-/// The timeline area of the master or a bus lane: the grid, the envelope
-/// (inset 10 px top and bottom) and the playhead, on `Studio.inset`.
+/// The envelope's opacity on a bus or master lane.
+pub const ENVELOPE_OPACITY: f32 = 0.55;
+
+/// The timeline area of the master or a bus lane: the bar lines, the
+/// envelope in `color` (inset `inset` px top and bottom) and the playhead.
 fn envelope_lane<'a>(
     peaks: Arc<[f64]>,
     extent_ms: i64,
@@ -1412,6 +1416,7 @@ fn envelope_lane<'a>(
     span: i64,
     color: Color,
     position_ms: i64,
+    inset: f32,
 ) -> Element<'a, Message> {
     container(stack![
         canvas_widget(TimelineGridPainter {
@@ -1422,11 +1427,13 @@ fn envelope_lane<'a>(
         .width(Length::Fill)
         .height(Length::Fill),
         container(
-            timeline_envelope_painter(peaks, extent_ms, view_start, span, color).into_canvas()
+            timeline_envelope_painter(peaks, extent_ms, view_start, span, color)
+                .opacity(ENVELOPE_OPACITY)
+                .into_canvas()
         )
         .width(Length::Fill)
         .height(Length::Fill)
-        .padding(Padding::from([10, 0])),
+        .padding(Padding::from([inset, 0.0])),
         canvas_widget(PlayheadPainter {
             position_ms,
             timeline_duration_ms: span,
@@ -1439,7 +1446,6 @@ fn envelope_lane<'a>(
     ])
     .width(Length::Fill)
     .height(Length::Fill)
-    .style(fill(Studio::INSET))
     .clip(true)
     .into()
 }
@@ -1556,22 +1562,38 @@ impl<M> canvas::Program<M> for LoopBand {
             };
             let (left, right) = (x(self.start_ms), x(self.end_ms));
             if right > left {
+                let x0 = TIMELINE_H_MARGIN + TRACK_HEADER_W;
                 frame.fill_rectangle(
-                    Point::new(
-                        TIMELINE_H_MARGIN + TRACK_HEADER_W + left as f32,
-                        RULER_HEIGHT,
-                    ),
+                    Point::new(x0 + left as f32, RULER_HEIGHT),
                     Size::new((right - left) as f32, bounds.height - RULER_HEIGHT),
-                    alpha(Studio::ACCENT, 0.06),
+                    alpha(Studio::ACCENT, 0.05),
                 );
+                // Its edges, faint, where they are in the view.
+                for (edge, at) in [(left, self.start_ms), (right, self.end_ms)] {
+                    if at >= self.view_start_ms && at <= self.view_start_ms + self.span_ms {
+                        let x = crisp(x0 + (edge as f32).min(w as f32 - 0.5));
+                        frame.stroke(
+                            &Path::line(Point::new(x, RULER_HEIGHT), Point::new(x, bounds.height)),
+                            canvas::Stroke::default()
+                                .with_color(alpha(Studio::ACCENT_BRIGHT, 0.35))
+                                .with_width(1.0),
+                        );
+                    }
+                }
             }
         }
         vec![frame.into_geometry()]
     }
 }
 
-/// The scrollbar's groove inset (horizontal, vertical).
+/// The scrollbar's groove inset (horizontal, vertical): a 4 px thumb in the
+/// 10 px strip.
 const GROOVE_INSET: (f32, f32) = (4.0, 3.0);
+
+/// The scrollbar thumb (`DESIGN.md`: thin, neutral), and under the pointer
+/// or dragged.
+pub const SCROLL_THUMB: Color = Color::from_rgb8(0x3A, 0x3A, 0x43);
+pub const SCROLL_THUMB_HOT: Color = Color::from_rgb8(0x4A, 0x4A, 0x54);
 
 /// How far a mouse moves horizontally before the thumb's drag wins
 /// (`kPrecisePointerHitSlop`).
@@ -1668,29 +1690,21 @@ impl canvas::Program<Message> for Scrollbar {
 
     fn draw(
         &self,
-        _: &ThumbDrag,
+        state: &ThumbDrag,
         renderer: &Renderer,
         _: &Theme,
         bounds: Rectangle,
-        _: mouse::Cursor,
+        cursor: mouse::Cursor,
     ) -> Vec<Geometry> {
         let mut frame = Frame::new(renderer, bounds.size());
-        let groove_size = Size::new(
-            (bounds.width - 2.0 * GROOVE_INSET.0).max(0.0),
-            (bounds.height - 2.0 * GROOVE_INSET.1).max(0.0),
-        );
-        frame.fill(
-            &Path::rounded_rectangle(
-                Point::new(GROOVE_INSET.0, GROOVE_INSET.1),
-                groove_size,
-                4.0.into(),
-            ),
-            Studio::INSET,
-        );
         let (thumb, _) = self.thumb(bounds);
+        let hot = state.press.is_some()
+            || cursor
+                .position_in(bounds)
+                .is_some_and(|p| thumb.contains(p));
         frame.fill(
-            &Path::rounded_rectangle(thumb.position(), thumb.size(), 4.0.into()),
-            Studio::BORDER_STRONG,
+            &Path::rounded_rectangle(thumb.position(), thumb.size(), (thumb.height / 2.0).into()),
+            if hot { SCROLL_THUMB_HOT } else { SCROLL_THUMB },
         );
         vec![frame.into_geometry()]
     }
@@ -1754,141 +1768,6 @@ impl<M> canvas::Program<M> for ProgressBar {
     }
 }
 
-// --------------------------------------------------------------- Reserve
-
-/// Lays `content` out with `reserve` px less than it is offered, so what
-/// follows it in a row keeps that room: Flutter's `Flexible` in a row of
-/// fixed siblings (iced gives a row's sized children their room in order,
-/// so a long name would have taken the chevron's).
-struct Reserve<'a> {
-    content: Element<'a, Message>,
-    reserve: f32,
-}
-
-impl<'a> Reserve<'a> {
-    fn new(content: impl Into<Element<'a, Message>>, reserve: f32) -> Self {
-        Self {
-            content: content.into(),
-            reserve,
-        }
-    }
-}
-
-impl Widget<Message, Theme, Renderer> for Reserve<'_> {
-    fn size(&self) -> Size<Length> {
-        self.content.as_widget().size()
-    }
-
-    fn size_hint(&self) -> Size<Length> {
-        self.content.as_widget().size_hint()
-    }
-
-    fn tag(&self) -> tree::Tag {
-        self.content.as_widget().tag()
-    }
-
-    fn state(&self) -> tree::State {
-        self.content.as_widget().state()
-    }
-
-    fn children(&self) -> Vec<Tree> {
-        self.content.as_widget().children()
-    }
-
-    fn diff(&self, tree: &mut Tree) {
-        self.content.as_widget().diff(tree);
-    }
-
-    fn layout(
-        &mut self,
-        tree: &mut Tree,
-        renderer: &Renderer,
-        limits: &layout::Limits,
-    ) -> layout::Node {
-        let max = limits.max();
-        let limits = layout::Limits::new(
-            limits.min(),
-            Size::new((max.width - self.reserve).max(0.0), max.height),
-        );
-        self.content.as_widget_mut().layout(tree, renderer, &limits)
-    }
-
-    fn draw(
-        &self,
-        tree: &Tree,
-        renderer: &mut Renderer,
-        theme: &Theme,
-        style: &renderer::Style,
-        layout: Layout<'_>,
-        cursor: mouse::Cursor,
-        viewport: &Rectangle,
-    ) {
-        self.content
-            .as_widget()
-            .draw(tree, renderer, theme, style, layout, cursor, viewport);
-    }
-
-    fn operate(
-        &mut self,
-        tree: &mut Tree,
-        layout: Layout<'_>,
-        renderer: &Renderer,
-        operation: &mut dyn Operation,
-    ) {
-        self.content
-            .as_widget_mut()
-            .operate(tree, layout, renderer, operation);
-    }
-
-    fn update(
-        &mut self,
-        tree: &mut Tree,
-        event: &Event,
-        layout: Layout<'_>,
-        cursor: mouse::Cursor,
-        renderer: &Renderer,
-        clipboard: &mut dyn Clipboard,
-        shell: &mut Shell<'_, Message>,
-        viewport: &Rectangle,
-    ) {
-        self.content.as_widget_mut().update(
-            tree, event, layout, cursor, renderer, clipboard, shell, viewport,
-        );
-    }
-
-    fn mouse_interaction(
-        &self,
-        tree: &Tree,
-        layout: Layout<'_>,
-        cursor: mouse::Cursor,
-        viewport: &Rectangle,
-        renderer: &Renderer,
-    ) -> mouse::Interaction {
-        self.content
-            .as_widget()
-            .mouse_interaction(tree, layout, cursor, viewport, renderer)
-    }
-
-    fn overlay<'b>(
-        &'b mut self,
-        tree: &'b mut Tree,
-        layout: Layout<'b>,
-        renderer: &Renderer,
-        viewport: &Rectangle,
-        translation: Vector,
-    ) -> Option<overlay::Element<'b, Message, Theme, Renderer>> {
-        self.content
-            .as_widget_mut()
-            .overlay(tree, layout, renderer, viewport, translation)
-    }
-}
-
-impl<'a> From<Reserve<'a>> for Element<'a, Message> {
-    fn from(r: Reserve<'a>) -> Self {
-        Element::new(r)
-    }
-}
-
 #[cfg(test)]
 mod animations {
     use iced::time::Instant;
@@ -1903,7 +1782,7 @@ mod animations {
         let mut window = Frames::new(Size::new(300.0, 64.0));
         // Inside the border, clear of the icon and the line.
         let fill = Point::new(5.0, 32.0);
-        let (rest, glow) = (Studio::PANEL, alpha(Studio::ACCENT, 0.08));
+        let (rest, glow) = (DROP_HINT_REST, DROP_HINT_LIT);
         let shows = |w: &Frames, c: Color| near(w.pixel(fill), over(c, BACKGROUND));
         let t0 = Instant::now();
         window.frame(view(false), &[], t0);

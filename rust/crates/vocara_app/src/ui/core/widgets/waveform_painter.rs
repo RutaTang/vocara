@@ -4,6 +4,12 @@
 //! built on (tick spacing, the viewport slice, the outlines), which the tests
 //! check without a window.
 //!
+//! They draw `rust/DESIGN.md`'s timeline: waveforms are filled, symmetric
+//! peak envelopes, one value per pixel column (the loudest peak the column
+//! covers), with no centre axis; the ruler has major ticks with `m:ss`
+//! labels and minor ticks between them; the grid lines fall on the major
+//! ticks; the playhead is a crisp 1 px line.
+//!
 //! Each painter is a `canvas::Program`. The ones whose drawing is costly
 //! keep a cache cleared only when their inputs change (`shouldRepaint`);
 //! the playhead redraws on every position change, as Dart's repainted on
@@ -22,7 +28,7 @@ use iced::{mouse, Color, Length, Pixels, Point, Rectangle, Renderer, Size, Theme
 use super::painter::{color_key, KeyedCache, Same};
 use super::studio_text::fill_tabular_text;
 use crate::ui::core::system_font;
-use crate::ui::core::theme::alpha;
+use crate::ui::core::theme::{clip, faded};
 pub use vocara_model::util::format::format_clock_ms;
 
 /// Picks a readable time-grid interval (in ms) so labels/lines land roughly
@@ -136,8 +142,26 @@ pub struct WaveformShape {
     pub outline: Vec<(f64, f64)>,
 }
 
+/// How much of the half-height a full-scale peak reaches.
+pub const PEAK_REACH: f64 = 0.92;
+
+/// The half-height a silent column keeps: a hairline, so a clip's silence
+/// still reads as part of the clip (the envelope has no centre axis).
+pub const SILENCE_HALF_HEIGHT: f64 = 0.35;
+
 /// The silhouette of `peaks` in a `width` × `height` box, as
-/// `WaveformPainter.paint` builds it; `None` when it draws nothing.
+/// [`WaveformPainter`] paints it; `None` when it draws nothing.
+///
+/// A true peak envelope, one value per pixel column: peak `k` stands for
+/// the stretch of audio from its vertex to the next one (index `k` to
+/// `k + 1`, mapped as `(index − index_offset) / index_span × draw width`;
+/// the spread-all mapping puts the first peak at the left edge and the last
+/// at the right), and each column takes the loudest peak whose stretch it
+/// covers. Zoomed out, a column stands for every peak in it, so a burst
+/// between two columns' centres is never dropped; zoomed in, a peak spans
+/// several columns and draws as a flat step, not a ramp to the next one.
+/// Past the last peak (a slice that reaches the clip's end has no peak
+/// after it), the last one holds out to the edge.
 pub fn waveform_shape(
     peaks: &[f64],
     width: f64,
@@ -158,73 +182,61 @@ pub fn waveform_shape(
     let mid = height / 2.0;
     let n = peaks.len();
     let span = index_span.unwrap_or((n - 1) as f64);
-    // A slice's edge vertices map outside the box by design (see
+    // A slice's edge peaks map outside the box by design (see
     // `index_offset`); keep them from bleeding into the neighboring padding.
     let clip = index_offset != 0.0 || index_span.is_some();
-    // One vertex per peak, but never more than per pixel — so a clip mapped
-    // far wider than the viewport (when zoomed in) doesn't build a giant path.
-    let steps = n.clamp(1, draw_width.ceil() as usize + 1);
-    let idx_at = |i: usize| {
-        if steps <= 1 {
-            0.0
-        } else {
-            i as f64 / (steps - 1) as f64 * (n - 1) as f64
-        }
-    };
-    let x_at = |i: usize| {
+    let last_index = n as i64 - 1;
+    // The peak index at x.
+    let index_at = |x: f64| {
         if span <= 0.0 {
             0.0
         } else {
-            (idx_at(i) - index_offset) / span * draw_width
+            index_offset + x / draw_width * span
         }
     };
-    // Each vertex stands for every peak in its bucket when there are more
-    // peaks than vertices: the one peak nearest it alone dropped a burst
-    // that fell between vertices — gone at one zoom, back at the next.
-    let half = if steps > 1 && steps < n {
-        (n - 1) as f64 / (steps - 1) as f64 / 2.0
-    } else {
-        0.0
-    };
-    let last_index = n as i64 - 1;
-    let amps: Vec<f64> = (0..steps)
-        .map(|i| {
-            let c = idx_at(i);
-            let mut m = peaks[clamp_i(c.round(), 0, last_index) as usize];
-            if half > 0.0 {
-                let hi = clamp_i((c + half).floor(), 0, last_index);
-                let mut k = clamp_i((c - half).ceil(), 0, last_index);
-                while k <= hi {
-                    if peaks[k as usize] > m {
-                        m = peaks[k as usize];
-                    }
-                    k += 1;
-                }
-            }
-            m
+    let columns = (draw_width.ceil() as usize).clamp(1, 1 << 20);
+    let reach = mid * PEAK_REACH;
+    let half_heights: Vec<f64> = (0..columns)
+        .map(|c| {
+            let from = index_at(c as f64).floor();
+            // The column's right edge belongs to the next column.
+            let to = (index_at((c + 1) as f64).ceil() - 1.0).max(from);
+            let lo = clamp_i(from, 0, last_index);
+            let hi = clamp_i(to, lo, last_index);
+            let loudest = peaks[lo as usize..=hi as usize]
+                .iter()
+                .fold(0.0f64, |m, &p| if p > m { p } else { m });
+            (loudest.clamp(0.0, 1.0) * reach).max(SILENCE_HALF_HEIGHT)
         })
         .collect();
 
-    // A slice whose window reaches the clip's END has no peak past its last
-    // one to draw to (see `visible_peak_slice`), so its final bucket — from
-    // the last vertex to the box's right edge — would stay blank: hold the
-    // last peak out to the edge. A no-op for a slice that carries a vertex
-    // past the edge and for the spread-all mapping, whose last vertex sits on
-    // it (bar a lone peak, which now fills the box instead of drawing
-    // nothing).
-    let last = steps - 1;
-    let tail = x_at(last) < draw_width;
-    let mut outline = Vec::with_capacity(steps * 2 + 3);
+    // The top edge left to right, then the bottom edge back, one flat step
+    // per run of equal columns.
+    let right = |c: usize| ((c + 1) as f64).min(draw_width);
+    let mut outline = Vec::with_capacity(columns * 4 + 2);
     outline.push((0.0, mid));
-    for (i, amp) in amps.iter().enumerate() {
-        outline.push((x_at(i), mid - amp * mid * 0.9));
+    let mut c = 0;
+    while c < columns {
+        let h = half_heights[c];
+        let mut end = c;
+        while end + 1 < columns && half_heights[end + 1] == h {
+            end += 1;
+        }
+        outline.push((c as f64, mid - h));
+        outline.push((right(end), mid - h));
+        c = end + 1;
     }
-    if tail {
-        outline.push((draw_width, mid - amps[last] * mid * 0.9));
-        outline.push((draw_width, mid + amps[last] * mid * 0.9));
-    }
-    for i in (0..=last).rev() {
-        outline.push((x_at(i), mid + amps[i] * mid * 0.9));
+    outline.push((draw_width, mid));
+    let mut c = columns;
+    while c > 0 {
+        let h = half_heights[c - 1];
+        let mut start = c - 1;
+        while start > 0 && half_heights[start - 1] == h {
+            start -= 1;
+        }
+        outline.push((right(c - 1), mid + h));
+        outline.push((start as f64, mid + h));
+        c = start;
     }
     Some(WaveformShape {
         draw_width,
@@ -281,25 +293,98 @@ pub fn live_waveform_outline(
         }
         m
     };
+    let half = |a: f64| (a.clamp(0.0, 1.0) * mid * PEAK_REACH).max(SILENCE_HALF_HEIGHT);
     let amps: Vec<f64> = (0..=cols).map(amp_at).collect();
     let mut outline = Vec::with_capacity(amps.len() * 2 + 1);
     outline.push((0.0, mid));
     for (c, a) in amps.iter().enumerate() {
-        outline.push((c as f64, mid - a * mid * 0.9));
+        outline.push((c as f64, mid - half(*a)));
     }
     for (c, a) in amps.iter().enumerate().rev() {
-        outline.push((c as f64, mid + a * mid * 0.9));
+        outline.push((c as f64, mid + half(*a)));
     }
     Some((outline, mid))
 }
 
-/// The x of every grid line `TimelineGridPainter` draws: one per interval
-/// strictly inside the view (the left edge's own line is the ruler's).
+/// How far apart (px, at least) the ruler's major ticks and labels, and the
+/// arrange's bar lines on them, fall: a 42 s song across a 670 px arrange
+/// gets one every 10 s, as `DESIGN.md`'s ruler has them.
+pub const MAJOR_TICK_MIN_PX: f64 = 96.0;
+
+/// The ruler's major tick interval (ms) for `duration_ms` across `width`
+/// px: [`nice_time_interval_ms_min`] at [`MAJOR_TICK_MIN_PX`].
+pub fn ruler_interval_ms(duration_ms: i64, width: f64) -> i64 {
+    nice_time_interval_ms_min(duration_ms, width, MAJOR_TICK_MIN_PX)
+}
+
+/// How many parts the ruler's minor ticks cut a major `interval` (ms) into:
+/// whole, round steps (10 s into 2 s, 30 s into 5 s, a minute into 10 s).
+pub fn minor_divisions(interval_ms: i64) -> i64 {
+    match interval_ms {
+        2000 | 120_000 | 3_600_000 => 4,
+        30_000 | 60_000 | 1_800_000 => 6,
+        _ => 5,
+    }
+}
+
+/// The closest the ruler's minor ticks come (px): closer, they are left out.
+pub const MINOR_TICK_MIN_PX: f64 = 6.0;
+
+/// The x of every minor tick the ruler draws: the steps between its major
+/// ticks (not on them), across the view; none when they would crowd closer
+/// than [`MINOR_TICK_MIN_PX`].
+pub fn minor_tick_xs(timeline_duration_ms: i64, start_ms: i64, width: f64) -> Vec<f64> {
+    if timeline_duration_ms <= 0 || width <= 0.0 {
+        return Vec::new();
+    }
+    let interval = ruler_interval_ms(timeline_duration_ms, width);
+    let step = (interval / minor_divisions(interval)).max(1);
+    if step as f64 / timeline_duration_ms as f64 * width < MINOR_TICK_MIN_PX {
+        return Vec::new();
+    }
+    let end = start_ms.saturating_add(timeline_duration_ms);
+    let mut t = (start_ms / step).saturating_mul(step);
+    if t < start_ms {
+        t = t.saturating_add(step);
+    }
+    let mut xs = Vec::new();
+    while t < end {
+        if t % interval != 0 {
+            xs.push((t - start_ms) as f64 / timeline_duration_ms as f64 * width);
+        }
+        match t.checked_add(step) {
+            Some(next) => t = next,
+            None => break,
+        }
+    }
+    xs
+}
+
+/// A ruler label: `m:ss` (`0:10`, `12:48`), `h:mm:ss` past an hour.
+pub fn ruler_label(ms: i64) -> String {
+    let s = ms.max(0) / 1000;
+    let (h, m, s) = (s / 3600, s / 60 % 60, s % 60);
+    if h > 0 {
+        format!("{h}:{m:02}:{s:02}")
+    } else {
+        format!("{m}:{s:02}")
+    }
+}
+
+/// `x` moved to the middle of its pixel column, where a 1 px line draws
+/// crisp.
+pub fn crisp(x: f32) -> f32 {
+    x.floor() + 0.5
+}
+
+/// The x of every grid line `TimelineGridPainter` draws: one per major
+/// ruler tick strictly inside the view (the left edge's own line is the
+/// ruler's).
 pub fn grid_line_xs(timeline_duration_ms: i64, start_ms: i64, width: f64) -> Vec<f64> {
     if timeline_duration_ms <= 0 {
         return Vec::new();
     }
-    let interval = nice_time_interval_ms(timeline_duration_ms, width);
+    let interval = ruler_interval_ms(timeline_duration_ms, width);
     // Dart's ints wrap; an end past i64 is unreachable for a real timeline.
     let end = start_ms.saturating_add(timeline_duration_ms);
     let mut xs = Vec::new();
@@ -314,13 +399,13 @@ pub fn grid_line_xs(timeline_duration_ms: i64, start_ms: i64, width: f64) -> Vec
     xs
 }
 
-/// Every ruler tick `TimeRulerPainter` draws: `(x, ms)`, from the first
-/// interval at or after the view's left edge.
+/// Every major ruler tick `TimeRulerPainter` draws: `(x, ms)`, from the
+/// first interval at or after the view's left edge.
 pub fn ruler_ticks(timeline_duration_ms: i64, start_ms: i64, width: f64) -> Vec<(f64, i64)> {
     if timeline_duration_ms <= 0 {
         return Vec::new();
     }
-    let interval = nice_time_interval_ms(timeline_duration_ms, width);
+    let interval = ruler_interval_ms(timeline_duration_ms, width);
     let end = start_ms.saturating_add(timeline_duration_ms);
     let mut t = (start_ms / interval).saturating_mul(interval);
     if t < start_ms {
@@ -372,21 +457,13 @@ fn outline_path(outline: &[(f64, f64)]) -> Path {
     })
 }
 
-fn axis(frame: &mut Frame, width: f32, mid: f32, color: Color) {
-    frame.stroke(
-        &Path::line(Point::new(0.0, mid), Point::new(width, mid)),
-        Stroke::default()
-            .with_color(alpha(color, 0.35))
-            .with_width(1.0),
-    );
-}
-
 // ------------------------------------------------------------------ painters
 
-/// `WaveformPainter`: a track's normalized peaks as a filled, mirrored
-/// audio-clip silhouette with a faint center axis. A track shorter than the
-/// shared timeline only fills `width_fraction` of the width so lanes align
-/// on time.
+/// `WaveformPainter`: a track's peaks as a filled, symmetric peak envelope
+/// ([`waveform_shape`]) in its colour at [`WaveformPainter::opacity`]
+/// (`DESIGN.md`: the clip's waveform is the track colour at 92 %, 45 % when
+/// muted). A track shorter than the shared timeline only fills
+/// `width_fraction` of the width so lanes align on time.
 #[derive(Debug, Clone)]
 pub struct WaveformPainter {
     pub peaks: Arc<[f64]>,
@@ -406,6 +483,8 @@ pub struct WaveformPainter {
     /// outside the box are clipped.
     pub index_offset: f64,
     pub index_span: Option<f64>,
+    /// The fill's opacity (of `color`'s own alpha).
+    pub opacity: f32,
 }
 
 impl WaveformPainter {
@@ -419,6 +498,7 @@ impl WaveformPainter {
             width_fraction: 1.0,
             index_offset: 0.0,
             index_span: None,
+            opacity: clip::WAVEFORM,
         }
     }
 
@@ -431,11 +511,18 @@ impl WaveformPainter {
             width_fraction: 1.0,
             index_offset: slice.index_offset,
             index_span: Some(slice.index_span),
+            opacity: clip::WAVEFORM,
         }
     }
 
     pub fn width_fraction(mut self, fraction: f64) -> Self {
         self.width_fraction = fraction;
+        self
+    }
+
+    /// The fill's opacity ([`clip::WAVEFORM`] unless set).
+    pub fn opacity(mut self, opacity: f32) -> Self {
+        self.opacity = opacity;
         self
     }
 
@@ -458,7 +545,7 @@ impl WaveformPainter {
     }
 }
 
-type WaveformKey = (Same<[f64]>, Range<usize>, [u32; 4], [u64; 3], bool);
+type WaveformKey = (Same<[f64]>, Range<usize>, [u32; 4], [u64; 3], bool, u32);
 
 impl<M> canvas::Program<M> for WaveformPainter {
     type State = KeyedCache<WaveformKey>;
@@ -481,14 +568,15 @@ impl<M> canvas::Program<M> for WaveformPainter {
                 self.index_span.unwrap_or(f64::NAN).to_bits(),
             ],
             self.index_span.is_some(),
+            self.opacity.to_bits(),
         );
         vec![state.draw(renderer, bounds.size(), key, |frame| {
             let Some(shape) = self.shape(bounds.size()) else {
                 return;
             };
+            let fill = faded(self.color, self.opacity);
             let paint = |frame: &mut Frame| {
-                frame.fill(&outline_path(&shape.outline), alpha(self.color, 0.92));
-                axis(frame, shape.draw_width as f32, shape.mid as f32, self.color);
+                frame.fill(&outline_path(&shape.outline), fill);
             };
             if shape.clip {
                 frame.with_clip(
@@ -539,15 +627,14 @@ impl<M> canvas::Program<M> for LiveWaveformPainter {
         _: mouse::Cursor,
     ) -> Vec<Geometry> {
         let mut frame = Frame::new(renderer, bounds.size());
-        if let Some((outline, mid)) = live_waveform_outline(
+        if let Some((outline, _)) = live_waveform_outline(
             &self.peaks,
             f64::from(bounds.width),
             f64::from(bounds.height),
             self.pixels_per_sample,
             self.sample_offset,
         ) {
-            frame.fill(&outline_path(&outline), alpha(self.color, 0.92));
-            axis(&mut frame, bounds.width, mid as f32, self.color);
+            frame.fill(&outline_path(&outline), faded(self.color, clip::WAVEFORM));
         }
         vec![frame.into_geometry()]
     }
@@ -585,7 +672,7 @@ impl<M> canvas::Program<M> for TimelineGridPainter {
                 self.start_ms,
                 f64::from(bounds.width),
             ) {
-                let x = x as f32;
+                let x = crisp(x as f32);
                 frame.stroke(
                     &Path::line(Point::new(x, 0.0), Point::new(x, bounds.height)),
                     Stroke::default().with_color(self.color).with_width(1.0),
@@ -595,19 +682,25 @@ impl<M> canvas::Program<M> for TimelineGridPainter {
     }
 }
 
-/// `TimeRulerPainter`: the time ruler above the tracks — 7 px ticks plus
-/// `m:ss` labels, 10 px tabular figures, 3 px right of each tick, 5 px off
-/// the bottom.
+/// `TimeRulerPainter`: the time ruler above the tracks (`DESIGN.md`,
+/// Ruler) — a full-height 1 px line per major tick in `tick_color` with its
+/// `m:ss` label ([`ruler_label`]: 10 px tabular figures in `text_color`, 5 px
+/// right of the line, 7 px from the top), and 5 px minor ticks along the
+/// bottom in `minor_color` between them.
 #[derive(Debug, Clone)]
 pub struct TimeRulerPainter {
     pub timeline_duration_ms: i64,
     pub tick_color: Color,
+    pub minor_color: Color,
     pub text_color: Color,
     pub start_ms: i64,
 }
 
+/// A minor tick's length.
+pub const MINOR_TICK_HEIGHT: f32 = 5.0;
+
 impl<M> canvas::Program<M> for TimeRulerPainter {
-    type State = KeyedCache<(i64, i64, [u32; 4], [u32; 4])>;
+    type State = KeyedCache<(i64, i64, [[u32; 4]; 3])>;
 
     fn draw(
         &self,
@@ -620,36 +713,40 @@ impl<M> canvas::Program<M> for TimeRulerPainter {
         let key = (
             self.timeline_duration_ms,
             self.start_ms,
-            color_key(self.tick_color),
-            color_key(self.text_color),
+            [
+                color_key(self.tick_color),
+                color_key(self.minor_color),
+                color_key(self.text_color),
+            ],
         );
         vec![state.draw(renderer, bounds.size(), key, |frame| {
             let h = bounds.height;
-            for (x, t) in ruler_ticks(
-                self.timeline_duration_ms,
-                self.start_ms,
-                f64::from(bounds.width),
-            ) {
-                let x = x as f32;
+            let w = f64::from(bounds.width);
+            let line = |frame: &mut Frame, x: f32, top: f32, color: Color| {
+                let x = crisp(x);
                 frame.stroke(
-                    &Path::line(Point::new(x, h - 7.0), Point::new(x, h)),
-                    Stroke::default()
-                        .with_color(self.tick_color)
-                        .with_width(1.0),
+                    &Path::line(Point::new(x, top), Point::new(x, h)),
+                    Stroke::default().with_color(color).with_width(1.0),
                 );
+            };
+            for x in minor_tick_xs(self.timeline_duration_ms, self.start_ms, w) {
+                line(frame, x as f32, h - MINOR_TICK_HEIGHT, self.minor_color);
+            }
+            for (x, t) in ruler_ticks(self.timeline_duration_ms, self.start_ms, w) {
+                let x = x as f32;
+                line(frame, x, 0.0, self.tick_color);
                 // A `TextPainter`'s line (no height: the font's own, a
-                // whole pixel tall), its bottom 5 off the ruler's, in the
-                // system UI font (no family).
+                // whole pixel tall), in the system UI font (no family).
                 fill_tabular_text(
                     frame,
                     canvas::Text {
-                        content: format_clock_ms(t),
-                        position: Point::new(x + 3.0, h - 5.0),
+                        content: ruler_label(t),
+                        position: Point::new(crisp(x) + 4.5, 7.0),
                         color: self.text_color,
                         size: Pixels(10.0),
                         line_height: crate::ui::core::text::NATURAL,
                         font: system_font::font(Weight::Normal),
-                        align_y: Vertical::Bottom,
+                        align_y: Vertical::Top,
                         ..canvas::Text::default()
                     },
                 );
@@ -660,9 +757,10 @@ impl<M> canvas::Program<M> for TimeRulerPainter {
 
 /// `PlayheadPainter` (mounted as Dart's `PlayheadLayer`: its own layer,
 /// ignoring pointers — an iced canvas with no `update` takes no input): the
-/// playback playhead as a 1.5 px vertical line, with a 10 × 6 head when
-/// `show_head`. `start_ms` is subtracted from the absolute position before
-/// mapping (a take's start, when a panel shows that take in take-local time).
+/// playback playhead as a crisp 1 px vertical line, with the ruler's 11 × 8
+/// marker ([`playhead_marker`]) on top when `show_head`. `start_ms` is
+/// subtracted from the absolute position before mapping (a take's start,
+/// when a panel shows that take in take-local time).
 #[derive(Debug, Clone)]
 pub struct PlayheadPainter {
     pub position_ms: i64,
@@ -690,23 +788,28 @@ impl<M> canvas::Program<M> for PlayheadPainter {
             self.timeline_duration_ms,
             f64::from(bounds.width),
         ) {
-            let x = x as f32;
+            let x = crisp(x as f32);
             frame.stroke(
                 &Path::line(Point::new(x, 0.0), Point::new(x, bounds.height)),
-                Stroke::default().with_color(self.color).with_width(1.5),
+                Stroke::default().with_color(self.color).with_width(1.0),
             );
             if self.show_head {
-                let head = Path::new(|b| {
-                    b.move_to(Point::new(x - 5.0, 0.0));
-                    b.line_to(Point::new(x + 5.0, 0.0));
-                    b.line_to(Point::new(x, 6.0));
-                    b.close();
-                });
-                frame.fill(&head, self.color);
+                frame.fill(&playhead_marker(x), self.color);
             }
         }
         vec![frame.into_geometry()]
     }
+}
+
+/// The playhead's marker on the ruler (`DESIGN.md`: a white 11 × 8
+/// triangle), its point down at `x` 8 px below the top.
+pub fn playhead_marker(x: f32) -> Path {
+    Path::new(|b| {
+        b.move_to(Point::new(x - 5.5, 0.0));
+        b.line_to(Point::new(x + 5.5, 0.0));
+        b.line_to(Point::new(x, 8.0));
+        b.close();
+    })
 }
 
 #[cfg(test)]
@@ -915,6 +1018,51 @@ mod tests {
         assert!(shape.outline.iter().any(|&(x, _)| x == 100.0));
     }
 
+    /// The top edge's height above the middle at x (`None` past it).
+    fn top_at(shape: &WaveformShape, x: f64) -> Option<f64> {
+        let top: Vec<(f64, f64)> = shape
+            .outline
+            .iter()
+            .copied()
+            .take_while(|&(_, y)| y <= shape.mid)
+            .collect();
+        top.windows(2)
+            .find(|w| w[0].0 <= x && x < w[1].0 && w[0].1 == w[1].1)
+            .map(|w| shape.mid - w[0].1)
+    }
+
+    #[test]
+    fn each_column_takes_the_loudest_peak_it_covers() {
+        // Ten peaks a column, one loud in the fourth column.
+        let mut peaks = vec![0.1; 1001];
+        peaks[35] = 1.0;
+        let shape = waveform_shape(&peaks, 100.0, 40.0, 1.0, 0.0, None).unwrap();
+        let reach = 20.0 * PEAK_REACH;
+        assert!((top_at(&shape, 3.5).unwrap() - reach).abs() < 1e-9);
+        assert!((top_at(&shape, 2.5).unwrap() - 0.1 * reach).abs() < 1e-9);
+        assert!((top_at(&shape, 4.5).unwrap() - 0.1 * reach).abs() < 1e-9);
+        // Symmetric: the bottom edge mirrors the top.
+        let lowest = shape.outline.iter().map(|&(_, y)| y).fold(0.0, f64::max);
+        assert!((lowest - (20.0 + reach)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn zoomed_in_a_peak_is_a_flat_step_not_a_ramp() {
+        // Four peaks over 100 px: each holds its level across its stretch.
+        let shape = waveform_shape(&[0.2, 1.0, 0.2, 0.2], 100.0, 40.0, 1.0, 0.0, None).unwrap();
+        let reach = 20.0 * PEAK_REACH;
+        for x in [34.0, 40.0, 50.0, 60.0, 66.0] {
+            assert!((top_at(&shape, x).unwrap() - reach).abs() < 1e-9, "{x}");
+        }
+        assert!((top_at(&shape, 20.0).unwrap() - 0.2 * reach).abs() < 1e-9);
+    }
+
+    #[test]
+    fn silence_keeps_a_hairline() {
+        let shape = waveform_shape(&[0.0; 10], 100.0, 40.0, 1.0, 0.0, None).unwrap();
+        assert!((top_at(&shape, 50.0).unwrap() - SILENCE_HALF_HEIGHT).abs() < 1e-9);
+    }
+
     #[test]
     fn a_short_track_fills_only_its_fraction() {
         let shape = waveform_shape(&[0.5, 0.5, 0.5], 200.0, 40.0, 0.25, 0.0, None).unwrap();
@@ -940,16 +1088,61 @@ mod tests {
 
     #[test]
     fn the_grid_skips_the_left_edge_and_the_ruler_does_not() {
+        // 80 px a second: majors every 2 s keep them 96 px apart or more.
         let xs = grid_line_xs(10000, 0, 800.0);
-        assert_eq!(xs.first().copied(), Some(80.0));
-        assert_eq!(xs.len(), 9);
+        assert_eq!(xs.first().copied(), Some(160.0));
+        assert_eq!(xs.len(), 4);
         let ticks = ruler_ticks(10000, 0, 800.0);
         assert_eq!(ticks.first().copied(), Some((0.0, 0)));
-        assert_eq!(ticks.len(), 10);
+        assert_eq!(ticks.len(), 5);
         // A view starting mid-interval: the ruler's first tick is the next one.
         let ticks = ruler_ticks(10000, 500, 800.0);
-        assert_eq!(ticks[0].1, 1000);
-        assert!((ticks[0].0 - 40.0).abs() < 1e-9);
+        assert_eq!(ticks[0].1, 2000);
+        assert!((ticks[0].0 - 120.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_song_across_the_arrange_has_a_major_tick_every_10_s() {
+        // The design's window: a 42 s song over a 670 px arrange.
+        assert_eq!(ruler_interval_ms(42_000, 670.0), 10_000);
+        let ticks: Vec<i64> = ruler_ticks(42_000, 0, 670.0)
+            .into_iter()
+            .map(|(_, t)| t)
+            .collect();
+        assert_eq!(ticks, [0, 10_000, 20_000, 30_000, 40_000]);
+        // 2 s minor ticks between them, never on them.
+        let minors = minor_tick_xs(42_000, 0, 670.0);
+        assert_eq!(minors.len(), 21 - 4 - 1);
+        let px_per_ms = 670.0 / 42_000.0;
+        assert!((minors[0] - 2000.0 * px_per_ms).abs() < 1e-9);
+        assert!(minors
+            .iter()
+            .all(|x| (x / px_per_ms).round() as i64 % 10_000 != 0));
+    }
+
+    #[test]
+    fn minor_ticks_too_close_to_read_are_left_out() {
+        // A 10-minute song in 300 px: 5-minute majors, minute minors 30 px
+        // apart.
+        assert_eq!(minor_tick_xs(600_000, 0, 300.0).len(), 8);
+        // Majors keep 96 px apart, so minors crowd only where the whole
+        // timeline is one tick on a ruler squeezed to a few pixels.
+        assert!(minor_tick_xs(1_000_000_000, 0, 20.0).is_empty());
+    }
+
+    #[test]
+    fn ruler_labels_read_minutes_and_seconds() {
+        assert_eq!(ruler_label(0), "0:00");
+        assert_eq!(ruler_label(10_000), "0:10");
+        assert_eq!(ruler_label(768_000), "12:48");
+        assert_eq!(ruler_label(3_723_000), "1:02:03");
+        assert_eq!(ruler_label(-5), "0:00");
+    }
+
+    #[test]
+    fn a_crisp_line_sits_in_the_middle_of_its_pixel() {
+        assert_eq!(crisp(10.0), 10.5);
+        assert_eq!(crisp(10.9), 10.5);
     }
 
     #[test]

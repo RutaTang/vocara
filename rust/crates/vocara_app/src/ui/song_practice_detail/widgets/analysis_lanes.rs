@@ -38,6 +38,14 @@
 //!   its own size wherever it lands, as Flutter did, and clip to the lane.
 //! - The marker lanes' range drag lives in the lane's canvas state, in
 //!   TIMES, as Dart held it in its `State`.
+//!
+//! The look is `rust/DESIGN.md`'s take lanes: a 28 px bar of sentence-case
+//! lane tabs (each a toggle, lit while its lane shows), then the lanes on
+//! `WELL` wells; the header column beside them holds each lane's header cell
+//! (its name in 11 px and its readout, the pitch lane's score at 18 px
+//! semibold), the first cell reaching up beside the tab bar. Every lane is
+//! built as a [`LanePart`]: on its own (the `*_lane` functions) it is a
+//! header cell and a body side by side.
 
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, Weak};
@@ -63,14 +71,14 @@ use vocara_model::util::dart_num::{clamp_f64, round_to_i64};
 
 use super::pitch_lane::{lane_visible_frames, pitch_lane, LANE_MARGIN_PX, PITCH_LANE_HEIGHT};
 use super::track_row::TRACK_HEADER_W;
-use crate::ui::core::icons::{self, Icon};
-use crate::ui::core::theme::{alpha, boxed, fill, font, Studio};
+use crate::ui::core::theme::{alpha, boxed, fill, font, type_scale, Studio};
+use crate::ui::core::widgets::controls::{tab, tab_strip, TabSize};
 use crate::ui::core::widgets::fading_scrollbar::scrollable;
+use crate::ui::core::widgets::line_icon::{glyphs, line_icon, Glyph};
 use crate::ui::core::widgets::painter::{KeyedCache, Same};
 use crate::ui::core::widgets::spectrogram_painter::{
     FrequencyGridPainter, PowerSpectrumPainter, RenderRequest, Rendered, SpectrogramImage,
 };
-use crate::ui::core::widgets::studio_hint::lane_hint;
 use crate::ui::core::widgets::studio_text::studio_text;
 use crate::ui::core::widgets::waveform_painter::PlayheadPainter;
 use crate::ui::core::widgets::wrap::Wrap;
@@ -80,10 +88,13 @@ pub use crate::ui::song_practice_detail::view_model::analysis_cache::AnalysisLan
 mod tests;
 
 /// Height of a notes / techniques marker lane.
-pub const MARKER_LANE_HEIGHT: f32 = 56.0;
+pub const MARKER_LANE_HEIGHT: f32 = 40.0;
 
-/// Height of the lane toggle bar.
-pub const LANE_TOOLBAR_HEIGHT: f32 = 30.0;
+/// Height of the lane tab bar, its 1 px bottom line included.
+pub const LANE_TOOLBAR_HEIGHT: f32 = 28.0;
+
+/// How far a marker chip sits in from its lane's top and bottom.
+const CHIP_INSET: f32 = 9.0;
 
 /// The loudness lane's fixed window under the take's peak (dB).
 pub const LOUDNESS_RANGE_DB: f64 = 48.0;
@@ -95,7 +106,7 @@ const PRECISE_HIT_SLOP: f32 = 1.0;
 /// `kTouchSlop`: how far a tap may travel before it is no tap.
 const TAP_SLOP: f32 = 18.0;
 
-/// `_laneLabels`: the toggle chip's label for each lane.
+/// `_laneLabels`: the lane tab's label for each lane.
 pub fn lane_label(lane: AnalysisLane) -> &'static str {
     match lane {
         AnalysisLane::Pitch => "Pitch",
@@ -308,6 +319,7 @@ impl LaneImage {
 /// [`Element`].
 pub struct AnalysisLanes<'a> {
     track: &'a AudioTrack,
+    color: Color,
     lanes: BTreeSet<AnalysisLane>,
     timeline_duration_ms: i64,
     view_start_ms: i64,
@@ -332,6 +344,7 @@ pub fn analysis_lanes(
 ) -> AnalysisLanes<'_> {
     AnalysisLanes {
         track,
+        color: Studio::track_color(0),
         lanes,
         timeline_duration_ms,
         view_start_ms: 0,
@@ -346,6 +359,13 @@ pub fn analysis_lanes(
 }
 
 impl<'a> AnalysisLanes<'a> {
+    /// The take's colour (`track_row::take_color`), which its loudness
+    /// envelope and technique chips are drawn in.
+    pub fn color(mut self, color: Color) -> Self {
+        self.color = color;
+        self
+    }
+
     /// `vm.playback.viewStartMs`.
     pub fn view_start_ms(mut self, ms: i64) -> Self {
         self.view_start_ms = ms;
@@ -391,23 +411,28 @@ impl<'a> From<AnalysisLanes<'a>> for Element<'a, Message> {
         let dur = l.timeline_duration_ms;
         let view_start = l.view_start_ms;
         let position = l.position_ms;
-        let mut col = column![lane_toolbar(&l.lanes, &id)].width(Length::Fill);
+        let mut parts: Vec<LanePart<'a>> = Vec::new();
         if l.lanes.contains(&AnalysisLane::Pitch) {
-            col = col.push(
-                pitch_lane(
-                    track,
-                    dur,
-                    position,
-                    TRACK_HEADER_W,
-                    l.metrics_loading,
-                    l.metrics.clone(),
-                )
-                .view_start_ms(view_start),
-            );
+            let (header, body) = pitch_lane(
+                track,
+                dur,
+                position,
+                TRACK_HEADER_W,
+                l.metrics_loading,
+                l.metrics.clone(),
+            )
+            .view_start_ms(view_start)
+            .parts();
+            parts.push(LanePart {
+                header,
+                body,
+                height: PITCH_LANE_HEIGHT,
+            });
         }
         if l.lanes.contains(&AnalysisLane::Loudness) {
-            col = col.push(loudness_lane(
+            parts.push(loudness_part(
                 track,
+                l.color,
                 dur,
                 view_start,
                 position,
@@ -416,7 +441,7 @@ impl<'a> From<AnalysisLanes<'a>> for Element<'a, Message> {
             ));
         }
         if l.lanes.contains(&AnalysisLane::Spectrogram) {
-            col = col.push(spectrogram_lane(
+            parts.push(spectrogram_part(
                 track,
                 dur,
                 view_start,
@@ -427,7 +452,7 @@ impl<'a> From<AnalysisLanes<'a>> for Element<'a, Message> {
             ));
         }
         if l.lanes.contains(&AnalysisLane::Power) {
-            col = col.push(power_lane(
+            parts.push(power_part(
                 track,
                 position,
                 l.spectrogram_loading,
@@ -436,12 +461,24 @@ impl<'a> From<AnalysisLanes<'a>> for Element<'a, Message> {
             ));
         }
         if l.lanes.contains(&AnalysisLane::Notes) {
-            col = col.push(notes_lane(track, dur, view_start, position));
+            parts.push(notes_part(track, dur, view_start, position));
         }
         if l.lanes.contains(&AnalysisLane::Technique) {
-            col = col.push(technique_lane(track, dur, view_start, position));
+            parts.push(technique_part(track, l.color, dur, view_start, position));
         }
-        heal_after_frame(col.into(), id, l.lacks_data)
+        // The header column: the first lane's cell reaches up beside the
+        // tab bar; the bodies sit under it.
+        let mut headers = column![].width(TRACK_HEADER_W);
+        let mut bodies = column![lane_toolbar(&l.lanes, &id)].width(Length::Fill);
+        if parts.is_empty() {
+            headers = headers.push(header_cell(Space::new().into(), LANE_TOOLBAR_HEIGHT));
+        }
+        for (i, part) in parts.into_iter().enumerate() {
+            let reach = if i == 0 { LANE_TOOLBAR_HEIGHT } else { 0.0 };
+            headers = headers.push(header_cell(part.header, part.height + reach));
+            bodies = bodies.push(body_cell(part.body, part.height));
+        }
+        heal_after_frame(row![headers, bodies].into(), id, l.lacks_data)
     }
 }
 
@@ -471,43 +508,27 @@ fn heal_after_frame<'a>(
 
 // ---------------------------------------------------------- the toolbar
 
-/// `_LaneToolbar`: a chip per [`AnalysisLane`], lit when that lane is shown;
-/// a tap toggles it ([`Message::ToggleLane`]).
+/// `_LaneToolbar`: a lane tab per [`AnalysisLane`] (`DESIGN.md`, Tabs, at
+/// the lane size), lit while that lane shows; a tap toggles it
+/// ([`Message::ToggleLane`]). The lanes are toggles, not one choice, so each
+/// tab is a strip of its own. A 1 px `BORDER_SUBTLE` line under them.
 pub fn lane_toolbar<'a>(active: &BTreeSet<AnalysisLane>, track_id: &str) -> Element<'a, Message> {
-    let mut chips = row![];
+    let mut tabs = row![].spacing(2).align_y(Vertical::Center);
     for l in AnalysisLane::ALL {
-        chips = chips.push(
-            container(lane_chip(
-                lane_label(l),
-                active.contains(&l),
-                Message::ToggleLane {
-                    track_id: track_id.to_string(),
-                    lane: l,
-                },
-            ))
-            .padding(Padding {
-                right: 6.0,
-                ..Padding::ZERO
-            }),
-        );
+        let track_id = track_id.to_string();
+        tabs = tabs.push(tab_strip(
+            vec![tab(l, lane_label(l))],
+            active.contains(&l).then_some(l),
+            TabSize::Lane,
+            move |lane| Message::ToggleLane {
+                track_id: track_id.clone(),
+                lane,
+            },
+        ));
     }
-    let label = container(
-        studio_text("LANES")
-            .size(9)
-            .font(font::BOLD)
-            .letter_spacing(0.8)
-            .color(Studio::TEXT_FAINT),
-    )
-    .padding(Padding {
-        left: 30.0,
-        ..Padding::ZERO
-    })
-    .width(TRACK_HEADER_W)
-    .height(Length::Fill)
-    .align_y(Vertical::Center);
     // Scroll rather than overflow if the center area is dragged narrow.
     let strip = scrollable(
-        container(chips)
+        container(tabs)
             .padding([0, 8])
             .height(Length::Fill)
             .align_y(Vertical::Center),
@@ -515,103 +536,88 @@ pub fn lane_toolbar<'a>(active: &BTreeSet<AnalysisLane>, track_id: &str) -> Elem
     .horizontal()
     .width(Length::Fill)
     .height(Length::Fill);
-    column![
-        container(row![label, strip].height(Length::Fill))
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .style(fill(Studio::SURFACE)),
-        rule(true),
-    ]
-    .width(Length::Fill)
-    .height(LANE_TOOLBAR_HEIGHT)
-    .into()
-}
-
-/// A toolbar chip: coral-washed and outlined when on.
-fn lane_chip<'a>(label: &str, on: bool, on_tap: Message) -> Element<'a, Message> {
-    let face = container(
-        text(label.to_string())
-            .size(11)
-            .font(font::SEMIBOLD)
-            .color(if on {
-                Studio::ACCENT_BRIGHT
-            } else {
-                Studio::TEXT_SECONDARY
-            })
-            .wrapping(Wrapping::None),
-    )
-    // 4 × 10, inside the 1 px border (a decoration's border pads its child).
-    .padding([5, 11])
-    .style(move |_| {
-        boxed(
-            Some(if on {
-                alpha(Studio::ACCENT, 0.18)
-            } else {
-                Studio::SURFACE_RAISED
-            }),
-            5.0,
-            Some(if on {
-                alpha(Studio::ACCENT, 0.6)
-            } else {
-                Studio::BORDER
-            }),
-        )
-    });
-    button(face)
-        .padding(0)
-        .style(crate::ui::core::theme::bare_button)
-        .on_press(on_tap)
+    column![strip, rule(true)]
+        .width(Length::Fill)
+        .height(LANE_TOOLBAR_HEIGHT)
         .into()
 }
 
 // ------------------------------------------------------------ the shell
 
-/// A 1 px line in `Studio.border`: one side of a `Border(...)` box.
+/// A 1 px line: across in `BORDER_SUBTLE` (between lanes), down in
+/// `BORDER` (the header column's edge).
 fn rule<'a>(horizontal: bool) -> Element<'a, Message> {
-    let line = container(Space::new()).style(fill(Studio::BORDER));
     if horizontal {
-        line.width(Length::Fill).height(1).into()
+        container(Space::new())
+            .style(fill(Studio::BORDER_SUBTLE))
+            .width(Length::Fill)
+            .height(1)
+            .into()
     } else {
-        line.width(1).height(Length::Fill).into()
+        container(Space::new())
+            .style(fill(Studio::BORDER))
+            .width(1)
+            .height(Length::Fill)
+            .into()
     }
 }
 
-/// `_laneShell`: an indented header column (`label`) and the lane `body`,
-/// sized and bordered like the other lanes. The bottom border takes its
-/// pixel from `height`, as a decoration's border pads its child.
-fn lane_shell<'a>(label: &str, height: f32, body: Element<'a, Message>) -> Element<'a, Message> {
-    let header = container(row![
-        container(
-            studio_text(label.to_string())
-                .size(10)
-                .font(font::BOLD)
-                .letter_spacing(0.8)
-                .color(Studio::TEXT_FAINT)
-                .wrapping(Wrapping::None),
-        )
-        .padding(Padding {
-            top: 8.0,
-            right: 8.0,
-            bottom: 8.0,
-            left: 30.0,
-        })
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .clip(true),
-        rule(false),
-    ])
-    .width(TRACK_HEADER_W)
-    .height(Length::Fill)
-    .style(fill(Studio::PANEL));
-    column![
+/// One lane: what its header cell holds, its body, and its height (its
+/// 1 px bottom line included).
+pub struct LanePart<'a> {
+    pub header: Element<'a, Message>,
+    pub body: Element<'a, Message>,
+    pub height: f32,
+}
+
+impl<'a> LanePart<'a> {
+    /// The lane on its own: its header cell beside its body.
+    pub fn row(self) -> Element<'a, Message> {
         row![
-            header,
-            container(body)
+            header_cell(self.header, self.height),
+            body_cell(self.body, self.height)
+        ]
+        .width(Length::Fill)
+        .height(self.height)
+        .into()
+    }
+}
+
+/// A header cell: `content` padded 8 / 10 / 10 / 14 on `PANEL`, `height`
+/// tall, the header column's `BORDER` line down its right and a
+/// `BORDER_SUBTLE` line under it.
+fn header_cell<'a>(content: Element<'a, Message>, height: f32) -> Element<'a, Message> {
+    container(column![
+        row![
+            container(content)
+                .padding(Padding {
+                    top: 8.0,
+                    right: 10.0,
+                    bottom: 10.0,
+                    left: 14.0,
+                })
                 .width(Length::Fill)
                 .height(Length::Fill)
-                .clip(true)
+                .clip(true),
+            rule(false),
         ]
         .height(Length::Fill),
+        rule(true),
+    ])
+    .width(TRACK_HEADER_W)
+    .height(height)
+    .style(fill(Studio::PANEL))
+    .into()
+}
+
+/// A lane's body, clipped to its box, `height` tall with a `BORDER_SUBTLE`
+/// line under it.
+fn body_cell<'a>(body: Element<'a, Message>, height: f32) -> Element<'a, Message> {
+    column![
+        container(body)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .clip(true),
         rule(true),
     ]
     .width(Length::Fill)
@@ -619,13 +625,59 @@ fn lane_shell<'a>(label: &str, height: f32, body: Element<'a, Message>) -> Eleme
     .into()
 }
 
-/// `ColoredBox(Studio.inset)` filling its slot.
-fn inset_fill<'a>() -> Element<'a, Message> {
+/// A header cell's line of text: 11 px, tabular figures, in `color`.
+fn header_text<'a>(
+    s: String,
+    color: Color,
+) -> crate::ui::core::widgets::studio_text::StudioText<'a> {
+    studio_text(s)
+        .size(type_scale::LABEL)
+        .line_height(iced::Pixels(type_scale::LINE))
+        .tabular()
+        .color(color)
+        .wrapping(Wrapping::None)
+}
+
+/// A header cell's content: the lane's `name` (11 px `TEXT_SECONDARY`) and,
+/// under it, an optional `meta` line (11 px `TEXT_FAINT`).
+pub fn lane_header<'a>(name: &str, meta: Option<String>) -> Element<'a, Message> {
+    let mut content = column![header_text(name.to_string(), Studio::TEXT_SECONDARY)].spacing(2);
+    if let Some(meta) = meta {
+        content = content.push(header_text(meta, Studio::TEXT_FAINT));
+    }
+    content.into()
+}
+
+/// A short lane's header content: its `name` and `meta` on one line.
+pub fn lane_header_inline<'a>(name: &str, meta: String) -> Element<'a, Message> {
+    row![
+        header_text(name.to_string(), Studio::TEXT_SECONDARY),
+        header_text(meta, Studio::TEXT_FAINT),
+    ]
+    .spacing(6)
+    .into()
+}
+
+/// A lane's well (`DESIGN.md`: `WELL`) filling its slot.
+fn well_fill<'a>() -> Element<'a, Message> {
     container(Space::new())
         .width(Length::Fill)
         .height(Length::Fill)
-        .style(fill(Studio::INSET))
+        .style(fill(Studio::WELL))
         .into()
+}
+
+/// A lane's hint: an 11 px `TEXT_FAINT` line centred on its well.
+pub fn well_hint<'a, M: 'a>(label: impl Into<String>) -> Element<'a, M> {
+    container(iced::widget::center(
+        text(label.into())
+            .size(type_scale::LABEL)
+            .color(Studio::TEXT_FAINT),
+    ))
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .style(fill(Studio::WELL))
+    .into()
 }
 
 /// `PlayheadLayer(position, timelineDurationMs, startMs: viewStartMs, color:
@@ -669,8 +721,35 @@ pub fn spectrogram_lane<'a>(
     spectrogram: Option<Arc<Spectrogram>>,
     image: Option<&'a LaneImage>,
 ) -> Element<'a, Message> {
+    spectrogram_part(
+        track,
+        timeline_duration_ms,
+        view_start_ms,
+        position_ms,
+        loading,
+        spectrogram,
+        image,
+    )
+    .row()
+}
+
+/// The spectrogram lane's [`LanePart`] (its header reads the top of its
+/// frequency axis).
+fn spectrogram_part<'a>(
+    track: &AudioTrack,
+    timeline_duration_ms: i64,
+    view_start_ms: i64,
+    position_ms: i64,
+    loading: bool,
+    spectrogram: Option<Arc<Spectrogram>>,
+    image: Option<&'a LaneImage>,
+) -> LanePart<'a> {
+    let top_khz = spectrogram
+        .as_ref()
+        .filter(|_| !loading)
+        .map(|spec| format!("Up to {} kHz", round_to_i64(spec.max_hz / 1000.0)));
     let body = if loading {
-        lane_hint(ANALYZING_HINT)
+        well_hint(ANALYZING_HINT)
     } else if let Some(spec) = spectrogram {
         let dur = timeline_duration_ms;
         let (track_start, track_dur) = (track.start_ms(), track.duration_ms());
@@ -701,7 +780,7 @@ pub fn spectrogram_lane<'a>(
             .clip(true);
             Element::from(
                 container(stack![
-                    inset_fill(),
+                    well_fill(),
                     Placed::new(take, left as f32, 0.0, 0.0).width(width as f32),
                     playhead_layer(position_ms, dur, view_start_ms),
                 ])
@@ -712,9 +791,13 @@ pub fn spectrogram_lane<'a>(
         })
         .into()
     } else {
-        lane_hint(NO_SPECTROGRAM_HINT)
+        well_hint(NO_SPECTROGRAM_HINT)
     };
-    lane_shell("SPECTROGRAM", PITCH_LANE_HEIGHT, body)
+    LanePart {
+        header: lane_header("Spectrogram", top_khz),
+        body,
+        height: PITCH_LANE_HEIGHT,
+    }
 }
 
 // ---------------------------------------------------------- power lane
@@ -759,8 +842,19 @@ pub fn power_lane<'a>(
     spectrogram: Option<&Spectrogram>,
     metrics: Option<&VoiceMetrics>,
 ) -> Element<'a, Message> {
+    power_part(track, position_ms, loading, spectrogram, metrics).row()
+}
+
+/// The power lane's [`LanePart`].
+fn power_part<'a>(
+    track: &AudioTrack,
+    position_ms: i64,
+    loading: bool,
+    spectrogram: Option<&Spectrogram>,
+    metrics: Option<&VoiceMetrics>,
+) -> LanePart<'a> {
     let body = if loading {
-        lane_hint(ANALYZING_HINT)
+        well_hint(ANALYZING_HINT)
     } else if let Some(spec) = spectrogram {
         let (column, formants) = playhead_power(
             position_ms,
@@ -778,12 +872,16 @@ pub fn power_lane<'a>(
         )
         .width(Length::Fill)
         .height(Length::Fill)
-        .style(fill(Studio::INSET))
+        .style(fill(Studio::WELL))
         .into()
     } else {
-        lane_hint(NO_POWER_HINT)
+        well_hint(NO_POWER_HINT)
     };
-    lane_shell("POWER SPECTRUM", PITCH_LANE_HEIGHT, body)
+    LanePart {
+        header: lane_header("Power spectrum", Some("At the playhead".to_string())),
+        body,
+        height: PITCH_LANE_HEIGHT,
+    }
 }
 
 // -------------------------------------------------------- loudness lane
@@ -798,15 +896,46 @@ pub fn loudness_lane<'a>(
     loading: bool,
     metrics: Option<Arc<VoiceMetrics>>,
 ) -> Element<'a, Message> {
+    loudness_part(
+        track,
+        Studio::track_color(0),
+        timeline_duration_ms,
+        view_start_ms,
+        position_ms,
+        loading,
+        metrics,
+    )
+    .row()
+}
+
+/// The loudness lane's [`LanePart`]: the envelope in the take's `color`,
+/// its header reading the take's peak.
+fn loudness_part<'a>(
+    track: &AudioTrack,
+    color: Color,
+    timeline_duration_ms: i64,
+    view_start_ms: i64,
+    position_ms: i64,
+    loading: bool,
+    metrics: Option<Arc<VoiceMetrics>>,
+) -> LanePart<'a> {
+    let peak = metrics
+        .as_ref()
+        .filter(|m| !loading && m.frames > 0)
+        .and_then(loudness_peak_of)
+        .map(|db| format!("Peak {} dB", signed_db(db)));
     let body = match metrics {
-        _ if loading => lane_hint(ANALYZING_HINT),
+        _ if loading => well_hint(ANALYZING_HINT),
         Some(m) if m.frames > 0 => stack![
-            inset_fill(),
-            LoudnessLanePainter {
-                metrics: m,
-                timeline_duration_ms,
-                start_ms: track.start_ms(),
-                view_start_ms,
+            well_fill(),
+            TakeLoudness {
+                painter: LoudnessLanePainter {
+                    metrics: m,
+                    timeline_duration_ms,
+                    start_ms: track.start_ms(),
+                    view_start_ms,
+                },
+                color,
             }
             .view(),
             playhead_layer(position_ms, timeline_duration_ms, view_start_ms),
@@ -814,9 +943,23 @@ pub fn loudness_lane<'a>(
         .width(Length::Fill)
         .height(Length::Fill)
         .into(),
-        _ => lane_hint(NO_LOUDNESS_HINT),
+        _ => well_hint(NO_LOUDNESS_HINT),
     };
-    lane_shell("LOUDNESS", PITCH_LANE_HEIGHT, body)
+    LanePart {
+        header: lane_header("Loudness", peak),
+        body,
+        height: PITCH_LANE_HEIGHT,
+    }
+}
+
+/// A level in whole dB with a true minus sign: `−12`, `0`.
+pub fn signed_db(db: f64) -> String {
+    let r = round_to_i64(db);
+    if r < 0 {
+        format!("−{}", r.unsigned_abs())
+    } else {
+        r.to_string()
+    }
 }
 
 // Per-take memo of the loudest finite frame (Dart's `Expando`): found once
@@ -869,12 +1012,97 @@ pub struct LoudnessShape {
 /// line, auto-ranged to the take's peak over a fixed
 /// [`LOUDNESS_RANGE_DB`] window. `start_ms` places the take's frames on the
 /// timeline; `view_start_ms` is the absolute time at the viewport's left.
+/// Drawn on its own (the dock's dynamics view) in the accent; the take's
+/// loudness lane draws it as a [`TakeLoudness`].
 #[derive(Debug, Clone)]
 pub struct LoudnessLanePainter {
     pub metrics: Arc<VoiceMetrics>,
     pub timeline_duration_ms: i64,
     pub start_ms: i64,
     pub view_start_ms: i64,
+}
+
+/// How a loudness envelope is drawn: its colour, the area's and the line's
+/// opacity, the line's width and whether it turns with round joins, and
+/// whether faint guides mark every 12 dB.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LoudnessLook {
+    pub color: Color,
+    pub area: f32,
+    pub line: f32,
+    pub width: f32,
+    pub round: bool,
+    pub guides: bool,
+}
+
+impl LoudnessLook {
+    /// [`LoudnessLanePainter`]'s own: the accent, 18 % / 85 %, 1.5 px.
+    pub const ACCENT: LoudnessLook = LoudnessLook {
+        color: Studio::ACCENT,
+        area: 0.18,
+        line: 0.85,
+        width: 1.5,
+        round: false,
+        guides: false,
+    };
+
+    /// A take's loudness lane (`DESIGN.md`: thin lines, muted fills): the
+    /// take's `color`, 12 % / 90 %, 1.2 px, with the guides.
+    pub fn lane(color: Color) -> LoudnessLook {
+        LoudnessLook {
+            color,
+            area: 0.12,
+            line: 0.9,
+            width: 1.2,
+            round: true,
+            guides: true,
+        }
+    }
+}
+
+/// A take's loudness lane envelope: [`LoudnessLanePainter`] in
+/// [`LoudnessLook::lane`].
+#[derive(Debug, Clone)]
+pub struct TakeLoudness {
+    pub painter: LoudnessLanePainter,
+    pub color: Color,
+}
+
+impl TakeLoudness {
+    /// The painter as a canvas filling the parent, cached as
+    /// [`LoudnessLanePainter`]'s is.
+    pub fn view<'a, M: 'a>(self) -> Element<'a, M> {
+        canvas_widget(self)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
+    }
+}
+
+impl<M> canvas::Program<M> for TakeLoudness {
+    type State = KeyedCache<LoudnessKey>;
+
+    fn draw(
+        &self,
+        state: &Self::State,
+        renderer: &Renderer,
+        _: &Theme,
+        bounds: Rectangle,
+        _: mouse::Cursor,
+    ) -> Vec<Geometry> {
+        let p = &self.painter;
+        let key = (
+            Same(Arc::clone(&p.metrics)),
+            [p.timeline_duration_ms, p.start_ms, p.view_start_ms],
+            crate::ui::core::widgets::painter::color_key(self.color),
+        );
+        let size = bounds.size();
+        vec![state.draw(renderer, size, key, |frame| {
+            #[cfg(test)]
+            LOUDNESS_RECORDS.with(|n| n.set(n.get() + 1));
+            p.draw_into(frame, size, LoudnessLook::lane(self.color));
+        })]
+    }
 }
 
 impl LoudnessLanePainter {
@@ -951,7 +1179,7 @@ impl LoudnessLanePainter {
     /// Draws the shape into `frame` (which clips to its box: zoomed in, most
     /// of the envelope maps outside it, and would paint over the
     /// track-header column; see the pitch lane).
-    fn draw_into(&self, frame: &mut Frame, size: Size) {
+    fn draw_into(&self, frame: &mut Frame, size: Size, look: LoudnessLook) {
         let Some(shape) = self.shape(size) else {
             return;
         };
@@ -971,12 +1199,29 @@ impl LoudnessLanePainter {
                 }
             })
         };
-        frame.fill(&polyline(&shape.areas, true), alpha(Studio::ACCENT, 0.18));
+        // The guides: −12, −24 and −36 dB under the peak.
+        if look.guides {
+            for step in 1..4 {
+                let y =
+                    (f64::from(step) * 12.0 / LOUDNESS_RANGE_DB * f64::from(size.height)) as f32;
+                let y = y.floor() + 0.5;
+                frame.stroke(
+                    &Path::line(Point::new(0.0, y), Point::new(size.width, y)),
+                    Stroke::default().with_color(Studio::GRID).with_width(1.0),
+                );
+            }
+        }
+        frame.fill(&polyline(&shape.areas, true), alpha(look.color, look.area));
+        let stroke = Stroke::default()
+            .with_color(alpha(look.color, look.line))
+            .with_width(look.width);
         frame.stroke(
             &polyline(&shape.lines, false),
-            Stroke::default()
-                .with_color(alpha(Studio::ACCENT, 0.85))
-                .with_width(1.5),
+            if look.round {
+                stroke.with_line_join(canvas::LineJoin::Round)
+            } else {
+                stroke
+            },
         );
     }
 }
@@ -989,7 +1234,7 @@ thread_local! {
 }
 
 /// What a loudness layer was drawn for (`shouldRepaint`).
-type LoudnessKey = (Same<VoiceMetrics>, [i64; 3]);
+type LoudnessKey = (Same<VoiceMetrics>, [i64; 3], [u32; 4]);
 
 impl<M> canvas::Program<M> for LoudnessLanePainter {
     type State = KeyedCache<LoudnessKey>;
@@ -1005,23 +1250,25 @@ impl<M> canvas::Program<M> for LoudnessLanePainter {
         let key = (
             Same(Arc::clone(&self.metrics)),
             [self.timeline_duration_ms, self.start_ms, self.view_start_ms],
+            crate::ui::core::widgets::painter::color_key(LoudnessLook::ACCENT.color),
         );
         let size = bounds.size();
         vec![state.draw(renderer, size, key, |frame| {
             #[cfg(test)]
             LOUDNESS_RECORDS.with(|n| n.set(n.get() + 1));
-            self.draw_into(frame, size);
+            self.draw_into(frame, size, LoudnessLook::ACCENT);
         })]
     }
 }
 
 // --------------------------------------------------------- marker lanes
 
-/// Visual styling for a marker lane (`_MarkerStyle`: notes are neutral;
-/// techniques are coral).
+/// Visual styling for a marker lane's chips (`_MarkerStyle`): small,
+/// crisp, radius 4, an 11 px label after a 10 px glyph — notes neutral,
+/// techniques in the take's colour.
 #[derive(Debug, Clone, Copy)]
 pub struct MarkerStyle {
-    pub icon: Icon,
+    pub glyph: Glyph,
     pub icon_color: Color,
     pub fill: Color,
     pub border: Color,
@@ -1030,25 +1277,29 @@ pub struct MarkerStyle {
 }
 
 impl MarkerStyle {
-    /// `_MarkerStyle.note`.
+    /// `_MarkerStyle.note`: a `CONTROL` chip, its note glyph
+    /// `TEXT_SECONDARY`.
     pub const NOTE: MarkerStyle = MarkerStyle {
-        icon: Icon::StickyNote,
-        icon_color: Studio::ACCENT,
-        fill: Studio::SURFACE_RAISED,
-        border: Studio::BORDER,
-        label_color: Studio::TEXT_SECONDARY,
+        glyph: glyphs::NOTE,
+        icon_color: Studio::TEXT_SECONDARY,
+        fill: Studio::CONTROL,
+        border: Studio::BORDER_STRONG,
+        label_color: Studio::TEXT_PRIMARY,
         label_font: font::REGULAR,
     };
 
-    /// `_MarkerStyle.technique`.
-    pub const TECHNIQUE: MarkerStyle = MarkerStyle {
-        icon: Icon::Waypoints,
-        icon_color: Studio::ACCENT,
-        fill: alpha(Studio::ACCENT, 0.14),
-        border: alpha(Studio::ACCENT, 0.4),
-        label_color: Studio::ACCENT_BRIGHT,
-        label_font: font::SEMIBOLD,
-    };
+    /// `_MarkerStyle.technique`: the take's `color` at 16 % with a 40 %
+    /// outline, its glyph in the colour, the label medium.
+    pub fn technique(color: Color) -> MarkerStyle {
+        MarkerStyle {
+            glyph: glyphs::PULSE,
+            icon_color: color,
+            fill: alpha(color, 0.16),
+            border: alpha(color, 0.4),
+            label_color: Studio::TEXT_PRIMARY,
+            label_font: font::MEDIUM,
+        }
+    }
 }
 
 /// One marker to render on a marker lane (`_LaneItem`) — a point (when
@@ -1079,6 +1330,21 @@ pub fn notes_lane<'a>(
     view_start_ms: i64,
     position_ms: i64,
 ) -> Element<'a, Message> {
+    notes_part(track, timeline_duration_ms, view_start_ms, position_ms).row()
+}
+
+/// "1 note", "3 notes": a marker lane header's count.
+fn count_of(n: usize, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
+}
+
+/// The notes lane's [`LanePart`].
+fn notes_part<'a>(
+    track: &AudioTrack,
+    timeline_duration_ms: i64,
+    view_start_ms: i64,
+    position_ms: i64,
+) -> LanePart<'a> {
     let items = track
         .notes
         .iter()
@@ -1090,7 +1356,7 @@ pub fn notes_lane<'a>(
         })
         .collect();
     marker_lane(
-        "NOTES",
+        lane_header_inline("Notes", count_of(track.notes.len(), "note", "notes")),
         MarkerStyle::NOTE,
         items,
         timeline_duration_ms,
@@ -1111,6 +1377,24 @@ pub fn technique_lane<'a>(
     view_start_ms: i64,
     position_ms: i64,
 ) -> Element<'a, Message> {
+    technique_part(
+        track,
+        Studio::track_color(0),
+        timeline_duration_ms,
+        view_start_ms,
+        position_ms,
+    )
+    .row()
+}
+
+/// The technique lane's [`LanePart`], its chips in the take's `color`.
+fn technique_part<'a>(
+    track: &AudioTrack,
+    color: Color,
+    timeline_duration_ms: i64,
+    view_start_ms: i64,
+    position_ms: i64,
+) -> LanePart<'a> {
     let items = track
         .technique_markers
         .iter()
@@ -1122,8 +1406,11 @@ pub fn technique_lane<'a>(
         })
         .collect();
     marker_lane(
-        "TECHNIQUES",
-        MarkerStyle::TECHNIQUE,
+        lane_header_inline(
+            "Techniques",
+            count_of(track.technique_markers.len(), "marker", "markers"),
+        ),
+        MarkerStyle::technique(color),
         items,
         timeline_duration_ms,
         view_start_ms,
@@ -1154,23 +1441,24 @@ impl Lane {
 /// point at the tapped spot; dragging horizontally adds a marker spanning
 /// the drag (with a live selection highlight).
 fn marker_lane<'a>(
-    label: &str,
+    header: Element<'a, Message>,
     style: MarkerStyle,
     items: Vec<LaneItem>,
     dur: i64,
     view_start: i64,
     position_ms: i64,
     lane: Lane,
-) -> Element<'a, Message> {
+) -> LanePart<'a> {
     let body = responsive(move |size| {
         let w = f64::from(size.width);
         let mut layers: Vec<Element<'a, Message>> = vec![
-            inset_fill(),
+            well_fill(),
             canvas_widget(MarkerGestures {
                 dur,
                 view_start,
                 lane,
-                color: style.icon_color,
+                // The range being drawn is a selection: the accent.
+                color: Studio::ACCENT,
             })
             .width(Length::Fill)
             .height(Length::Fill)
@@ -1184,15 +1472,15 @@ fn marker_lane<'a>(
                 MarkerBox::Range { left, width } => Placed::new(
                     marker_chip(style, &it.label, it.on_tap.clone(), true),
                     left as f32,
-                    6.0,
-                    6.0,
+                    CHIP_INSET,
+                    CHIP_INSET,
                 )
                 .width(width as f32),
                 MarkerBox::Point { left } => Placed::new(
                     marker_chip(style, &it.label, it.on_tap.clone(), false),
                     left as f32,
-                    6.0,
-                    6.0,
+                    CHIP_INSET,
+                    CHIP_INSET,
                 ),
             };
             layers.push(placed.into());
@@ -1205,7 +1493,11 @@ fn marker_lane<'a>(
                 .clip(true),
         )
     });
-    lane_shell(label, MARKER_LANE_HEIGHT, body.into())
+    LanePart {
+        header,
+        body: body.into(),
+        height: MARKER_LANE_HEIGHT,
+    }
 }
 
 /// `_MarkerChip`: a content-sized point pill, or (when `fill`) a bar that
@@ -1218,7 +1510,8 @@ fn marker_chip<'a>(
     fill: bool,
 ) -> Element<'a, Message> {
     let label_text = studio_text(label.to_string())
-        .size(11)
+        .size(type_scale::LABEL)
+        .line_height(iced::Pixels(type_scale::LINE))
         .font(style.label_font)
         .color(style.label_color)
         .ellipsis(1);
@@ -1231,14 +1524,14 @@ fn marker_chip<'a>(
         container(label_text).max_width(150).into()
     };
     let content = row![
-        icons::icon(style.icon, 11.0, style.icon_color),
+        line_icon(style.glyph, 10.0, style.icon_color),
         Space::new().width(5),
         label_box,
     ]
     .align_y(Vertical::Center);
     let face = container(content)
-        // 4 × 7 (a bar) or 8 (a pill), inside the 1 px border.
-        .padding([5.0, if fill { 8.0 } else { 9.0 }])
+        // 6 to the sides, inside the 1 px outline.
+        .padding([0.0, 6.0])
         .height(Length::Fill)
         .width(if fill { Length::Fill } else { Length::Shrink })
         .align_y(Vertical::Center)

@@ -188,8 +188,8 @@ fn home_opens_a_practice_whose_page_loads_and_its_chevron_pops_back() {
     );
     assert!(song(&app).1.view_model().practice().is_some(), "loaded");
     assert!(shows(&app, "Seeded song"), "the transport's title");
-    assert!(shows(&app, "VOCAL TAKES"));
-    assert!(shows(&app, "TAKE 1"));
+    assert!(shows(&app, "Vocal takes"));
+    assert!(shows(&app, "Take 1"));
 
     back(&mut app);
     assert_eq!(app.routes(), [Some(Route::Home)]);
@@ -230,7 +230,7 @@ fn a_deep_linked_practice_boots_with_its_takes_and_its_chevron_goes_home() {
     let (library, id, _dir) = seeded(2);
     let mut app = boot(library, Some(&crate::router::song_practice(&id)));
     assert_eq!(app.routes(), [Some(Route::Song { id: id.clone() })]);
-    assert!(shows(&app, "TAKE 1") && shows(&app, "TAKE 2"));
+    assert!(shows(&app, "Take 1") && shows(&app, "Take 2"));
     assert!(
         shows(&app, &glyph(Icon::Play)),
         "transport play is available once the practice has tracks"
@@ -256,14 +256,15 @@ fn the_bottom_analysis_dock_opens() {
 fn the_interpretation_switcher_opens_its_menu() {
     let (library, id, _dir) = seeded(2);
     let mut app = boot(library, Some(&crate::router::song_practice(&id)));
-    click(&mut app, &glyph(Icon::Drama));
-    assert!(shows(&app, "New interpretation"));
     let active = song(&app)
         .1
         .view_model()
         .practice()
         .and_then(|p| p.active_version().map(|v| v.name.clone()))
         .expect("an interpretation");
+    // The pop-up reads the active interpretation.
+    click(&mut app, &active);
+    assert!(shows(&app, "New interpretation"));
     assert!(shows(&app, &active), "the seeded interpretation is listed");
 }
 
@@ -273,7 +274,7 @@ fn the_new_take_button_adds_an_empty_vocal_lane() {
     let (library, id, _dir) = seeded(2);
     let mut app = boot(library.clone(), Some(&crate::router::song_practice(&id)));
     click(&mut app, "New take");
-    assert!(shows(&app, "TAKE 3"));
+    assert!(shows(&app, "Take 3"));
     let stored = library.song_repo.get_practice(&id).expect("stored");
     assert_eq!(stored.vocal_tracks.len(), 3, "saved");
 }
@@ -284,7 +285,7 @@ fn the_new_take_button_adds_an_empty_vocal_lane() {
 fn adding_a_note_via_the_take_header_persists_it_on_the_take() {
     let (library, id, _dir) = seeded(2);
     let mut app = boot(library.clone(), Some(&crate::router::song_practice(&id)));
-    click(&mut app, &glyph(Icon::StickyNote));
+    click(&mut app, track_row::ADD_NOTE);
     assert!(song(&app).1.note_editor().is_some(), "the editor opened");
     assert!(shows(&app, "Add"));
     send(

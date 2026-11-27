@@ -22,6 +22,15 @@
 //!
 //! An F0 the analysis never produces — infinite — reads as unvoiced here; in
 //! Dart it reached `round()` / `ceil()`, which threw.
+//!
+//! The look is `rust/DESIGN.md`'s pitch lane: a `WELL` well, semitone lines
+//! in `GRID`, each sung note's target semitone as a faint 5 px bar
+//! ([`TARGET_NOTE`]), the sung pitch over them as a 1.6 px line in
+//! `IN_TUNE` (`OUT_OF_TUNE` along a note off by more than
+//! [`IN_TUNE_CENTS`], the worst few keeping their cents labels), and C
+//! labels at 9 px. Its header cell reads the score ("100%", 18 px
+//! semibold, "in tune"), the range sung and the average deviation, and the
+//! note under the playhead.
 
 use std::collections::{BTreeSet, HashMap};
 use std::f64::consts::LN_2;
@@ -41,9 +50,8 @@ use vocara_model::models::spectrogram::AnalysisFraming;
 use vocara_model::models::voice_metrics::{analyze_vibrato, Vibrato, VibratoOptions, VoiceMetrics};
 use vocara_model::util::dart_num::{ceil_to_i64, compare_f64, floor_to_i64, round_to_i64};
 
-use crate::ui::core::theme::{alpha, fill, font, Studio};
+use crate::ui::core::theme::{alpha, fill, font, type_scale, Studio};
 use crate::ui::core::widgets::painter::{KeyedCache, Same};
-use crate::ui::core::widgets::studio_hint::lane_hint;
 use crate::ui::core::widgets::studio_text::studio_text;
 use crate::ui::core::widgets::waveform_painter::PlayheadPainter;
 
@@ -51,11 +59,23 @@ use crate::ui::core::widgets::waveform_painter::PlayheadPainter;
 mod tests;
 
 /// Height of the inline pitch sub-lane that folds out under a vocal take
-/// (`kPitchLaneHeight`).
-pub const PITCH_LANE_HEIGHT: f32 = 96.0;
+/// (`kPitchLaneHeight`), its 1 px bottom line included.
+pub const PITCH_LANE_HEIGHT: f32 = 105.0;
 
-/// In-tune color (green); off-pitch ramps toward `Studio.record`.
-const IN_TUNE: Color = Studio::IN_TUNE;
+/// A sung note's target semitone: a faint bar under the sung line.
+pub const TARGET_NOTE: Color = Color::from_rgb8(0x26, 0x30, 0x3A);
+
+/// The target bars' height.
+pub const TARGET_NOTE_HEIGHT: f64 = 5.0;
+
+/// The sung line's width.
+pub const SUNG_LINE_WIDTH: f32 = 1.6;
+
+/// The sung line's opacity: all but opaque. The renderer's opaque fast path
+/// rounds a line's anti-aliased edge by how much path it draws at once, so
+/// an opaque line over a window of the take came out a shade off the same
+/// line drawn with the whole take; a window must draw what the whole does.
+pub const SUNG_LINE_OPACITY: f32 = 0.97;
 
 /// A sung note within ±this many cents of its semitone counts as "in tune".
 pub const IN_TUNE_CENTS: f64 = 25.0;
@@ -92,7 +112,7 @@ fn semi_name(semi: i64) -> String {
 }
 
 /// `+12¢` / `−7¢` (a true minus sign).
-fn cents_str(cents: f64) -> String {
+pub fn cents_str(cents: f64) -> String {
     let c = round_to_i64(cents);
     format!("{}{}¢", if c >= 0 { '+' } else { '−' }, c.unsigned_abs())
 }
@@ -329,6 +349,26 @@ pub fn pitch_in_tune_percent(notes: &[PitchNote]) -> f64 {
     }
 }
 
+/// The header's summary of `notes`: the range sung and the average
+/// deviation, weighted by each note's length — `C4 – D5 · avg +3¢`; `None`
+/// with nothing sung.
+pub fn pitch_summary(notes: &[PitchNote]) -> Option<String> {
+    let lo = notes.iter().map(|n| n.semitone).min()?;
+    let hi = notes.iter().map(|n| n.semitone).max()?;
+    let frames: usize = notes.iter().map(PitchNote::frames).sum();
+    let avg = notes
+        .iter()
+        .map(|n| n.median_cents * n.frames() as f64)
+        .sum::<f64>()
+        / frames.max(1) as f64;
+    let range = if lo == hi {
+        semi_name(lo)
+    } else {
+        format!("{} – {}", semi_name(lo), semi_name(hi))
+    };
+    Some(format!("{range} · avg {}", cents_str(avg)))
+}
+
 /// The (up to 3) most off-pitch notes worth flagging — indices into `notes`.
 /// (Dart's sort is stable up to 32 elements, as Rust's always is; past that,
 /// notes with exactly equal deviations could tie in another order.)
@@ -475,8 +515,7 @@ const LABEL_SIZE: f32 = 9.0;
 /// One thing [`PitchLanePainter`] draws, in lane coordinates.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PitchOp {
-    /// A semitone grid line across the lane, 1 px: `Studio.gridStrong` on a
-    /// C, `Studio.grid` at 50 % otherwise.
+    /// A semitone grid line across the lane, 1 px in `color` (`GRID`).
     GridLine { y: f64, color: Color },
     /// 9 px text whose left edge is at `x`, centred vertically on `y`.
     Label {
@@ -485,8 +524,7 @@ pub enum PitchOp {
         y: f64,
         color: Color,
     },
-    /// Note `index`'s block: a radius-3 rounded rectangle filled with `fill`
-    /// and stroked `stroke_width` wide in `stroke`.
+    /// Note `index`'s target bar: a radius-1 rectangle in `fill`.
     Block {
         index: usize,
         left: f64,
@@ -494,11 +532,14 @@ pub enum PitchOp {
         right: f64,
         bottom: f64,
         fill: Color,
-        stroke: Color,
-        stroke_width: f32,
     },
-    /// One segment of the fine F0 contour (1.3 px, round caps).
-    Contour { from: (f64, f64), to: (f64, f64) },
+    /// One segment of the sung line ([`SUNG_LINE_WIDTH`], round caps), in
+    /// tune or not.
+    Contour {
+        from: (f64, f64),
+        to: (f64, f64),
+        in_tune: bool,
+    },
 }
 
 /// Everything [`PitchLanePainter`] draws in a box, in paint order: the
@@ -534,16 +575,13 @@ pub struct PitchLanePainter {
     pub hi_semi: i64,
 }
 
-/// The note colour for a deviation: green in tune, ramping to
-/// `Studio.record` at 50¢ (`Color.lerp`).
-fn cents_color(abs_cents: f64) -> Color {
-    let t = (abs_cents / 50.0).clamp(0.0, 1.0) as f32;
-    let lerp = |a: f32, b: f32| a * (1.0 - t) + b * t;
-    Color {
-        r: lerp(IN_TUNE.r, Studio::RECORD.r),
-        g: lerp(IN_TUNE.g, Studio::RECORD.g),
-        b: lerp(IN_TUNE.b, Studio::RECORD.b),
-        a: lerp(IN_TUNE.a, Studio::RECORD.a),
+/// The sung line's colour: `IN_TUNE`, or `OUT_OF_TUNE` along a note off by
+/// more than [`IN_TUNE_CENTS`].
+pub fn contour_color(in_tune: bool) -> Color {
+    if in_tune {
+        Studio::IN_TUNE
+    } else {
+        Studio::OUT_OF_TUNE
     }
 }
 
@@ -596,29 +634,24 @@ impl PitchLanePainter {
         }
     }
 
-    /// The semitone grid (octave C lines bolder + labeled).
+    /// The semitone grid, the octaves' C labelled just above its line.
     pub fn grid_ops(&self, size: Size) -> Vec<PitchOp> {
         let Some(a) = self.axes(size) else {
             return Vec::new();
         };
         let mut ops = Vec::new();
         for s in self.lo_semi..=self.hi_semi {
-            let is_c = s.rem_euclid(12) == 0;
             let y = a.y_of(s as f64);
             ops.push(PitchOp::GridLine {
                 y,
-                color: if is_c {
-                    Studio::GRID_STRONG
-                } else {
-                    alpha(Studio::GRID, 0.5)
-                },
+                color: Studio::GRID,
             });
-            if is_c {
+            if s.rem_euclid(12) == 0 {
                 ops.push(PitchOp::Label {
                     text: format!("C{}", s / 12 - 1),
-                    x: 3.0,
-                    y,
-                    color: Studio::TEXT_FAINT,
+                    x: 6.0,
+                    y: (y - 7.0).max(7.0),
+                    color: Studio::TEXT_DISABLED,
                 });
             }
         }
@@ -630,8 +663,7 @@ impl PitchLanePainter {
         let Some(a) = self.axes(size) else {
             return Vec::new();
         };
-        let semi_h = a.height / a.span;
-        let block_h = semi_h * 0.62;
+        let block_h = TARGET_NOTE_HEIGHT;
         // Only the notes that can reach the box are drawn (it is clipped): a
         // block with its stroke, and for the flagged ones the cents label
         // right of its start. Zoomed in on a long take that is a handful of
@@ -653,23 +685,15 @@ impl PitchLanePainter {
                 continue;
             }
             let yc = a.y_of(n.semitone as f64);
-            let col = cents_color(n.median_cents.abs());
-            let is_worst = self.worst.contains(&i);
             ops.push(PitchOp::Block {
                 index: i,
                 left: x0,
                 top: yc - block_h / 2.0,
                 right: x1,
                 bottom: yc + block_h / 2.0,
-                fill: alpha(col, 0.26),
-                stroke: if is_worst {
-                    Studio::RECORD
-                } else {
-                    alpha(col, 0.7)
-                },
-                stroke_width: if is_worst { 1.6 } else { 1.0 },
+                fill: TARGET_NOTE,
             });
-            if is_worst {
+            if self.worst.contains(&i) {
                 let mut ly = yc - block_h / 2.0 - 11.0;
                 if ly < 1.0 {
                     ly = yc + block_h / 2.0 + 2.0;
@@ -678,7 +702,7 @@ impl PitchLanePainter {
                     text: cents_str(n.median_cents),
                     x: x0 + 2.0,
                     y: ly + 5.0,
-                    color: Studio::RECORD,
+                    color: Studio::OUT_OF_TUNE,
                 });
             }
         }
@@ -709,6 +733,7 @@ impl PitchLanePainter {
             let mut prev: Option<(f64, f64)> = None;
             let from = n.start_frame.max(window.first as usize);
             let to = n.end_frame.min(window.last as usize);
+            let in_tune = n.in_tune();
             for fr in from..=to {
                 let Some(hz) = voiced_hz(f0_at(m, fr)) else {
                     prev = None;
@@ -716,7 +741,11 @@ impl PitchLanePainter {
                 };
                 let p = (a.x_of_frame(fr), a.y_of(hz_to_midi(hz)));
                 if let Some(q) = prev {
-                    ops.push(PitchOp::Contour { from: q, to: p });
+                    ops.push(PitchOp::Contour {
+                        from: q,
+                        to: p,
+                        in_tune,
+                    });
                 }
                 prev = Some(p);
             }
@@ -752,15 +781,19 @@ impl PitchLanePainter {
     }
 }
 
+/// A segment of the sung line: from, to.
+type Segment = ((f64, f64), (f64, f64));
+
 /// Draws `ops` into `frame`. The frame clips to its own box (Dart clipped
 /// with `canvas.clipRect`: zoomed in, most of the take maps outside the box,
 /// and the notes left of the viewport painted over the track-header column).
 fn draw_ops(frame: &mut Frame, size: Size, ops: &[PitchOp]) {
-    let mut contour = Vec::new();
+    // The sung line's segments, out of tune then in tune.
+    let mut contour: [Vec<Segment>; 2] = [Vec::new(), Vec::new()];
     for op in ops {
         match op {
             PitchOp::GridLine { y, color } => {
-                let y = *y as f32;
+                let y = (*y as f32).floor() + 0.5;
                 frame.stroke(
                     &Path::line(Point::new(0.0, y), Point::new(size.width, y)),
                     Stroke::default().with_color(*color).with_width(1.0),
@@ -787,34 +820,34 @@ fn draw_ops(frame: &mut Frame, size: Size, ops: &[PitchOp]) {
                 right,
                 bottom,
                 fill,
-                stroke,
-                stroke_width,
                 ..
             } => {
                 let (w, h) = ((right - left) as f32, (bottom - top) as f32);
-                // Flutter's RRect shrinks radii that don't fit the rect.
-                let radius = 3.0f32.min(w / 2.0).min(h / 2.0).max(0.0);
-                let block = Path::rounded_rectangle(
-                    Point::new(*left as f32, *top as f32),
-                    Size::new(w, h),
-                    radius.into(),
-                );
-                frame.fill(&block, *fill);
-                frame.stroke(
-                    &block,
-                    Stroke::default()
-                        .with_color(*stroke)
-                        .with_width(*stroke_width),
+                let radius = 1.0f32.min(w / 2.0).min(h / 2.0).max(0.0);
+                frame.fill(
+                    &Path::rounded_rectangle(
+                        Point::new(*left as f32, *top as f32),
+                        Size::new(w, h),
+                        radius.into(),
+                    ),
+                    *fill,
                 );
             }
-            PitchOp::Contour { from, to } => contour.push((*from, *to)),
+            PitchOp::Contour { from, to, in_tune } => {
+                contour[usize::from(*in_tune)].push((*from, *to));
+            }
         }
     }
-    if !contour.is_empty() {
+    for (in_tune, segments) in [(false, &contour[0]), (true, &contour[1])] {
+        if segments.is_empty() {
+            continue;
+        }
         // One path of one-segment subpaths: each segment keeps its own round
-        // caps, as Dart's drawLine per segment did, in one tessellation.
+        // caps (an opaque line, so they read as round joins), in one
+        // tessellation that a window over the take draws pixel for pixel as
+        // the whole take does.
         let path = Path::new(|b| {
-            for (from, to) in &contour {
+            for (from, to) in segments {
                 b.move_to(Point::new(from.0 as f32, from.1 as f32));
                 b.line_to(Point::new(to.0 as f32, to.1 as f32));
             }
@@ -822,8 +855,8 @@ fn draw_ops(frame: &mut Frame, size: Size, ops: &[PitchOp]) {
         frame.stroke(
             &path,
             Stroke::default()
-                .with_color(alpha(Studio::TEXT_PRIMARY, 0.85))
-                .with_width(1.3)
+                .with_color(alpha(contour_color(in_tune), SUNG_LINE_OPACITY))
+                .with_width(SUNG_LINE_WIDTH)
                 .with_line_cap(LineCap::Round),
         );
     }
@@ -957,102 +990,141 @@ impl PitchLane {
     }
 }
 
-/// A 1 px line in `Studio.border`: one side of a `Border(...)` box.
+/// A 1 px line: across in `BORDER_SUBTLE` (under the lane), down in
+/// `BORDER` (the header column's edge).
 fn rule<'a, M: 'a>(horizontal: bool) -> Element<'a, M> {
-    let line = container(iced::widget::Space::new()).style(fill(Studio::BORDER));
     if horizontal {
-        line.width(Length::Fill).height(1).into()
+        container(iced::widget::Space::new())
+            .style(fill(Studio::BORDER_SUBTLE))
+            .width(Length::Fill)
+            .height(1)
+            .into()
     } else {
-        line.width(1).height(Length::Fill).into()
+        container(iced::widget::Space::new())
+            .style(fill(Studio::BORDER))
+            .width(1)
+            .height(Length::Fill)
+            .into()
+    }
+}
+
+impl PitchLane {
+    /// The lane's header cell content (the score, the range and the note
+    /// under the playhead) and its body (the well), for a caller that lays
+    /// the header column out itself (the analysis lanes).
+    pub fn parts<'a, M: 'a>(self) -> (Element<'a, M>, Element<'a, M>) {
+        let notes = match &self.metrics {
+            Some(m) if !self.loading => pitch_notes_of(m),
+            _ => no_notes(),
+        };
+        let in_tune = pitch_in_tune_percent(&notes);
+        let worst = worst_notes_of(&notes);
+        let range = self
+            .metrics
+            .as_ref()
+            .map_or(DEFAULT_SEMITONE_RANGE, pitch_range_of);
+        let header = header(&self, &notes, in_tune);
+        (header, body(&self, notes, worst, range))
     }
 }
 
 impl<'a, M: 'a> From<PitchLane> for Element<'a, M> {
     fn from(lane: PitchLane) -> Self {
-        let notes = match &lane.metrics {
-            Some(m) if !lane.loading => pitch_notes_of(m),
-            _ => no_notes(),
-        };
-        let in_tune = pitch_in_tune_percent(&notes);
-        let worst = worst_notes_of(&notes);
-        let range = lane
-            .metrics
-            .as_ref()
-            .map_or(DEFAULT_SEMITONE_RANGE, pitch_range_of);
-
-        let header = header(&lane, &notes, in_tune);
-        let body = body(&lane, notes, worst, range);
-        // `Border(bottom: Studio.border)`: the line takes its pixel from the
-        // lane's height, as a decoration's border pads its child.
+        let (width, height) = (lane.header_width, lane.height);
+        let (header, body) = lane.parts();
+        // The header cell, padded 8 / 10 / 10 / 14 on `PANEL` with the
+        // column's line down its right, beside the well; a line under both.
+        let cell = container(row![
+            container(header)
+                .padding(Padding {
+                    top: 8.0,
+                    right: 10.0,
+                    bottom: 10.0,
+                    left: 14.0,
+                })
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .clip(true),
+            rule(false),
+        ])
+        .width(width)
+        .height(Length::Fill)
+        .style(fill(Studio::PANEL));
         column![
             row![
-                header,
+                cell,
                 container(body).width(Length::Fill).height(Length::Fill)
             ]
             .height(Length::Fill),
             rule(true),
         ]
         .width(Length::Fill)
-        .height(lane.height)
+        .height(height)
         .into()
     }
 }
 
+/// The header cell's content: "Pitch"; with an analysis, the score
+/// ("100%" at 18 px semibold, "in tune"), the range and average deviation,
+/// and the note under the playhead.
 fn header<'a, M: 'a>(lane: &PitchLane, notes: &[PitchNote], in_tune: f64) -> Element<'a, M> {
-    let mut content = column![studio_text("PITCH")
-        .size(10)
-        .font(font::BOLD)
-        .letter_spacing(0.8)
-        .color(Studio::TEXT_FAINT)];
+    let line = |s: String, color: Color| {
+        studio_text(s)
+            .size(type_scale::LABEL)
+            .line_height(iced::Pixels(type_scale::LINE))
+            .tabular()
+            .color(color)
+            .wrapping(iced::widget::text::Wrapping::None)
+    };
+    let mut content = column![line("Pitch".to_string(), Studio::TEXT_SECONDARY)].spacing(4);
     if let (Some(m), false) = (&lane.metrics, lane.loading) {
         let score = if in_tune.is_nan() {
             "—".to_string()
         } else {
             format!("{}%", round_to_i64(in_tune))
         };
-        content = content
-            .push(iced::widget::Space::new().height(7))
-            .push(
-                rich_text::<(), M, Theme, Renderer>([
-                    span(score)
-                        .size(14)
-                        .font(font::BOLD)
-                        .color(Studio::TEXT_PRIMARY),
-                    span("  in tune").size(9).color(Studio::TEXT_FAINT),
-                ])
-                // `Text.rich` under the Material default: height 1.
-                .line_height(1.0),
-            )
-            .push(iced::widget::Space::new().height(3))
-            // Live readout of the note under the playhead.
-            .push(
-                text(playhead_note_text(
-                    m,
-                    notes,
-                    lane.track_start_ms,
-                    lane.position_ms,
-                ))
-                .size(11)
-                .font(font::SEMIBOLD)
-                .color(Studio::TEXT_SECONDARY),
-            );
+        content = content.push(
+            rich_text::<(), M, Theme, Renderer>([
+                span(score)
+                    .size(type_scale::READOUT)
+                    .font(crate::ui::core::widgets::studio_text::tabular_font(
+                        font::SEMIBOLD,
+                    ))
+                    .color(Studio::TEXT_PRIMARY),
+                span("  in tune")
+                    .size(type_scale::LABEL)
+                    .color(Studio::TEXT_FAINT),
+            ])
+            .line_height(iced::Pixels(22.0)),
+        );
+        if let Some(summary) = pitch_summary(notes) {
+            content = content.push(line(summary, Studio::TEXT_FAINT));
+        }
+        // Live readout of the note under the playhead.
+        content = content.push(
+            row![
+                line("At playhead".to_string(), Studio::TEXT_FAINT),
+                line(
+                    playhead_note_text(m, notes, lane.track_start_ms, lane.position_ms),
+                    Studio::TEXT_SECONDARY,
+                ),
+            ]
+            .spacing(6),
+        );
     }
-    container(row![
-        container(content)
-            .padding(Padding {
-                top: 8.0,
-                right: 8.0,
-                bottom: 8.0,
-                left: 30.0,
-            })
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .clip(true),
-        rule(false),
-    ])
-    .width(lane.header_width)
+    content.width(Length::Fill).into()
+}
+
+/// A hint on the well: 11 px `TEXT_FAINT`, centred.
+fn hint<'a, M: 'a>(label: &'static str) -> Element<'a, M> {
+    container(iced::widget::center(
+        text(label)
+            .size(type_scale::LABEL)
+            .color(Studio::TEXT_FAINT),
+    ))
+    .width(Length::Fill)
     .height(Length::Fill)
-    .style(fill(Studio::PANEL))
+    .style(fill(Studio::WELL))
     .into()
 }
 
@@ -1063,10 +1135,10 @@ fn body<'a, M: 'a>(
     range: SemitoneRange,
 ) -> Element<'a, M> {
     if lane.loading {
-        return lane_hint("Analyzing pitch…");
+        return hint("Analyzing pitch…");
     }
     let Some(m) = &lane.metrics else {
-        return lane_hint("Pitch is available for recorded WAV takes.");
+        return hint("Pitch is available for recorded WAV takes.");
     };
     // The notes are their own layers, under the playhead: a playhead tick
     // redraws only the playhead.
@@ -1100,6 +1172,6 @@ fn body<'a, M: 'a>(
     container(stack![painter.view(), playhead])
         .width(Length::Fill)
         .height(Length::Fill)
-        .style(fill(Studio::INSET))
+        .style(fill(Studio::WELL))
         .into()
 }

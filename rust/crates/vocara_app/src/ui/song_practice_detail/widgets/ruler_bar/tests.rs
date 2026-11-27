@@ -23,6 +23,7 @@ fn ruler(view_start_ms: i64, view_ms: i64, loop_start_ms: i64, loop_end_ms: i64)
         loop_start_ms,
         loop_end_ms,
         loop_enabled: true,
+        song_end_ms: 8_000,
     }
 }
 
@@ -285,8 +286,9 @@ fn a_time_maps_onto_the_ticks_and_back() {
 fn the_band_is_clamped_to_the_view_and_tinted_by_the_loop_state() {
     assert_eq!(loop_fill(-40.0, 900.0, 564.0), (0.0, 564.0));
     assert_eq!(loop_fill(10.0, 20.0, 564.0), (10.0, 20.0));
-    assert!((loop_fill_color(true).a - 0.20).abs() < 1e-6);
-    assert!((loop_fill_color(false).a - 0.07).abs() < 1e-6);
+    // An accent band while it loops; nothing otherwise.
+    assert!((loop_fill_color(true).a - 0.16).abs() < 1e-6);
+    assert_eq!(loop_fill_color(false).a, 0.0);
 }
 
 #[test]

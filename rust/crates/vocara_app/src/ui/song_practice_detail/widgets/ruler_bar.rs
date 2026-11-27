@@ -31,35 +31,43 @@
 //!   ([`PlayheadPainter`], Dart's `PlayheadLayer`), taking no input.
 //! - The `Stack` clipped its handles to the ruler (`Clip.hardEdge`): a
 //!   handle's grip is drawn clipped to the ticks' width here too.
+//!
+//! The look is `rust/DESIGN.md`'s ruler: 28 px on [`RULER_BACKGROUND`],
+//! major ticks with `m:ss` labels and minor ticks
+//! ([`TimeRulerPainter`]), the playhead's white 11 × 8 marker, and the
+//! song's end as a 1 px `TEXT_DISABLED` line. The loop region shows while
+//! looping, as an accent band with 1 px edges; off, it is not drawn, and its
+//! edges still take a drag (the cursor says where).
 
 use std::time::Duration;
 
-use iced::widget::canvas::{self, Frame, Geometry, Path};
-use iced::widget::{canvas as canvas_widget, container, row, stack, Space};
+use iced::widget::canvas::{self, Frame, Geometry, Path, Stroke};
+use iced::widget::{canvas as canvas_widget, column, container, row, stack, Space};
 use iced::{mouse, Color, Element, Length, Point, Rectangle, Renderer, Size, Theme};
 use vocara_model::util::dart_num::{clamp_f64, round_to_i64};
 
 use crate::ui::core::theme::{alpha, fill, Studio};
-use crate::ui::core::widgets::waveform_painter::{PlayheadPainter, TimeRulerPainter};
+use crate::ui::core::widgets::waveform_painter::{
+    crisp, playhead_marker, playhead_x, TimeRulerPainter,
+};
 
 #[cfg(test)]
 mod tests;
 
-/// The ruler's height (`rulerHeight`).
+/// The ruler's height (`rulerHeight`), its 1 px bottom line included.
 pub const RULER_HEIGHT: f32 = 28.0;
+
+/// The ruler's background (`DESIGN.md`, Ruler: `#16161A`, between the
+/// arrange's and the panels').
+pub const RULER_BACKGROUND: Color = Color::from_rgb8(0x16, 0x16, 0x1A);
 
 /// How wide a loop handle is to grab (`_LoopHandle.width`).
 pub const LOOP_HANDLE_WIDTH: f32 = 16.0;
 
-/// The width of the track-header column the ruler's corner sits over: the
-/// track row's `kTrackHeaderW` (`track_row::TRACK_HEADER_W` where that port
-/// is in; the value is the same).
-pub const TRACK_HEADER_W: f32 = 208.0;
-
-/// The timeline's side inset, matching the lanes and drop boxes below so
-/// ticks stay aligned with the waveforms: the track row's
-/// `kTimelineHMargin` (`track_row::TIMELINE_H_MARGIN`).
-pub const TIMELINE_H_MARGIN: f32 = 14.0;
+/// The width of the track-header column the ruler's corner sits over, and
+/// the timeline's side inset, matching the lanes below so ticks stay aligned
+/// with the waveforms.
+pub use super::track_row::{TIMELINE_H_MARGIN, TRACK_HEADER_W};
 
 /// How far a mouse press travels across before it is a horizontal drag
 /// (`kPrecisePointerHitSlop`, the drag recognizer's slop for a mouse).
@@ -96,8 +104,11 @@ pub struct RulerBar {
     pub loop_start_ms: i64,
     /// `playback.loopEndMs`.
     pub loop_end_ms: i64,
-    /// `playback.loopEnabled`: the band's tint is stronger when it loops.
+    /// `playback.loopEnabled`: the band shows while it loops.
     pub loop_enabled: bool,
+    /// Where the song ends (the practice's timeline), drawn as a line where
+    /// it is inside the view; 0 for none.
+    pub song_end_ms: i64,
 }
 
 /// A loop edge: which handle a drag moves.
@@ -130,10 +141,17 @@ pub fn loop_fill(start_x: f64, end_x: f64, w: f64) -> (f64, f64) {
     (clamp_f64(start_x, 0.0, w), clamp_f64(end_x, 0.0, w))
 }
 
-/// The band's tint: the accent at 20 % while it loops, 7 % otherwise.
+/// The band's tint: the accent at 16 % while it loops; not drawn otherwise.
 pub fn loop_fill_color(loop_enabled: bool) -> Color {
-    alpha(Studio::ACCENT, if loop_enabled { 0.20 } else { 0.07 })
+    if loop_enabled {
+        alpha(Studio::ACCENT, 0.16)
+    } else {
+        Color::TRANSPARENT
+    }
 }
+
+/// The loop's edges while it loops.
+pub const LOOP_EDGE: Color = Studio::ACCENT_BRIGHT;
 
 /// Whether the end handle also takes a drag that starts leftward, moving the
 /// START: it is drawn over the start's grip when the region is narrower
@@ -180,9 +198,10 @@ fn millis(ms: i64) -> Duration {
 
 // ---------------------------------------------------------------------- view
 
-/// The ruler: [`RULER_HEIGHT`] tall, `Studio.surface`, inset by
+/// The ruler: [`RULER_HEIGHT`] tall on [`RULER_BACKGROUND`], inset by
 /// [`TIMELINE_H_MARGIN`]; the corner over the track headers, then the ticks
-/// with the loop band, its handles and the playhead.
+/// with the loop band, the song's end, the handles and the playhead's
+/// marker; a 1 px `BORDER` line under it all.
 pub fn ruler_bar<'a>(ruler: RulerBar) -> Element<'a, Message> {
     let dur = ruler.timeline_duration_ms;
     // Corner over the track-header column — keeps ticks aligned with each
@@ -199,7 +218,8 @@ pub fn ruler_bar<'a>(ruler: RulerBar) -> Element<'a, Message> {
     let ticks = canvas_widget(TimeRulerPainter {
         timeline_duration_ms: dur,
         tick_color: Studio::GRID_STRONG,
-        text_color: Studio::TEXT_SECONDARY,
+        minor_color: Studio::CONTROL_ACTIVE,
+        text_color: Studio::TEXT_FAINT,
         start_ms: ruler.view_start_ms,
     })
     .width(Length::Fill)
@@ -212,22 +232,67 @@ pub fn ruler_bar<'a>(ruler: RulerBar) -> Element<'a, Message> {
         canvas_widget(Handles { ruler })
             .width(Length::Fill)
             .height(Length::Fill),
-        canvas_widget(PlayheadPainter {
-            position_ms: i64::try_from(ruler.position.as_millis()).unwrap_or(i64::MAX),
-            timeline_duration_ms: dur,
-            color: Studio::PLAYHEAD,
-            show_head: true,
-            start_ms: ruler.view_start_ms,
-        })
-        .width(Length::Fill)
-        .height(Length::Fill),
+        canvas_widget(Marker { ruler })
+            .width(Length::Fill)
+            .height(Length::Fill),
     ];
-    container(row![corner, container(lane).width(Length::Fill).clip(true)])
+    let bar = container(row![corner, container(lane).width(Length::Fill).clip(true)])
         .width(Length::Fill)
-        .height(RULER_HEIGHT)
-        .padding([0.0, TIMELINE_H_MARGIN])
-        .style(fill(Studio::SURFACE))
-        .into()
+        .height(Length::Fill)
+        .padding([0.0, TIMELINE_H_MARGIN]);
+    container(column![
+        bar,
+        container(Space::new())
+            .width(Length::Fill)
+            .height(1)
+            .style(fill(Studio::BORDER)),
+    ])
+    .width(Length::Fill)
+    .height(RULER_HEIGHT)
+    .style(fill(RULER_BACKGROUND))
+    .into()
+}
+
+/// The song's end and the playhead's marker, over the ticks, taking no
+/// input.
+struct Marker {
+    ruler: RulerBar,
+}
+
+impl<M> canvas::Program<M> for Marker {
+    type State = ();
+
+    fn draw(
+        &self,
+        _: &(),
+        renderer: &Renderer,
+        _: &Theme,
+        bounds: Rectangle,
+        _: mouse::Cursor,
+    ) -> Vec<Geometry> {
+        let r = self.ruler;
+        let w = f64::from(bounds.width);
+        let dur = r.timeline_duration_ms;
+        let mut frame = Frame::new(renderer, bounds.size());
+        if r.song_end_ms > 0 {
+            if let Some(x) =
+                playhead_x(r.song_end_ms, r.view_start_ms, dur, w).filter(|&x| x > 0.0 && x < w)
+            {
+                let x = crisp(x as f32);
+                frame.stroke(
+                    &Path::line(Point::new(x, 0.0), Point::new(x, bounds.height)),
+                    Stroke::default()
+                        .with_color(Studio::TEXT_DISABLED)
+                        .with_width(1.0),
+                );
+            }
+        }
+        let position = i64::try_from(r.position.as_millis()).unwrap_or(i64::MAX);
+        if let Some(x) = playhead_x(position, r.view_start_ms, dur, w) {
+            frame.fill(&playhead_marker(crisp(x as f32)), Studio::PLAYHEAD);
+        }
+        vec![frame.into_geometry()]
+    }
 }
 
 /// Whether the ruler is live: a span and a width to map it across. With
@@ -264,7 +329,7 @@ impl<M> canvas::Program<M> for LoopBand {
             );
             // A band whose end is left of its start has a negative width in
             // Dart (nothing painted).
-            if right > left {
+            if r.loop_enabled && right > left {
                 frame.fill_rectangle(
                     Point::new(left as f32, 0.0),
                     Size::new((right - left) as f32, bounds.height),
@@ -447,20 +512,15 @@ impl canvas::Program<Message> for Handles {
     ) -> Vec<Geometry> {
         let w = f64::from(bounds.width);
         let mut frame = Frame::new(renderer, bounds.size());
-        if live(self.ruler.timeline_duration_ms, w) {
+        if self.ruler.loop_enabled && live(self.ruler.timeline_duration_ms, w) {
             let (start_x, end_x) = self.xs(w);
-            for center in [start_x, end_x] {
-                // A 3 px grip centred in the handle, clipped to the ruler.
-                let left = (center as f32 - 1.5).max(0.0);
-                let right = (center as f32 + 1.5).min(bounds.width);
-                if right > left {
-                    frame.fill(
-                        &Path::rounded_rectangle(
-                            Point::new(left, 0.0),
-                            Size::new(right - left, bounds.height),
-                            2.0.into(),
-                        ),
-                        Studio::ACCENT,
+            for edge in [start_x, end_x] {
+                // A 1 px edge down the ruler, where it is inside it.
+                if (0.0..=w).contains(&edge) {
+                    let x = crisp((edge as f32).min(bounds.width - 0.5));
+                    frame.stroke(
+                        &Path::line(Point::new(x, 0.0), Point::new(x, bounds.height)),
+                        Stroke::default().with_color(LOOP_EDGE).with_width(1.0),
                     );
                 }
             }

@@ -187,6 +187,17 @@ Line height 16 px for 11–12 px text unless noted.
 - **Section rows** in the arrange ("Accompaniment", "Vocal takes", "FX
   buses", "Master"): 30 px, 11 px semibold `TEXT_SECONDARY`, controls on the
   right (segmented control, ghost and pop-up buttons).
+- **Drop zone** (an empty Accompaniment or Vocal takes section): a 52 px
+  box inset 14 / 10, radius 6, a 1 px dashed outline (4 on, 3 off) in
+  `BORDER_STRONG`, a 14 px icon and a 12 px line in `TEXT_FAINT`; while a
+  file is dragged over it, the outline `ACCENT` at 70 %, the box `ACCENT`
+  at 6 % and the line `ACCENT_BRIGHT`.
+- **Take lanes** (a take folded out): a 28 px bar of lane tabs (each a
+  toggle, lit while its lane shows), the lanes on `#0F0F12` wells with
+  `BORDER_SUBTLE` lines between them; beside them, in the header column,
+  each lane's cell (its name 11 px `TEXT_SECONDARY`, a readout 11 px
+  `TEXT_FAINT`; the pitch score 18 px semibold), the first cell reaching up
+  beside the tab bar.
 - **Ruler**: 28 px, `#16161A`; major ticks every 10 s with 10 px labels
   `TEXT_FAINT` ("0:10"); minor 5 px ticks `#2A2A31`; the playhead marker a
   white 11 × 8 triangle; song end a 1 px `TEXT_DISABLED` line.
