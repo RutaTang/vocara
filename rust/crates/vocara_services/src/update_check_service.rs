@@ -110,11 +110,11 @@ impl UpdateCheckService {
     /// version (which the release tag must match), so a release with a
     /// stale constant fails the test gate instead of shipping an app that
     /// mis-identifies its own version.
-    pub const APP_VERSION: &'static str = "0.2.0";
+    pub const APP_VERSION: &'static str = "0.3.0";
 
     /// The running app's build number: the bundle's `CFBundleVersion`
     /// (`packaging/macos/bundle.sh` reads it here), one more each release.
-    pub const APP_BUILD_NUMBER: &'static str = "2";
+    pub const APP_BUILD_NUMBER: &'static str = "3";
 
     /// The production service: HTTP fetch, this build's version.
     pub fn new() -> Self {
