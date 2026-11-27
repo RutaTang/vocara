@@ -41,25 +41,24 @@ use iced::advanced::{overlay, renderer, Clipboard, Shell, Widget};
 use iced::alignment::Vertical;
 use iced::widget::canvas::{self, Frame, Geometry, LineCap, Path, Stroke};
 use iced::widget::text::Wrapping;
-use iced::widget::{button, canvas as canvas_widget, column, container, row, Space};
+use iced::widget::{button, canvas as canvas_widget, container, row, Space};
 use iced::{mouse, Element, Event, Length, Point, Rectangle, Renderer, Size, Theme, Vector};
 use vocara_model::models::song_practice::SongPractice;
 use vocara_model::util::format::{format_clock, format_clock_ms};
 
 use crate::ui::core::icons::{self, Icon};
-use crate::ui::core::theme::{alpha, bare_button, boxed, fill, font, Studio};
+use crate::ui::core::theme::{alpha, bare_button, boxed, font, Studio};
 use crate::ui::core::widgets::studio_controls::studio_round_button;
 use crate::ui::core::widgets::studio_hint::spinner;
 use crate::ui::core::widgets::studio_text::{studio_text, StudioText};
+use crate::ui::core::widgets::toolbar;
 
 #[cfg(test)]
 mod tests;
 
-/// The bar's height.
-pub const BAR_HEIGHT: f32 = 54.0;
-
-/// The bar's side padding.
-const BAR_PADDING: f32 = 14.0;
+/// The bar's height: the page's unified toolbar's (`widgets::toolbar`),
+/// its hairline included.
+pub const BAR_HEIGHT: f32 = toolbar::HEIGHT;
 
 /// The least clear space [`bar_layout`] keeps between the transport and
 /// either side (`_BarLayout._gap`).
@@ -251,8 +250,9 @@ pub fn side_room(width: f32, center_width: f32) -> f32 {
 
 // ---------------------------------------------------------------------- view
 
-/// The transport bar: [`BAR_HEIGHT`] tall, `Studio.surface`, a bottom
-/// border.
+/// The transport bar: the page's unified toolbar (`widgets::toolbar`:
+/// [`BAR_HEIGHT`] tall, `Studio::TOOLBAR`, a bottom hairline, its content
+/// past the traffic lights).
 pub fn detail_transport_bar<'a>(bar: TransportBar<'a>) -> Element<'a, Message> {
     let c = controls(&bar);
     let practice = bar.practice;
@@ -350,20 +350,7 @@ pub fn detail_transport_bar<'a>(bar: TransportBar<'a>) -> Element<'a, Message> {
         Size::new(Length::Fill, Length::Fill),
         Box::new(arrange_bar),
     );
-    container(column![
-        container(slots)
-            .width(Length::Fill)
-            .height(BAR_HEIGHT - 1.0)
-            .padding([0.0, BAR_PADDING]),
-        container(Space::new())
-            .width(Length::Fill)
-            .height(1)
-            .style(fill(Studio::BORDER)),
-    ])
-    .width(Length::Fill)
-    .height(BAR_HEIGHT)
-    .style(fill(Studio::SURFACE))
-    .into()
+    toolbar::page_toolbar(slots)
 }
 
 /// `_BackButton`: a 30 px square hit area with a 20 px chevron.

@@ -486,7 +486,7 @@ fn the_header_cluster_right_anchors_and_new_technique_hugs_the_edge() {
 #[test]
 fn the_back_chevron_leaves_for_home() {
     let mut h = Harness::library(Vec::new());
-    assert_eq!(h.click(&glyph(Icon::ChevronLeft)), vec![Message::Back]);
+    assert_eq!(h.click("Back"), vec![Message::Back]);
     assert_eq!(h.navigations, vec![Navigation::PopOrGo(Route::Home)]);
 }
 

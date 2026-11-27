@@ -74,6 +74,7 @@ use crate::ui::core::widgets::studio_button::{studio_button, StudioButtonVariant
 use crate::ui::core::widgets::studio_hint::spinner;
 use crate::ui::core::widgets::studio_text::studio_text;
 use crate::ui::core::widgets::text_field::text_input;
+use crate::ui::core::widgets::toolbar;
 use crate::ui::snack::{fixed_bar, SnackEvent, SnackQueue, SnackStyle};
 use crate::ui::{Screen, SnackBar, Update};
 
@@ -428,23 +429,13 @@ impl TechniqueLibraryScreen {
 
     // ---------------------------------------------------------------- view
 
+    /// The page's toolbar (`widgets::toolbar`): the back button, the
+    /// title, and the search, tag filter and New technique at its right.
     fn header(&self) -> Element<'_, Message> {
-        let back = button(
-            container(icons::icon(Icon::ChevronLeft, 20.0, Studio::TEXT_SECONDARY))
-                .center_x(32)
-                .center_y(32),
-        )
-        .padding(0)
-        .style(bare_button)
-        .on_press(Message::Back);
         let mut bar = row![
-            back,
-            Space::new().width(6),
-            studio_text("Technique library")
-                .size(18)
-                .font(font::BOLD)
-                .letter_spacing(0.3)
-                .color(Studio::TEXT_PRIMARY),
+            toolbar::back_button(Message::Back),
+            Space::new().width(8),
+            toolbar::title("Technique library"),
             // The space absorbs the slack so the search + tag filter + New
             // technique cluster sits flush right. The tag filter is a
             // dropdown (not inline chips) so it stays compact no matter how
@@ -466,19 +457,7 @@ impl TechniqueLibraryScreen {
                 .icon(Icon::Plus)
                 .variant(StudioButtonVariant::Accent),
         );
-        column![
-            container(bar)
-                .width(Length::Fill)
-                .height(55)
-                .padding(Padding {
-                    left: 12.0,
-                    right: 16.0,
-                    ..Padding::ZERO
-                })
-                .style(theme::fill(Studio::SURFACE)),
-            rule(),
-        ]
-        .into()
+        toolbar::page_toolbar(bar)
     }
 
     /// The tag filter: a compact dropdown button showing the active filter,

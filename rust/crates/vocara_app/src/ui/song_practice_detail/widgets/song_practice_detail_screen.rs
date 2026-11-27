@@ -65,7 +65,7 @@
 //!   in and out as Material's floating snack bar did, its time counted from
 //!   the end of its entrance (`ui::snack`). Its timer is a subscription.
 //! - The note editor and the technique picker are drawn over the page, under
-//!   the window drag bar (Dart's dialog routes covered it); the app's studio
+//!   the page's toolbar (Dart's dialog routes covered it); the app's studio
 //!   dialogs cover the whole window as before. They come in and go as their
 //!   `DialogRoute`s did (`confirm_dialog::DialogMotion`); a closed one stays
 //!   drawn, taking no input, until it has faded out.

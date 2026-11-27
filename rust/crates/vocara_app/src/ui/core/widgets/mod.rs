@@ -1,7 +1,7 @@
 //! The shared widgets (port of `client/lib/ui/core/widgets`), and the
 //! design system's own (`rust/DESIGN.md`): the desktop controls
-//! ([`controls`]) and the line icons drawn to one optical size
-//! ([`line_icon`]).
+//! ([`controls`]), the line icons drawn to one optical size
+//! ([`line_icon`]) and the unified toolbar every page draws ([`toolbar`]).
 
 pub mod animated;
 pub mod cap_label;
@@ -29,9 +29,9 @@ pub mod studio_hint;
 pub mod studio_text;
 pub mod text_field;
 pub mod tick_boundary;
+pub mod toolbar;
 pub mod visible_drop_target;
 pub mod waveform_painter;
-pub mod window_drag_bar;
 
 pub(crate) mod gesture;
 pub(crate) mod painter;

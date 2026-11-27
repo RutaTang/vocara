@@ -2,11 +2,10 @@
 //!
 //! - [`Sheet`]: `_DetailView`'s `DraggableScrollableSheet` and the card on
 //!   it. The sheet's size is a fraction of the page's height, starting at
-//!   (and never under) `(screenHeight - kToolbarHeight) / screenHeight` of
-//!   the *window's* height (`MediaQuery`), while the page it sits in is the
-//!   window less the drag bar above it: so its top is `56 · h / (h + 28)`
-//!   down the page, about 54 px. A trackpad's (or a Magic Mouse's)
-//!   two-finger swipe that starts over the card is a pan-zoom gesture,
+//!   (and never under) `(h - toolbar) / h`: its top is right under the
+//!   page's 52 px toolbar (`widgets::toolbar`, which replaced Flutter's
+//!   `kToolbarHeight` app bar under the 28 px drag bar). A trackpad's (or
+//!   a Magic Mouse's) two-finger swipe that starts over the card is a pan-zoom gesture,
 //!   which the detail's scroll view took as a drag, alone in its arena
 //!   (`pan_zoom`): each move goes through
 //!   `_DraggableScrollableSheetScrollPosition.applyUserOffset`, which,
@@ -49,10 +48,9 @@ use crate::ui::core::widgets::pan_zoom::{self, Held, Scroll};
 use crate::ui::core::widgets::scroll_fling::{
     self, Ballistic, ClampingScrollSimulation, MacOsVelocityTracker, Tolerance,
 };
-use crate::ui::core::widgets::window_drag_bar;
+use crate::ui::core::widgets::toolbar;
 
-/// `kToolbarHeight`: the sheet's least size leaves this much of the window
-/// above it, and the pinned header is this tall.
+/// `kToolbarHeight`: the pinned header is this tall.
 const TOOLBAR_HEIGHT: f32 = 56.0;
 
 /// `_kCardElevation`: the card's margin either side of the sheet.
@@ -65,14 +63,14 @@ const CARD_RADIUS: f32 = 3.0;
 /// (`ElevationOverlay`'s table).
 pub const SCROLLED_UNDER_TINT: f32 = 0.08;
 
-/// The sheet's least (and first) size on a page `page_height` tall under
-/// the window's drag bar: `(screenHeight - kToolbarHeight) / screenHeight`.
+/// The sheet's least (and first) size on a page `page_height` tall (the
+/// whole window): what leaves the page's toolbar above it,
+/// `(h - toolbar) / h`.
 pub fn least_size(page_height: f32) -> f32 {
-    let screen = page_height + window_drag_bar::HEIGHT;
-    if screen <= 0.0 {
+    if page_height <= 0.0 {
         return 1.0;
     }
-    ((screen - TOOLBAR_HEIGHT) / screen).clamp(0.0, 1.0)
+    ((page_height - toolbar::HEIGHT) / page_height).clamp(0.0, 1.0)
 }
 
 /// `_DraggableScrollableSheetScrollPosition.applyUserOffset`: where a drag
@@ -1070,12 +1068,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_sheet_starts_a_toolbar_of_the_window_down() {
-        // A 900 px window: the page under the drag bar is 872 tall.
-        let least = least_size(872.0);
-        assert!((least - 844.0 / 900.0).abs() < 1e-6);
-        assert!(((1.0 - least) * 872.0 - 56.0 * 872.0 / 900.0).abs() < 1e-3);
-        assert_eq!(least_size(-28.0), 1.0);
+    fn the_sheet_starts_right_under_the_toolbar() {
+        // A 900 px window: the page is all of it.
+        let least = least_size(900.0);
+        assert!((least - 848.0 / 900.0).abs() < 1e-6);
+        assert!(((1.0 - least) * 900.0 - toolbar::HEIGHT).abs() < 1e-3);
+        assert_eq!(least_size(0.0), 1.0);
     }
 
     // `_DraggableScrollableSheetScrollPosition.applyUserOffset`.

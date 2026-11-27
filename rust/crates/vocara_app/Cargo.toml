@@ -57,6 +57,13 @@ harness = false
 name = "macos_touches"
 harness = false
 
+# The window's empty unified toolbar (vocara_services::window_toolbar) on
+# the app's own window: the traffic lights centred in the pages' 52 px
+# toolbar, and clicks on its empty area reaching the app.
+[[test]]
+name = "macos_window_toolbar"
+harness = false
+
 # What those tests drive AppKit with and make their events with (objc2
 # 0.6's bindings, the versions vocara_services and the run loop use).
 [target.'cfg(target_os = "macos")'.dev-dependencies]
@@ -70,6 +77,9 @@ block2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = [
     "std",
     "NSApplication",
+    # The window toolbar test reads the close button's frame.
+    "NSButton",
+    "NSControl",
     "NSEvent",
     # NSEvent's key-event constructor.
     "NSGraphicsContext",
@@ -81,6 +91,7 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
     "NSResponder",
     "NSRunningApplication",
     "NSSavePanel",
+    "NSToolbar",
     # The touches test reads the view's touch types.
     "NSTouch",
     "NSView",

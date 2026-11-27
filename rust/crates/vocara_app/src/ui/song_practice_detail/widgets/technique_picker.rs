@@ -13,7 +13,7 @@
 //! has nowhere to land.
 //!
 //! The screen draws [`TechniquePicker::view`] over its page (as Home draws
-//! its "Loading practice" dialog: under the window drag bar, which Dart's
+//! its "Loading practice" dialog: under the window's toolbar, which Dart's
 //! dialog route covered), runs [`TechniquePicker::focus`] when it opens
 //! (`autofocus`), and feeds it its messages until
 //! [`TechniquePicker::update`] says it closed. It is modal like the studio
