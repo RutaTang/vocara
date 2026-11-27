@@ -380,6 +380,8 @@ impl SongPracticeDetailScreen {
                     monitor_allowed: settings.monitor_allowed(),
                     suggest_headphones_mark: settings.suggest_headphones_mark(),
                     input_level: vm.recording().input_level(),
+                    monitoring: vm.recording().input_monitor_enabled(),
+                    taking: vm.is_recording() || vm.recording().is_starting_take(),
                 },
             };
             let selected = selected_track_ref(vm, practice).map(|t| &**t);

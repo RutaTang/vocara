@@ -708,6 +708,13 @@ impl SongPracticeDetailScreen {
                     .retain(|o| *o != Owed::MasterVolume(Source::Mixer(None)));
                 self.vm.mixer_do(|m, _| m.commit_master_volume())
             }
+            // The input strip's R and I: the toolbar's Record and input
+            // monitoring.
+            X::StartRecording => return self.transport(transport::Message::StartRecording, step),
+            X::StopRecording => return self.transport(transport::Message::StopRecording, step),
+            X::ToggleInputMonitor => {
+                return self.transport(transport::Message::ToggleInputMonitor, step)
+            }
             X::SetRecordGainDbLive { db } => {
                 self.vm.app_settings().set_record_gain_db_live(db);
                 return;

@@ -33,8 +33,8 @@ fn fx_bus(id: &str, name: &str) -> Arc<FxBus> {
     Arc::new(FxBus::new(id, name, TrackFx::flat()))
 }
 
-/// The desk as the bottom dock shows it, the master at 0.8 (its readout
-/// "-1.9 dB" apart from the takes' "0.0 dB").
+/// The desk as the bottom dock shows it, the master at 0.8 (its dB field
+/// "−1.9" apart from the takes' "0.0").
 fn desk<'a>(
     tracks: &'a [Arc<AudioTrack>],
     buses: &'a [Arc<FxBus>],
@@ -47,41 +47,70 @@ fn desk<'a>(
     }
 }
 
-/// The `n`-th take strip's fader box: between its pan knob's label and its
-/// dB readout, 46 px wide.
+/// The master's dB field.
+const MASTER_DB: &str = "\u{2212}1.9";
+
+/// The fader canvas (its column and its `meters` meters) between a knob's
+/// value label and a dB field: 10 px under the label (the knob slot's 6 px
+/// and the fader slot's 4), 16 px over the field (the slot's 6 px over its
+/// 20 px box), centred on the strip.
+fn fader_between(label: Rectangle, field: Rectangle, meters: usize) -> Rectangle {
+    let top = label.y + label.height + 10.0;
+    let bottom = field.center_y() - 10.0 - 6.0;
+    let width = fader_meters_width(meters);
+    Rectangle::new(
+        Point::new(label.center_x() - width / 2.0, top),
+        Size::new(width, bottom - top),
+    )
+}
+
+/// The point on a fader canvas's column at `dy` from its top.
+fn on_column(fader: Rectangle, dy: f32) -> Point {
+    Point::new(fader.x + FADER_WIDTH / 2.0, fader.y + dy)
+}
+
+/// The `n`-th take strip's fader box.
 fn take_fader(ui: &mut Simulator<'_, Message>, n: usize) -> Rectangle {
     let label = text_at(ui, "C", n).expect("the pan label");
-    let readout = text_at(ui, "0.0 dB", n).expect("the dB readout");
-    let top = label.y + label.height + 10.0;
-    Rectangle::new(
-        Point::new(label.center_x() - 23.0, top),
-        Size::new(46.0, readout.y - 8.0 - top),
-    )
+    let field = text_at(ui, "0.0", n).expect("the dB field");
+    fader_between(label, field, 2)
 }
 
 /// The `n`-th bus strip's fader box.
-fn bus_fader(ui: &mut Simulator<'_, Message>, n: usize, volume_text: &str) -> Rectangle {
-    // The mic strip has no pan knob: bus knobs follow the takes'.
+fn bus_fader(ui: &mut Simulator<'_, Message>, n: usize, field: &str) -> Rectangle {
     let label = text_at(ui, "C", n).expect("the pan label");
-    let readout = text_at(ui, volume_text, n).expect("the dB readout");
-    let top = label.y + label.height + 10.0;
+    let field = text_at(ui, field, n).expect("the dB field");
+    fader_between(label, field, 2)
+}
+
+/// The text reading `label` nearest `x` across.
+fn text_near(ui: &mut Simulator<'_, Message>, label: &str, x: f32) -> Rectangle {
+    (0..)
+        .map_while(|n| text_at(ui, label, n))
+        .min_by(|a, b| {
+            (a.center_x() - x)
+                .abs()
+                .total_cmp(&(b.center_x() - x).abs())
+        })
+        .unwrap_or_else(|| panic!("{label} is not on the desk"))
+}
+
+/// The master strip's fader box: under its name (a 26 px row under the
+/// 3 px cap) and the room a take's buttons and knob take, over its field.
+fn master_fader(ui: &mut Simulator<'_, Message>) -> Rectangle {
+    let field = text_at(ui, MASTER_DB, 0).expect("the master's field");
+    let title = text_near(ui, "Master", field.center_x());
+    let top = title.center_y() + 13.0 + BUTTONS_AND_KNOB + 4.0;
+    let bottom = field.center_y() - 10.0 - 6.0;
+    let width = fader_meters_width(2);
     Rectangle::new(
-        Point::new(label.center_x() - 23.0, top),
-        Size::new(46.0, readout.y - 8.0 - top),
+        Point::new(field.center_x() - width / 2.0, top),
+        Size::new(width, bottom - top),
     )
 }
 
-/// The master strip's fader box: under its title and the 92 px pad, above
-/// its readout.
-fn master_fader(ui: &mut Simulator<'_, Message>) -> Rectangle {
-    let title = text_at(ui, "MASTER", 0).expect("the master strip");
-    let readout = text_at(ui, "-1.9 dB", 0).expect("the master readout");
-    let top = title.y + title.height + 92.0;
-    Rectangle::new(
-        Point::new(title.center_x() - 23.0, top),
-        Size::new(46.0, readout.y - 8.0 - top),
-    )
-}
+/// A strip's step across the desk: its width and its gap.
+const STEP: f32 = STRIP_WIDTH + STRIP_GAP;
 
 fn volumes(messages: &[Message]) -> Vec<(String, f64)> {
     messages
@@ -108,14 +137,15 @@ fn the_desk_lays_out_and_the_fader_works_at_a_normal_dock_height() {
     let size = Size::new(600.0, 400.0);
     let mut ui = simulator(size, desk(&tracks, &[], false).view());
     // Tall enough: the plain column — the fader fills what the fixed rows
-    // leave (350 inner px), well past the squeezed fallback's 120.
+    // leave, well past the squeezed fallback's 120.
     let fader = take_fader(&mut ui, 0);
     assert!(fader.height > SQUEEZED_FADER_HEIGHT + 40.0, "{fader:?}");
-    // The delete control sits at the strip's inner bottom.
-    let trash = text_at(&mut ui, &glyph(Icon::Trash2), 0).expect("the trash icon");
-    assert!((trash.y + trash.height - (400.0 - 12.0 - 13.0)).abs() < 1.0);
+    // The dB field sits over the strip's 30 px output row, at the desk's
+    // inner bottom.
+    let field = text_at(&mut ui, "0.0", 0).expect("the dB field");
+    assert!((field.center_y() - (400.0 - 10.0 - 30.0 - 10.0)).abs() < 1.0);
     // The fader is live: dragging it reports volume ticks.
-    let c = fader.center();
+    let c = on_column(fader, fader.height / 2.0);
     drive(
         &mut ui,
         &drag_steps(
@@ -130,10 +160,10 @@ fn the_desk_lays_out_and_the_fader_works_at_a_normal_dock_height() {
 
 #[test]
 fn a_squeezed_desk_scrolls_per_strip_and_the_fader_still_works() {
-    // 270 − the desk's padding (24) − the strip's border and padding (26) =
-    // 220 inner px: below the threshold, so the scrolling fallback kicks in.
+    // 230 − the desk's padding (20) − the strip's cap (3) = 207 inner px:
+    // below the threshold, so the scrolling fallback kicks in.
     let tracks = takes(1..2);
-    let size = Size::new(600.0, 270.0);
+    let size = Size::new(600.0, 230.0);
     let mut ui = simulator(size, desk(&tracks, &[], false).view());
     let fader = take_fader(&mut ui, 0);
     assert!(
@@ -144,7 +174,7 @@ fn a_squeezed_desk_scrolls_per_strip_and_the_fader_still_works() {
     let master = master_fader(&mut ui);
     assert!((master.height - SQUEEZED_FADER_HEIGHT).abs() < 0.5);
     // The fixed-height fader inside the scroll view is interactive.
-    let c = fader.center();
+    let c = on_column(fader, fader.height / 2.0);
     drive(&mut ui, &drag_steps(c, &[Point::new(c.x, c.y - 30.0)]));
     let messages: Vec<_> = ui.into_messages().collect();
     assert!(!volumes(&messages).is_empty());
@@ -155,23 +185,27 @@ fn a_severely_squeezed_desk_still_lays_out() {
     let tracks = takes(1..2);
     let mut ui = simulator(Size::new(600.0, 80.0), desk(&tracks, &[], false).view());
     assert!(text_at(&mut ui, "Take 1", 0).is_some());
-    assert!(text_at(&mut ui, "MASTER", 0).is_some());
+    assert!(text_at(&mut ui, MASTER_DB, 0).is_some());
 }
 
 #[test]
 fn the_squeeze_threshold_is_the_tallest_strips_fixed_rows_plus_travel() {
-    // Inner height = dock − 24 (desk padding) − 26 (strip border + padding).
-    let inner = |dock: f32| dock - 50.0;
+    // Inner height = dock − 20 (desk padding) − 3 (the strip's cap).
+    let inner = |dock: f32| dock - 23.0;
     assert!(inner(400.0) >= STRIP_MIN_CONTENT_HEIGHT);
-    assert!(inner(270.0) < STRIP_MIN_CONTENT_HEIGHT);
-    assert!(inner(282.0) >= STRIP_MIN_CONTENT_HEIGHT);
+    assert!(inner(230.0) < STRIP_MIN_CONTENT_HEIGHT);
+    assert!(inner(238.0) >= STRIP_MIN_CONTENT_HEIGHT);
+    // The fixed rows: cap, name, buttons, knob, the fader's padding, the
+    // field and the output; plus 56 px of travel.
+    let fixed = 3.0 + 26.0 + 26.0 + (26.0 + 2.0 + 10.0 + 6.0) + 10.0 + 20.0 + 30.0;
+    assert_eq!(STRIP_MIN_CONTENT_HEIGHT, fixed + 56.0);
 }
 
 #[test]
 fn an_empty_desk_says_so() {
     let mut ui = simulator(Size::new(600.0, 300.0), MixerStrip::new(&[], &[]).view());
     assert!(text_at(&mut ui, "No tracks yet", 0).is_some());
-    assert!(text_at(&mut ui, "MASTER", 0).is_none());
+    assert!(text_at(&mut ui, "Master", 0).is_none());
 }
 
 #[test]
@@ -182,13 +216,13 @@ fn the_effects_engine_adds_the_mic_strip_the_buses_and_plus_bus() {
         Size::new(1200.0, 400.0),
         desk(&tracks, &buses, false).view(),
     );
-    assert!(text_at(&mut ui, "MIC", 0).is_none());
+    assert!(text_at(&mut ui, "Input", 0).is_none());
     assert!(text_at(&mut ui, "Verb", 0).is_none());
-    assert!(text_at(&mut ui, "BUS", 0).is_none());
+    assert!(text_at(&mut ui, ADD_BUS_LABEL, 0).is_none());
     let mut ui = simulator(Size::new(1200.0, 400.0), desk(&tracks, &buses, true).view());
-    assert!(text_at(&mut ui, "MIC", 0).is_some());
+    assert!(text_at(&mut ui, "Input", 0).is_some());
     assert!(text_at(&mut ui, "Verb", 0).is_some());
-    assert!(text_at(&mut ui, "BUS", 0).is_some());
+    assert!(text_at(&mut ui, ADD_BUS_LABEL, 0).is_some());
 }
 
 // ------------------------------------------------------------ the faders
@@ -204,7 +238,7 @@ fn a_click_on_a_fader_sets_and_saves_the_level() {
     let tracks = one_take();
     let mut ui = simulator(STRIP, desk(&tracks, &[], false).view());
     let fader = take_fader(&mut ui, 0);
-    ui.point_at(Point::new(fader.center_x(), fader.y + FADER_PAD + 20.0));
+    ui.point_at(on_column(fader, FADER_PAD + 20.0));
     let _ = ui.simulate([press(), release()]);
     let messages: Vec<_> = ui.into_messages().collect();
     let v = volumes(&messages);
@@ -221,7 +255,10 @@ fn a_click_on_a_fader_sets_and_saves_the_level() {
 fn a_held_press_that_turns_into_a_drag_saves_once() {
     let tracks = one_take();
     let mut ui = simulator(STRIP, desk(&tracks, &[], false).view());
-    let c = take_fader(&mut ui, 0).center();
+    let c = {
+        let f = take_fader(&mut ui, 0);
+        on_column(f, f.height / 2.0)
+    };
     drive(
         &mut ui,
         &[
@@ -250,7 +287,10 @@ fn a_held_press_that_turns_into_a_drag_saves_once() {
 fn a_press_that_slips_sideways_before_its_drag_saves_once() {
     let tracks = one_take();
     let mut ui = simulator(STRIP, desk(&tracks, &[], false).view());
-    let c = take_fader(&mut ui, 0).center();
+    let c = {
+        let f = take_fader(&mut ui, 0);
+        on_column(f, f.height / 2.0)
+    };
     drive(
         &mut ui,
         &drag_steps(
@@ -272,7 +312,10 @@ fn a_two_finger_trackpad_swipe_over_a_strip_moves_nothing() {
     // fader or knob it crosses.
     let tracks = one_take();
     let mut ui = simulator(STRIP, desk(&tracks, &[], false).view());
-    let fader = take_fader(&mut ui, 0).center();
+    let fader = {
+        let f = take_fader(&mut ui, 0);
+        on_column(f, f.height / 2.0)
+    };
     let knob = text_at(&mut ui, "C", 0).expect("the knob's label");
     let knob = Point::new(knob.center_x(), knob.y - 15.0);
     for at in [fader, knob] {
@@ -290,7 +333,10 @@ fn a_strip_fader_scrolled_away_mid_drag_still_saves_its_level() {
     // release still ends its drag, and saves once.
     let tracks = takes(0..30);
     let mut ui = simulator(STRIP, desk(&tracks, &[], false).view());
-    let c = take_fader(&mut ui, 0).center();
+    let c = {
+        let f = take_fader(&mut ui, 0);
+        on_column(f, f.height / 2.0)
+    };
     drive(
         &mut ui,
         &[
@@ -317,7 +363,8 @@ fn a_strip_fader_scrolled_away_mid_drag_still_saves_its_level() {
 
 #[test]
 fn the_fader_maps_its_travel_linearly_and_clamps() {
-    // 8 px of pad at each end; the top of the travel is unity.
+    // The cap's half height at each end; the top of the travel is unity.
+    assert_eq!(FADER_PAD, 6.0);
     assert_eq!(vertical_fader_value(FADER_PAD, 216.0), 1.0);
     assert_eq!(vertical_fader_value(216.0 - FADER_PAD, 216.0), 0.0);
     assert!((vertical_fader_value(108.0, 216.0) - 0.5).abs() < 1e-12);
@@ -325,7 +372,7 @@ fn the_fader_maps_its_travel_linearly_and_clamps() {
     assert_eq!(vertical_fader_value(400.0, 216.0), 0.0);
     // Laid out under 2 × the pad (a master strip squeezed to nothing): the
     // span holds at 1 px instead of flipping the clamp.
-    assert_eq!(vertical_fader_value(8.5, 10.0), 0.5);
+    assert_eq!(vertical_fader_value(6.5, 10.0), 0.5);
     assert_eq!(vertical_fader_value(0.0, 0.5), 1.0);
 }
 
@@ -341,7 +388,8 @@ fn the_master_fader_keeps_its_drag_as_takes_come_and_go() {
     let after = takes(1..3);
     let at = {
         let mut ui = simulator(size, desk(&before, &[], false).view());
-        master_fader(&mut ui).center()
+        let f = master_fader(&mut ui);
+        on_column(f, f.height / 2.0)
     };
     let mut frames = Frames::new(size);
     let pressed = frames.run(desk(&before, &[], false).view(), at, &[press()]);
@@ -351,7 +399,7 @@ fn the_master_fader_keeps_its_drag_as_takes_come_and_go() {
     ));
     // A take lands: the master strip moves one strip right; the drag goes
     // on.
-    let moved = Point::new(at.x + 102.0, at.y - 30.0);
+    let moved = Point::new(at.x + STEP, at.y - 30.0);
     let frame = frames.run(
         desk(&after, &[], false).view(),
         moved,
@@ -372,14 +420,15 @@ fn a_take_fader_keeps_its_drag_when_a_take_before_it_goes() {
     let two: Vec<_> = three[1..].to_vec();
     let at = {
         let mut ui = simulator(size, desk(&three, &[], false).view());
-        take_fader(&mut ui, 1).center()
+        let f = take_fader(&mut ui, 1);
+        on_column(f, f.height / 2.0)
     };
     let mut frames = Frames::new(size);
     let pressed = frames.run(desk(&three, &[], false).view(), at, &[press()]);
     assert_eq!(volumes(&pressed.messages)[0].0, "t1");
     // Take 0 is deleted: t1's strip moves left into its place, under the
     // pointer of nobody else.
-    let moved = Point::new(at.x - 102.0, at.y - 30.0);
+    let moved = Point::new(at.x - STEP, at.y - 30.0);
     let frame = frames.run(
         desk(&two, &[], false).view(),
         moved,
@@ -398,7 +447,8 @@ fn a_bus_fader_keeps_its_drag_when_a_bus_before_it_goes() {
     let fewer: Vec<_> = buses[1..].to_vec();
     let at = {
         let mut ui = simulator(size, desk(&[], &buses, true).view());
-        bus_fader(&mut ui, 1, "0.0 dB").center()
+        let f = bus_fader(&mut ui, 1, "0.0");
+        on_column(f, f.height / 2.0)
     };
     let mut frames = Frames::new(size);
     let pressed = frames.run(desk(&[], &buses, true).view(), at, &[press()]);
@@ -406,7 +456,7 @@ fn a_bus_fader_keeps_its_drag_when_a_bus_before_it_goes() {
         pressed.messages.as_slice(),
         [Message::SetBusVolumeLive { id, .. }] if id == "B"
     ));
-    let moved = Point::new(at.x - 102.0, at.y - 30.0);
+    let moved = Point::new(at.x - STEP, at.y - 30.0);
     let frame = frames.run(
         desk(&[], &fewer, true).view(),
         moved,
@@ -475,7 +525,11 @@ fn a_strip_selects_its_take_and_its_buttons_reach_the_take() {
     ui.click(nth("Take 1", 0)).expect("t1's title");
     ui.click(nth("M", 0)).expect("t0's M");
     ui.click(nth("S", 1)).expect("t1's S");
-    ui.click(nth(&glyph(Icon::Trash2), 1)).expect("t1's trash");
+    // Its delete is its right-click menu's.
+    let title = text_at(&mut ui, "Take 1", 0).expect("t1's title");
+    ui.point_at(title.center());
+    let _ = ui.simulate([right_press(), right_release()]);
+    ui.click(nth("Delete take", 0)).expect("the menu's delete");
     assert_eq!(
         ui.into_messages().collect::<Vec<_>>(),
         vec![
@@ -495,7 +549,7 @@ fn a_take_can_be_routed_through_its_chip_to_the_current_bus() {
     let buses = vec![fx_bus("bus1", "Renamed")];
     let mut ui = simulator(Size::new(1200.0, 400.0), desk(&tracks, &buses, true).view());
     let titles = count(&mut ui, "Renamed");
-    ui.click(nth("→ Master", 1)).expect("t1's chip");
+    ui.click(nth("Master", 1)).expect("t1's output");
     assert_eq!(
         count(&mut ui, "Renamed"),
         titles + 1,
@@ -519,8 +573,10 @@ fn a_routed_take_reads_its_bus_and_goes_back_to_the_master() {
     let tracks = vec![Arc::new(routed)];
     let buses = vec![fx_bus("bus1", "Lead")];
     let mut ui = simulator(Size::new(1200.0, 400.0), desk(&tracks, &buses, true).view());
-    ui.click(nth("→ Lead", 0)).expect("the routed chip");
-    ui.click(nth("Master", 0)).expect("Master in the menu");
+    let masters = count(&mut ui, "Master");
+    ui.click(nth("Lead", 0)).expect("the routed output");
+    ui.click(nth("Master", masters))
+        .expect("Master in the menu");
     assert_eq!(
         ui.into_messages().collect::<Vec<_>>(),
         vec![Message::SetTrackBus {
@@ -541,11 +597,17 @@ fn the_backing_track_plays_dry_with_no_route_chip() {
     let tracks = vec![backing, take(1)];
     let buses = vec![fx_bus("bus1", "Verb")];
     let mut ui = simulator(Size::new(1200.0, 400.0), desk(&tracks, &buses, true).view());
-    // The take's chip, and the bus's own output chip; none for the backing.
-    assert_eq!(count(&mut ui, "→ Master"), 2);
-    // Without buses, no take shows one either.
+    // The backing's output opens nothing: it reads where it goes.
+    let verbs = count(&mut ui, "Verb");
+    ui.click(nth("Master", 0)).expect("the backing's output");
+    assert_eq!(count(&mut ui, "Verb"), verbs, "no menu");
+    // The take's does.
+    ui.click(nth("Master", 1)).expect("the take's output");
+    assert_eq!(count(&mut ui, "Verb"), verbs + 1, "the menu lists the bus");
+    // Without buses, the take's opens nothing either.
     let mut ui = simulator(Size::new(1200.0, 400.0), desk(&tracks, &[], true).view());
-    assert_eq!(count(&mut ui, "→ Master"), 0);
+    ui.click(nth("Master", 1)).expect("the take's output");
+    let _ = ui.into_messages();
 }
 
 #[test]
@@ -554,8 +616,8 @@ fn a_buss_own_output_never_offers_itself() {
     let mut ui = simulator(Size::new(1200.0, 400.0), desk(&[], &buses, true).view());
     let reverbs = count(&mut ui, "Reverb");
     let delays = count(&mut ui, "Delay");
-    // Reverb's output chip (the first bus chip).
-    ui.click(nth("→ Master", 0)).expect("the bus's chip");
+    // Reverb's output (the first bus output).
+    ui.click(nth("Master", 0)).expect("the bus's output");
     assert_eq!(count(&mut ui, "Reverb"), reverbs, "never itself");
     assert_eq!(count(&mut ui, "Delay"), delays + 1);
     ui.click(nth("Delay", delays)).expect("Delay in the menu");
@@ -589,12 +651,14 @@ mod deleting_a_bus_asks_first {
     }
 
     #[test]
-    fn the_trash_icon() {
+    fn the_strip_deletes_through_its_menu_alone() {
+        // No trash icon on the strip: a press anywhere on it selects.
         let buses = lead_vox();
         let mut ui = simulator(SIZE, desk(&[], &buses, true).view());
-        ui.click(nth(&glyph(Icon::Trash2), 0))
-            .expect("the trash icon");
-        assert_eq!(ui.into_messages().collect::<Vec<_>>(), vec![delete()]);
+        let title = text_at(&mut ui, "Lead Vox", 0).expect("the bus strip");
+        ui.point_at(Point::new(title.center_x(), title.y + 300.0));
+        let _ = ui.simulate([press(), release()]);
+        assert!(!ui.into_messages().any(|m| m == delete()));
     }
 
     #[test]
@@ -650,7 +714,7 @@ mod deleting_a_bus_asks_first {
         assert!(text_at(&mut ui, "Rename", 0).is_some());
         // The "+ Bus" button sits under the barrier, which dismisses on a
         // tap's release (`ModalBarrier`), not its press.
-        let add = text_at(&mut ui, "BUS", 0).expect("+ Bus");
+        let add = text_at(&mut ui, ADD_BUS_LABEL, 0).expect("the add-bus tile");
         ui.point_at(add.center());
         let _ = ui.simulate([press()]);
         assert!(text_at(&mut ui, "Rename", 0).is_some(), "still open");
@@ -674,7 +738,7 @@ fn a_bus_strip_selects_its_bus_and_its_buttons_reach_the_bus() {
     ui.click(nth("Verb", 0)).expect("the title");
     ui.click(nth("M", 0)).expect("M");
     ui.click(nth("S", 0)).expect("S");
-    ui.click(nth("BUS", 0)).expect("+ Bus");
+    ui.click(nth(ADD_BUS_LABEL, 0)).expect("the add-bus tile");
     assert_eq!(
         ui.into_messages().collect::<Vec<_>>(),
         vec![
@@ -690,7 +754,10 @@ fn a_bus_strip_selects_its_bus_and_its_buttons_reach_the_bus() {
 fn a_bus_fader_commits_through_the_fx_commit() {
     let buses = vec![fx_bus("b1", "Verb")];
     let mut ui = simulator(Size::new(900.0, 420.0), desk(&[], &buses, true).view());
-    let c = bus_fader(&mut ui, 0, "0.0 dB").center();
+    let c = {
+        let f = bus_fader(&mut ui, 0, "0.0");
+        on_column(f, f.height / 2.0)
+    };
     drive(&mut ui, &drag_steps(c, &[Point::new(c.x, c.y + 30.0)]));
     let messages: Vec<_> = ui.into_messages().collect();
     assert!(matches!(
@@ -703,27 +770,24 @@ fn a_bus_fader_commits_through_the_fx_commit() {
 // ------------------------------------------------------- the mic strip
 
 #[test]
-fn the_mic_strip_sets_the_record_gain_and_commits_the_gains() {
+fn the_input_strip_sets_the_record_gain_and_commits_the_gains() {
     let mic = MicInput {
         record_gain_db: 20.0,
         monitor_gain: 0.5,
         ..MicInput::default()
     };
-    let view = MixerStrip {
-        mic,
-        ..desk(&[], &[], true)
-    };
     let tracks = one_take();
     let view = MixerStrip {
-        tracks: &tracks,
-        ..view
+        mic,
+        ..desk(&tracks, &[], true)
     };
     let mut ui = simulator(STRIP, view.view());
-    assert!(text_at(&mut ui, "20 dB", 0).is_some());
+    assert!(text_at(&mut ui, "+20.0", 0).is_some());
     assert!(text_at(&mut ui, "50%", 0).is_some());
-    let label = text_at(&mut ui, "REC", 0).expect("REC");
-    let readout = text_at(&mut ui, "20 dB", 0).expect("its readout");
-    let c = Point::new(label.center_x(), (label.y + label.height + readout.y) / 2.0);
+    let label = text_at(&mut ui, "50%", 0).expect("the monitor's reading");
+    let field = text_at(&mut ui, "+20.0", 0).expect("the record gain's field");
+    let fader = fader_between(label, field, 1);
+    let c = on_column(fader, fader.height / 2.0);
     drive(&mut ui, &drag_steps(c, &[Point::new(c.x, c.y - 40.0)]));
     let messages: Vec<_> = ui.into_messages().collect();
     let dbs: Vec<f64> = messages
@@ -735,6 +799,48 @@ fn the_mic_strip_sets_the_record_gain_and_commits_the_gains() {
         .collect();
     assert_eq!(dbs.len(), 2);
     assert!(dbs[1] > dbs[0]);
+    assert_eq!(messages.last(), Some(&Message::CommitAudioGains));
+}
+
+/// The input strip's monitor knob: over its reading.
+fn monitor_knob(ui: &mut Simulator<'_, Message>, reading: &str) -> Point {
+    let label = text_at(ui, reading, 0).expect("the monitor's reading");
+    Point::new(label.center_x(), label.y - 2.0 - PAN_KNOB_SIZE / 2.0)
+}
+
+#[test]
+fn the_monitor_knob_sets_how_loud_you_hear_yourself() {
+    let mic = MicInput {
+        monitor_gain: 0.5,
+        ..MicInput::default()
+    };
+    let tracks = one_take();
+    let view = MixerStrip {
+        mic,
+        ..desk(&tracks, &[], true)
+    };
+    let mut ui = simulator(STRIP, view.view());
+    let at = monitor_knob(&mut ui, "50%");
+    drive(
+        &mut ui,
+        &drag_steps(
+            at,
+            &[Point::new(at.x + 20.0, at.y), Point::new(at.x + 40.0, at.y)],
+        ),
+    );
+    let messages: Vec<_> = ui.into_messages().collect();
+    let gains: Vec<f64> = messages
+        .iter()
+        .filter_map(|m| match m {
+            Message::SetMonitorGainLive { gain } => Some(*gain),
+            _ => None,
+        })
+        .collect();
+    assert!(!gains.is_empty(), "{messages:?}");
+    // Right is louder: 40 px of 160 is a quarter of the range.
+    assert!((gains.last().unwrap() - level_after_drag(0.5, 40.0)).abs() < 1e-9);
+    assert_eq!(level_after_drag(0.5, 40.0), 0.75);
+    assert_eq!(level_after_drag(0.9, 80.0), 1.0);
     assert_eq!(messages.last(), Some(&Message::CommitAudioGains));
 }
 
@@ -752,10 +858,8 @@ fn a_locked_monitor_reads_speaker_and_ignores_the_pointer() {
     };
     let mut ui = simulator(STRIP, view.view());
     assert!(text_at(&mut ui, "spkr", 0).is_some());
-    let label = text_at(&mut ui, "MON", 0).expect("MON");
-    let readout = text_at(&mut ui, "spkr", 0).expect("its readout");
-    let c = Point::new(label.center_x(), (label.y + label.height + readout.y) / 2.0);
-    drive(&mut ui, &drag_steps(c, &[Point::new(c.x, c.y - 40.0)]));
+    let at = monitor_knob(&mut ui, "spkr");
+    drive(&mut ui, &drag_steps(at, &[Point::new(at.x + 40.0, at.y)]));
     let messages: Vec<_> = ui.into_messages().collect();
     assert!(
         !messages.iter().any(|m| matches!(
@@ -764,6 +868,41 @@ fn a_locked_monitor_reads_speaker_and_ignores_the_pointer() {
         )),
         "{messages:?}"
     );
+}
+
+#[test]
+fn r_records_and_i_arms_the_mic_as_the_toolbar_does() {
+    let tracks = one_take();
+    let mut ui = simulator(STRIP, desk(&tracks, &[], true).view());
+    ui.click(nth("R", 0)).expect("R");
+    ui.click(nth("I", 0)).expect("I");
+    assert_eq!(
+        ui.into_messages().collect::<Vec<_>>(),
+        vec![Message::StartRecording, Message::ToggleInputMonitor]
+    );
+    // A take in flight: R ends it.
+    let taking = MixerStrip {
+        mic: MicInput {
+            taking: true,
+            ..MicInput::default()
+        },
+        ..desk(&tracks, &[], true)
+    };
+    let mut ui = simulator(STRIP, taking.view());
+    ui.click(nth("R", 0)).expect("R");
+    assert_eq!(
+        ui.into_messages().collect::<Vec<_>>(),
+        vec![Message::StopRecording]
+    );
+}
+
+#[test]
+fn the_db_fields_read_with_a_true_minus_sign() {
+    assert_eq!(strip_db(1.0), "0.0");
+    assert_eq!(strip_db(0.8), MASTER_DB);
+    assert_eq!(strip_db(0.0), "\u{2212}∞");
+    assert_eq!(record_gain_label(12.0), "+12.0");
+    assert_eq!(record_gain_label(0.0), "+0.0");
 }
 
 #[test]
@@ -810,8 +949,9 @@ fn a_take_without_a_tint_keeps_a_stable_color_from_its_id() {
         "Original",
         DateTime::local_ymd(2026, 1, 1),
     );
-    assert_eq!(track_accent(&backing), Studio::ACCENT);
-    assert_eq!(track_accent(&take(1)), default_take_color("t1"));
+    // The strip's cap is its lane's colour.
+    assert_eq!(track_accent(&backing), lane_accent(&backing));
+    assert_eq!(track_accent(&take(1)), lane_accent(&take(1)));
 }
 
 #[test]

@@ -173,7 +173,11 @@ Line height 16 px for 11–12 px text unless noted.
   with an inset `#24242B` outline (selected `#202026` with `#4A4A54`); a 3 px
   track-colour cap; name 11 px medium; M/S; pan; fader + meters; dB field;
   output pop-up. Groups (input | tracks | buses | master) are separated by a
-  1 px divider.
+  1 px divider. The input strip's buttons are R (record) and I (input
+  monitoring, lit as solo is); its knob is the monitor level, a level knob
+  (the pan knob's look, its arc from the start of the track, its value
+  below); its fader the record gain over the input's meter, its dB field
+  "+12.0".
 - **Effect module** (inspector): a 24 px header (drag handle dots, power
   button, 12 px medium name, a right-aligned 11 px `TEXT_FAINT` badge such
   as "GR −2.1 dB" or "Bypassed"), then its parameter rows; 8/14/12 px
