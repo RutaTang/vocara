@@ -1010,7 +1010,7 @@ fn an_in_tune_straight_take_reads_as_such() {
     };
     let shown = summary_texts(s);
     for t in [
-        "VOICE SUMMARY",
+        "Voice summary",
         "A3 – E5",
         "19 st",
         "Range",
@@ -1231,6 +1231,36 @@ fn the_range_bar_maps_the_sung_span() {
     assert_eq!(range_x(90, 57, 76, 190.0), 190.0);
     assert_eq!(range_x(60, 60, 60, 100.0), 0.0);
     assert_eq!(range_line(&profile()), Some(("A3 – E5".to_string(), 19)));
+}
+
+#[test]
+fn a_metric_card_splits_its_unit_and_sits_its_reading_on_its_bar() {
+    assert_eq!(split_unit("86%"), ("86", "%"));
+    assert_eq!(split_unit("5.6 Hz"), ("5.6", "Hz"));
+    assert_eq!(split_unit("-13 dB"), ("-13", "dB"));
+    assert_eq!(split_unit("12.3"), ("12.3", ""));
+    assert_eq!(split_unit("straight"), ("straight", ""));
+    assert_eq!(split_unit("—"), ("—", ""));
+    assert_eq!(split_unit("%"), ("%", ""));
+    assert_eq!(metric_level(50.0, (0.0, 100.0)), Some(0.5));
+    assert_eq!(metric_level(-15.0, (-30.0, 0.0)), Some(0.5));
+    assert_eq!(metric_level(140.0, (0.0, 100.0)), Some(1.0), "clamped");
+    assert_eq!(metric_level(f64::NAN, (0.0, 100.0)), None);
+    let m = sung(220.0, 0.0, 0.0, 120);
+    let cells = summary_cells(&m, &profile(), Some(&ltas(-15.0, -6.0)));
+    let levels: Vec<Option<f32>> = cells.iter().map(|c| c.level).collect();
+    // In tune 100 %, no vibrato, CPP 12.345 of 20, ring −15 of −30..0,
+    // dynamics 20.4 of 40, brightness −6 of −30..0.
+    assert_eq!(levels[0], Some(1.0));
+    assert_eq!(levels[1], None);
+    assert!((levels[2].unwrap() - 0.617).abs() < 0.001);
+    assert_eq!(levels[3], Some(0.5));
+    assert!((levels[4].unwrap() - 0.51).abs() < 0.001);
+    assert_eq!(levels[5], Some(0.8));
+    // The cards fill the dock: six a row on a wide one.
+    assert_eq!(summary_columns(1400.0), 6);
+    assert_eq!(summary_columns(600.0), 3);
+    assert_eq!(summary_columns(300.0), 2);
 }
 
 #[test]
