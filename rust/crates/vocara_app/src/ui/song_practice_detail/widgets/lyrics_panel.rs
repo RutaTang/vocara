@@ -58,6 +58,15 @@
 //! Where iced differs: a tooltip (`material_tooltip`, which fades as
 //! Material's did) stays below its button, kept inside the window, where
 //! Flutter's flipped above when there was no room below.
+//!
+//! The look is `rust/DESIGN.md`'s right panel: 292 px on `PANEL`; a 36 px
+//! header with the Lyrics / Notes (its count) / Techniques tab strip and the
+//! hide button; a 32 px tools row (what the lyrics are, then import, edit,
+//! sync and focus as 24 px icon buttons); the lyrics as rows of a 34 px time
+//! column and 13 px text on 20 px lines, the current line on a `#24242A`
+//! pill in white with its time in `ACCENT_BRIGHT`, sung lines faint and the
+//! lines to come a light grey; notes and technique markers as cards with a
+//! neutral time pill. Collapsed, a 34 px rail.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -81,16 +90,18 @@ use vocara_model::models::audio_track::AudioTrack;
 use vocara_model::models::lyric_line::LyricLine;
 use vocara_model::models::practice_note::PracticeNote;
 use vocara_model::models::technique_marker::TechniqueMarker;
-use vocara_model::util::format::format_clock_ms;
 
 use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::motion::{Curve, Implicit};
-use crate::ui::core::theme::{self, alpha, boxed, fill, font, Studio};
+use crate::ui::core::theme::{self, alpha, boxed, fill, font, radius, type_scale, Studio};
+use crate::ui::core::widgets::controls::{
+    icon_button, labelled, primary_button, secondary_button, tab, tab_strip, TabSize,
+};
 use crate::ui::core::widgets::fading_scrollbar::{scrollable, Fading};
 use crate::ui::core::widgets::holds_keyboard::holds_keyboard;
+use crate::ui::core::widgets::line_icon::{glyphs, line_icon, Glyph, Part};
 use crate::ui::core::widgets::material_tooltip::material_tooltip;
-use crate::ui::core::widgets::studio_button::{studio_button, StudioButtonVariant};
-use crate::ui::core::widgets::studio_text::{fill_spaced_text, studio_text};
+use crate::ui::core::widgets::studio_text::studio_text;
 use crate::ui::core::widgets::text_field::editor::{self as text_editor, text_editor};
 use crate::ui::core::widgets::visible_drop_target::visible_drop_target;
 use crate::ui::core::widgets::wrap::Wrap;
@@ -98,8 +109,84 @@ use crate::ui::core::widgets::wrap::Wrap;
 #[cfg(test)]
 mod tests;
 
-/// The open panel's width.
-pub const PANEL_WIDTH: f32 = 300.0;
+/// The open panel's width (`DESIGN.md`: the right panel is 292).
+pub const PANEL_WIDTH: f32 = 292.0;
+
+/// The panel header's height.
+pub const HEADER_HEIGHT: f32 = 36.0;
+
+/// The lyrics tools row's height.
+pub const TOOLS_HEIGHT: f32 = 32.0;
+
+/// The line under the panel's header (the inspector's too).
+pub const HEADER_RULE: Color = Color::from_rgb8(0x22, 0x22, 0x28);
+
+/// The current lyric line's pill.
+pub const CURRENT_LINE: Color = Color::from_rgb8(0x24, 0x24, 0x2A);
+
+/// The lyrics still to come.
+pub const UPCOMING_LINE: Color = Color::from_rgb8(0xC4, 0xC4, 0xCE);
+
+/// The lyric rows' time column.
+pub const TIME_COLUMN: f32 = 34.0;
+
+/// The panel's line glyphs (`DESIGN.md`, Icons: the 24-unit grid), beside
+/// the shared set.
+pub mod panel_glyphs {
+    use super::{Glyph, Part::Stroke};
+
+    /// Import a lyrics file: an arrow down onto a line.
+    pub const IMPORT: Glyph = Glyph {
+        name: "import",
+        parts: &[Stroke("M12 3.5v11.5M7 10l5 5 5-5M5 20.5h14")],
+        scale: 1.0,
+    };
+    /// Edit the lyrics: a pencil.
+    pub const EDIT: Glyph = Glyph {
+        name: "edit",
+        parts: &[Stroke("M4 20h4L19 9l-4-4L4 16zM14 6l4 4")],
+        scale: 1.0,
+    };
+    /// Sync the lyrics to the song: a stopwatch.
+    pub const SYNC: Glyph = Glyph {
+        name: "sync",
+        parts: &[
+            Stroke("M12 9v4l2.5 1.5"),
+            Stroke("M4.5 13a7.5 7.5 0 1 0 15 0a7.5 7.5 0 1 0-15 0z"),
+            Stroke("M9.5 3h5"),
+        ],
+        scale: 1.0,
+    };
+    /// The Focus view: four corners.
+    pub const FOCUS: Glyph = Glyph {
+        name: "focus",
+        parts: &[Stroke("M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5")],
+        scale: 1.0,
+    };
+    /// Remove: a bin.
+    pub const TRASH: Glyph = Glyph {
+        name: "trash",
+        parts: &[Stroke(
+            "M4 6.5h16M9.5 6.5V4h5v2.5M6 6.5l1 13.5h10l1-13.5M10 10.5v6M14 10.5v6",
+        )],
+        scale: 1.0,
+    };
+
+    /// Every glyph above.
+    pub const ALL: [Glyph; 5] = [IMPORT, EDIT, SYNC, FOCUS, TRASH];
+}
+
+/// The tools row's buttons' tooltips (and labels).
+pub const IMPORT_TIP: &str = "Import lyrics file";
+pub const EDIT_TIP: &str = "Edit lyrics";
+pub const SYNC_TIP: &str = "Sync lyrics to the song";
+pub const FOCUS_TIP: &str = "Focus view";
+/// The header's hide button's tooltip (and label).
+pub const HIDE_TIP: &str = "Hide side panel";
+/// The rail's label: it shows the panel again.
+pub const SHOW_TIP: &str = "Show side panel";
+/// The rail's label.
+pub const RAIL_LABEL: &str = "Lyrics · Notes · Techniques";
 
 /// The collapsed rail's width.
 pub const RAIL_WIDTH: f32 = 34.0;
@@ -808,8 +895,8 @@ impl Operation<RevealScroll> for Reveal {
 
 // --------------------------------------------------------------- the panel
 
-/// `RightPanel`: the rail while collapsed, else the tab bar over the open
-/// tab.
+/// `RightPanel`: the rail while collapsed, else the header over the open
+/// tab, on `PANEL` with a 1 px `BORDER` line down its left.
 pub fn right_panel<'a>(
     state: &'a LyricsPanelState,
     data: RightPanelData<'a>,
@@ -824,22 +911,27 @@ pub fn right_panel<'a>(
     };
     container(row![
         vrule(),
-        column![tab_bar(data.right_tab), hrule(), body]
+        column![tab_bar(data.right_tab, notes_count(&data)), hrule(), body]
             .width(Length::Fill)
             .height(Length::Fill),
     ])
     .width(PANEL_WIDTH)
     .height(Length::Fill)
-    .style(fill(Studio::SURFACE))
+    .style(fill(Studio::PANEL))
     .into()
 }
 
-/// A 1 px `Studio.border` line across.
+/// The count the Notes tab shows: every take's notes (the page title's).
+fn notes_count(data: &RightPanelData<'_>) -> usize {
+    data.all_notes.len()
+}
+
+/// The 1 px line under the header.
 fn hrule<'a>() -> Element<'a, Message> {
     container(Space::new())
         .width(Length::Fill)
         .height(1)
-        .style(fill(Studio::BORDER))
+        .style(fill(HEADER_RULE))
         .into()
 }
 
@@ -874,7 +966,7 @@ fn with_tip<'a>(
 }
 
 /// `_IconBtn`: a 15 px icon in a 6 px pad (coral-washed when `active`),
-/// with its tooltip.
+/// with its tooltip — the Focus view's exit.
 fn icon_btn<'a>(icon: Icon, tip: &str, on_tap: Message, active: bool) -> Element<'a, Message> {
     let face = container(icons::icon(
         icon,
@@ -900,25 +992,44 @@ fn icon_btn<'a>(icon: Icon, tip: &str, on_tap: Message, active: bool) -> Element
     )
 }
 
-/// `_TabBar`: the three tabs and the collapse button.
-fn tab_bar<'a>(active: RightTab) -> Element<'a, Message> {
+/// A 24 px panel icon button: `glyph` at 14 px, its tooltip, on when
+/// `active`.
+fn panel_button<'a>(
+    glyph: Glyph,
+    tip: &'static str,
+    on_press: Message,
+    active: bool,
+) -> Element<'a, Message> {
+    icon_button(glyph, on_press)
+        .panel()
+        .tooltip(tip)
+        .active(active)
+        .into()
+}
+
+/// `_TabBar`: the 36 px header — the Lyrics / Notes / Techniques tab strip
+/// (the notes' count after its tab) and the hide button.
+fn tab_bar<'a>(active: RightTab, notes: usize) -> Element<'a, Message> {
+    let mut notes_tab = tab(RightTab::Notes, "Notes");
+    if notes > 0 {
+        notes_tab = notes_tab.count(notes);
+    }
     container(
         row![
-            tab("Lyrics", active == RightTab::Lyrics, RightTab::Lyrics),
-            Space::new().width(4),
-            tab("Notes", active == RightTab::Notes, RightTab::Notes),
-            Space::new().width(4),
-            tab(
-                "Techniques",
-                active == RightTab::Techniques,
-                RightTab::Techniques
+            tab_strip(
+                vec![
+                    tab(RightTab::Lyrics, "Lyrics"),
+                    notes_tab,
+                    tab(RightTab::Techniques, "Techniques"),
+                ],
+                Some(active),
+                TabSize::Panel,
+                Message::SetRightTab,
             ),
             Space::new().width(Length::Fill),
-            // Panel-toggle icon, matching the left inspector's collapse
-            // button.
-            icon_btn(
-                Icon::PanelRightClose,
-                "Collapse",
+            panel_button(
+                glyphs::PANEL_RIGHT,
+                HIDE_TIP,
                 Message::ToggleLyricsPanel,
                 false
             ),
@@ -926,75 +1037,45 @@ fn tab_bar<'a>(active: RightTab) -> Element<'a, Message> {
         .align_y(Vertical::Center)
         .height(Length::Fill),
     )
-    .padding(Padding {
-        left: 12.0,
-        right: 6.0,
-        ..Padding::ZERO
-    })
-    .height(40)
+    .padding([0, 8])
+    .height(HEADER_HEIGHT - 1.0)
     .into()
-}
-
-/// `_Tab`: an upper-cased label, raised and outlined when active.
-fn tab<'a>(label: &str, active: bool, to: RightTab) -> Element<'a, Message> {
-    let face = container(
-        studio_text(label.to_uppercase())
-            .size(11)
-            .font(font::BOLD)
-            .letter_spacing(0.6)
-            .color(if active {
-                Studio::TEXT_PRIMARY
-            } else {
-                Studio::TEXT_FAINT
-            })
-            .wrapping(Wrapping::None),
-    )
-    // 5 × 10, inside a 1 px border (transparent when inactive).
-    .padding([6, 11])
-    .style(move |_| {
-        if active {
-            boxed(Some(Studio::SURFACE_RAISED), 6.0, Some(Studio::BORDER))
-        } else {
-            boxed(None, 6.0, None)
-        }
-    });
-    bare(face, Message::SetRightTab(to)).into()
 }
 
 /// `_Rail`: the collapsed panel — a tap anywhere opens it.
 fn rail<'a>() -> Element<'a, Message> {
     let content = column![
-        Space::new().height(12),
-        icons::icon(Icon::PanelRightOpen, 15.0, Studio::TEXT_SECONDARY),
-        Space::new().height(18),
+        Space::new().height(6),
+        line_icon(glyphs::PANEL_RIGHT, 14.0, Studio::TEXT_SECONDARY),
+        Space::new().height(14),
         // Clipped, not overflowing, where the dock leaves the panels less
         // height than the label.
-        canvas_widget(RotatedLabel {
-            label: "LYRICS   NOTES   TECHNIQUES",
-        })
-        .width(Length::Fill)
-        .height(Length::Fill),
+        canvas_widget(RotatedLabel { label: RAIL_LABEL })
+            .width(Length::Fill)
+            .height(Length::Fill),
     ]
     .align_x(Horizontal::Center)
     .width(Length::Fill)
     .height(Length::Fill);
-    container(row![
-        vrule(),
-        button(content)
-            .padding(0)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .style(theme::bare_button)
-            .on_press(Message::ToggleLyricsPanel),
-    ])
-    .width(RAIL_WIDTH)
-    .height(Length::Fill)
-    .style(fill(Studio::SURFACE))
-    .into()
+    let open = button(content)
+        .padding(0)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(|_, status| button::Style {
+            background: matches!(status, button::Status::Hovered | button::Status::Pressed)
+                .then_some(iced::Background::Color(Studio::HOVER)),
+            ..theme::bare_button(&Theme::Dark, status)
+        })
+        .on_press(Message::ToggleLyricsPanel);
+    container(row![vrule(), labelled(open, SHOW_TIP)])
+        .width(RAIL_WIDTH)
+        .height(Length::Fill)
+        .style(fill(Studio::PANEL))
+        .into()
 }
 
 /// `RotatedBox(quarterTurns: 1, child: Text(label))`: the label (11 px
-/// w700, 1.5 letter spacing) reading top to bottom from the top of its box,
+/// medium, sentence case) reading top to bottom from the top of its box,
 /// clipped at its bottom.
 struct RotatedLabel {
     label: &'static str,
@@ -1014,22 +1095,17 @@ impl canvas::Program<Message> for RotatedLabel {
         let mut frame = Frame::new(renderer, bounds.size());
         frame.translate(Vector::new(bounds.width / 2.0, 0.0));
         frame.rotate(std::f32::consts::FRAC_PI_2);
-        fill_spaced_text(
-            &mut frame,
-            canvas::Text {
-                content: self.label.to_string(),
-                position: Point::ORIGIN,
-                color: Studio::TEXT_SECONDARY,
-                size: Pixels(11.0),
-                // A `Text` under the app's Material theme: height 1.
-                line_height: 1.0.into(),
-                font: font::BOLD,
-                align_x: Alignment::Left,
-                align_y: Vertical::Center,
-                ..canvas::Text::default()
-            },
-            1.5,
-        );
+        frame.fill_text(canvas::Text {
+            content: self.label.to_string(),
+            position: Point::ORIGIN,
+            color: Studio::TEXT_SECONDARY,
+            size: Pixels(type_scale::LABEL),
+            line_height: 1.0.into(),
+            font: font::MEDIUM,
+            align_x: Alignment::Left,
+            align_y: Vertical::Center,
+            ..canvas::Text::default()
+        });
         vec![frame.into_geometry()]
     }
 }
@@ -1045,7 +1121,7 @@ fn lyrics_tab<'a>(state: &'a LyricsPanelState, data: RightPanelData<'a>) -> Elem
         // The slot stays when the toolbar goes, so the body keeps the editor
         // or the sync list it holds (Dart keyed it).
         let top: Element<'a, Message> = if toolbar {
-            lyrics_toolbar(data.lyrics_mode)
+            lyrics_toolbar(data)
         } else {
             Space::new().height(0).into()
         };
@@ -1073,38 +1149,85 @@ fn lyrics_body<'a>(state: &'a LyricsPanelState, data: RightPanelData<'a>) -> Ele
     }
 }
 
-/// `_LyricsToolbar`: import, edit, sync and focus.
-fn lyrics_toolbar<'a>(mode: LyricsMode) -> Element<'a, Message> {
+/// What the tools row says of the lyrics in `mode`: "Synced · 8 lines",
+/// "3 of 8 lines synced", "8 lines, not synced", "Editing", "Syncing · line
+/// 3 of 8".
+pub fn lyrics_status(lyrics: &[LyricLine], mode: LyricsMode, sync_index: i64) -> String {
+    let lines = lyrics.iter().filter(|l| !l.is_blank()).count();
+    let synced = lyrics
+        .iter()
+        .filter(|l| !l.is_blank() && l.is_synced())
+        .count();
+    let plural = |n: usize| if n == 1 { "line" } else { "lines" };
+    match mode {
+        LyricsMode::Edit => "Editing".to_string(),
+        LyricsMode::Sync => {
+            // The line Tap stamps next, counted among the sung ones.
+            let next = lyrics
+                .iter()
+                .take(usize::try_from(sync_index.max(0)).unwrap_or(0))
+                .filter(|l| !l.is_blank())
+                .count()
+                + 1;
+            if next > lines {
+                format!("Synced · {lines} {}", plural(lines))
+            } else {
+                format!("Syncing · line {next} of {lines}")
+            }
+        }
+        LyricsMode::Read if synced == lines => format!("Synced · {lines} {}", plural(lines)),
+        LyricsMode::Read if synced == 0 => format!("{lines} {}, not synced", plural(lines)),
+        LyricsMode::Read => format!("{synced} of {lines} lines synced"),
+    }
+}
+
+/// `_LyricsToolbar`: the 32 px tools row — what the lyrics are, then
+/// import, edit, sync and focus.
+fn lyrics_toolbar<'a>(data: RightPanelData<'a>) -> Element<'a, Message> {
+    let mode = data.lyrics_mode;
     let toggle =
         |to: LyricsMode| Message::SetLyricsMode(if mode == to { LyricsMode::Read } else { to });
-    container(row![
-        Space::new().width(Length::Fill),
-        icon_btn(
-            Icon::FileUp,
-            "Import lyrics file",
-            Message::BrowseImport,
-            false
-        ),
-        icon_btn(
-            Icon::Pencil,
-            "Edit lyrics",
-            toggle(LyricsMode::Edit),
-            mode == LyricsMode::Edit
-        ),
-        icon_btn(
-            Icon::Timer,
-            "Sync (tap-to-time)",
-            toggle(LyricsMode::Sync),
-            mode == LyricsMode::Sync
-        ),
-        icon_btn(
-            Icon::Maximize2,
-            "Focus",
-            Message::SetLyricsFocus(true),
-            false
-        ),
-    ])
-    .padding(ltrb(12.0, 8.0, 6.0, 4.0))
+    container(
+        row![
+            studio_text(lyrics_status(data.lyrics, mode, data.sync_index))
+                .size(type_scale::LABEL)
+                .line_height(iced::Pixels(type_scale::LINE))
+                .color(Studio::TEXT_FAINT)
+                .width(Length::Fill)
+                .ellipsis(1),
+            row![
+                panel_button(
+                    panel_glyphs::IMPORT,
+                    IMPORT_TIP,
+                    Message::BrowseImport,
+                    false
+                ),
+                panel_button(
+                    panel_glyphs::EDIT,
+                    EDIT_TIP,
+                    toggle(LyricsMode::Edit),
+                    mode == LyricsMode::Edit
+                ),
+                panel_button(
+                    panel_glyphs::SYNC,
+                    SYNC_TIP,
+                    toggle(LyricsMode::Sync),
+                    mode == LyricsMode::Sync
+                ),
+                panel_button(
+                    panel_glyphs::FOCUS,
+                    FOCUS_TIP,
+                    Message::SetLyricsFocus(true),
+                    false
+                ),
+            ]
+            .spacing(2),
+        ]
+        .align_y(Vertical::Center)
+        .height(Length::Fill),
+    )
+    .padding(ltrb(14.0, 0.0, 8.0, 0.0))
+    .height(TOOLS_HEIGHT)
     .into()
 }
 
@@ -1123,28 +1246,33 @@ fn ltrb(left: f32, top: f32, right: f32, bottom: f32) -> Padding {
 /// dock open) it scrolls instead of overflowing.
 fn empty_state<'a>() -> Element<'a, Message> {
     let content = column![
-        icons::icon(Icon::Quote, 26.0, Studio::TEXT_FAINT),
-        Space::new().height(14),
         text("No lyrics yet")
-            .size(13)
+            .size(type_scale::TITLE)
             .font(font::SEMIBOLD)
-            .color(Studio::TEXT_SECONDARY),
-        Space::new().height(16),
-        studio_button("Paste lyrics", Message::SetLyricsMode(LyricsMode::Edit))
-            .icon(Icon::Clipboard)
-            .variant(StudioButtonVariant::Accent),
-        Space::new().height(10),
-        studio_button("Import lyrics file", Message::BrowseImport)
-            .icon(Icon::FileUp)
-            .variant(StudioButtonVariant::Subtle),
-        Space::new().height(12),
-        text("or drop a .lrc or .txt file here")
-            .size(12)
+            .color(Studio::TEXT_PRIMARY),
+        Space::new().height(6),
+        text("Paste them, or import a .lrc or .txt file.")
+            .size(type_scale::BODY)
+            .line_height(iced::Pixels(type_scale::LINE))
             .align_x(Alignment::Center)
             .color(Studio::TEXT_FAINT),
+        Space::new().height(16),
+        row![
+            secondary_button("Import lyrics file", Some(Message::BrowseImport)),
+            primary_button(
+                "Paste lyrics",
+                Some(Message::SetLyricsMode(LyricsMode::Edit))
+            ),
+        ]
+        .spacing(8),
+        Space::new().height(12),
+        text("or drop a .lrc or .txt file here")
+            .size(type_scale::LABEL)
+            .align_x(Alignment::Center)
+            .color(Studio::TEXT_DISABLED),
     ]
     .align_x(Horizontal::Center);
-    center(scrollable(container(content).padding(24)).fading()).into()
+    center(scrollable(container(content).padding(20)).fading()).into()
 }
 
 // -------------------------------------------------------------- the reader
@@ -1164,6 +1292,9 @@ fn lyrics_reader<'a>(
         &state.reader
     };
     let active = latch.as_ref().map_or(-1, |r| r.active);
+    if !large {
+        return panel_reader(state, data, active);
+    }
     let mut lines = Column::new();
     for (i, l) in data.lyrics.iter().enumerate() {
         let id = state.line_id(list, i);
@@ -1220,6 +1351,101 @@ fn lyrics_reader<'a>(
         .into()
 }
 
+/// A lyric's time in the reader's column: `m:ss`.
+pub fn lyric_time(ms: i64) -> String {
+    let s = ms.max(0) / 1000;
+    format!("{}:{:02}", s / 60, s % 60)
+}
+
+/// The panel's reader: a row per line (`DESIGN.md`, Lyrics) — a
+/// [`TIME_COLUMN`] of 10 px tabular time and the line at 13 px on a 20 px
+/// line; the `active` line on a [`CURRENT_LINE`] pill, white and medium,
+/// its time `ACCENT_BRIGHT`; the lines before it `TEXT_FAINT`, the ones to
+/// come [`UPCOMING_LINE`]. A synced line seeks to itself.
+fn panel_reader<'a>(
+    state: &'a LyricsPanelState,
+    data: RightPanelData<'a>,
+    active: i64,
+) -> Element<'a, Message> {
+    let mut lines = Column::new().spacing(1);
+    for (i, l) in data.lyrics.iter().enumerate() {
+        let id = state.line_id(List::Reader, i);
+        if l.is_blank() {
+            lines = lines.push(
+                container(Space::new().height(10))
+                    .width(Length::Fill)
+                    .id(id),
+            );
+            continue;
+        }
+        let i = i as i64;
+        let current = i == active;
+        let sung = active >= 0 && i < active;
+        let time = studio_text(l.time_ms.map(lyric_time).unwrap_or_default())
+            .size(type_scale::AXIS)
+            .line_height(iced::Pixels(20.0))
+            .tabular()
+            .color(if current {
+                Studio::ACCENT_BRIGHT
+            } else {
+                Studio::TEXT_DISABLED
+            })
+            .wrapping(Wrapping::None);
+        let words = text(l.text.as_str())
+            .size(type_scale::TITLE)
+            .line_height(iced::Pixels(20.0))
+            .font(if current { font::MEDIUM } else { font::REGULAR })
+            .color(if current {
+                Color::WHITE
+            } else if sung {
+                Studio::TEXT_FAINT
+            } else {
+                UPCOMING_LINE
+            })
+            .width(Length::Fill);
+        let face = container(
+            row![container(time).width(TIME_COLUMN), words]
+                .spacing(6)
+                .align_y(Vertical::Top),
+        )
+        .padding([6, 8])
+        .width(Length::Fill)
+        .style(move |_| {
+            if current {
+                boxed(Some(CURRENT_LINE), radius::WELL, None)
+            } else {
+                boxed(None, radius::WELL, None)
+            }
+        });
+        let line: Element<'a, Message> = if l.is_synced() {
+            button(face)
+                .padding(0)
+                .width(Length::Fill)
+                .style(move |_, status| button::Style {
+                    background: (!current
+                        && matches!(status, button::Status::Hovered | button::Status::Pressed))
+                    .then_some(iced::Background::Color(alpha(Studio::HOVER, 0.6))),
+                    border: iced::Border {
+                        radius: radius::WELL.into(),
+                        ..iced::Border::default()
+                    },
+                    ..theme::bare_button(&Theme::Dark, status)
+                })
+                .on_press(Message::SeekToLyric(l.clone()))
+                .into()
+        } else {
+            face.into()
+        };
+        lines = lines.push(container(line).width(Length::Fill).id(id));
+    }
+    scrollable(lines.padding([4, 8]))
+        .id(state.list_id(List::Reader))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .fading()
+        .into()
+}
+
 // -------------------------------------------------------------- the editor
 
 /// `_LyricsEditor`: the lyrics as text, with Cancel and Save.
@@ -1231,34 +1457,45 @@ fn lyrics_editor<'a>(state: &'a LyricsPanelState, editor: &'a Editor) -> Element
             .id(id.clone())
             .placeholder(EDITOR_PLACEHOLDER)
             .on_action(Message::EditorAction)
-            .size(14)
-            .line_height(1.4)
+            .size(type_scale::TITLE)
+            .line_height(iced::Pixels(20.0))
             .padding(theme::FIELD_PADDING)
             .height(Length::Fill)
             .caret_color(Studio::ACCENT)
             .style(editor_style);
+        // The text field's well (`DESIGN.md`, Text fields): `WELL`, radius
+        // 6, an inset outline.
         let well = container(field)
-            // 10 (4 compact) × 12, inside the well's 1 px border.
-            .padding(if compact { [5, 13] } else { [11, 13] })
+            .padding(if compact { [3, 5] } else { [7, 5] })
             .width(Length::Fill)
             .height(Length::Fill)
-            .style(|_| boxed(Some(Studio::INSET), 8.0, Some(Studio::BORDER)));
+            .style(|_| {
+                boxed(
+                    Some(Studio::WELL),
+                    radius::WELL,
+                    Some(Studio::BORDER_STRONG),
+                )
+            });
         Element::from(
             container(
                 column![
                     well,
-                    Space::new().height(if compact { 6 } else { 12 }),
+                    Space::new().height(if compact { 6 } else { 10 }),
                     row![
-                        studio_button("Cancel", Message::SetLyricsMode(LyricsMode::Read)),
                         Space::new().width(Length::Fill),
-                        studio_button("Save", Message::ApplyEditedLyrics)
-                            .variant(StudioButtonVariant::Accent),
-                    ],
+                        secondary_button("Cancel", Some(Message::SetLyricsMode(LyricsMode::Read))),
+                        primary_button("Save", Some(Message::ApplyEditedLyrics)),
+                    ]
+                    .spacing(8),
                 ]
                 .width(Length::Fill)
                 .height(Length::Fill),
             )
-            .padding(if compact { 8 } else { 12 })
+            .padding(if compact {
+                Padding::from(8)
+            } else {
+                ltrb(12.0, 4.0, 12.0, 12.0)
+            })
             .width(Length::Fill)
             .height(Length::Fill),
         )
@@ -1291,17 +1528,16 @@ pub fn sync_time(ms: i64) -> String {
     )
 }
 
-/// The how-to hint, full width on its pale coral wash.
+/// The how-to hint: 11 px `TEXT_FAINT`, full width over the lines.
 fn sync_hint<'a>() -> Element<'a, Message> {
     container(
         text(SYNC_HINT)
-            .size(11)
-            .line_height(1.4)
-            .color(Studio::TEXT_SECONDARY),
+            .size(type_scale::LABEL)
+            .line_height(iced::Pixels(type_scale::LINE))
+            .color(Studio::TEXT_FAINT),
     )
-    .padding(ltrb(14.0, 10.0, 14.0, 10.0))
+    .padding(ltrb(14.0, 2.0, 14.0, 8.0))
     .width(Length::Fill)
-    .style(fill(alpha(Studio::ACCENT, 0.06)))
     .into()
 }
 
@@ -1325,11 +1561,11 @@ fn lyrics_sync<'a>(state: &'a LyricsPanelState, data: RightPanelData<'a>) -> Ele
             items = items.push(if pin_hint {
                 line
             } else {
-                container(line).padding([0, 10]).into()
+                container(line).padding([0, 8]).into()
             });
         }
-        let list = scrollable(items.padding(if pin_hint {
-            Padding::from([10, 10])
+        let list = scrollable(items.spacing(1).padding(if pin_hint {
+            Padding::from([4, 8])
         } else {
             Padding {
                 bottom: 10.0,
@@ -1353,16 +1589,13 @@ fn lyrics_sync<'a>(state: &'a LyricsPanelState, data: RightPanelData<'a>) -> Ele
                 list,
                 hrule(),
                 container(row![
-                    studio_button("Clear", Message::ClearLyricTimes)
-                        .variant(StudioButtonVariant::Danger),
+                    secondary_button("Clear", Some(Message::ClearLyricTimes)),
                     Space::new().width(Length::Fill),
-                    studio_button("Tap (Space)", Message::StampNextLyric)
-                        .icon(Icon::Target)
-                        .variant(StudioButtonVariant::Accent),
+                    secondary_button("Done", Some(Message::SetLyricsMode(LyricsMode::Read))),
                     Space::new().width(8),
-                    studio_button("Done", Message::SetLyricsMode(LyricsMode::Read)),
+                    primary_button("Tap (Space)", Some(Message::StampNextLyric)),
                 ])
-                .padding(10),
+                .padding([10, 12]),
             ]
             .width(Length::Fill)
             .height(Length::Fill),
@@ -1393,7 +1626,9 @@ fn space_stamps(content: Element<'_, Message>) -> Element<'_, Message> {
     .into()
 }
 
-/// Line `i` of the sync list: its time and text; a tap stamps it.
+/// Line `i` of the sync list: its time (`mm:ss.cc`) and text, the next
+/// line to stamp on the current-line pill with an accent outline; a tap
+/// stamps it.
 fn sync_line<'a>(
     state: &'a LyricsPanelState,
     data: RightPanelData<'a>,
@@ -1409,42 +1644,40 @@ fn sync_line<'a>(
     }
     let target = i as i64 == data.sync_index;
     let time = studio_text(l.time_ms.map_or_else(|| "—".to_string(), sync_time))
-        .size(11)
-        .font(font::SEMIBOLD)
+        .size(type_scale::AXIS)
+        .line_height(iced::Pixels(20.0))
         .tabular()
-        .color(if l.is_synced() {
-            Studio::ACCENT
+        .color(if target {
+            Studio::ACCENT_BRIGHT
+        } else if l.is_synced() {
+            Studio::TEXT_SECONDARY
         } else {
-            Studio::TEXT_FAINT
+            Studio::TEXT_DISABLED
         })
         .wrapping(Wrapping::None);
     // At most two lines of 13 px text, the second ellipsized.
     let words = studio_text(l.text.as_str())
-        .size(13)
-        .color(if target {
-            Studio::TEXT_PRIMARY
-        } else {
-            Studio::TEXT_SECONDARY
-        })
+        .size(type_scale::TITLE)
+        .line_height(iced::Pixels(20.0))
+        .font(if target { font::MEDIUM } else { font::REGULAR })
+        .color(if target { Color::WHITE } else { UPCOMING_LINE })
         .width(Length::Fill)
         .ellipsis(2);
-    let face = container(row![container(time).width(52), words].align_y(Vertical::Center))
-        // 6 × 8, inside a 1 px border (transparent off target).
-        .padding([7, 9])
+    let face = container(row![container(time).width(52), words].align_y(Vertical::Top))
+        .padding([6, 8])
         .width(Length::Fill)
         .style(move |_| {
             if target {
                 boxed(
-                    Some(alpha(Studio::ACCENT, 0.12)),
-                    6.0,
+                    Some(CURRENT_LINE),
+                    radius::WELL,
                     Some(alpha(Studio::ACCENT, 0.5)),
                 )
             } else {
-                boxed(None, 6.0, None)
+                boxed(None, radius::WELL, None)
             }
         });
     container(bare(face, Message::StampLyricAt(i)).width(Length::Fill))
-        .padding([2, 0])
         .width(Length::Fill)
         .id(id)
         .into()
@@ -1454,16 +1687,21 @@ fn sync_line<'a>(
 
 /// `_Hint`: a faint 12 px note in a list.
 fn hint<'a>(s: &'static str) -> Element<'a, Message> {
-    container(text(s).size(12).line_height(1.4).color(Studio::TEXT_FAINT))
-        .padding([4, 0])
-        .into()
+    container(
+        text(s)
+            .size(type_scale::BODY)
+            .line_height(iced::Pixels(18.0))
+            .color(Studio::TEXT_FAINT),
+    )
+    .padding([4, 0])
+    .into()
 }
 
-/// The tabs' list: a scrolling column, padded (14, 14, 14, 16).
+/// The tabs' list: a scrolling column, padded (14, 10, 14, 16).
 fn tab_list<'a>(items: Column<'a, Message>) -> Element<'a, Message> {
     scrollable(
         items
-            .padding(ltrb(14.0, 14.0, 14.0, 16.0))
+            .padding(ltrb(14.0, 10.0, 14.0, 16.0))
             .width(Length::Fill),
     )
     .width(Length::Fill)
@@ -1533,60 +1771,69 @@ fn notes_view<'a>(data: RightPanelData<'a>) -> Element<'a, Message> {
     tab_list(items)
 }
 
-/// `_NotesHeader`: the take's name, upper-cased, and the + (with
-/// `add_tip`) when it can be annotated.
-fn notes_header<'a>(title: &str, on_add: Option<Message>, add_tip: &str) -> Element<'a, Message> {
-    let mut header = row![studio_text(title.to_uppercase())
-        .size(11)
-        .font(font::BOLD)
-        .letter_spacing(0.8)
-        .color(Studio::TEXT_FAINT)
+/// `_NotesHeader`: the take's name as typed (11 px semibold
+/// `TEXT_SECONDARY`) and the + (with `add_tip`) when it can be annotated.
+fn notes_header<'a>(
+    title: &str,
+    on_add: Option<Message>,
+    add_tip: &'static str,
+) -> Element<'a, Message> {
+    let mut header = row![studio_text(title.to_string())
+        .size(type_scale::LABEL)
+        .line_height(iced::Pixels(type_scale::LINE))
+        .font(font::SEMIBOLD)
+        .color(Studio::TEXT_SECONDARY)
         .width(Length::Fill)
         .ellipsis(1)]
+    .height(24)
     .align_y(Vertical::Center);
     if let Some(on_add) = on_add {
-        let plus = container(icons::icon(Icon::Plus, 15.0, Studio::ACCENT))
-            .center_x(24)
-            .center_y(24)
-            .style(|_| boxed(Some(Studio::SURFACE_RAISED), 6.0, Some(Studio::BORDER)));
-        header = header.push(with_tip(bare(plus, on_add).into(), add_tip, 24.0));
+        header = header.push(
+            icon_button(glyphs::PLUS, on_add)
+                .panel()
+                .icon_size(12.0)
+                .tooltip(add_tip),
+        );
     }
     container(header)
         .padding(Padding {
-            bottom: 10.0,
+            bottom: 6.0,
             ..Padding::ZERO
         })
         .into()
 }
 
-/// The `mm:ss` (or `mm:ss → mm:ss` for a range) chip of a tile.
+/// The `m:ss` (or `m:ss – m:ss` for a range) pill of a card: 10 px
+/// tabular `TEXT_SECONDARY` on `CONTROL`, radius 4.
 fn time_chip<'a>(start_ms: i64, end_ms: Option<i64>) -> Element<'a, Message> {
     let label = match end_ms {
         Some(end) if end > start_ms => {
-            format!("{} → {}", format_clock_ms(start_ms), format_clock_ms(end))
+            format!("{} – {}", lyric_time(start_ms), lyric_time(end))
         }
-        _ => format_clock_ms(start_ms),
+        _ => lyric_time(start_ms),
     };
     container(
-        text(label)
-            .size(10)
-            .font(font::SEMIBOLD)
-            .color(Studio::ACCENT)
+        studio_text(label)
+            .size(type_scale::AXIS)
+            .line_height(iced::Pixels(16.0))
+            .font(font::MEDIUM)
+            .tabular()
+            .color(Studio::TEXT_SECONDARY)
             .wrapping(Wrapping::None),
     )
-    .padding([2, 6])
-    .style(|_| boxed(Some(Studio::INSET), 4.0, None))
+    .padding([0, 5])
+    .style(|_| boxed(Some(Studio::CONTROL), radius::SMALL, None))
     .into()
 }
 
-/// A tile: `content` in a raised, outlined card (padded `padding`, inside
-/// its 1 px border), 6 px over the next.
+/// A card: `content` on `SURFACE` with an inset `BORDER` outline, radius 8
+/// (padded `padding`, inside it), 6 px over the next.
 fn tile<'a>(content: Element<'a, Message>, padding: Padding) -> Element<'a, Message> {
     container(
         container(content)
             .padding(padding)
             .width(Length::Fill)
-            .style(|_| boxed(Some(Studio::PANEL), 6.0, Some(Studio::BORDER))),
+            .style(|_| boxed(Some(Studio::SURFACE), radius::CARD, Some(Studio::BORDER))),
     )
     .padding(Padding {
         bottom: 6.0,
@@ -1603,14 +1850,15 @@ fn note_tile<'a>(
     on_tap: Vec<Message>,
 ) -> Element<'a, Message> {
     let mut words = column![text(note.content.as_str())
-        .size(12.5)
-        .line_height(1.35)
+        .size(type_scale::BODY)
+        .line_height(iced::Pixels(type_scale::LINE))
         .color(Studio::TEXT_PRIMARY)]
     .width(Length::Fill);
     if let Some(sub) = subtitle {
-        words = words.push(Space::new().height(3)).push(
+        words = words.push(Space::new().height(2)).push(
             studio_text(sub)
-                .size(10)
+                .size(type_scale::LABEL)
+                .line_height(iced::Pixels(type_scale::LINE))
                 .color(Studio::TEXT_FAINT)
                 .ellipsis(1),
         );
@@ -1620,7 +1868,7 @@ fn note_tile<'a>(
         Space::new().width(8),
         words
     ];
-    tap_area(tile(content.into(), Padding::from(10)), on_tap)
+    tap_area(tile(content.into(), Padding::from([9, 10])), on_tap)
 }
 
 /// `_TechniquesView`: the selected take's technique markers, mirroring the
@@ -1661,6 +1909,9 @@ fn techniques_view<'a>(data: RightPanelData<'a>) -> Element<'a, Message> {
     tab_list(items)
 }
 
+/// The remove button's tooltip (and label) on a technique card.
+pub const REMOVE_TECHNIQUE: &str = "Remove technique";
+
 /// `_TechniqueTile`: the marker's time, glyph and technique, and a remove
 /// button.
 fn technique_tile<'a>(
@@ -1668,22 +1919,18 @@ fn technique_tile<'a>(
     on_tap: Message,
     on_remove: Message,
 ) -> Element<'a, Message> {
-    let remove = with_tip(
-        bare(
-            container(icons::icon(Icon::Trash2, 14.0, Studio::TEXT_FAINT)).padding(4),
-            on_remove,
-        )
-        .into(),
-        "Remove technique",
-        22.0,
-    );
+    let remove = icon_button(panel_glyphs::TRASH, on_remove)
+        .panel()
+        .icon_size(13.0)
+        .tooltip(REMOVE_TECHNIQUE);
     let content = row![
         time_chip(marker.position_ms, marker.end_ms),
         Space::new().width(8),
-        icons::icon(Icon::Waypoints, 13.0, Studio::ACCENT),
+        line_icon(glyphs::PULSE, 12.0, Studio::TEXT_SECONDARY),
         Space::new().width(6),
         studio_text(marker.technique_name.as_str())
-            .size(12.5)
+            .size(type_scale::BODY)
+            .line_height(iced::Pixels(type_scale::LINE))
             .color(Studio::TEXT_PRIMARY)
             .width(Length::Fill)
             .ellipsis(1),
@@ -1691,7 +1938,7 @@ fn technique_tile<'a>(
     ]
     .align_y(Vertical::Center);
     tap_area(
-        tile(content.into(), ltrb(10.0, 10.0, 7.0, 10.0)),
+        tile(content.into(), ltrb(10.0, 5.0, 5.0, 5.0)),
         vec![on_tap],
     )
 }

@@ -483,7 +483,7 @@ fn a_save_that_lands_after_the_user_moved_on_to_sync_leaves_sync() {
     let ticket = tap_save(&state, &vm);
     // The toolbar's Sync, while the write waits.
     assert_eq!(
-        tap_label(&mut ui, &state, &vm, &glyph(Icon::Timer)),
+        tap_label(&mut ui, &state, &vm, &tip(SYNC_TIP)),
         vec![Message::SetLyricsMode(LyricsMode::Sync)]
     );
     vm.set_lyrics_mode(LyricsMode::Sync);
@@ -990,9 +990,9 @@ fn at_the_floor_the_actions_still_take_their_taps() {
     );
 }
 
-/// The toolbar's sync toggle (its Lucide glyph).
-fn glyph(icon: Icon) -> String {
-    char::from(icon).to_string()
+/// An icon button's label: its tooltip.
+fn tip(label: &str) -> String {
+    label.to_string()
 }
 
 /// Whether the hint is laid out inside the sync list (it scrolls with the
@@ -1014,21 +1014,20 @@ fn hint_scrolls(ui: &mut PanelUi, state: &LyricsPanelState, vm: &Vm) -> bool {
 #[test]
 fn a_tall_panel_keeps_its_toolbar_and_the_pinned_sync_hint() {
     let (vm, state, mut ui) = short_panel(LyricsMode::Sync, 600.0);
-    assert!(bounds_of(&mut ui, &state, &vm, &glyph(Icon::Timer)).is_some());
+    assert!(bounds_of(&mut ui, &state, &vm, &tip(SYNC_TIP)).is_some());
     assert!(
         !hint_scrolls(&mut ui, &state, &vm),
         "the hint stays pinned above the lines"
     );
 
     let (vm, state, mut ui) = short_panel(LyricsMode::Edit, 600.0);
-    assert!(bounds_of(&mut ui, &state, &vm, &glyph(Icon::Pencil)).is_some());
+    assert!(bounds_of(&mut ui, &state, &vm, &tip(EDIT_TIP)).is_some());
     // The editor keeps its normal spacing: Save's button ends 12 px above
     // the panel's bottom.
     let save = bounds_of(&mut ui, &state, &vm, "Save")
         .expect("Save")
         .bounds();
-    let button_bottom: f32 =
-        save.center_y() + crate::ui::core::widgets::studio_button::HEIGHT / 2.0;
+    let button_bottom: f32 = save.center_y() + crate::ui::core::theme::height::TOOLBAR_BUTTON / 2.0;
     assert!(
         (600.0 - button_bottom - 12.0).abs() < 0.5,
         "Save ends at {button_bottom}"
@@ -1040,9 +1039,9 @@ fn the_sync_hint_scrolls_with_the_lines_on_a_short_panel() {
     let (vm, state, mut ui) = short_panel(LyricsMode::Sync, 173.0);
     assert!(hint_scrolls(&mut ui, &state, &vm));
     // The tab keeps its toolbar down to 128 px, then drops it.
-    assert!(bounds_of(&mut ui, &state, &vm, &glyph(Icon::Timer)).is_some());
+    assert!(bounds_of(&mut ui, &state, &vm, &tip(SYNC_TIP)).is_some());
     let (vm, state, mut ui) = short_panel(LyricsMode::Sync, 120.0);
-    assert!(bounds_of(&mut ui, &state, &vm, &glyph(Icon::Timer)).is_none());
+    assert!(bounds_of(&mut ui, &state, &vm, &tip(SYNC_TIP)).is_none());
     assert!(hint_scrolls(&mut ui, &state, &vm));
 }
 
@@ -1153,7 +1152,7 @@ fn a_note_tile_seeks_then_edits_its_note() {
     vm.track = Some(annotated_take(AudioTrackKind::Vocal));
     let state = LyricsPanelState::new();
     let mut ui = PanelUi::new(Size::new(300.0, 600.0));
-    assert!(bounds_of(&mut ui, &state, &vm, "00:12 → 00:15").is_some());
+    assert!(bounds_of(&mut ui, &state, &vm, "0:12 – 0:15").is_some());
     assert_eq!(
         tap_label(&mut ui, &state, &vm, "breathy onset"),
         vec![
@@ -1165,7 +1164,7 @@ fn a_note_tile_seeks_then_edits_its_note() {
         ]
     );
     assert_eq!(
-        tap_label(&mut ui, &state, &vm, &glyph(Icon::Plus)),
+        tap_label(&mut ui, &state, &vm, "Add note at playhead"),
         vec![Message::AddNote("t1".into())]
     );
 }
@@ -1182,7 +1181,7 @@ fn a_technique_tile_seeks_and_only_its_button_removes() {
         vec![Message::Seek(Duration::from_millis(3_000))]
     );
     assert_eq!(
-        tap_label(&mut ui, &state, &vm, &glyph(Icon::Trash2)),
+        tap_label(&mut ui, &state, &vm, &tip(REMOVE_TECHNIQUE)),
         vec![Message::EditTechnique {
             track_id: "t1".into(),
             marker_id: "m1".into()
@@ -1204,7 +1203,9 @@ fn a_backing_track_takes_no_notes_or_techniques() {
             "Techniques apply to vocal takes only."
         };
         assert!(bounds_of(&mut ui, &state, &vm, hint).is_some(), "{tab:?}");
-        assert!(bounds_of(&mut ui, &state, &vm, &glyph(Icon::Plus)).is_none());
+        for add in ["Add note at playhead", "Add technique at playhead"] {
+            assert!(bounds_of(&mut ui, &state, &vm, add).is_none(), "{add}");
+        }
     }
 }
 
@@ -1214,7 +1215,7 @@ fn with_nothing_selected_the_tabs_say_what_to_do() {
     let state = LyricsPanelState::new();
     let mut ui = PanelUi::new(Size::new(300.0, 600.0));
     vm.tab = RightTab::Notes;
-    assert!(bounds_of(&mut ui, &state, &vm, "ALL NOTES").is_some());
+    assert!(bounds_of(&mut ui, &state, &vm, "All notes").is_some());
     assert!(bounds_of(
         &mut ui,
         &state,
@@ -1280,37 +1281,37 @@ fn the_tabs_the_rail_and_the_toolbar_say_what_they_do() {
     let mut ui = PanelUi::new(Size::new(300.0, 600.0));
     sync(&mut ui, &mut state, &vm);
     assert_eq!(
-        tap_label(&mut ui, &state, &vm, "NOTES"),
+        tap_label(&mut ui, &state, &vm, "Notes"),
         vec![Message::SetRightTab(RightTab::Notes)]
     );
     assert_eq!(
-        tap_label(&mut ui, &state, &vm, &glyph(Icon::PanelRightClose)),
+        tap_label(&mut ui, &state, &vm, &tip(HIDE_TIP)),
         vec![Message::ToggleLyricsPanel]
     );
     assert_eq!(
-        tap_label(&mut ui, &state, &vm, &glyph(Icon::Pencil)),
+        tap_label(&mut ui, &state, &vm, &tip(EDIT_TIP)),
         vec![Message::SetLyricsMode(LyricsMode::Edit)]
     );
     assert_eq!(
-        tap_label(&mut ui, &state, &vm, &glyph(Icon::Maximize2)),
+        tap_label(&mut ui, &state, &vm, &tip(FOCUS_TIP)),
         vec![Message::SetLyricsFocus(true)]
     );
     assert_eq!(
-        tap_label(&mut ui, &state, &vm, &glyph(Icon::FileUp)),
+        tap_label(&mut ui, &state, &vm, &tip(IMPORT_TIP)),
         vec![Message::BrowseImport]
     );
     // In a mode, its toggle leads back to reading.
     vm.set_lyrics_mode(LyricsMode::Sync);
     sync(&mut ui, &mut state, &vm);
     assert_eq!(
-        tap_label(&mut ui, &state, &vm, &glyph(Icon::Timer)),
+        tap_label(&mut ui, &state, &vm, &tip(SYNC_TIP)),
         vec![Message::SetLyricsMode(LyricsMode::Read)]
     );
     // Collapsed: the rail, which opens it again.
     vm.open = false;
     sync(&mut ui, &mut state, &vm);
     assert_eq!(
-        tap_label(&mut ui, &state, &vm, &glyph(Icon::PanelRightOpen)),
+        tap_label(&mut ui, &state, &vm, &tip(SHOW_TIP)),
         vec![Message::ToggleLyricsPanel]
     );
 }
@@ -1323,7 +1324,7 @@ fn with_no_lyrics_the_tab_offers_paste_and_import() {
     assert!(bounds_of(&mut ui, &state, &vm, "No lyrics yet").is_some());
     assert!(bounds_of(&mut ui, &state, &vm, "or drop a .lrc or .txt file here").is_some());
     assert!(
-        bounds_of(&mut ui, &state, &vm, &glyph(Icon::Pencil)).is_none(),
+        bounds_of(&mut ui, &state, &vm, &tip(EDIT_TIP)).is_none(),
         "no toolbar without lyrics"
     );
     assert_eq!(
