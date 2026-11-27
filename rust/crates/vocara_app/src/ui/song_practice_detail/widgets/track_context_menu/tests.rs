@@ -156,7 +156,7 @@ fn vocal_only_rows_follow_the_lane_kind() {
         "Delete take"
     ));
     // Always: the color caption, rename and re-analyze.
-    for row in ["COLOR", "Rename", "Re-analyze waveform"] {
+    for row in ["Color", "Rename", "Re-analyze waveform"] {
         assert!(shows(track_context_menu(&vocal()), row), "{row}");
     }
 }
@@ -202,7 +202,7 @@ fn the_bus_menu_offers_color_rename_duplicate_and_delete() {
         ("Delete", BusAction::Delete),
     ] {
         let mut ui = simulator(bus_context_menu(&BusMenu::default()));
-        assert!(ui.find("COLOR").is_ok());
+        assert!(ui.find("Color").is_ok());
         ui.click(label).expect(label);
         assert_eq!(ui.into_messages().collect::<Vec<_>>(), vec![action]);
     }
@@ -226,19 +226,22 @@ fn menu_ui(menu: &TrackMenu) -> iced_test::Simulator<'static, TrackAction> {
 
 #[test]
 fn the_color_grid_is_two_rows_of_eight_and_a_swatch_picks_its_tint() {
-    // The grid's first swatch sits under the caption, 14 + 1 px in (the
-    // padding inside the 1 px border); each next one 30 px on (22 + 8), and
-    // the ninth starts the second row.
+    // The grid's first swatch sits under the caption, the menu's padding
+    // and the grid's own in; each next one a swatch and its gap on, and the
+    // ninth starts the second row.
+    let mut ui = menu_ui(&vocal());
+    let caption = ui.find("Color").expect("the caption").bounds();
+    let top = caption.y + caption.height + 8.0;
+    let step = SWATCH + SWATCH_GAP;
     let swatch = |i: usize| {
         Point::new(
-            1.0 + 14.0 + 11.0 + (i % 8) as f32 * 30.0,
-            1.0 + 12.0 + 11.0 + 8.0 + (i / 8) as f32 * 30.0 + 11.0,
+            MENU_PADDING + COLOR_GRID_PADDING.left + SWATCH / 2.0 + (i % 8) as f32 * step,
+            top + (i / 8) as f32 * step + SWATCH / 2.0,
         )
     };
     for (i, &value) in TRACK_COLOR_PALETTE.iter().enumerate() {
         let mut ui = menu_ui(&vocal());
-        // The caption's line box: 9 px in a 1.3 line height (rounded up by
-        // the text layout); probe the swatch's centre band.
+        // Probe the swatch's centre.
         ui.point_at(swatch(i));
         let _ = ui.simulate(iced_test::simulator::click());
         assert_eq!(
@@ -253,13 +256,16 @@ fn the_color_grid_is_two_rows_of_eight_and_a_swatch_picks_its_tint() {
 fn the_menu_is_its_fixed_width() {
     let mut ui = menu_ui(&vocal());
     let rename = ui.find("Rename").expect("the row").bounds();
-    // The row's label starts after the 14 px padding, a 15 px icon and a
-    // 12 px gap, inside the 1 px border.
+    // The row's label starts after the menu's padding, the row's 8 px
+    // inset, a 14 px icon and an 8 px gap; the row is 26 px tall, its label
+    // centred in it.
     assert!(
-        (rename.x - (1.0 + 14.0 + 15.0 + 12.0)).abs() < 0.5,
+        (rename.x - (MENU_PADDING + 8.0 + MENU_ICON + 8.0)).abs() < 0.5,
         "{rename:?}"
     );
+    assert_eq!(rename.height, 16.0, "{rename:?}");
     assert_eq!(MENU_WIDTH, 268.0);
+    assert_eq!(MENU_ROW_HEIGHT, 26.0);
 }
 
 // ------------------------------------------------------- the studio menu
@@ -290,13 +296,26 @@ fn the_studio_menu_marks_the_selected_item_and_reports_taps() {
         ui.into_messages().collect::<Vec<_>>(),
         vec![Pick::B, Pick::New]
     );
-    // The selected row reads in the accent; a danger row in red.
-    assert_eq!(MenuRow::new("x", ()).selected(true).color(), Studio::ACCENT);
+    // The selected row carries a check (its label stays primary); a danger
+    // row reads in the record text colour, its icon too.
+    assert_eq!(
+        MenuRow::new("x", ()).selected(true).color(),
+        Studio::TEXT_PRIMARY
+    );
     assert_eq!(
         MenuRow::new("x", ()).selected(true).danger(true).color(),
-        Studio::RECORD
+        Studio::RECORD_TEXT
+    );
+    assert_eq!(
+        MenuRow::new("x", ()).danger(true).icon_color(),
+        Studio::RECORD_TEXT
     );
     assert_eq!(MenuRow::new("x", ()).color(), Studio::TEXT_PRIMARY);
+    assert_eq!(MenuRow::new("x", ()).icon_color(), Studio::TEXT_SECONDARY);
+    let mut ui = simulator(studio_menu(items(), 224.0));
+    assert!(ui
+        .find(char::from(Icon::Check).to_string().as_str())
+        .is_ok());
 }
 
 // ------------------------------------------------------------ the prompts
@@ -447,18 +466,22 @@ fn host_view(open: bool) -> Element<'static, Host> {
         .into()
 }
 
+/// How far a row's label sits from the menu's left edge: the menu's
+/// padding, the row's inset, its icon and the gap after it.
+const LABEL_IN: f32 = MENU_PADDING + 8.0 + MENU_ICON + 8.0;
+
 #[test]
 fn the_host_pops_the_menu_where_it_was_right_clicked() {
     let mut ui = LiveUi::new(Size::new(1000.0, 800.0));
     ui.point_at(Point::new(150.0, 70.0));
     assert_eq!(ui.run(host_view(false), right_click()), vec![Host::Open]);
     // The screen opens the menu: its card's top-left is at the press (the
-    // first row's label 1 + 14 + 15 + 12 px in from it).
+    // first row's label [`LABEL_IN`] in from it).
     let rename = ui
         .find(host_view(true), "Rename")
         .expect("the menu is open")
         .bounds();
-    assert!((rename.x - (150.0 + 42.0)).abs() < 0.5, "{rename:?}");
+    assert!((rename.x - (150.0 + LABEL_IN)).abs() < 0.5, "{rename:?}");
     assert!(rename.y > 70.0 && rename.y < 70.0 + 140.0, "{rename:?}");
     // A row reports its action.
     ui.point_at(rename.center());
@@ -485,7 +508,7 @@ fn a_menu_opened_near_the_corner_is_pulled_inside_the_window() {
     assert_eq!(ui.run(view(false), right_click()), vec![Host::Open]);
     let rename = ui.find(view(true), "Rename").expect("open").bounds();
     assert!(
-        (rename.x - (1000.0 - 8.0 - MENU_WIDTH + 42.0)).abs() < 0.5,
+        (rename.x - (1000.0 - 8.0 - MENU_WIDTH + LABEL_IN)).abs() < 0.5,
         "{rename:?}"
     );
     let delete = ui.find(view(true), "Delete take").expect("open").bounds();
@@ -551,8 +574,14 @@ fn a_dropdown_opens_under_its_trigger() {
     };
     let tender = ui.find(view(true), "Tender").expect("open").bounds();
     // Below the trigger's bottom-left (300, 130), 4 px down, inside the
-    // border and the row's 14 / 9 padding.
-    assert!((tender.x - (300.0 + 1.0 + 14.0)).abs() < 0.5, "{tender:?}");
-    assert!(tender.y >= 134.0 + 1.0 + 9.0 - 0.5, "{tender:?}");
-    assert!(tender.y < 134.0 + 1.0 + 9.0 + 4.0, "{tender:?}");
+    // menu's padding and the row's 8 px inset, centred in its 26 px.
+    assert!(
+        (tender.x - (300.0 + MENU_PADDING + 8.0)).abs() < 0.5,
+        "{tender:?}"
+    );
+    let row_top = 134.0 + MENU_PADDING;
+    assert!(
+        (tender.y - (row_top + (MENU_ROW_HEIGHT - tender.height) / 2.0)).abs() < 0.5,
+        "{tender:?}"
+    );
 }
