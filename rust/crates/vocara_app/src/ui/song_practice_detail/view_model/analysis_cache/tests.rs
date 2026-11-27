@@ -35,6 +35,7 @@ use vocara_services::graph_audio_playback_service::GraphAudioPlaybackService;
 use vocara_services::mic_permission;
 use vocara_services::monitor_service::{LiveMonitor, MonitorService};
 use vocara_services::spectrogram_service::{SpectrogramAnalyses, TakeAnalysisBundle};
+use vocara_tract::anatomy::BodyMix;
 
 use super::*;
 
@@ -2272,4 +2273,103 @@ fn a_failed_compute_latches_unavailable_and_is_not_retried() {
     assert!(!cache.metrics_loading(&host));
     let e = cache.ensure_selected_spectrogram(&host);
     assert!(e.is_empty(), "latched: not retried");
+}
+
+// --- The vocal tract (not Dart's) ----------------------------------------------------
+
+/// A take's vocal-tract track computes on a worker once its metrics are in,
+/// is memoized beside them, answers the playhead, follows the body, and goes
+/// with its metrics.
+#[test]
+fn the_vocal_tract_track_follows_the_subjects_metrics() {
+    // an /a/-like vowel throughout, voiced
+    let mut m = metrics_value(30);
+    m.f1.fill(700.0);
+    m.f2.fill(1200.0);
+    m.f3.fill(2600.0);
+    let stub = Stub::new(&[], 0);
+    stub.s()
+        .metrics_by_path
+        .insert("c1.wav".into(), Arc::new(m));
+    stub.s().specs_by_path.insert("c1.wav".into(), spec(30, 2));
+    let track = lane(vec![clip("c1", 0)]);
+    let mut host = Host::selecting(&track);
+    let mut cache = cache_with(
+        &stub,
+        AnalysisCacheOptions {
+            gate: Some(private_gate()),
+            ..AnalysisCacheOptions::default()
+        },
+    );
+    let mut d = Driver::default();
+    let tract_jobs = |e: &[AnalysisEffect]| {
+        e.iter()
+            .filter(|e| matches!(e, AnalysisEffect::Run(j) if j.kind() == JobKind::VocalTract))
+            .count()
+    };
+    assert!(cache.selected_vocal_tract(&host).is_none());
+
+    // no metrics yet: asks for them, not for the track
+    let e = cache.ensure_vocal_tract(&host);
+    assert_eq!(tract_jobs(&e), 0);
+    d.go(&mut cache, &host, e);
+    assert!(cache.selected_metrics(&host).is_some());
+    assert!(cache.selected_vocal_tract(&host).is_none());
+
+    // with them: the track, on a worker
+    let e = cache.ensure_vocal_tract(&host);
+    assert!(cache.vocal_tract_loading(&host));
+    assert_eq!(tract_jobs(&e), 1);
+    d.go(&mut cache, &host, e);
+    assert!(!cache.vocal_tract_loading(&host));
+    let t = cache.selected_vocal_tract(&host).expect("computed");
+    assert_eq!(t.body(), DEFAULT_TRACT_BODY);
+    assert!(
+        cache.ensure_vocal_tract(&host).is_empty(),
+        "not asked again"
+    );
+    // the playhead, into the take
+    host.position = Duration::from_millis(2500);
+    let at = cache.vocal_tract_at_playhead(&host).expect("a state");
+    assert!(at.estimate.fitted && at.folds.voiced());
+    assert!(at.estimate.residual < 0.05, "{}", at.estimate.residual);
+    // a body from the take's F3 (2.6 kHz: between the adults)
+    let suggested = cache.suggested_vocal_tract_body(&host).expect("voiced");
+    assert!(
+        suggested.female > 0.1 && suggested.female < 0.9,
+        "{suggested:?}"
+    );
+
+    // another body: computed for it
+    let e = cache.set_vocal_tract_body(BodyMix::MALE, &host);
+    assert_eq!(cache.vocal_tract_body(), BodyMix::MALE);
+    assert!(cache.selected_vocal_tract(&host).is_none());
+    d.go(&mut cache, &host, e);
+    assert_eq!(
+        cache.selected_vocal_tract(&host).unwrap().body(),
+        BodyMix::MALE
+    );
+
+    // the source goes, the track with it
+    cache.evict_analysis("c1.wav", false);
+    assert!(cache.selected_vocal_tract(&host).is_none());
+}
+
+/// The live vocal tract runs on the monitor while asked for, for the body.
+#[test]
+fn the_live_vocal_tract_runs_on_the_monitor() {
+    let stub = Stub::new(&[], 0);
+    let mut cache = cache(&stub);
+    assert!(cache.live_vocal_tract().is_none());
+    vocara_tract::codebook::Codebook::prewarm(DEFAULT_TRACT_BODY);
+    cache.set_live_vocal_tract(true);
+    assert_eq!(
+        cache.monitor().read().vocal_tract_body(),
+        Some(DEFAULT_TRACT_BODY)
+    );
+    // no frames yet: the neutral, unfitted estimate
+    let s = cache.live_vocal_tract().expect("tracking");
+    assert!(!s.estimate.fitted);
+    cache.set_live_vocal_tract(false);
+    assert!(cache.live_vocal_tract().is_none());
 }

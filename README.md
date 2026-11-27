@@ -14,6 +14,7 @@ algorithms are formally verified in Lean 4.
 | `rust/crates/vocara_engine` | the real-time audio engine (graph runtime, CoreAudio device, decoders, DSP) |
 | `rust/crates/vocara_model` | the domain model and pure utilities |
 | `rust/crates/vocara_store` | the library store: SQLite database, asset pool, sync, repositories |
+| `rust/crates/vocara_tract` | the vocal tract: CHIMERA's articulatory anatomy and airway acoustics (ported, MIT), its 2D and 3D drawing, and the inversion of measured formants into articulator positions |
 | `rust/crates/vocara_services` | services: engine bridge, playback, recording, analysis, separation, settings, persistence |
 | `rust/crates/vocara_app` | the iced application (`vocara` binary) |
 | `rust/verification` | Lean 4 proofs of the core algorithms, and the vectors the Rust tests replay ([README](rust/verification/README.md)) |

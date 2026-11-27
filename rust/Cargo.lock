@@ -4540,6 +4540,7 @@ dependencies = [
  "vocara_model",
  "vocara_services",
  "vocara_store",
+ "vocara_tract",
 ]
 
 [[package]]
@@ -4602,6 +4603,7 @@ dependencies = [
  "vocara_engine",
  "vocara_model",
  "vocara_store",
+ "vocara_tract",
 ]
 
 [[package]]
@@ -4621,6 +4623,14 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "vocara_model",
+]
+
+[[package]]
+name = "vocara_tract"
+version = "0.2.0"
+dependencies = [
+ "libm",
+ "serde_json",
 ]
 
 [[package]]

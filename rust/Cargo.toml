@@ -19,6 +19,7 @@ vocara_model = { path = "crates/vocara_model" }
 vocara_store = { path = "crates/vocara_store" }
 vocara_services = { path = "crates/vocara_services" }
 vocara_engine = { path = "crates/vocara_engine" }
+vocara_tract = { path = "crates/vocara_tract" }
 
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
@@ -66,6 +67,16 @@ unsafe_op_in_unsafe_fn = "deny"
 [workspace.lints.clippy]
 dbg_macro = "deny"
 todo = "deny"
+
+# The vocal-tract model (vocara_tract) inverts formants into articulator positions for every
+# analysis frame, and its libm math is most of the work. Unoptimised it runs some 20 times slower:
+# too slow for the live view of a debug build, and its tests take minutes. Optimised in every
+# profile.
+[profile.dev.package.vocara_tract]
+opt-level = 3
+
+[profile.dev.package.libm]
+opt-level = 3
 
 [profile.release]
 # Default panic = "unwind", NOT abort: every engine C ABI entry point is

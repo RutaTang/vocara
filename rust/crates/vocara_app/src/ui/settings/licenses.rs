@@ -29,7 +29,11 @@
 //!   draw (its Apache License text is
 //!   `assets/licenses/material-icons/LICENSE`), and Flutter, whose
 //!   `AnimatedIcons.play_pause` keyframes those controls animate (its BSD
-//!   license text is `assets/licenses/flutter/LICENSE`). Keep this
+//!   license text is `assets/licenses/flutter/LICENSE`), and CHIMERA, a
+//!   voice synthesizer whose anatomy, airway acoustics and head drawing
+//!   the `vocara_tract` crate ports (a workspace crate, so not in the
+//!   generated list: its MIT notice is `vocara_tract::CHIMERA_LICENSE`).
+//!   Keep this
 //!   list in sync when the app starts shipping another non-crate component
 //!   (a media framework for the technique videos, say). The engine's own
 //!   code is first-party, covered by the app's copyright; its crates are in
@@ -422,6 +426,22 @@ fn bundled_components() -> Vec<LicenseEntry> {
                     None,
                 ),
                 include_str!("../../../assets/licenses/material-icons/LICENSE").trim()
+            ),
+        },
+        LicenseEntry {
+            packages: vec!["CHIMERA".to_string()],
+            text: format!(
+                "{}
+
+{}",
+                entry(
+                    "CHIMERA — the vocal tract view's anatomy, airway acoustics and                      head drawing (jamesondh/chimera-vocal-synth)",
+                    "MIT License (MIT)",
+                    "below",
+                    Some("ported to Rust in the Vocara app (its vocara_tract crate)"),
+                    Some(vocara_tract::CHIMERA_SOURCE),
+                ),
+                vocara_tract::CHIMERA_LICENSE.trim()
             ),
         },
         LicenseEntry {
@@ -1242,6 +1262,7 @@ mod tests {
             "SQLite",
             "Material Icons",
             "Flutter",
+            "CHIMERA",
             "iced",
             "rusqlite",
             "serde",
@@ -1278,6 +1299,15 @@ mod tests {
         assert!(icons[0]
             .text
             .contains("TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION"));
+        // The vocal tract's model is CHIMERA's, ported: its MIT notice, in
+        // full.
+        let chimera = data.licenses_of("CHIMERA");
+        assert_eq!(chimera.len(), 1);
+        assert!(chimera[0].text.contains("License: MIT License"));
+        assert!(chimera[0].text.contains("Copyright (c) 2026 Jameson Hodge"));
+        assert!(chimera[0]
+            .text
+            .contains("153c7c8f22108c400e8556950a2c3b61f3f62aa2"));
         // The video controls' play/pause keyframes are Flutter's, under its
         // BSD license, in full.
         let flutter = data.licenses_of("Flutter");

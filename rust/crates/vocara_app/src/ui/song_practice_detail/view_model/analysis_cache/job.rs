@@ -1,7 +1,9 @@
 //! The analysis cache's off-UI-thread work: the per-clip computes (Dart's
 //! `computeFromFile` / `computeMetricsFromFile` / `computeBothFromFile` calls,
-//! each its own isolate inside the service) and the lane merge (Dart's
-//! `_mergeLaneInGate`: `Isolate.run` inside an analysis-gate slot).
+//! each its own isolate inside the service), the lane merge (Dart's
+//! `_mergeLaneInGate`: `Isolate.run` inside an analysis-gate slot), and (not
+//! Dart's) a subject's vocal-tract track, from its metrics, in a gate slot
+//! too.
 //!
 //! An [`AnalysisJob`] carries everything its worker needs and nothing of the
 //! cache: the service, the path, and a [`WantedProbe`] — shared atomics the
@@ -25,6 +27,8 @@ use vocara_model::models::voice_metrics::{
 use vocara_model::util::analysis_gate::AnalysisGate;
 use vocara_services::audio_dsp::AnalysisParams;
 use vocara_services::spectrogram_service::{SpectrogramAnalyses, TakeAnalysisBundle};
+use vocara_services::vocal_tract::VocalTractTrack;
+use vocara_tract::anatomy::BodyMix;
 
 use crate::util::panic_message;
 
@@ -42,6 +46,9 @@ pub enum JobKind {
     EqSpectrogram,
     /// A multi-clip lane's merged analysis, in an analysis-gate slot.
     MergeLane,
+    /// The analysis subject's vocal-tract track (from its metrics), in an
+    /// analysis-gate slot.
+    VocalTract,
 }
 
 /// Whether a job is still wanted once the gate admits it (Dart's `wanted`
@@ -122,6 +129,12 @@ pub(super) enum Work {
         specs: Vec<SpectrogramPart>,
         wanted: WantedProbe,
     },
+    VocalTract {
+        gate: &'static AnalysisGate,
+        metrics: Arc<VoiceMetrics>,
+        body: BodyMix,
+        wanted: WantedProbe,
+    },
 }
 
 /// One piece of blocking analysis work: run it on a worker thread
@@ -137,6 +150,7 @@ impl AnalysisJob {
         match &self.work {
             Work::Compute { kind, .. } => *kind,
             Work::Merge { .. } => JobKind::MergeLane,
+            Work::VocalTract { .. } => JobKind::VocalTract,
         }
     }
 
@@ -144,7 +158,7 @@ impl AnalysisJob {
     pub fn path(&self) -> Option<&str> {
         match &self.work {
             Work::Compute { path, .. } => Some(path),
-            Work::Merge { .. } => None,
+            Work::Merge { .. } | Work::VocalTract { .. } => None,
         }
     }
 
@@ -158,7 +172,9 @@ impl AnalysisJob {
     /// its worker.
     pub fn wanted_probe(&self) -> WantedProbe {
         match &self.work {
-            Work::Compute { wanted, .. } | Work::Merge { wanted, .. } => wanted.clone(),
+            Work::Compute { wanted, .. }
+            | Work::Merge { wanted, .. }
+            | Work::VocalTract { wanted, .. } => wanted.clone(),
         }
     }
 
@@ -190,6 +206,23 @@ impl AnalysisJob {
                     })),
                 }
             }
+            Work::VocalTract {
+                gate,
+                metrics,
+                body,
+                wanted,
+            } => Outcome::VocalTract(caught(|| {
+                // A few seconds for a long take: in a gate slot like every
+                // heavy compute, and dropped (between stretches of frames)
+                // once no one wants it.
+                Ok(gate.run(|| {
+                    let predicate = || wanted.is_wanted();
+                    if !predicate() {
+                        return None;
+                    }
+                    VocalTractTrack::compute(&metrics, body, Some(&predicate)).map(Arc::new)
+                }))
+            })),
             Work::Merge {
                 gate,
                 metrics,
@@ -231,6 +264,7 @@ pub(super) enum Outcome {
     Metrics(Result<Option<Arc<VoiceMetrics>>, String>),
     Both(Result<Option<TakeAnalysisBundle>, String>),
     Merge(Result<Option<MergedLane>, String>),
+    VocalTract(Result<Option<Arc<VocalTractTrack>>, String>),
 }
 
 /// A finished [`AnalysisJob`], for `AnalysisCache::job_done`.

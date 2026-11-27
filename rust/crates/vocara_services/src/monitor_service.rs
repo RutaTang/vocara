@@ -5,7 +5,9 @@
 //! runs the incremental [`LiveVoiceAnalyzer`], and keeps a rolling window of
 //! dB columns, the per-column voice metrics for the overlays, the latest
 //! input level, the running session averages, the live LTAS and register
-//! tallies, and the tuner's stable pitch.
+//! tallies, and the tuner's stable pitch; and, while the "Vocal tract" view
+//! asks for it ([`MonitorService::set_vocal_tract`]), the singer's estimated
+//! articulation ([`MonitorState::vocal_tract`]).
 //!
 //! # How live frames are delivered
 //!
@@ -40,7 +42,11 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use vocara_model::models::voice_metrics::{finalize_ltas, register_score, Ltas, RegisterOptions};
 use vocara_model::util::dart_num::{clamp_f64, compare_f64, floor_to_i64, pow_f64};
 
+use vocara_tract::anatomy::BodyMix;
+use vocara_tract::codebook::Codebook;
+
 use crate::audio_dsp::{AnalysisParams, LiveVoiceAnalyzer, TunerTracker};
+use crate::vocal_tract::{VocalTractState, VocalTractTracker};
 
 /// One live spectrogram column: dB per bin, from DC up to
 /// [`MonitorState::max_hz`]. Shared, so a view keeps the columns it drew and
@@ -119,8 +125,18 @@ pub struct MonitorState {
     // EMA-glides).
     tuner: TunerTracker,
     tuner_f0: f64,
+    /// The live vocal tract while the view asks for it (not Dart's: new).
+    tract: Option<LiveTract>,
     /// Bumped on every Dart `notifyListeners`.
     revision: u64,
+}
+
+/// The live vocal tract: the body the view asked for, and its tracker once the body's codebook
+/// is built (on a worker: building it on the feeding thread would stall the capture pump for
+/// a few tenths of a second).
+struct LiveTract {
+    body: BodyMix,
+    tracker: Option<VocalTractTracker>,
 }
 
 impl MonitorState {
@@ -157,6 +173,7 @@ impl MonitorState {
             reg_head: 0,
             tuner: TunerTracker::default(),
             tuner_f0: f64::NAN,
+            tract: None,
             revision: 0,
         }
     }
@@ -371,6 +388,25 @@ impl MonitorState {
         self.tuner_f0
     }
 
+    /// The singer's estimated vocal tract after the latest frame, while
+    /// [`MonitorService::set_vocal_tract`] asks for it; `None` when it does
+    /// not, and until the body's codebook is built (see
+    /// [`MonitorState::vocal_tract_preparing`]).
+    pub fn vocal_tract(&self) -> Option<&VocalTractState> {
+        self.tract.as_ref()?.tracker.as_ref().map(|t| t.state())
+    }
+
+    /// The body the live vocal tract is estimated for, while asked for.
+    pub fn vocal_tract_body(&self) -> Option<BodyMix> {
+        self.tract.as_ref().map(|t| t.body)
+    }
+
+    /// Whether the live vocal tract is asked for but its body's codebook is
+    /// still being built.
+    pub fn vocal_tract_preparing(&self) -> bool {
+        self.tract.as_ref().is_some_and(|t| t.tracker.is_none())
+    }
+
     fn start(&mut self) {
         if self.active {
             return;
@@ -402,6 +438,9 @@ impl MonitorState {
         self.cur_h1h2 = f64::NAN;
         self.tuner.reset();
         self.tuner_f0 = f64::NAN;
+        if let Some(tracker) = self.tract.as_mut().and_then(|t| t.tracker.as_mut()) {
+            tracker.reset();
+        }
         self.analyzer.reset();
         self.active = true;
         self.notify();
@@ -427,7 +466,16 @@ impl MonitorState {
 
         // The frame callback updates every field but the analyzer (Dart's
         // closure over the fields); the closure borrows those fields alone.
+        let frame_rate = self.analyzer.frame_rate();
         self.analyzer.add_samples(&pcm, |f| {
+            if let Some(t) = &mut self.tract {
+                if t.tracker.is_none() {
+                    t.tracker = Codebook::cached(t.body).map(VocalTractTracker::with_codebook);
+                }
+                if let Some(tracker) = &mut t.tracker {
+                    tracker.push_live(&f, frame_rate);
+                }
+            }
             let col: LiveColumn = Arc::from(f.column);
             let voiced = f.active && f.f0_confidence > 0.0;
             self.columns.push(Arc::clone(&col));
@@ -603,6 +651,42 @@ impl MonitorService {
     /// the views until the next [`Self::start`].
     pub fn stop(&self) {
         self.lock().stop();
+    }
+
+    /// Asks for the live vocal tract for `body` (or stops estimating it,
+    /// `None`): from then on each analysis frame also feeds the inversion
+    /// (about half a millisecond a frame), and [`MonitorState::vocal_tract`]
+    /// reads its latest state. The body's codebook is built on a worker the
+    /// first time a body is asked for; frames meanwhile are not estimated. A
+    /// new body starts afresh; the same body again changes nothing.
+    pub fn set_vocal_tract(&self, body: Option<BodyMix>) {
+        let mut s = self.lock();
+        let Some(body) = body else {
+            if s.tract.take().is_some() {
+                s.notify();
+            }
+            return;
+        };
+        if s.tract.as_ref().is_some_and(|t| t.body == body) {
+            return;
+        }
+        let cached = Codebook::cached(body);
+        let ready = cached.is_some();
+        s.tract = Some(LiveTract {
+            body,
+            tracker: cached.map(VocalTractTracker::with_codebook),
+        });
+        s.notify();
+        drop(s);
+        if !ready {
+            let built = std::thread::Builder::new()
+                .name("vocal-tract-codebook".into())
+                .spawn(move || Codebook::prewarm(body));
+            if built.is_err() {
+                // no thread to build it on: build it here rather than never
+                Codebook::prewarm(body);
+            }
+        }
     }
 }
 
@@ -984,5 +1068,42 @@ mod tests {
         });
         assert!(feeder.join().unwrap());
         assert!(!monitor.read().columns().is_empty());
+    }
+
+    /// Not Dart's: the live vocal tract runs only while asked for, on the
+    /// monitor's own frames, and starts afresh with a session or a body.
+    #[test]
+    fn the_live_vocal_tract_runs_while_asked_for() {
+        use crate::audio_dsp::tests::support::vowel_at;
+        let monitor = MonitorService::default();
+        let body = BodyMix::new(0.5, 0.0);
+        // as the worker the monitor starts would, before the first frame
+        Codebook::prewarm(body);
+        let x = vowel_at(700.0, 1200.0, 2600.0, 200.0);
+        monitor.start();
+        monitor.feed_samples(&x);
+        assert!(monitor.read().vocal_tract().is_none());
+        let before = monitor.revision();
+        monitor.set_vocal_tract(Some(body));
+        assert!(monitor.revision() > before);
+        assert_eq!(monitor.read().vocal_tract_body(), Some(body));
+        monitor.feed_samples(&x);
+        {
+            let s = monitor.read();
+            assert!(!s.vocal_tract_preparing());
+            let state = s.vocal_tract().expect("estimated");
+            assert!(state.estimate.fitted && state.folds.voiced());
+            assert!(state.estimate.residual < 0.1);
+        }
+        // the same body again keeps the estimate; a new session starts it afresh
+        let revision = monitor.revision();
+        monitor.set_vocal_tract(Some(body));
+        assert_eq!(monitor.revision(), revision);
+        monitor.stop();
+        monitor.start();
+        assert!(!monitor.read().vocal_tract().expect("kept").estimate.fitted);
+        monitor.set_vocal_tract(None);
+        assert!(monitor.read().vocal_tract().is_none());
+        assert_eq!(monitor.read().vocal_tract_body(), None);
     }
 }

@@ -19,6 +19,9 @@ device = ["vocara_services/device"]
 vocara_model.workspace = true
 vocara_store.workspace = true
 vocara_services.workspace = true
+# The vocal tract's model: the analysis cache's vocal-tract tracks, and CHIMERA's licence on
+# the Licences page (vocara_tract ports CHIMERA's code).
+vocara_tract.workspace = true
 iced.workspace = true
 iced_winit.workspace = true
 iced_renderer.workspace = true

@@ -48,7 +48,8 @@ wrong. Port the behavior, not the shape:
 | `crates/vocara_engine` | the engine itself (`client/rust/vocara_engine`, moved as is) | — |
 | `crates/vocara_model` | `lib/domain/models`, `lib/utils` (pure parts), `lib/config` (environment, app config) | — |
 | `crates/vocara_store` | `lib/data/db`, `lib/data/sync`, `lib/data/repositories` | model |
-| `crates/vocara_services` | `lib/data/services`, `lib/data/ffi` | model, store, engine |
+| `crates/vocara_tract` | not Dart's: CHIMERA's anatomy, airway and head drawing (MIT, `LICENSE-CHIMERA`; its crate docs list the files), and the formant inversion | — |
+| `crates/vocara_services` | `lib/data/services`, `lib/data/ffi` | model, store, engine, tract |
 | `crates/vocara_app` | `lib/ui`, `lib/main.dart`, `lib/app.dart`, `lib/routing`, `lib/config/dependencies.dart`, `lib/utils/{command,busy_gate}` | all |
 | `verification/` | Lean 4 models and proofs of the core algorithms | — |
 

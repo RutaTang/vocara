@@ -16,6 +16,7 @@ use vocara_model::models::audio_track::AudioTrack;
 use vocara_model::models::spectrogram::Spectrogram;
 use vocara_model::models::voice_metrics::{Ltas, RegisterMap, VoiceMetrics, VoiceProfile};
 use vocara_services::monitor_service::MonitorService;
+use vocara_services::vocal_tract::VocalTractTrack;
 
 /// The read-only surface the bottom-dock analysis views need from their host
 /// view model: the selected subject's computed analysis plus playback /
@@ -75,4 +76,16 @@ pub trait AnalysisSource {
 
     /// Bumped on every change a view may draw (Dart's `notifyListeners`).
     fn revision(&self) -> u64;
+
+    /// Not Dart's: the subject's vocal-tract track, once computed (the song
+    /// screen's: `AnalysisCache::ensure_vocal_tract`); none where a source
+    /// does not compute one.
+    fn selected_vocal_tract(&self) -> Option<Arc<VocalTractTrack>> {
+        None
+    }
+
+    /// Whether the subject's vocal-tract track is computing.
+    fn vocal_tract_loading(&self) -> bool {
+        false
+    }
 }
