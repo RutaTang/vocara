@@ -571,6 +571,46 @@ small and written down in the module that has it:
   rasterizing glyphs with CoreText and porting Skia's edge coverage were
   weighed and not taken.
 
+## Design refresh
+
+The app's visual details now follow `rust/DESIGN.md` (the design system,
+drawn from the approved mockups in `rust/design/mockups/`), deliberately
+departing from the Flutter app's look: its colours, type sizes, radii,
+control shapes, icons and chrome. Behaviour, data and layouts do not change:
+every feature, control, keyboard shortcut, motion timing and the data shown
+are the Flutter app's, as the rest of this document describes. Where a
+"port of …" note or a comment in the code says a colour, size or shape
+matches Flutter, `DESIGN.md` wins.
+
+What the refresh puts in place, for every screen to build on:
+
+- **Tokens** (`ui::core::theme`): the `Studio` palette at `DESIGN.md`'s
+  values with its new tokens (`TOOLBAR`, `PANEL_SELECTED`, `CONTROL`,
+  `CONTROL_ACTIVE`, `BORDER_SUBTLE`, `TEXT_DISABLED`, `WARN`, the track
+  colours), and the `type_scale`, `radius` and `height` scales. The chrome
+  (dialogs, menus, tooltips, text fields, toasts, buttons) draws with
+  them; forui's `Zinc` palette stays only for the looks that copy a third
+  party's (the text field's Cupertino menu, the licence page's Material
+  list, the Material switch and scrollbar).
+- **Controls** (`ui::core::widgets::controls`, `line_icon`): the icon
+  button, toolbar group, ghost, pop-up and dialog buttons, segmented
+  control, tab strip, thin slider, parameter row, power button and the
+  M / S / R buttons, the mixer's fader and meter painters, and line icons
+  drawn to one optical size (equal visible extent and stroke across a row;
+  the settings gear at 75 %). `cap_label` reads in sentence case.
+- **The unified toolbar** (`ui::core::widgets::toolbar`): the Flutter app's
+  28 px drag bar over a 56 px page header is now one 52 px toolbar per
+  page, which is the window's title bar. On macOS the window takes an
+  empty unified `NSToolbar` once it opens
+  (`vocara_services::window_toolbar`; the unified style from macOS 11,
+  asked with `respondsToSelector:`), so the traffic lights sit centred in
+  it; a page's toolbar starts 80 px in to clear them. The toolbar's empty
+  area drags the window and a double click zooms it, as the drag bar did;
+  the environment badge sits at its right end.
+- **The library** (`ui::home`): the cards' waveform band reads the
+  waveform cache (`SongPracticeRepository::list_practice_previews`) off
+  the UI thread after each list read; until it lands, the band is empty.
+
 ## Tracking
 
 Every Dart source and where it lives in Rust. A row is `done` only when its
