@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use vocara_model::config::environment::AppEnvironment;
+use vocara_services::self_update::Phase;
 use vocara_services::update_check_service::{FetchError, UpdateCheckService, UpdateStatus};
 use vocara_store::repositories::SongPracticeRepository;
 
@@ -18,6 +19,7 @@ use crate::app::library::Library;
 use crate::router::Navigation;
 use crate::ui::core::widgets::confirm_dialog::{Dialog, DialogResult};
 use crate::ui::home::testing::{remote_applied, run_task, spawn_task, summary, FakePractices};
+use crate::ui::home::widgets::update_notice::testing as update_testing;
 use crate::ui::DialogRequest;
 
 fn services_over(repo: Arc<dyn SongPracticeRepository>) -> Services {
@@ -605,17 +607,32 @@ fn the_screen_listens_to_the_librarys_remote_applied_broadcast() {
 
 // ------------------------------------------- home_update_check_test
 
-/// A service whose manifest advertises 9.9.9 over a running 1.0.0, counting
-/// its fetches.
-fn newer_available(fetches: &Arc<AtomicUsize>) -> Arc<UpdateCheckService> {
+/// A service whose manifest advertises 9.9.9 over a running 1.0.0 (in the
+/// shape before the self-update, unless `image`), counting its fetches; the
+/// user agreed to automatic checks when `consented`.
+fn advertising(
+    fetches: &Arc<AtomicUsize>,
+    image: Option<&[u8]>,
+    consented: bool,
+) -> Arc<UpdateCheckService> {
     let fetches = Arc::clone(fetches);
-    Arc::new(UpdateCheckService::with_fetcher(
+    let body = update_testing::manifest("9.9.9", "New voiceprint views.", image);
+    let updates = Arc::new(UpdateCheckService::with_fetcher(
         Box::new(move |_| {
             fetches.fetch_add(1, Ordering::SeqCst);
-            Ok(r#"{"latest": "9.9.9", "url": "https://example.com/download", "notes": "New voiceprint views."}"#.to_string())
+            Ok(body.clone())
         }),
         "1.0.0",
-    ))
+    ));
+    if consented {
+        updates.set_auto_check(true);
+    }
+    updates
+}
+
+/// [`advertising`] with the user's consent, and no image.
+fn newer_available(fetches: &Arc<AtomicUsize>) -> Arc<UpdateCheckService> {
+    advertising(fetches, None, true)
 }
 
 fn home_with_updates(updates: Arc<UpdateCheckService>) -> Home {
@@ -642,6 +659,7 @@ fn the_auto_check_fires_once_5s_after_mount_and_raises_the_banner() {
     assert!(home.shows("Download"));
     assert!(!home.screen.timers().contains(&Timer::UpdateCheck));
     assert!(home.screen.snack().is_none());
+    assert!(home.dialog.is_none(), "nothing to ask: the user agreed");
 
     // Never twice: not from this page, nor from Home mounted again.
     home.send(Message::UpdateCheckDue);
@@ -652,12 +670,103 @@ fn the_auto_check_fires_once_5s_after_mount_and_raises_the_banner() {
     assert!(again.shows("Vocara 9.9.9 is available."));
 }
 
+/// Unanswered is not consent: the auto-check contacts nobody, and Home asks
+/// — once Home is on top with nothing opening — whether it may. A yes is
+/// kept, and checks at once.
+#[test]
+fn the_auto_check_asks_first_and_a_yes_checks_at_once() {
+    let fetches = Arc::new(AtomicUsize::new(0));
+    let updates = advertising(&fetches, None, false);
+    let mut home = home_with_updates(updates.clone());
+    home.fire(Timer::UpdateCheck);
+    assert_eq!(
+        fetches.load(Ordering::SeqCst),
+        0,
+        "no network without a yes"
+    );
+    assert!(!home.shows("Vocara 9.9.9 is available."));
+    assert_eq!(Timer::Consent.delay(), CONSENT_DELAY);
+    assert!(home.screen.timers().contains(&Timer::Consent));
+    assert!(home.dialog.is_none(), "not until it has been on top a beat");
+
+    home.fire(Timer::Consent);
+    let Some(DialogRequest {
+        dialog: Dialog::Confirm(question),
+        ..
+    }) = &home.dialog
+    else {
+        panic!("the question, through the app's dialog stack")
+    };
+    assert_eq!(question.title, CONSENT_TITLE);
+    assert_eq!(question.body.as_deref(), Some(CONSENT_BODY));
+    assert_eq!(question.confirm_label, CONSENT_YES);
+    assert_eq!(question.cancel_label, CONSENT_NO);
+    assert!(!question.destructive);
+    assert!(
+        !home.screen.timers().contains(&Timer::Consent),
+        "asked once"
+    );
+
+    home.answer(DialogResult::Confirmed(true));
+    assert_eq!(updates.auto_check_preference(), Some(true));
+    assert_eq!(fetches.load(Ordering::SeqCst), 1, "checked at once");
+    assert!(home.shows("Vocara 9.9.9 is available."));
+    assert!(home.screen.snack().is_none());
+}
+
+/// A no (the "Don't check" button, Escape or a click on the barrier, as
+/// macOS's own updaters take it) is kept, and contacts nobody; the question
+/// is not asked again this run, however often Home mounts.
+#[test]
+fn a_no_is_kept_and_contacts_nobody() {
+    let fetches = Arc::new(AtomicUsize::new(0));
+    let updates = advertising(&fetches, None, false);
+    let mut home = home_with_updates(updates.clone());
+    home.fire(Timer::UpdateCheck);
+    home.fire(Timer::Consent);
+    home.answer(DialogResult::Confirmed(false));
+    assert_eq!(updates.auto_check_preference(), Some(false));
+    assert_eq!(fetches.load(Ordering::SeqCst), 0);
+    assert!(!home.shows("Vocara 9.9.9 is available."));
+
+    let mut again = Home::mount(home.services.clone());
+    again.fire(Timer::UpdateCheck);
+    assert!(!again.screen.timers().contains(&Timer::Consent));
+    assert_eq!(fetches.load(Ordering::SeqCst), 0);
+}
+
+/// The question waits while a practice opens (it would land over the take
+/// about to be recorded), and asks once Home is back.
+#[test]
+fn the_question_waits_while_a_practice_opens() {
+    let fetches = Arc::new(AtomicUsize::new(0));
+    let updates = advertising(&fetches, None, false);
+    let mut services = services_over(FakePractices::with(vec![summary("P1", "Song")]));
+    services.update_check = updates;
+    let mut home = Home::mount(services);
+    home.send(Message::Open("P1".into()));
+    home.fire(Timer::UpdateCheck);
+    assert!(!home.screen.timers().contains(&Timer::Consent), "opening");
+    let opening = home.opening_timer();
+    home.fire(opening);
+    assert!(
+        !home.screen.timers().contains(&Timer::Consent),
+        "the practice is open"
+    );
+    home.pop_back();
+    assert!(
+        home.screen.timers().contains(&Timer::Consent),
+        "Home is back"
+    );
+}
+
 #[test]
 fn an_up_to_date_auto_check_shows_no_banner_and_no_error() {
     let updates = Arc::new(UpdateCheckService::with_fetcher(
         Box::new(|_| Ok(r#"{"latest": "1.0.0", "url": "https://example.com"}"#.to_string())),
         "1.0.0",
     ));
+    updates.set_auto_check(true);
     let mut home = home_with_updates(updates.clone());
     home.fire(Timer::UpdateCheck);
     assert_eq!(updates.status(), UpdateStatus::UpToDate);
@@ -672,6 +781,7 @@ fn a_failed_auto_check_stays_silent() {
         Box::new(|_| Err(FetchError("offline".into()))),
         "1.0.0",
     ));
+    updates.set_auto_check(true);
     let mut home = home_with_updates(updates.clone());
     home.fire(Timer::UpdateCheck);
     assert_eq!(updates.status(), UpdateStatus::Unknown);
@@ -679,11 +789,14 @@ fn a_failed_auto_check_stays_silent() {
     assert!(home.screen.snack().is_none());
 }
 
+/// A release before the self-update (no image), or a copy that cannot
+/// replace itself: "Download" opens the dialog, with the release page.
 #[test]
 fn download_opens_the_update_dialog_over_the_window() {
     let fetches = Arc::new(AtomicUsize::new(0));
     let mut home = home_with_updates(newer_available(&fetches));
     home.fire(Timer::UpdateCheck);
+    assert!(!home.shows("Update now"));
     home.click("Download");
     let Some(DialogRequest {
         dialog: Dialog::UpdateDownload(dialog),
@@ -694,7 +807,10 @@ fn download_opens_the_update_dialog_over_the_window() {
     };
     assert_eq!(dialog.info().version, "9.9.9");
     assert_eq!(dialog.info().notes, "New voiceprint views.");
-    assert_eq!(dialog.info().url, "https://example.com/download");
+    assert_eq!(
+        dialog.info().url,
+        "https://github.com/RutaTang/vocara/releases/tag/v9.9.9"
+    );
     home.answer(DialogResult::Closed);
     assert!(home.navigations.is_empty());
 }
@@ -709,4 +825,93 @@ fn dismissing_the_banner_hides_it_for_the_rest_of_the_run() {
     home.click(&glyph(Icon::X));
     assert!(!home.shows("Vocara 9.9.9 is available."));
     assert!(updates.notice_dismissed());
+}
+
+/// A release with its image, on a copy that can replace itself: the check
+/// also finds that out, so the banner offers the one click. "Update now"
+/// downloads, and the banner follows the download to the install, after
+/// which the app quits (`app` tests the quit itself).
+#[test]
+fn update_now_from_the_banner_downloads_and_installs() {
+    let fetches = Arc::new(AtomicUsize::new(0));
+    let fake = update_testing::updates(true);
+    let mut services = services_over(FakePractices::with(Vec::new()));
+    services.update_check = advertising(&fetches, Some(&update_testing::image()), true);
+    services.self_update = fake.updater.clone();
+    let mut home = Home::mount(services);
+    home.fire(Timer::UpdateCheck);
+    assert!(home.shows("What's new"));
+    home.click("Update now");
+    fake.let_through(1);
+    fake.wait_for(&Phase::Downloading {
+        done: 1000,
+        total: 2500,
+    });
+    assert!(home.shows("Downloading Vocara 9.9.9…"));
+    assert!(home.shows("1 kB of 3 kB"));
+    assert!(!home.shows("Update now"));
+    fake.let_through(3);
+    fake.settle();
+    assert!(home.shows("Installing Vocara 9.9.9… Vocara will relaunch."));
+    assert!(fake.updater.wants_quit());
+    assert_eq!(fake.installer.installs.load(Ordering::SeqCst), 1);
+}
+
+/// "What's new" opens the dialog, from which the update starts too.
+#[test]
+fn whats_new_opens_the_dialog_with_update_now() {
+    let fetches = Arc::new(AtomicUsize::new(0));
+    let fake = update_testing::updates(false);
+    let mut services = services_over(FakePractices::with(Vec::new()));
+    services.update_check = advertising(&fetches, Some(&update_testing::image()), true);
+    services.self_update = fake.updater.clone();
+    let mut home = Home::mount(services);
+    home.fire(Timer::UpdateCheck);
+    home.click("What's new");
+    let Some(DialogRequest {
+        dialog: Dialog::UpdateDownload(dialog),
+        ..
+    }) = &mut home.dialog
+    else {
+        panic!("the update dialog")
+    };
+    assert!(dialog.info().dmg.is_some());
+    assert_eq!(
+        dialog.update(crate::ui::core::widgets::confirm_dialog::Message::Confirm),
+        None
+    );
+    fake.settle();
+    assert!(fake.updater.wants_quit());
+}
+
+/// A swap that failed after the last quit is reported once Home mounts in
+/// the relaunched Vocara, before any check (it is local), until dismissed.
+#[test]
+fn a_failed_swap_is_reported_when_home_mounts() {
+    use vocara_services::self_update::files::INSTALL_FAILED_MARKER;
+    use vocara_services::self_update::{HttpsTransport, SelfUpdate};
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join(INSTALL_FAILED_MARKER),
+        "Vocara did not quit, so the update was not applied\n",
+    )
+    .unwrap();
+    let fake = update_testing::updates(false);
+    let updates_dir = dir.path().to_path_buf();
+    let mut services = services_over(FakePractices::with(Vec::new()));
+    services.self_update = Arc::new(SelfUpdate::new(
+        Box::new(move || Ok(updates_dir.clone())),
+        Arc::new(HttpsTransport),
+        fake.installer.clone(),
+        "1.0.0",
+    ));
+    let mut home = Home::mount(services);
+    let line = "Update failed: Vocara did not quit, so the update was not applied";
+    assert!(home.shows(line));
+    home.click(&glyph(Icon::X));
+    assert!(!home.shows(line));
+    assert!(
+        !dir.path().join(INSTALL_FAILED_MARKER).exists(),
+        "reported once"
+    );
 }

@@ -35,13 +35,21 @@
 //! macOS sends through `terminate:` (Cmd+Q, the app-menu Quit, a Dock quit,
 //! logout; [`vocara_services::quit_request`]), kills the separation
 //! sidecars, finalizes the recordings ([`quit::QuitHooks`]), then exits —
-//! once, however many requests arrive meanwhile.
+//! once, however many requests arrive meanwhile. An installed update quits
+//! the same way: once the self-update has staged it and started the helper
+//! that swaps the bundle when this process is gone
+//! ([`vocara_services::self_update`], `Phase::Relaunching`), the app runs
+//! the same guard — the recordings saved, nothing cut off — and exits, and
+//! the helper relaunches the new version. The app listens to the
+//! self-update for as long as it runs, which also redraws the banner, the
+//! dialog and Settings as the download moves.
 
 pub mod library;
 mod messenger;
 mod page;
 pub mod quit;
 
+use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -51,6 +59,7 @@ use iced::widget::{container, stack, Space};
 use iced::{window, Element, Length, Size, Subscription, Task, Theme};
 use vocara_model::diagnostics::DiagnosticsLog;
 use vocara_services::quit_request::QuitRequests;
+use vocara_services::self_update::{ListenerId, SelfUpdate};
 
 use self::library::{LibraryOpen, OpenLibrary};
 use self::messenger::Messenger;
@@ -189,6 +198,9 @@ pub enum Message {
     QuitRequested,
     /// The quit guard finished its work: exit.
     QuitGuardDone,
+    /// The self-update moved (its download's progress, its install, its
+    /// failure): redraw, and quit once it waits for the app to go.
+    UpdaterChanged,
     /// The toolbar's empty area: start a window drag / toggle maximize.
     DragWindow,
     ToggleMaximize,
@@ -508,6 +520,17 @@ impl App {
             }
             Message::QuitRequested => self.quit(),
             Message::QuitGuardDone => iced::exit(),
+            Message::UpdaterChanged => match &self.state {
+                // The helper swaps the bundle once this process is gone:
+                // quit through the guard, as Cmd+Q does, so the recordings
+                // are saved first. (A quit already under way is not run
+                // twice.)
+                State::Running(running) if running.services.self_update.wants_quit() => {
+                    DiagnosticsLog::instance().log("update", "quitting for the relaunch");
+                    self.quit()
+                }
+                _ => Task::none(),
+            },
             Message::DragWindow => self.window.map_or_else(Task::none, window::drag),
             Message::ToggleMaximize => self.window.map_or_else(Task::none, window::toggle_maximize),
             Message::ScreenshotDue => match self.window {
@@ -828,9 +851,54 @@ impl App {
             subscriptions.push(running.messenger.subscription());
             subscriptions
                 .push(motion::frames(running.is_animating(Instant::now())).map(Message::Frame));
+            subscriptions.push(
+                Subscription::run_with(
+                    UpdaterFeed(Arc::clone(&running.services.self_update)),
+                    updater_changes,
+                )
+                .map(|()| Message::UpdaterChanged),
+            );
         }
         Subscription::batch(subscriptions)
     }
+}
+
+/// The self-update as a subscription's identity (the service itself, by
+/// address).
+struct UpdaterFeed(Arc<SelfUpdate>);
+
+impl Hash for UpdaterFeed {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        Arc::as_ptr(&self.0).hash(state);
+    }
+}
+
+/// Removes its listener when the stream holding it is dropped.
+struct UpdaterListening {
+    updater: Arc<SelfUpdate>,
+    id: ListenerId,
+}
+
+impl Drop for UpdaterListening {
+    fn drop(&mut self) {
+        self.updater.remove_listener(self.id);
+    }
+}
+
+/// One item per change of the self-update, for as long as the app runs.
+fn updater_changes(feed: &UpdaterFeed) -> impl iced::futures::Stream<Item = ()> {
+    use iced::futures::StreamExt;
+    let (sender, receiver) = iced::futures::channel::mpsc::unbounded();
+    let id = feed.0.add_listener(Box::new(move || {
+        let _ = sender.unbounded_send(());
+    }));
+    let listening = UpdaterListening {
+        updater: Arc::clone(&feed.0),
+        id,
+    };
+    receiver.map(move |()| {
+        let _ = &listening;
+    })
 }
 
 /// The quits macOS routes through `terminate:` (Cmd+Q, the app-menu Quit, a

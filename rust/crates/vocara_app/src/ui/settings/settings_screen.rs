@@ -12,6 +12,13 @@
 //! auto-check), a short watch tick — the update service has no way to drop a
 //! listener, and one left registered per opening would pile up.
 //!
+//! The About block is also where updates are looked after: "Check for
+//! updates" (a manual check, which opens the update dialog when it finds a
+//! release; its line follows an update under way — the download's progress,
+//! the install, a failure — as the app redraws on every change of the
+//! self-update), and "Check automatically", the switch for the answer Home
+//! asks for once (until answered, no automatic check runs).
+//!
 //! Every service call that blocks runs off the UI thread as a task: the
 //! device refresh (enumeration, and the last-known-name persist it may
 //! make), each settings choice (the setter persists), the update check, the
@@ -72,6 +79,7 @@ use vocara_services::app_settings_service::{AppSettingsService, ListenerId};
 use vocara_services::graph_audio_playback_service::GraphAudioPlaybackService;
 use vocara_services::persistence::RepairReport;
 use vocara_services::recording_finalizer::RecordingFinalizer;
+use vocara_services::self_update::{Phase, SelfInstall, SelfUpdate};
 use vocara_services::update_check_service::{UpdateCheckService, UpdateStatus};
 
 use super::licenses::{self, LicensesPage};
@@ -89,7 +97,7 @@ use crate::ui::core::widgets::slide::{cupertino, slide, PAGE_TRANSITION};
 use crate::ui::core::widgets::studio_hint::spinner;
 use crate::ui::core::widgets::studio_text::studio_text;
 use crate::ui::core::widgets::toolbar;
-use crate::ui::home::widgets::update_notice::UpdateDownloadDialog;
+use crate::ui::home::widgets::update_notice::{self, UpdateDownloadDialog};
 use crate::ui::snack::{SnackEvent, SnackQueue, SnackStyle, SnackTimer};
 use crate::ui::{Screen, SnackBar, Update};
 use crate::util::to_string_as_fixed;
@@ -121,6 +129,16 @@ pub const DIAGNOSTICS_INTO_APP_STORAGE: &str =
 pub const DIAGNOSTICS_SAVED: &str =
     "Diagnostics saved. The file holds technical logs only, never your audio.";
 pub const DIAGNOSTICS_FAILED: &str = "Could not save the diagnostics file.";
+pub const AUTO_CHECK_NOT_SAVED: &str =
+    "Could not save the update setting. It applies until Vocara quits.";
+
+/// The "Check automatically" row's explanation: what an automatic check
+/// sends, and what it does not.
+pub const AUTO_CHECK_SUBTITLE: &str =
+    "Asks GitHub for a newer Vocara each time it starts. Nothing about your practices is sent.";
+
+/// The "Check automatically" switch (an id to find it by: it has no text).
+pub const AUTO_CHECK_SWITCH: iced::widget::Id = iced::widget::Id::new("settings-auto-check-switch");
 
 /// The banners.
 const PERSIST_FAILED: &str = "Your settings could not be saved to disk. They are in effect now, \
@@ -216,17 +234,48 @@ pub fn version_line() -> String {
     )
 }
 
-/// The Check-for-updates row's one-line status: the last result, or what the
-/// row does before any check has run.
-pub fn update_subtitle(updates: &UpdateCheckService, checking: bool) -> String {
+/// The Check-for-updates row's one-line status: an update under way (its
+/// download's progress, its install, its failure), else the last check's
+/// result, or what the row does before any check has run.
+pub fn update_subtitle(
+    updates: &UpdateCheckService,
+    updater: &SelfUpdate,
+    checking: bool,
+) -> String {
     if checking {
         return "Checking…".to_string();
     }
+    let version = || {
+        updater
+            .version()
+            .or_else(|| updates.available().map(|i| i.version))
+            .unwrap_or_default()
+    };
+    match updater.phase() {
+        Phase::Downloading { done, total } => {
+            return format!(
+                "{} {}",
+                update_notice::downloading_line(&version()),
+                update_notice::progress_line(done, total)
+            );
+        }
+        Phase::Installing | Phase::Relaunching => {
+            return update_notice::installing_line(&version());
+        }
+        Phase::Failed(reason) => return update_notice::failed_line(&reason),
+        Phase::Idle => {}
+    }
     match (updates.status(), updates.available()) {
-        (UpdateStatus::UpdateAvailable, Some(info)) => format!(
-            "Vocara {} is available. Click for the download.",
-            info.version
-        ),
+        (UpdateStatus::UpdateAvailable, Some(info)) => {
+            if matches!(updater.self_install(&info), SelfInstall::Blocked(_)) {
+                format!(
+                    "Vocara {} is available. Click for the download.",
+                    info.version
+                )
+            } else {
+                format!("Vocara {} is available. Click to update.", info.version)
+            }
+        }
         (UpdateStatus::UpToDate, _) => "You have the latest version.".to_string(),
         _ => {
             if updates.last_checked_at().is_none() {
@@ -381,6 +430,13 @@ pub enum Message {
     CheckForUpdates,
     /// The manual check finished.
     UpdatesChecked,
+    /// "Check automatically" switched on or off.
+    SetAutoCheck(bool),
+    /// The answer was written, or why it could not be.
+    AutoCheckSaved(Result<(), String>),
+    /// The check a switch turned on ran (it opens no dialog: the banner and
+    /// the row say what it found).
+    QuietlyChecked,
     /// The update watch's tick (see the module docs).
     UpdateWatch,
     /// The update download dialog closed.
@@ -418,6 +474,7 @@ pub enum Message {
 pub struct SettingsScreen {
     settings: Arc<AppSettingsService>,
     updates: Arc<UpdateCheckService>,
+    updater: Arc<SelfUpdate>,
     library: Arc<Library>,
     finalizer: Arc<RecordingFinalizer>,
     hooks: SettingsHooks,
@@ -484,6 +541,7 @@ impl SettingsScreen {
         let mut screen = SettingsScreen {
             settings: services.app_settings.clone(),
             updates: services.update_check.clone(),
+            updater: services.self_update.clone(),
             library: services.library.clone(),
             finalizer: RecordingFinalizer::instance(),
             hooks,
@@ -641,11 +699,44 @@ impl SettingsScreen {
             return Update::none();
         }
         self.checking_updates = true;
+        self.check_task(Message::UpdatesChecked).into()
+    }
+
+    /// The update check off the UI thread, then `done`. When it finds a
+    /// release, whether this copy can replace itself is found out too
+    /// (`SelfUpdate::prepare`), so the row and the dialog offer "Update now"
+    /// or the release page from the start.
+    fn check_task(&self, done: Message) -> Task<Message> {
         let updates = Arc::clone(&self.updates);
-        Task::perform(crate::util::blocking(move || updates.check()), |_| {
-            Message::UpdatesChecked
-        })
-        .into()
+        let updater = Arc::clone(&self.updater);
+        Task::perform(
+            crate::util::blocking(move || {
+                updates.check();
+                if updates.available().is_some() {
+                    updater.prepare();
+                }
+            }),
+            move |_| done,
+        )
+    }
+
+    /// "Check automatically" switched: kept at once (the switch reads it
+    /// back), written off the UI thread; turned on, a check runs now — what
+    /// the user just agreed to — unless one runs or found a release already.
+    fn set_auto_check(&mut self, enabled: bool) -> Update<Message> {
+        self.updates.set_auto_check(enabled);
+        let updates = Arc::clone(&self.updates);
+        let save = Task::perform(
+            crate::util::blocking(move || updates.save_auto_check().map_err(|e| e.to_string())),
+            |saved| Message::AutoCheckSaved(saved.and_then(|s| s)),
+        );
+        let check = if enabled && !self.update_checking() && self.updates.available().is_none() {
+            self.checking_updates = true;
+            self.check_task(Message::QuietlyChecked)
+        } else {
+            Task::none()
+        };
+        Task::batch([save, check]).into()
     }
 
     fn repair_library(&mut self) -> Update<Message> {
@@ -826,11 +917,23 @@ impl Screen for SettingsScreen {
             Message::UpdatesChecked => {
                 self.checking_updates = false;
                 match self.updates.available() {
-                    Some(info) => Update::dialog(UpdateDownloadDialog::new(info), |_| {
-                        Message::DownloadDialogClosed
-                    }),
+                    Some(info) => Update::dialog(
+                        UpdateDownloadDialog::new(info, Arc::clone(&self.updater)),
+                        |_| Message::DownloadDialogClosed,
+                    ),
                     None => Update::none(),
                 }
+            }
+            Message::SetAutoCheck(enabled) => self.set_auto_check(enabled),
+            Message::AutoCheckSaved(saved) => {
+                if saved.is_err() {
+                    self.show_toast(AUTO_CHECK_NOT_SAVED);
+                }
+                Update::none()
+            }
+            Message::QuietlyChecked => {
+                self.checking_updates = false;
+                Update::none()
             }
             Message::RepairLibrary => self.repair_library(),
             Message::RepairAnswered(confirmed) => self.repair_answered(confirmed),
@@ -1150,10 +1253,12 @@ impl SettingsScreen {
                 action_row(
                     Icon::RefreshCw,
                     "Check for updates",
-                    update_subtitle(&self.updates, checking),
+                    update_subtitle(&self.updates, &self.updater, checking),
                     (!checking).then_some(Message::CheckForUpdates),
                     checking,
                 ),
+                separator(ICON_ROW_INSET),
+                auto_check_row(self.updates.auto_check_enabled()),
                 separator(ICON_ROW_INSET),
                 action_row(
                     Icon::ScrollText,
@@ -1605,6 +1710,30 @@ fn action_row<'a>(
     .spacing(ICON_GAP)
     .align_y(Vertical::Center);
     tappable(container(content).padding(ROW_PADDING), on_tap)
+}
+
+/// "Check automatically": whether Vocara asks GitHub for a newer release
+/// each time it starts — the answer to the question Home asks once
+/// (`UpdateCheckService::auto_check_preference`; unanswered, it reads off).
+/// The headphones row's shape: an icon, the title over its explanation,
+/// and the design's switch at its right.
+fn auto_check_row<'a>(on: bool) -> Element<'a, Message> {
+    container(
+        row![
+            icons::icon(Icon::Clock, 14.0, Studio::TEXT_SECONDARY),
+            titled(
+                "Check automatically".to_string(),
+                AUTO_CHECK_SUBTITLE.to_string(),
+                Studio::TEXT_PRIMARY,
+            ),
+            container(toggle_switch(on, Some(Message::SetAutoCheck(!on)))).id(AUTO_CHECK_SWITCH),
+        ]
+        .spacing(ICON_GAP)
+        .align_y(Vertical::Center),
+    )
+    .width(Length::Fill)
+    .padding(ROW_PADDING)
+    .into()
 }
 
 /// `_InfoRow`: a row that takes no taps (the About block's version line):

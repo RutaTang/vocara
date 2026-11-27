@@ -1,20 +1,35 @@
 //! Whether a newer Vocara exists (port of
-//! `lib/data/services/update_check_service.dart`).
+//! `lib/data/services/update_check_service.dart`), and whether Vocara may
+//! look on its own.
 //!
-//! Checks once per app run automatically and on demand from Settings. This is
-//! the app's one release-time escape hatch: with no update path, nothing
-//! shipped after release would ever reach users.
+//! Checks automatically once per app run, but only once the user has agreed
+//! to ([`UpdateCheckService::auto_check`]): the check contacts GitHub, so an
+//! unanswered question is not consent, and until it is answered no automatic
+//! check runs (Home asks it once, Settings changes the answer). And on demand
+//! from Settings. This is the app's one release-time escape hatch: with no
+//! update path, nothing shipped after release would ever reach users.
+//!
+//! The manifest also names the release's disk image ([`DmgAsset`]: its
+//! address, size and SHA-256), which the self-update (`crate::self_update`)
+//! downloads, checks and installs. A manifest without one (every release
+//! before the self-update, or one whose image entry is unusable) is still a
+//! release on offer: the app then sends the user to its page, as it always
+//! did.
 //!
 //! Failure policy: an update check can never make anything worse. Offline,
 //! 404, TLS trouble, or a malformed manifest all collapse to
 //! [`UpdateStatus::Unknown`] silently (an update already found is kept); only
 //! Settings' manual check shows even a gentle "could not check" line.
 
-use std::sync::Mutex;
+use std::io;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
-use serde_json::Value;
+use serde_json::{Map, Value};
 use vocara_model::diagnostics::DiagnosticsLog;
+
+use crate::app_settings_service::SettingsStorage;
 
 /// The outcome of the most recent update check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,6 +64,51 @@ pub struct UpdateInfo {
     pub url: String,
     /// Release notes, possibly empty.
     pub notes: String,
+    /// The release's disk image, for the self-update; `None` when the
+    /// manifest names none Vocara can use (the release page is then the only
+    /// way).
+    pub dmg: Option<DmgAsset>,
+}
+
+/// The disk image a manifest names: where it is, how big it is, and its
+/// SHA-256.
+///
+/// What these buy is integrity, not trust: a download that is not exactly
+/// `size` bytes with this digest is thrown away, but the manifest is only a
+/// file on a web server, so an image that matches it is still untrusted bytes
+/// until the installer has checked the app inside it against the running
+/// app's own signing identity (`self_update::install`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DmgAsset {
+    /// The image's address: an https release asset of this repository on
+    /// github.com ([`is_release_asset_url`]).
+    pub url: String,
+    /// Its exact size in bytes, at most `self_update::MAX_UPDATE_BYTES`.
+    pub size: u64,
+    /// Its SHA-256.
+    pub sha256: [u8; 32],
+}
+
+impl DmgAsset {
+    /// The digest as the manifest and `SHA256SUMS` write it: 64 lowercase
+    /// hex digits.
+    pub fn sha256_hex(&self) -> String {
+        hex::encode(self.sha256)
+    }
+}
+
+/// What [`UpdateCheckService::auto_check`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutoCheck {
+    /// It already ran this app run.
+    AlreadyRan,
+    /// The user has not said whether Vocara may check on its own: nothing
+    /// was fetched, and the question is due.
+    Unanswered,
+    /// The user said no: nothing was fetched.
+    Declined,
+    /// The manifest was fetched (see [`UpdateCheckService::status`]).
+    Checked,
 }
 
 /// Why a manifest fetch failed (offline, a non-200 status, TLS, timeout).
@@ -80,13 +140,23 @@ pub struct UpdateCheckService {
     current_version: String,
     state: Mutex<State>,
     listeners: Mutex<Vec<Box<dyn Fn() + Send + Sync>>>,
+    /// Where the answer to "check for updates automatically?" is kept
+    /// (`settings/updates.json`); `None` keeps it in memory only (a test's
+    /// service).
+    preference_storage: Option<Arc<dyn SettingsStorage>>,
+    /// That answer as last read or chosen: the outer `None` until it has
+    /// been read, the inner one while the user has not answered.
+    preference: Mutex<Option<Option<bool>>>,
+    /// Whether this run has put the question already (once per run, however
+    /// often Home mounts).
+    consent_asked: AtomicBool,
 }
 
-impl Default for UpdateCheckService {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+/// The document the answer to "check automatically?" is kept in, under the
+/// settings collection, apart from the audio settings' own.
+const PREFERENCE_COLLECTION: &str = "settings";
+const PREFERENCE_DOC: &str = "updates";
+const K_AUTO_CHECK: &str = "autoCheck";
 
 impl UpdateCheckService {
     /// Where the version manifest lives: the `latest.json` the release
@@ -99,6 +169,18 @@ impl UpdateCheckService {
     /// {"latest": "1.1.0", "url": "https://...", "notes": "..."}
     /// ```
     ///
+    /// and, from the self-update on, the release's disk image too:
+    ///
+    /// ```json
+    /// {"latest": "1.1.0", "url": "https://...", "notes": "...",
+    ///  "dmg": {"url": "https://github.com/RutaTang/vocara/releases/download/v1.1.0/Vocara-1.1.0.dmg",
+    ///          "size": 41234567, "sha256": "<64 hex digits>"}}
+    /// ```
+    ///
+    /// (`latest`, `url` and `notes` stay as they were, so the versions
+    /// before the self-update read the new manifest as they read the old
+    /// one, and offer its release page.)
+    ///
     /// The parser also accepts GitHub's own release shape (`tag_name` /
     /// `html_url` / `body`), so this can point at a public repo's
     /// releases/latest API instead without code changes. A test pins this to
@@ -106,22 +188,49 @@ impl UpdateCheckService {
     pub const MANIFEST_URL: &'static str =
         "https://github.com/RutaTang/vocara/releases/latest/download/latest.json";
 
-    /// The running app's version. A test pins it to the workspace package
-    /// version (which the release tag must match), so a release with a
-    /// stale constant fails the test gate instead of shipping an app that
-    /// mis-identifies its own version.
+    /// The repository the releases are published on (release.yml's
+    /// `RELEASES_REPO`; a test pins the two together, and [`MANIFEST_URL`]
+    /// to it): the only repository a manifest's disk image may come from.
+    ///
+    /// [`MANIFEST_URL`]: UpdateCheckService::MANIFEST_URL
+    pub const RELEASES_REPO: &'static str = "RutaTang/vocara";
+
+    /// The version this binary was built as. A test pins it to the workspace
+    /// package version (which the release tag must match), so a release with
+    /// a stale constant fails the test gate instead of shipping an app that
+    /// mis-identifies its own version. What the app compares releases with
+    /// is the RUNNING version, the bundle's own
+    /// (`self_update::current_version`), which falls back to this outside a
+    /// bundle; release.yml checks that the bundle it builds says the same.
     pub const APP_VERSION: &'static str = "0.3.0";
 
     /// The running app's build number: the bundle's `CFBundleVersion`
     /// (`packaging/macos/bundle.sh` reads it here), one more each release.
     pub const APP_BUILD_NUMBER: &'static str = "3";
 
-    /// The production service: HTTP fetch, this build's version.
-    pub fn new() -> Self {
-        Self::with_fetcher(Box::new(fetch_over_http), Self::APP_VERSION)
+    /// The production service: HTTP fetch, compared with the running
+    /// version (`self_update::current_version`: the bundle's), the answer to
+    /// "check automatically?" kept in `preferences` (the app's storage).
+    pub fn new(preferences: Arc<dyn SettingsStorage>) -> Self {
+        Self::with_fetcher(
+            Box::new(fetch_over_http),
+            crate::self_update::current_version(),
+        )
+        .with_preferences(preferences)
     }
 
-    /// A service with an injected fetcher and current version (tests).
+    /// The same service, the answer to "check automatically?" kept in
+    /// `storage` (`settings/updates.json`) and read from it the first time it
+    /// is asked for.
+    pub fn with_preferences(mut self, storage: Arc<dyn SettingsStorage>) -> Self {
+        self.preference_storage = Some(storage);
+        self.preference = Mutex::new(None);
+        self
+    }
+
+    /// A service with an injected fetcher and current version (tests). The
+    /// answer to "check automatically?" is kept in memory, unanswered until
+    /// [`set_auto_check`](UpdateCheckService::set_auto_check).
     pub fn with_fetcher(fetch: UpdateFetcher, current_version: &str) -> Self {
         UpdateCheckService {
             fetch,
@@ -136,7 +245,15 @@ impl UpdateCheckService {
                 unreadable: false,
             }),
             listeners: Mutex::new(Vec::new()),
+            preference_storage: None,
+            preference: Mutex::new(Some(None)),
+            consent_asked: AtomicBool::new(false),
         }
+    }
+
+    /// The version releases are compared with.
+    pub fn current_version(&self) -> &str {
+        &self.current_version
     }
 
     fn state(&self) -> std::sync::MutexGuard<'_, State> {
@@ -213,19 +330,108 @@ impl UpdateCheckService {
     }
 
     /// The once-per-app-run automatic check (home schedules it shortly after
-    /// mounting). Re-entering home later never re-checks; Settings' manual
-    /// [`check`] always does. Blocking: run it off the UI thread.
+    /// mounting), made only when the user agreed to it
+    /// ([`auto_check_preference`]): unanswered, it fetches nothing and says
+    /// the question is due; declined, it fetches nothing. Re-entering home
+    /// later never re-checks; Settings' manual [`check`] always does.
+    /// Blocking (the answer's first read, the fetch): run it off the UI
+    /// thread.
     ///
     /// [`check`]: UpdateCheckService::check
-    pub fn auto_check(&self) {
+    /// [`auto_check_preference`]: UpdateCheckService::auto_check_preference
+    pub fn auto_check(&self) -> AutoCheck {
         {
             let mut s = self.state();
             if s.auto_check_done {
-                return;
+                return AutoCheck::AlreadyRan;
             }
             s.auto_check_done = true;
         }
-        self.check();
+        match self.auto_check_preference() {
+            None => AutoCheck::Unanswered,
+            Some(false) => AutoCheck::Declined,
+            Some(true) => {
+                self.check();
+                AutoCheck::Checked
+            }
+        }
+    }
+
+    /// The answer to "check for updates automatically?": `None` while the
+    /// user has not given one. Read from storage the first time (blocking:
+    /// off the UI thread), from memory after. A document that is there but
+    /// cannot be read is no answer, and is read again next time: taken as
+    /// "no" it would silence the check for good, taken as "yes" it would
+    /// contact GitHub unasked.
+    pub fn auto_check_preference(&self) -> Option<bool> {
+        if let Some(known) = *self.preference_lock() {
+            return known;
+        }
+        let Some(storage) = &self.preference_storage else {
+            return None;
+        };
+        let read = match storage.read(PREFERENCE_COLLECTION, PREFERENCE_DOC) {
+            Ok(document) => document
+                .as_ref()
+                .and_then(|d| d.get(K_AUTO_CHECK))
+                .and_then(Value::as_bool),
+            Err(e) => {
+                DiagnosticsLog::instance()
+                    .log("update", &format!("preference unreadable: {}", e.kind()));
+                return None;
+            }
+        };
+        let mut cached = self.preference_lock();
+        // A choice made while this read ran is newer than what it read.
+        *cached.get_or_insert(read)
+    }
+
+    /// The answer as far as it is known now, without reading storage (for a
+    /// view): `None` while it is unanswered or not yet read.
+    pub fn auto_check_preference_now(&self) -> Option<bool> {
+        self.preference_lock().flatten()
+    }
+
+    /// Whether automatic checks are on, as far as is known now.
+    pub fn auto_check_enabled(&self) -> bool {
+        self.auto_check_preference_now() == Some(true)
+    }
+
+    /// Records the answer at once (the switch and the question read it
+    /// back straight away) and notifies; [`save_auto_check`] then writes it.
+    ///
+    /// [`save_auto_check`]: UpdateCheckService::save_auto_check
+    pub fn set_auto_check(&self, enabled: bool) {
+        *self.preference_lock() = Some(Some(enabled));
+        self.notify_listeners();
+    }
+
+    /// Writes the answer [`set_auto_check`] recorded, so the next launch
+    /// knows it. Blocking: run it off the UI thread. Nothing to write while
+    /// there is no answer, or for a test's service (kept in memory).
+    ///
+    /// [`set_auto_check`]: UpdateCheckService::set_auto_check
+    pub fn save_auto_check(&self) -> io::Result<()> {
+        let Some(Some(enabled)) = *self.preference_lock() else {
+            return Ok(());
+        };
+        let Some(storage) = &self.preference_storage else {
+            return Ok(());
+        };
+        let mut document = Map::new();
+        document.insert(K_AUTO_CHECK.to_string(), Value::Bool(enabled));
+        storage.write(PREFERENCE_COLLECTION, PREFERENCE_DOC, &document)
+    }
+
+    /// True the first time this run asks the question "check for updates
+    /// automatically?", false after: Home asks it once per run, however
+    /// often it is mounted, and only while it is unanswered.
+    pub fn claim_consent_question(&self) -> bool {
+        !self.consent_asked.swap(true, Ordering::SeqCst)
+    }
+
+    fn preference_lock(&self) -> std::sync::MutexGuard<'_, Option<Option<bool>>> {
+        self.preference.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Fetches and parses the manifest, then updates [`status`] /
@@ -303,6 +509,11 @@ impl UpdateCheckService {
     /// user on raw JSON with no installer in sight. A hand-hosted manifest
     /// has no `html_url`, so it still falls through to `url`.
     ///
+    /// The disk image (`dmg`) is optional and judged on its own
+    /// ([`parse_dmg`]): an entry Vocara cannot use leaves the release on offer
+    /// without it (its page is then the way to it), rather than taking the
+    /// whole offer away.
+    ///
     /// [`is_newer`]: UpdateCheckService::is_newer
     pub fn parse_manifest(body: &str) -> Option<UpdateInfo> {
         let decoded: Value = serde_json::from_str(body).ok()?;
@@ -324,15 +535,11 @@ impl UpdateCheckService {
             .and_then(Value::as_str)
             .map(|n| n.trim().to_string())
             .unwrap_or_default();
-        let v = version.trim();
-        let v = v
-            .strip_prefix('v')
-            .or_else(|| v.strip_prefix('V'))
-            .unwrap_or(v);
         Some(UpdateInfo {
-            version: v.to_string(),
+            version: normalize_version(version),
             url: trimmed.to_string(),
             notes,
+            dmg: map.get("dmg").and_then(parse_dmg),
         })
     }
 
@@ -372,6 +579,94 @@ impl UpdateCheckService {
         }
         dash.is_some() // equal cores: the GA beats its own prerelease
     }
+
+    /// True when `a` and `b` are both readable versions and neither is newer
+    /// than the other under [`is_newer`]'s order (`1.2` and `v1.2.0` are the
+    /// same version). What the installer asks of an update image: that it
+    /// holds exactly the release the user was offered.
+    ///
+    /// [`is_newer`]: UpdateCheckService::is_newer
+    pub fn same_version(a: &str, b: &str) -> bool {
+        parse_version(a).is_some()
+            && parse_version(b).is_some()
+            && !Self::is_newer(a, b)
+            && !Self::is_newer(b, a)
+    }
+}
+
+/// `version` as the app shows it: trimmed, its leading `v` dropped.
+pub fn normalize_version(version: &str) -> String {
+    let v = version.trim();
+    v.strip_prefix('v')
+        .or_else(|| v.strip_prefix('V'))
+        .unwrap_or(v)
+        .to_string()
+}
+
+/// A manifest's `dmg` entry, or `None` when Vocara cannot use it: not an
+/// object; a `url` that is not one of this repository's release assets
+/// ([`is_release_asset_url`]); a `size` that is not a whole number of bytes
+/// from 1 to `self_update::MAX_UPDATE_BYTES`; a `sha256` that is not 64 hex
+/// digits. Each is refused rather than repaired: the image is what the
+/// self-update downloads and installs, and a manifest that gets any of it
+/// wrong is not one to act on.
+pub fn parse_dmg(value: &Value) -> Option<DmgAsset> {
+    let entry = value.as_object()?;
+    let url = entry.get("url")?.as_str()?.trim();
+    if !is_release_asset_url(url) {
+        return None;
+    }
+    let size = entry.get("size")?.as_u64()?;
+    if size == 0 || size > crate::self_update::MAX_UPDATE_BYTES {
+        return None;
+    }
+    let digest = entry.get("sha256")?.as_str()?.trim();
+    if digest.len() != 64 {
+        return None;
+    }
+    let mut sha256 = [0u8; 32];
+    hex::decode_to_slice(digest, &mut sha256).ok()?;
+    Some(DmgAsset {
+        url: url.to_string(),
+        size,
+        sha256,
+    })
+}
+
+/// Whether `url` is a release asset of [`UpdateCheckService::RELEASES_REPO`]
+/// on github.com, as release.yml writes one:
+/// `https://github.com/RutaTang/vocara/releases/download/<tag>/<name>.dmg`.
+///
+/// Judged strictly on the text, because it is the text that gets fetched:
+/// no user info, no port, no query or fragment, no percent escapes (a
+/// `%2e%2e` segment passes a prefix test and resolves elsewhere), exactly
+/// two plain segments after `download/` (letters, digits, `.`, `_`, `-`,
+/// `+`; never `.` or `..`). It is not what makes an update safe — the
+/// installer checks whatever arrives — but it keeps Vocara from being told
+/// to fetch half a gigabyte from an arbitrary host in the first place.
+/// GitHub then redirects the download to its own storage host, over https
+/// only (`self_update::download`).
+pub fn is_release_asset_url(url: &str) -> bool {
+    let prefix = format!(
+        "https://github.com/{}/releases/download/",
+        UpdateCheckService::RELEASES_REPO
+    );
+    let Some(rest) = url.strip_prefix(&prefix) else {
+        return false;
+    };
+    let mut segments = rest.split('/');
+    let (Some(tag), Some(name), None) = (segments.next(), segments.next(), segments.next()) else {
+        return false;
+    };
+    let plain = |segment: &str| {
+        !segment.is_empty()
+            && segment != "."
+            && segment != ".."
+            && segment
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'+'))
+    };
+    plain(tag) && plain(name) && name.len() > ".dmg".len() && name.ends_with(".dmg")
 }
 
 /// Dart's `Uri.tryParse(url)` then `scheme == 'https' && host.isNotEmpty`
@@ -395,7 +690,7 @@ fn is_https_with_host(url: &str) -> bool {
 
 /// A dotted-numeric version with an optional leading `v` and `+build`, or
 /// `None`. Digits only: Dart's `int.tryParse` also takes "0x1" and " 2".
-fn parse_version(raw: &str) -> Option<Vec<u64>> {
+pub(crate) fn parse_version(raw: &str) -> Option<Vec<u64>> {
     let mut s = raw.trim();
     if let Some(rest) = s.strip_prefix('v').or_else(|| s.strip_prefix('V')) {
         s = rest;
@@ -720,23 +1015,260 @@ mod tests {
         assert_eq!(notifications.load(Ordering::SeqCst), 2);
     }
 
-    #[test]
-    fn auto_check_fetches_exactly_once_per_app_run_and_a_manual_check_still_works() {
-        let fetches = Arc::new(AtomicUsize::new(0));
+    fn counting(fetches: &Arc<AtomicUsize>) -> UpdateCheckService {
         let f = fetches.clone();
-        let s = UpdateCheckService::with_fetcher(
+        UpdateCheckService::with_fetcher(
             Box::new(move |_| {
                 f.fetch_add(1, Ordering::SeqCst);
                 Ok(r#"{"latest": "1.0.0", "url": "https://example.com"}"#.to_string())
             }),
             "1.0.0",
-        );
-        s.auto_check();
-        s.auto_check();
-        s.auto_check();
+        )
+    }
+
+    #[test]
+    fn auto_check_fetches_exactly_once_per_app_run_and_a_manual_check_still_works() {
+        let fetches = Arc::new(AtomicUsize::new(0));
+        let s = counting(&fetches);
+        s.set_auto_check(true);
+        assert_eq!(s.auto_check(), AutoCheck::Checked);
+        assert_eq!(s.auto_check(), AutoCheck::AlreadyRan);
+        assert_eq!(s.auto_check(), AutoCheck::AlreadyRan);
         assert_eq!(fetches.load(Ordering::SeqCst), 1);
         s.check();
         assert_eq!(fetches.load(Ordering::SeqCst), 2);
+    }
+
+    /// Unanswered is not consent: the automatic check contacts nobody until
+    /// the user said yes, and says the question is due; a no is a no.
+    #[test]
+    fn the_automatic_check_waits_for_consent() {
+        let fetches = Arc::new(AtomicUsize::new(0));
+        let unanswered = counting(&fetches);
+        assert_eq!(unanswered.auto_check_preference(), None);
+        assert!(!unanswered.auto_check_enabled());
+        assert_eq!(unanswered.auto_check(), AutoCheck::Unanswered);
+        let declined = counting(&fetches);
+        declined.set_auto_check(false);
+        assert_eq!(declined.auto_check(), AutoCheck::Declined);
+        assert_eq!(
+            fetches.load(Ordering::SeqCst),
+            0,
+            "no network without a yes"
+        );
+        // The question is put once per run.
+        assert!(unanswered.claim_consent_question());
+        assert!(!unanswered.claim_consent_question());
+        // A manual check is the user's own asking.
+        unanswered.check();
+        assert_eq!(fetches.load(Ordering::SeqCst), 1);
+    }
+
+    /// The settings document a test keeps in memory, failing its reads or
+    /// writes on demand.
+    #[derive(Default)]
+    struct Documents {
+        docs: Mutex<std::collections::HashMap<String, Map<String, Value>>>,
+        unreadable: AtomicBool,
+        reads: AtomicUsize,
+    }
+
+    impl SettingsStorage for Documents {
+        fn read(&self, collection: &str, id: &str) -> io::Result<Option<Map<String, Value>>> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            if self.unreadable.load(Ordering::SeqCst) {
+                return Err(io::Error::other("locked"));
+            }
+            Ok(self
+                .docs
+                .lock()
+                .unwrap()
+                .get(&format!("{collection}/{id}"))
+                .cloned())
+        }
+
+        fn write(&self, collection: &str, id: &str, json: &Map<String, Value>) -> io::Result<()> {
+            self.docs
+                .lock()
+                .unwrap()
+                .insert(format!("{collection}/{id}"), json.clone());
+            Ok(())
+        }
+    }
+
+    fn kept_in(documents: &Arc<Documents>) -> UpdateCheckService {
+        UpdateCheckService::with_fetcher(Box::new(|_| Err(FetchError("offline".into()))), "1.0.0")
+            .with_preferences(documents.clone())
+    }
+
+    /// The answer is kept in `settings/updates.json`, read once, and survives
+    /// a restart; an unreadable document is no answer, and is read again.
+    #[test]
+    fn the_answer_is_kept_across_runs() {
+        let documents = Arc::new(Documents::default());
+        let first = kept_in(&documents);
+        assert_eq!(first.auto_check_preference_now(), None, "not read yet");
+        assert_eq!(first.auto_check_preference(), None);
+        assert_eq!(first.auto_check_preference(), None);
+        assert_eq!(documents.reads.load(Ordering::SeqCst), 1, "read once");
+        first.set_auto_check(true);
+        assert!(first.auto_check_enabled(), "at once, before it is written");
+        first.save_auto_check().unwrap();
+        let written = documents
+            .docs
+            .lock()
+            .unwrap()
+            .get("settings/updates")
+            .cloned();
+        assert_eq!(written.unwrap().get("autoCheck"), Some(&Value::Bool(true)));
+
+        let next_run = kept_in(&documents);
+        assert_eq!(next_run.auto_check_preference(), Some(true));
+        next_run.set_auto_check(false);
+        next_run.save_auto_check().unwrap();
+        assert_eq!(kept_in(&documents).auto_check_preference(), Some(false));
+
+        documents.unreadable.store(true, Ordering::SeqCst);
+        let locked = kept_in(&documents);
+        assert_eq!(locked.auto_check_preference(), None);
+        documents.unreadable.store(false, Ordering::SeqCst);
+        assert_eq!(locked.auto_check_preference(), Some(false), "read again");
+    }
+
+    /// Choosing notifies, so the Settings switch and the Home question read
+    /// it back at once.
+    #[test]
+    fn choosing_notifies() {
+        let s = counting(&Arc::new(AtomicUsize::new(0)));
+        let heard = Arc::new(AtomicUsize::new(0));
+        let h = heard.clone();
+        s.add_listener(Box::new(move || {
+            h.fetch_add(1, Ordering::SeqCst);
+        }));
+        s.set_auto_check(true);
+        assert_eq!(heard.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            s.save_auto_check().map_err(|e| e.to_string()),
+            Ok(()),
+            "memory only"
+        );
+    }
+
+    // group('the release image')
+
+    const SHA: &str = "4f1e9b5a3c2d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f";
+
+    fn with_dmg(dmg: &str) -> String {
+        format!(
+            r#"{{"latest": "0.4.0", "url": "https://github.com/RutaTang/vocara/releases/tag/v0.4.0", "notes": "Fixes.", "dmg": {dmg}}}"#
+        )
+    }
+
+    /// The new manifest names the image: its address, size and digest.
+    #[test]
+    fn the_new_manifest_names_its_image() {
+        let body = with_dmg(&format!(
+            r#"{{"url": "https://github.com/RutaTang/vocara/releases/download/v0.4.0/Vocara-0.4.0.dmg", "size": 41234567, "sha256": "{SHA}"}}"#
+        ));
+        let info = UpdateCheckService::parse_manifest(&body).unwrap();
+        assert_eq!(info.version, "0.4.0");
+        assert_eq!(
+            info.url,
+            "https://github.com/RutaTang/vocara/releases/tag/v0.4.0"
+        );
+        let dmg = info.dmg.expect("the image");
+        assert_eq!(
+            dmg.url,
+            "https://github.com/RutaTang/vocara/releases/download/v0.4.0/Vocara-0.4.0.dmg"
+        );
+        assert_eq!(dmg.size, 41234567);
+        assert_eq!(dmg.sha256_hex(), SHA);
+        // An upper-case digest is the same digest.
+        let upper = body.replace(SHA, &SHA.to_uppercase());
+        assert_eq!(
+            UpdateCheckService::parse_manifest(&upper)
+                .unwrap()
+                .dmg
+                .unwrap()
+                .sha256_hex(),
+            SHA
+        );
+    }
+
+    /// The old shape (every release before the self-update) is still a
+    /// release on offer, with no image: its page is the way.
+    #[test]
+    fn the_old_manifest_is_still_an_offer_without_an_image() {
+        let info = UpdateCheckService::parse_manifest(
+            r#"{"latest": "0.3.0", "url": "https://github.com/RutaTang/vocara/releases/tag/v0.3.0", "notes": "n"}"#,
+        )
+        .unwrap();
+        assert_eq!(info.dmg, None);
+        assert_eq!(info.version, "0.3.0");
+    }
+
+    /// An image entry Vocara cannot use leaves the offer, without the image:
+    /// another host or repository, plain http, escapes and dot segments, a
+    /// port or user info, a query, no `.dmg`; a size of nothing or past the
+    /// cap, or not a whole number; a digest that is not 64 hex digits.
+    #[test]
+    fn an_unusable_image_entry_leaves_the_offer_without_it() {
+        let good_url =
+            "https://github.com/RutaTang/vocara/releases/download/v0.4.0/Vocara-0.4.0.dmg";
+        let entry = |url: &str, size: &str, sha: &str| {
+            with_dmg(&format!(
+                r#"{{"url": "{url}", "size": {size}, "sha256": "{sha}"}}"#
+            ))
+        };
+        let mut bodies = Vec::new();
+        for url in [
+            "http://github.com/RutaTang/vocara/releases/download/v0.4.0/Vocara-0.4.0.dmg",
+            "https://evil.example/RutaTang/vocara/releases/download/v0.4.0/Vocara-0.4.0.dmg",
+            "https://github.com.evil.example/RutaTang/vocara/releases/download/v0.4.0/V.dmg",
+            "https://github.com@evil.example/RutaTang/vocara/releases/download/v0.4.0/V.dmg",
+            "https://github.com:8443/RutaTang/vocara/releases/download/v0.4.0/V.dmg",
+            "https://github.com/someone/else/releases/download/v0.4.0/Vocara-0.4.0.dmg",
+            "https://github.com/RutaTang/vocara/releases/download/%2e%2e/%2e%2e/x/y.dmg",
+            "https://github.com/RutaTang/vocara/releases/download/../../../x/releases/download/v1/V.dmg",
+            "https://github.com/RutaTang/vocara/releases/download/v0.4.0/../V.dmg",
+            "https://github.com/RutaTang/vocara/releases/download/v0.4.0/Vocara-0.4.0.dmg?x=1",
+            "https://github.com/RutaTang/vocara/releases/download/v0.4.0/Vocara-0.4.0.dmg#x",
+            "https://github.com/RutaTang/vocara/releases/download/v0.4.0/Vocara-0.4.0.zip",
+            "https://github.com/RutaTang/vocara/releases/download/v0.4.0/.dmg",
+            "https://github.com/RutaTang/vocara/releases/download/Vocara-0.4.0.dmg",
+            "https://github.com/RutaTang/vocara/releases/download/v0.4.0/a/Vocara-0.4.0.dmg",
+            "https://github.com/RutaTang/vocara/releases/download/v0.4.0/Vocara 0.4.0.dmg",
+            "file:///Applications/vocara.app",
+        ] {
+            assert!(!is_release_asset_url(url), "{url}");
+            bodies.push(entry(url, "100", SHA));
+        }
+        for size in ["0", "-1", "1.5", "\"100\"", "536870913", "null"] {
+            bodies.push(entry(good_url, size, SHA));
+        }
+        for sha in [&SHA[1..], "zz", &format!("{}g", &SHA[1..]), ""] {
+            bodies.push(entry(good_url, "100", sha));
+        }
+        bodies.push(with_dmg(r#""https://github.com/x.dmg""#));
+        bodies.push(with_dmg("null"));
+        for body in bodies {
+            let info = UpdateCheckService::parse_manifest(&body).expect(&body);
+            assert_eq!(info.dmg, None, "{body}");
+            assert_eq!(info.version, "0.4.0");
+        }
+        assert!(is_release_asset_url(good_url));
+        assert!(is_release_asset_url(
+            "https://github.com/RutaTang/vocara/releases/download/v1.0.0-rc.1/Vocara-1.0.0-rc.1.dmg"
+        ));
+    }
+
+    #[test]
+    fn the_same_version_is_the_same_however_spelled() {
+        assert!(UpdateCheckService::same_version("1.2", "v1.2.0"));
+        assert!(UpdateCheckService::same_version("0.4.0", "0.4.0"));
+        assert!(!UpdateCheckService::same_version("0.4.1", "0.4.0"));
+        assert!(!UpdateCheckService::same_version("next", "next"));
+        assert!(!UpdateCheckService::same_version("1.0.0-rc.1", "1.0.0"));
     }
 
     #[test]

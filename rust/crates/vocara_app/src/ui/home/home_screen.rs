@@ -16,6 +16,17 @@
 //! double-tap guard, the delete queue, the failure toast, and the update
 //! auto-check timer.
 //!
+//! The update auto-check runs only with the user's consent: unanswered, the
+//! question "Check for Vocara updates automatically?" is asked instead,
+//! once per run, and only once Home is on top with nothing opening (put while
+//! a practice was open, it would land over a take being recorded). The
+//! answer is kept (`UpdateCheckService::save_auto_check`), and Settings
+//! changes it. What stays local runs at mount whatever the answer: a swap
+//! that failed after the last run quit for it is reported, and stale
+//! downloads are swept (`SelfUpdate::startup`). The banner is the
+//! self-update's face (`widgets::update_notice`): "Update now", its
+//! download, its install, its failure.
+//!
 //! Dart's timers (`Timer`, `Future.delayed`) are [`Timer`]s here: the screen
 //! lists the delays it is waiting out and [`Screen::subscription`] runs each
 //! as a one-shot subscription, so the page leaving the stack cancels them,
@@ -54,7 +65,8 @@ use iced::{Color, Element, Length, Padding, Subscription, Task, Theme};
 use vocara_model::models::practice_summary::{PracticePreview, PracticeSummary};
 use vocara_model::util::dart_date_time::DateTime;
 use vocara_services::recording_finalizer::RecordingFinalizer;
-use vocara_services::update_check_service::UpdateCheckService;
+use vocara_services::self_update::SelfUpdate;
+use vocara_services::update_check_service::{AutoCheck, UpdateCheckService};
 use vocara_store::repositories::SongPracticeRepository;
 use vocara_store::sync::sync_engine::RemoteApplied;
 
@@ -83,6 +95,23 @@ use crate::ui::{Screen, SnackBar, Update};
 /// How long after home mounts the once-per-run update auto-check fires: a
 /// beat later, so it never competes with first paint.
 pub const UPDATE_CHECK_DELAY: Duration = Duration::from_secs(5);
+
+/// How long Home must have been on top, with nothing opening, before it
+/// asks whether to check for updates automatically (the question is due
+/// once the auto-check found it unanswered).
+pub const CONSENT_DELAY: Duration = Duration::from_secs(1);
+
+/// The question, its explanation and its answers.
+pub const CONSENT_TITLE: &str = "Check for Vocara updates automatically?";
+pub const CONSENT_BODY: &str = "Vocara can ask GitHub for a newer release each time it starts. \
+     Nothing about your practices is sent. You can change this, and check for updates yourself, \
+     in Settings at any time.";
+pub const CONSENT_YES: &str = "Check automatically";
+pub const CONSENT_NO: &str = "Don't check";
+
+/// The toast when the answer could not be kept.
+pub const CONSENT_NOT_SAVED: &str =
+    "Your update choice could not be saved. Vocara will ask again next time.";
 
 /// How long the "Loading practice" dialog holds before the push (so it
 /// never just flashes).
@@ -114,6 +143,9 @@ const DELETE_FAILED: &str = "Could not delete the practice. Please try again.";
 pub enum Timer {
     /// The update auto-check, [`UPDATE_CHECK_DELAY`] after mount.
     UpdateCheck,
+    /// The question whether to check automatically, [`CONSENT_DELAY`] after
+    /// it became due — run only while Home is on top with nothing opening.
+    Consent,
     /// The opening dialog's hold before open `n` pushes its practice.
     Opening(u64),
 }
@@ -123,6 +155,7 @@ impl Timer {
     pub fn delay(self) -> Duration {
         match self {
             Timer::UpdateCheck => UPDATE_CHECK_DELAY,
+            Timer::Consent => CONSENT_DELAY,
             Timer::Opening(_) => OPENING_HOLD,
         }
     }
@@ -131,6 +164,7 @@ impl Timer {
     pub fn message(self) -> Message {
         match self {
             Timer::UpdateCheck => Message::UpdateCheckDue,
+            Timer::Consent => Message::ConsentDue,
             Timer::Opening(n) => Message::OpeningElapsed(n),
         }
     }
@@ -168,8 +202,18 @@ pub enum Message {
     RemoteApplied(RemoteApplied),
     /// Time for the update auto-check.
     UpdateCheckDue,
-    /// The auto-check finished: the banner reads its outcome.
-    UpdateChecked,
+    /// The auto-check finished (or found no answer to whether it may run):
+    /// the banner reads its outcome.
+    UpdateChecked(AutoCheck),
+    /// Time to ask whether to check for updates automatically.
+    ConsentDue,
+    /// The question was answered: whether to check automatically.
+    ConsentAnswered(bool),
+    /// The answer was written, or why it could not be.
+    ConsentSaved(Result<(), String>),
+    /// The self-update's start-up work is done (a failed swap reported,
+    /// stale downloads swept).
+    UpdaterStarted,
     /// The update banner's buttons.
     Banner(update_notice::Message),
     /// The update download dialog closed.
@@ -205,6 +249,7 @@ pub struct HomeScreen {
     /// them lands).
     previews: HashMap<String, PracticePreview>,
     updates: Arc<UpdateCheckService>,
+    updater: Arc<SelfUpdate>,
     remote_applied: Arc<RemoteAppliedBroadcast>,
     finalizer: Arc<RecordingFinalizer>,
 
@@ -220,6 +265,11 @@ pub struct HomeScreen {
     /// makes repeat mounts a no-op; this timer only spaces out the first
     /// one.
     update_check_pending: bool,
+
+    /// The question whether to check for updates automatically is due (the
+    /// auto-check found it unanswered): asked once Home is on top with
+    /// nothing opening ([`Timer::Consent`]).
+    consent_pending: bool,
 
     /// The failure toasts (one at a time: each replaces the one up).
     snacks: SnackQueue,
@@ -263,7 +313,8 @@ fn run_all(effects: impl IntoIterator<Item = Option<Effect>>) -> Task<Message> {
 
 impl HomeScreen {
     /// The home page over the app's services: its view model starts the
-    /// first list read at once, and the update auto-check timer starts.
+    /// first list read at once, the self-update's start-up work runs (once
+    /// per run, off the UI thread), and the update auto-check timer starts.
     pub fn new(services: &Services) -> (Self, Task<Message>) {
         let (vm, first) = HomeViewModel::new(services.song_repo.clone());
         let screen = HomeScreen {
@@ -271,17 +322,23 @@ impl HomeScreen {
             repository: services.song_repo.clone(),
             previews: HashMap::new(),
             updates: services.update_check.clone(),
+            updater: services.self_update.clone(),
             remote_applied: services.library.remote_applied.clone(),
             finalizer: RecordingFinalizer::instance(),
             opening: None,
             opens: 0,
             update_check_pending: true,
+            consent_pending: false,
             snacks: SnackQueue::new(),
             loading: None,
             now: Instant::now(),
             queued_deletes: VecDeque::new(),
         };
-        (screen, run(first))
+        let updater = Arc::clone(&screen.updater);
+        let startup = Task::perform(crate::util::blocking(move || updater.startup()), |_| {
+            Message::UpdaterStarted
+        });
+        (screen, Task::batch([run(first), startup]))
     }
 
     /// The view model.
@@ -294,6 +351,9 @@ impl HomeScreen {
         let mut timers = Vec::new();
         if self.update_check_pending {
             timers.push(Timer::UpdateCheck);
+        }
+        if self.consent_pending && self.opening.is_none() {
+            timers.push(Timer::Consent);
         }
         if let Some(o) = self.opening.as_ref().filter(|o| o.dialog) {
             timers.push(Timer::Opening(o.seq));
@@ -357,6 +417,33 @@ impl HomeScreen {
             effects.push(self.vm.clear_delete_result());
         }
         effects
+    }
+
+    /// The update check, off the UI thread: the automatic one (`auto`: only
+    /// with the user's consent, once per run) or the one a yes to the
+    /// question just asked for. When it finds a release, whether this copy
+    /// can replace itself is found out too (`SelfUpdate::prepare`, which on
+    /// a Mac runs `codesign`), so the banner offers "Update now" or the
+    /// release page from the start.
+    fn check(&self, auto: bool) -> Task<Message> {
+        let updates = Arc::clone(&self.updates);
+        let updater = Arc::clone(&self.updater);
+        Task::perform(
+            crate::util::blocking(move || {
+                let outcome = if auto {
+                    updates.auto_check()
+                } else {
+                    updates.check();
+                    AutoCheck::Checked
+                };
+                if updates.available().is_some() {
+                    updater.prepare();
+                }
+                outcome
+            }),
+            // A panic in the check said nothing either.
+            |outcome| Message::UpdateChecked(outcome.unwrap_or(AutoCheck::Checked)),
+        )
     }
 
     /// Replaces any toast on screen with `message` (`clearSnackBars`, then
@@ -522,19 +609,63 @@ impl Screen for HomeScreen {
                     return Update::none();
                 }
                 self.update_check_pending = false;
-                // Fire-and-forget: the check is non-blocking and swallows
-                // every failure.
-                let updates = Arc::clone(&self.updates);
-                Task::perform(crate::util::blocking(move || updates.auto_check()), |_| {
-                    Message::UpdateChecked
-                })
-                .into()
+                // The check swallows every failure; it contacts nothing
+                // unless the user agreed (`AutoCheck`).
+                self.check(true).into()
             }
-            Message::UpdateChecked | Message::DownloadDialogClosed => Update::none(),
-            Message::Banner(message) => match update_notice::update(&self.updates, message) {
-                Some(dialog) => Update::dialog(dialog, |_| Message::DownloadDialogClosed),
-                None => Update::none(),
-            },
+            Message::UpdateChecked(AutoCheck::Unanswered) => {
+                // Once per run, however often Home mounts.
+                self.consent_pending = self.updates.claim_consent_question();
+                Update::none()
+            }
+            Message::UpdateChecked(_) | Message::DownloadDialogClosed | Message::UpdaterStarted => {
+                Update::none()
+            }
+            Message::ConsentDue => {
+                if !std::mem::take(&mut self.consent_pending) {
+                    return Update::none();
+                }
+                Update::dialog(
+                    ConfirmDialog::new(CONSENT_TITLE)
+                        .body(CONSENT_BODY)
+                        .confirm_label(CONSENT_YES)
+                        .cancel_label(CONSENT_NO)
+                        .destructive(false)
+                        .icon(Icon::RefreshCw),
+                    |result| Message::ConsentAnswered(result.confirmed()),
+                )
+            }
+            Message::ConsentAnswered(enabled) => {
+                // Kept at once (Settings' switch reads it), written off the
+                // UI thread; a yes checks now — what the user just agreed
+                // to, and the check this run passed on.
+                self.updates.set_auto_check(enabled);
+                let updates = Arc::clone(&self.updates);
+                let save = Task::perform(
+                    crate::util::blocking(move || {
+                        updates.save_auto_check().map_err(|e| e.to_string())
+                    }),
+                    |saved| Message::ConsentSaved(saved.and_then(|s| s)),
+                );
+                let check = if enabled {
+                    self.check(false)
+                } else {
+                    Task::none()
+                };
+                Task::batch([save, check]).into()
+            }
+            Message::ConsentSaved(saved) => {
+                if saved.is_err() {
+                    self.show_error(CONSENT_NOT_SAVED);
+                }
+                Update::none()
+            }
+            Message::Banner(message) => {
+                match update_notice::update(&self.updates, &self.updater, message) {
+                    Some(dialog) => Update::dialog(dialog, |_| Message::DownloadDialogClosed),
+                    None => Update::none(),
+                }
+            }
             Message::SnackExpired(seq) => {
                 self.snacks.expired(seq, Instant::now());
                 Update::none()
@@ -560,7 +691,7 @@ impl Screen for HomeScreen {
     fn view(&self) -> Element<'_, Message> {
         let page = column![
             self.header(),
-            update_notice_banner(&self.updates).map(Message::Banner),
+            update_notice_banner(&self.updates, &self.updater).map(Message::Banner),
             container(self.body())
                 .width(Length::Fill)
                 .height(Length::Fill),
@@ -581,10 +712,13 @@ impl Screen for HomeScreen {
         layers.into()
     }
 
-    fn subscription(&self, _on_top: bool) -> Subscription<Message> {
+    fn subscription(&self, on_top: bool) -> Subscription<Message> {
         let mut subscriptions: Vec<Subscription<Message>> = self
             .timers()
             .into_iter()
+            // The question waits for Home to be on top: put over a practice,
+            // it would land on a take being recorded.
+            .filter(|timer| on_top || *timer != Timer::Consent)
             .map(|timer| Subscription::run_with(timer, timer_stream))
             .collect();
         subscriptions.push(self.snacks.subscription().map(snack_message));

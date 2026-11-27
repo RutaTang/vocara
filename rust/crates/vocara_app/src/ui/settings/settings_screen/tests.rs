@@ -830,6 +830,7 @@ fn a_check_started_elsewhere_shows_as_checking_until_it_ends() {
         }),
         "1.0.0",
     ));
+    updates.set_auto_check(true);
     let mut page = Setup::new().updates(updates.clone()).mount();
     let elsewhere = {
         let updates = updates.clone();
@@ -851,6 +852,120 @@ fn a_check_started_elsewhere_shows_as_checking_until_it_ends() {
     assert!(!page.screen.watches_update_check());
     page.send(Message::UpdateWatch);
     assert!(page.shows("You have the latest version."));
+}
+
+/// "Check automatically" reads the answer Home asked for (off until it is
+/// given), keeps a new one at once and writes it; turned on, it checks
+/// right away, quietly — no dialog: the row and the banner say what it
+/// found.
+#[test]
+fn check_automatically_is_a_switch_that_keeps_its_answer() {
+    let fetches = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&fetches);
+    let updates = Arc::new(UpdateCheckService::with_fetcher(
+        Box::new(move |_| {
+            counted.fetch_add(1, Ordering::SeqCst);
+            Ok(r#"{"latest": "9.9.9", "url": "https://example.com/dl"}"#.to_string())
+        }),
+        "1.0.0",
+    ));
+    let mut page = Setup::new().updates(updates.clone()).mount();
+    assert!(page.shows("Check automatically"));
+    assert!(page.shows(AUTO_CHECK_SUBTITLE));
+    assert_eq!(updates.auto_check_preference(), None, "unanswered: off");
+
+    page.click_id(AUTO_CHECK_SWITCH);
+    assert_eq!(updates.auto_check_preference(), Some(true));
+    assert_eq!(fetches.load(Ordering::SeqCst), 1, "checked right away");
+    assert!(page.dialog.is_none(), "quietly");
+    assert!(page.shows("Vocara 9.9.9 is available. Click for the download."));
+    assert!(page.screen.toast().is_none());
+
+    // Off: kept, and nothing more is fetched.
+    page.click_id(AUTO_CHECK_SWITCH);
+    assert_eq!(updates.auto_check_preference(), Some(false));
+    assert_eq!(fetches.load(Ordering::SeqCst), 1);
+}
+
+/// The answer the switch keeps lands in the settings folder, for the next
+/// launch to read.
+#[test]
+fn the_switch_writes_its_answer_for_the_next_launch() {
+    let mut page = Setup::new().mount();
+    let storage = page.services.local_storage.clone();
+    // Kept in the app's storage, as the app's service keeps it (offline
+    // here: no test contacts the network).
+    let kept_in_storage = || {
+        UpdateCheckService::with_fetcher(Box::new(|_| Err(FetchError("offline".into()))), "1.0.0")
+            .with_preferences(storage.clone())
+    };
+    let updates = Arc::new(kept_in_storage());
+    page.screen.updates = Arc::clone(&updates);
+    page.services.update_check = Arc::clone(&updates);
+    page.click_id(AUTO_CHECK_SWITCH);
+    let written = storage
+        .read("settings", "updates")
+        .expect("readable")
+        .expect("written");
+    assert_eq!(written.get("autoCheck"), Some(&Value::Bool(true)));
+    assert_eq!(kept_in_storage().auto_check_preference(), Some(true));
+}
+
+/// While an update runs, the row follows it: the download's progress, the
+/// install, a failure.
+#[test]
+fn the_row_follows_an_update_under_way() {
+    use crate::ui::home::widgets::update_notice::testing::{image, release, updates};
+    use vocara_services::self_update::Phase;
+    let fake = updates(true);
+    let mut page = Setup::new().mount();
+    page.screen.updater = fake.updater.clone();
+    fake.updater.prepare();
+    fake.updater.start(&release(Some(&image())));
+    fake.let_through(1);
+    fake.wait_for(&Phase::Downloading {
+        done: 1000,
+        total: 2500,
+    });
+    assert!(page.shows("Downloading Vocara 9.9.9… 1 kB of 3 kB"));
+    fake.let_through(3);
+    fake.settle();
+    assert!(page.shows("Installing Vocara 9.9.9… Vocara will relaunch."));
+
+    let failing = updates(false);
+    *failing.installer.fails_with.lock().unwrap() = Some("the disk is full".into());
+    page.screen.updater = failing.updater.clone();
+    failing.updater.start(&release(Some(&image())));
+    failing.settle();
+    assert!(page.shows("Update failed: the disk is full"));
+}
+
+/// A release with its image, on a copy that can replace itself: the row
+/// says a click updates, and the dialog the check opens offers "Update now".
+#[test]
+fn a_release_vocara_can_install_itself_is_offered_as_an_update() {
+    use crate::ui::home::widgets::update_notice::testing::{image, manifest, updates};
+    let body = manifest("9.9.9", "Better vibrato analysis.", Some(&image()));
+    let checks = Arc::new(UpdateCheckService::with_fetcher(
+        Box::new(move |_| Ok(body.clone())),
+        "1.0.0",
+    ));
+    let fake = updates(false);
+    let mut page = Setup::new().updates(checks).mount();
+    page.screen.updater = fake.updater.clone();
+    page.click("Check for updates");
+    assert!(page.shows("Vocara 9.9.9 is available. Click to update."));
+    let Some(DialogRequest {
+        dialog: Dialog::UpdateDownload(dialog),
+        ..
+    }) = &page.dialog
+    else {
+        panic!("the update dialog")
+    };
+    let state = DialogState::new(Dialog::UpdateDownload(dialog.clone()));
+    let mut ui = Simulator::with_size(fonts(), TALL, state.view());
+    assert!(ui.find("Update now").is_ok());
+    assert!(ui.find("Open Download Page").is_err());
 }
 
 // ----------------------------------------------------------- the repair

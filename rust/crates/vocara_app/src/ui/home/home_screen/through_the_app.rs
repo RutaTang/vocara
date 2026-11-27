@@ -185,7 +185,9 @@ fn delete_confirms_over_the_window_and_the_empty_state_returns() {
     assert!(shows(&app, "No practices yet"));
 }
 
-fn newer_release(library: Arc<Library>, environment: AppEnvironment) -> Services {
+/// A newer release on offer (before the self-update: no image), the user
+/// not yet asked whether Vocara may check by itself.
+fn unanswered_release(library: Arc<Library>, environment: AppEnvironment) -> Services {
     let mut services = Services::detached(library, environment);
     services.update_check = Arc::new(UpdateCheckService::with_fetcher(
         Box::new(|_| {
@@ -194,6 +196,64 @@ fn newer_release(library: Arc<Library>, environment: AppEnvironment) -> Services
         "1.0.0",
     ));
     services
+}
+
+/// The same, the user having agreed to automatic checks.
+fn newer_release(library: Arc<Library>, environment: AppEnvironment) -> Services {
+    let services = unanswered_release(library, environment);
+    services.update_check.set_auto_check(true);
+    services
+}
+
+// The first-launch question goes through the app's dialog stack, over the
+// whole window; its yes is kept and checks at once, raising the banner.
+#[test]
+fn the_question_whether_to_check_comes_once_and_a_yes_checks() {
+    let mut app = boot(Arc::new(Library::in_memory()), unanswered_release);
+    fire(&mut app, |t| *t == Timer::UpdateCheck);
+    assert_eq!(app.dialogs(), 0);
+    assert!(
+        !shows(&app, "Vocara 9.9.9 is available."),
+        "nothing fetched"
+    );
+    fire(&mut app, |t| *t == Timer::Consent);
+    assert_eq!(app.dialogs(), 1);
+    assert!(shows(&app, CONSENT_TITLE));
+    assert!(shows(&app, CONSENT_BODY));
+    click(&mut app, CONSENT_YES);
+    assert_eq!(app.dialogs(), 0);
+    assert!(shows(&app, "Vocara 9.9.9 is available."));
+    assert_eq!(
+        app.services().update_check.auto_check_preference(),
+        Some(true)
+    );
+    assert!(home(&app).1.timers().is_empty(), "asked once");
+}
+
+// Escape on the question is "Don't check", as the macOS updaters take it:
+// kept, and nothing is fetched.
+#[test]
+fn escape_on_the_question_is_a_no() {
+    let mut app = boot(Arc::new(Library::in_memory()), unanswered_release);
+    fire(&mut app, |t| *t == Timer::UpdateCheck);
+    fire(&mut app, |t| *t == Timer::Consent);
+    let escape: Vec<app::Message> = {
+        let mut ui = iced_test::simulator(app.view());
+        let _ = ui.tap_key(iced::keyboard::Key::Named(
+            iced::keyboard::key::Named::Escape,
+        ));
+        ui.into_messages().collect()
+    };
+    for message in escape {
+        let task = app.update(message);
+        settle(&mut app, task);
+    }
+    assert_eq!(app.dialogs(), 0);
+    assert_eq!(
+        app.services().update_check.auto_check_preference(),
+        Some(false)
+    );
+    assert!(!shows(&app, "Vocara 9.9.9 is available."));
 }
 
 // The update dialog goes through the app's dialog stack: it covers the drag

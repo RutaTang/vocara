@@ -1104,6 +1104,8 @@ impl RenameExampleDialog {
             confirm_dialog::Message::Confirm => Some(DialogResult::Text(Some(
                 dart_string::trim(&self.text).to_string(),
             ))),
+            // It has no second action.
+            confirm_dialog::Message::Secondary => None,
         }
     }
 

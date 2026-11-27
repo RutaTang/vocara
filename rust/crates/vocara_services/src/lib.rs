@@ -21,6 +21,7 @@ pub mod playback_engine_factory;
 pub mod quit_request;
 pub mod recording_finalizer;
 pub mod restorable_state;
+pub mod self_update;
 pub mod source_separation_service;
 pub mod spectrogram_service;
 pub mod technique_media_service;

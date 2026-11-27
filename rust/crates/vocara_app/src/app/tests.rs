@@ -188,6 +188,60 @@ fn the_quit_guard_runs_once_however_many_close_requests_arrive() {
     assert!(app.closing);
 }
 
+/// An installed update quits the app through the quit guard — as Cmd+Q
+/// does, so the recordings are finalized before the process goes — once the
+/// self-update waits for it (the helper that swaps the bundle waits for this
+/// process to exit); any other change of the self-update only redraws.
+#[test]
+fn an_installed_update_quits_through_the_quit_guard() {
+    use crate::ui::home::widgets::update_notice::testing::{image, release, updates};
+    let hooks = Arc::new(CountingHooks::default());
+    let mut b = Boot::new(AppEnvironment::Dev);
+    b.quit_hooks = hooks.clone();
+    let (mut app, _) = App::new(b);
+    let _ = app.update(Message::Library(LibraryEvent::Finished(
+        LibraryOpen::Opened(Arc::new(Library::stub())),
+    )));
+    let fake = updates(true);
+    let State::Running(running) = &mut app.state else {
+        panic!("running")
+    };
+    running.services.self_update = fake.updater.clone();
+
+    fake.updater.start(&release(Some(&image())));
+    let _ = app.update(Message::UpdaterChanged);
+    assert_eq!(
+        hooks.kills.load(Ordering::SeqCst),
+        0,
+        "downloading: no quit"
+    );
+    assert!(!app.closing);
+    fake.let_through(4);
+    fake.settle();
+    assert!(fake.updater.wants_quit());
+    let _ = app.update(Message::UpdaterChanged);
+    assert_eq!(hooks.kills.load(Ordering::SeqCst), 1, "the quit guard ran");
+    assert!(app.closing);
+    // Once.
+    let _ = app.update(Message::UpdaterChanged);
+    assert_eq!(hooks.kills.load(Ordering::SeqCst), 1);
+}
+
+/// The app hears every change of the self-update, for as long as it runs.
+#[test]
+fn the_app_hears_the_self_update_change() {
+    use iced::futures::StreamExt;
+    let updater = Arc::new(vocara_services::self_update::SelfUpdate::unavailable("x"));
+    let mut changes = Box::pin(updater_changes(&UpdaterFeed(Arc::clone(&updater))));
+    updater.prepare();
+    let heard = iced::futures::executor::block_on(changes.next());
+    assert_eq!(heard, Some(()));
+    drop(changes);
+    // Nobody left to hear it: the listener went with the stream.
+    updater.dismiss_failure();
+    updater.startup();
+}
+
 /// Opens a confirm dialog for the page on top, as a screen's `Update::dialog`
 /// does; a confirmed result navigates to Settings.
 fn open_dialog(app: &mut App) {
