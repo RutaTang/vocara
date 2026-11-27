@@ -193,8 +193,10 @@ pub fn open_library(on_waiting: &mut dyn FnMut()) -> LibraryOpen {
 
 /// The app's library folder: the application support directory per bundle
 /// id (`~/Library/Application Support/com.rutatang.vocara[.dev|.test]` on
-/// macOS), which holds the database and the asset pool — the folder
-/// [`open_library`] opens.
+/// macOS, or the App Sandbox container's when this launch could not move a
+/// sandboxed release's library out of it: see [`super::settle_storage`]),
+/// which holds the database and the asset pool — the folder
+/// [`open_library`] opens, and the one "Reveal Library Folder" shows.
 pub fn library_folder(env: AppEnvironment) -> Option<PathBuf> {
     application_support_dir(env.bundle_id()).ok()
 }
