@@ -112,14 +112,25 @@ jobs:
       - name: Check it can load on macOS 10.15
         run: .github/scripts/macos-minimum-check.sh "${{ steps.bundle.outputs.app }}"
 
-  # The shipping build is the only one with the App Sandbox on, and the
-  # release workflow first launches it once it is notarized, at the end of a
-  # tagged release. This builds that same release configuration (prod,
-  # Release.entitlements, signed ad hoc since the Developer ID certificate
-  # lives only in the release workflow) and launches it with the same checks
-  # (.github/scripts/launch-check.sh). Manual: a release build takes a while.
-  sandbox-launch:
-    name: Sandboxed release launch (manual)
+  # The release build runs unsandboxed under the hardened runtime, and its
+  # first launch on a Mac where a sandboxed release (0.3.0 and earlier) ran
+  # moves that release's library out of its App Sandbox container. The
+  # release workflow checks both on the notarized app before publishing it.
+  # This builds that same release configuration (prod, Release.entitlements,
+  # the hardened runtime; signed ad hoc, since the Developer ID certificate
+  # lives only in the release workflow) and runs the same checks
+  # (.github/scripts/launch-check.sh): a fresh install, then an update from
+  # the last sandboxed release's DMG. Manual: a release build takes a while.
+  #
+  # The update's container is made by that release, which is Developer ID
+  # signed; this build is not. macOS 14 and later guard a sandboxed app's
+  # container from other apps ("App Data") and may not take an ad-hoc build
+  # for its owner: the release workflow's run of the same check, on the
+  # notarized build (the same team), is the one that proves the move on a
+  # real update. A failure here that the check puts down to that protection
+  # is the signature, not the move.
+  release-launch:
+    name: Release launch and update (manual)
     if: github.event_name == 'workflow_dispatch'
     runs-on: macos-latest
     steps:
@@ -131,5 +142,12 @@ jobs:
       - name: Build the prod release bundle, signed ad hoc
         id: bundle
         run: echo "app=$(rust/packaging/macos/bundle.sh --flavor prod)" >> "$GITHUB_OUTPUT"
-      - name: Launch it and check it boots inside its sandbox
+      - name: Launch it and check it boots unsandboxed, under the hardened runtime
         run: .github/scripts/launch-check.sh "${{ steps.bundle.outputs.app }}"
+      # An update starts from no library outside the container: the fresh
+      # install's goes first.
+      - name: Update to it from the last sandboxed release and check the library moved
+        run: |
+          set -euo pipefail
+          rm -rf "$HOME/Library/Application Support/com.rutatang.vocara"
+          .github/scripts/launch-check.sh --update "${{ steps.bundle.outputs.app }}"

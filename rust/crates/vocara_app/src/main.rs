@@ -1,7 +1,9 @@
 //! Vocara (port of `main.dart`): attaches the diagnostics log, then runs the
 //! iced app with the library open and the quit hooks.
 //!
-//! What `main.dart` did and where it went:
+//! What `main.dart` did and where it went (and the one step it never had:
+//! [`app::settle_storage`], carrying the library out of the App Sandbox
+//! container releases up to 0.3.0 kept it in):
 //! - the exit guard and the window-close guard → the app's quit guard
 //!   (`app::quit`), on the window's close request and on the quits macOS
 //!   sends through `NSApplication.terminate:` (Cmd+Q, the app-menu Quit, a
@@ -31,7 +33,12 @@ use std::sync::Arc;
 use vocara_app::app::{self, library, quit, Boot};
 
 fn main() -> iced::Result {
-    // Diagnostics first: from here on, every entry is appended to the
+    // Where the data lives, before anything resolves it: a library a
+    // sandboxed release left in its App Sandbox container moves out of it
+    // (or, when it cannot, the app is rooted there for this launch).
+    app::settle_storage();
+
+    // Diagnostics next: from here on, every entry is appended to the
     // rotating on-disk log and every uncaught panic is logged (then handed to
     // the default hook), so a field failure leaves a trace the export can
     // bundle.

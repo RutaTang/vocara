@@ -2,4 +2,5 @@
 //! `lib/config/app_config.dart`).
 
 pub mod app_config;
+pub mod app_support;
 pub mod environment;

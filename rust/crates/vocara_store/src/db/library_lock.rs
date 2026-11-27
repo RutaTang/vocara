@@ -423,6 +423,53 @@ impl LibraryGuard for LibraryLock {
     }
 }
 
+/// What [`hold_for_move`] found.
+#[derive(Debug)]
+pub enum MoveHold {
+    /// This process holds the library exclusively for as long as the file
+    /// stays open: no other process has it open, and none can open it
+    /// meanwhile (a launch waits for it, see [`LibraryLock`]).
+    Held(File),
+    /// Another process holds the library (shared or exclusive): a running
+    /// Vocara has it open, or another launch is moving it right now.
+    InUse,
+    /// Nothing to hold: the folder has no lock file (no Vocara ever opened
+    /// a library there), or it cannot be locked at all (a filesystem
+    /// without record locks, where the guard stands down too). Any other
+    /// refusal to open the file is one the move then meets, and reports.
+    Unguarded,
+}
+
+/// Takes the library in [dir] exclusively, never waiting, so the whole
+/// folder can be moved (`vocara_services::sandbox_migration`): the same
+/// byte every running instance holds shared for its whole life, so the
+/// answer is [`MoveHold::InUse`] while any other Vocara has the library
+/// open. The lock file is never created.
+///
+/// Only BEFORE this process opens any library: record locks belong to the
+/// process, so closing the returned file drops every lock this process holds
+/// on that lock file, a [`LibraryLock`]'s included.
+pub fn hold_for_move(dir: &Path) -> MoveHold {
+    let file = match OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(dir.join(LibraryLock::FILE_NAME))
+    {
+        Ok(file) => file,
+        Err(_) => return MoveHold::Unguarded,
+    };
+    match record_lock(&file, LockMode::Exclusive, LIBRARY_BYTE) {
+        Ok(()) => MoveHold::Held(file),
+        Err(e)
+            if e.raw_os_error()
+                .is_some_and(|c| HELD_ELSEWHERE.contains(&c)) =>
+        {
+            MoveHold::InUse
+        }
+        Err(_) => MoveHold::Unguarded,
+    }
+}
+
 fn log_unsupported(e: &io::Error) {
     let code = e
         .raw_os_error()
@@ -477,6 +524,20 @@ mod tests {
         assert!(FixedGuard::new(true).try_exclusive());
         assert!(!FixedGuard::new(false).try_exclusive());
         FixedGuard::new(true).release_exclusive();
+    }
+
+    #[test]
+    fn a_move_holds_a_library_nobody_has_open_and_never_makes_a_lock_file() {
+        // (Another process holding it: vocara_services' sandbox_migration
+        // tests, which start one.)
+        let dir = tempfile::tempdir().unwrap();
+        assert!(matches!(hold_for_move(dir.path()), MoveHold::Unguarded));
+        assert!(!dir.path().join(LibraryLock::FILE_NAME).exists());
+        std::fs::write(dir.path().join(LibraryLock::FILE_NAME), b"").unwrap();
+        let held = hold_for_move(dir.path());
+        if cfg!(unix) {
+            assert!(matches!(held, MoveHold::Held(_)), "{held:?}");
+        }
     }
 
     #[test]

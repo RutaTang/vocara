@@ -8,8 +8,8 @@
 #
 # Prints the path of the .app on stdout. The flavor is baked into the binary
 # (VOCARA_FLAVOR at compile time) and picks the bundle id, so each flavor
-# keeps its own sandbox container and library, as the Flutter app's did:
-# com.rutatang.vocara, .dev, .test.
+# keeps its own library folder (~/Library/Application Support/<bundle id>),
+# as the Flutter app's did: com.rutatang.vocara, .dev, .test.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -98,13 +98,15 @@ done
 iconutil -c icns "$SET" -o "$APP/Contents/Resources/AppIcon.icns"
 rm -rf "${SET:?}"
 
-# Ad-hoc signed for local runs; the release workflow re-signs with the
-# Developer ID, the hardened runtime and Release.entitlements. A --debug
-# bundle gets Debug.entitlements, sandbox off, as the Flutter app's Debug
-# configuration did: the prototype separation engine spawns a Python sidecar,
-# which a sandboxed app cannot exec. Release bundles stay sandboxed.
-ENTITLEMENTS="$HERE/Release.entitlements"
-[[ "$PROFILE" == debug ]] && ENTITLEMENTS="$HERE/Debug.entitlements"
-codesign --force --sign - --entitlements "$ENTITLEMENTS" "$APP" >&2
+# Ad-hoc signed for local runs, with Release.entitlements (the microphone
+# only; no build is sandboxed: see the file); the release workflow re-signs
+# with the Developer ID, the hardened runtime and the same file. A release
+# bundle gets the hardened runtime here too, so a local or CI launch of it
+# runs as the shipped app does: without the runtime a missing entitlement
+# goes unnoticed (the microphone opens regardless). A --debug bundle leaves
+# it off, so a debugger can attach.
+SIGN=(--force --sign - --entitlements "$HERE/Release.entitlements")
+[[ "$PROFILE" == release ]] && SIGN+=(--options runtime)
+codesign "${SIGN[@]}" "$APP" >&2
 
 echo "$APP"

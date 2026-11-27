@@ -13,13 +13,28 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use serde_json::{Map, Value};
+use vocara_model::config::app_support;
 use vocara_model::util::{dart_json, id::new_id};
 
-/// The macOS application support directory for [bundle_id]:
-/// `~/Library/Application Support/<bundle id>` (inside the app's container
-/// when sandboxed), which is what Flutter's `getApplicationSupportDirectory`
-/// returns. Elsewhere, the platform's data directory plus the bundle id.
+/// The application support directory for [bundle_id], where every store of
+/// that environment lives: [`default_application_support_dir`], unless this
+/// launch rooted the app at the App Sandbox container a sandboxed release
+/// left its library in, because it could not move it out
+/// ([`crate::sandbox_migration`]; [`app_support::rooted_at`]).
 pub fn application_support_dir(bundle_id: &str) -> io::Result<PathBuf> {
+    if let Some(rooted) = app_support::rooted_at(bundle_id) {
+        return rooted;
+    }
+    default_application_support_dir(bundle_id)
+}
+
+/// The application support directory for [bundle_id] when nothing roots it
+/// elsewhere: on macOS `~/Library/Application Support/<bundle id>`, which is
+/// what Flutter's `getApplicationSupportDirectory` returned (in the App
+/// Sandbox container while releases were sandboxed, up to 0.3.0; see
+/// [`crate::sandbox_migration`]). Elsewhere, the platform's data directory
+/// plus the bundle id.
+pub fn default_application_support_dir(bundle_id: &str) -> io::Result<PathBuf> {
     let base = dirs::data_dir()
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no data directory"))?;
     Ok(base.join(bundle_id))

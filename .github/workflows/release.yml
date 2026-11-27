@@ -10,7 +10,9 @@
 #   2  Build     - universal build (rust/packaging/macos/bundle.sh)
 #                  -> Developer ID deep re-sign -> DMG
 #                  -> notarize -> staple -> Gatekeeper assessment
-#                  -> launch the app from the DMG, inside its sandbox
+#                  -> launch the app from the DMG (unsandboxed, hardened
+#                  runtime), then update to it from the last sandboxed
+#                  release (its library must leave the App Sandbox container)
 #   3  Publish   - the DMG + SHA256SUMS + latest.json (the in-app update
 #                  check's manifest) as this public repo's GitHub release
 #
@@ -278,7 +280,8 @@ jobs:
             done < <(find "$dir" -type f -perm +111 -print0)
           done
 
-          # 4) The app itself, last, with its sandbox entitlements.
+          # 4) The app itself, last, with Release.entitlements: the
+          #    microphone only, no App Sandbox (see the file for why).
           sign --entitlements "$ENTITLEMENTS" "$APP_PATH"
 
       - name: Verify signature
@@ -339,11 +342,19 @@ jobs:
           spctl --assess --type open --context context:primary-signature -v "${{ steps.dmg.outputs.dmg }}" \
             || { echo "::error::Gatekeeper rejected the stapled DMG"; exit 1; }
 
-      # The notarized app is the one users get, and the only build with the
-      # App Sandbox on and this signature: launched here, from the stapled
-      # DMG, before anything is published (see .github/scripts/launch-check.sh;
-      # CI's manual sandbox-launch job runs the same checks on an ad-hoc
-      # build). A release that cannot start fails here.
+      # The notarized app is the one users get, and the only build with this
+      # signature: launched here, from the stapled DMG, before anything is
+      # published (see .github/scripts/launch-check.sh; CI's manual
+      # release-launch job runs the same checks on an ad-hoc build). First as
+      # a fresh install: it must run unsandboxed, under the hardened runtime,
+      # with its library in ~/Library/Application Support. Then as an update
+      # from the last sandboxed release, on a real container that release
+      # makes: the library must move out of it whole and open. This is the
+      # build that update reaches users as (the same bundle id and team as
+      # the container's owner, which is what macOS 14+'s App Data protection
+      # of containers looks at), so this is where the move is proven. A
+      # release that cannot start, or that would leave an updating user's
+      # library behind in the container, fails here.
       - name: Launch the notarized app from the DMG
         run: |
           set -euo pipefail
@@ -351,6 +362,17 @@ jobs:
           hdiutil attach -nobrowse -readonly -mountpoint "$MOUNT" "${{ steps.dmg.outputs.dmg }}"
           trap 'hdiutil detach "$MOUNT" -force || true' EXIT
           .github/scripts/launch-check.sh "$MOUNT/vocara.app"
+
+      - name: Update to it from the last sandboxed release (the library leaves the container)
+        run: |
+          set -euo pipefail
+          # An update starts from no library outside the container: the
+          # fresh install's goes first.
+          rm -rf "$HOME/Library/Application Support/com.rutatang.vocara"
+          MOUNT="$(mktemp -d)"
+          hdiutil attach -nobrowse -readonly -mountpoint "$MOUNT" "${{ steps.dmg.outputs.dmg }}"
+          trap 'hdiutil detach "$MOUNT" -force || true' EXIT
+          .github/scripts/launch-check.sh --update "$MOUNT/vocara.app"
 
       - name: Checksum and Package Outputs
         id: package

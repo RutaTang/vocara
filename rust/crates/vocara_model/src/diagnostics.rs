@@ -35,6 +35,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::config::app_support;
 use crate::config::environment::AppEnvironment;
 use crate::util::dart_date_time::DateTime;
 use crate::util::dart_string::{self, truncate_utf16, utf16_len};
@@ -597,8 +598,15 @@ fn create_temp_dir(root: &Path, prefix: &str) -> io::Result<PathBuf> {
 }
 
 /// The environment's application support directory
-/// (`<data dir>/<bundle id>`, created when missing, as path_provider does).
+/// (`<data dir>/<bundle id>`, created when missing, as path_provider does),
+/// or the App Sandbox container this launch rooted the app at
+/// ([`app_support::rooted_at`]: a library a sandboxed release left there
+/// that could not be moved out), which is never created again.
 fn application_support_directory() -> Option<PathBuf> {
+    let bundle_id = AppEnvironment::current().bundle_id();
+    if let Some(rooted) = app_support::rooted_at(bundle_id) {
+        return rooted.ok();
+    }
     let home = std::env::var_os("HOME").filter(|h| !h.is_empty())?;
     let base = if cfg!(target_os = "macos") {
         PathBuf::from(home).join("Library/Application Support")
@@ -608,7 +616,7 @@ fn application_support_directory() -> Option<PathBuf> {
             None => PathBuf::from(home).join(".local/share"),
         }
     };
-    let dir = base.join(AppEnvironment::current().bundle_id());
+    let dir = base.join(bundle_id);
     fs::create_dir_all(&dir).ok()?;
     Some(dir)
 }

@@ -87,12 +87,25 @@ pub const SCREENSHOT_VAR: &str = "VOCARA_SCREENSHOT";
 /// How long after the first frame the screenshot is taken.
 const SCREENSHOT_DELAY: Duration = Duration::from_secs(4);
 
-/// `DiagnosticsLog.attachGlobalHooks()`, the first thing `main` does: binds
-/// the diagnostics log to the application support directory (the library
-/// folder, where the export and the release's launch check read it), so
-/// every entry from here on is appended to the rotating on-disk log, and
-/// logs every uncaught panic before handing it to the default hook. Without
-/// the bind the log only ever buffers in memory.
+/// Settles where this environment's data lives, the first thing `main`
+/// does, before anything resolves the application support directory: a
+/// library a sandboxed release (0.3.0 and earlier) kept in its App Sandbox
+/// container moves to `~/Library/Application Support/<bundle id>`, or, when
+/// it cannot, every store (and the diagnostics log) is rooted at the
+/// container for this launch, so the user never opens an empty library
+/// beside theirs (`vocara_services::sandbox_migration`). What it did is
+/// logged once [`attach_diagnostics`] binds the log.
+pub fn settle_storage() {
+    vocara_services::sandbox_migration::settle(AppEnvironment::current());
+}
+
+/// `DiagnosticsLog.attachGlobalHooks()`, right after [`settle_storage`]:
+/// binds the diagnostics log to the application support directory (the
+/// library folder, where the export and the release's launch check read
+/// it), so every entry from here on — and the ones buffered before — is
+/// appended to the rotating on-disk log, and logs every uncaught panic
+/// before handing it to the default hook. Without the bind the log only
+/// ever buffers in memory.
 pub fn attach_diagnostics() {
     DiagnosticsLog::instance().attach_global_hooks(None);
 }
