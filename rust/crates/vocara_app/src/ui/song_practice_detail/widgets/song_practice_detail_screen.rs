@@ -121,6 +121,7 @@ use super::ruler_bar;
 use super::technique_picker::{self, TechniquePicker};
 use super::track_context_menu::{BusAction, ClipAction, TrackAction};
 use super::track_row;
+use super::vocal_tract_view::{self, VocalTractState};
 use super::voiceprint_view::VoiceprintState;
 use crate::app::library::RemoteAppliedBroadcast;
 use crate::services::Services;
@@ -710,6 +711,9 @@ pub struct SongPracticeDetailScreen {
     shown: Shown,
     lyrics: LyricsPanelState,
     voiceprint: VoiceprintState,
+    /// The dock's Vocal tract tab: its view, its camera and the pose on its
+    /// springs (kept for the session).
+    vocal_tract: VocalTractState,
     lane_images: HashMap<String, LaneImage>,
     /// The image a lane is handed before its own is made.
     no_image: LaneImage,
@@ -809,6 +813,7 @@ impl SongPracticeDetailScreen {
             shown: Shown::default(),
             lyrics: LyricsPanelState::new(),
             voiceprint: VoiceprintState::new(),
+            vocal_tract: VocalTractState::new(),
             lane_images: HashMap::new(),
             no_image: LaneImage::new(),
             menu: None,
@@ -951,6 +956,14 @@ impl Screen for SongPracticeDetailScreen {
         subscriptions.push(self.snacks.subscription().map(snack_message));
         subscriptions
             .push(motion::frames(self.dialogs_animating(Instant::now())).map(Message::DialogFrame));
+        // The Vocal tract tab's figure moving to the latest estimate.
+        subscriptions.push(
+            motion::frames(self.vocal_tract_shown() && self.vocal_tract.animating()).map(|at| {
+                Message::Dock(bottom_dock::Message::VocalTract(
+                    vocal_tract_view::Message::Frame(at),
+                ))
+            }),
+        );
         // A lyrics list scrolling to a revealed line.
         subscriptions.push(
             motion::frames(self.lyrics.is_scrolling(Instant::now()))
@@ -981,6 +994,7 @@ impl Screen for SongPracticeDetailScreen {
         self.awaiting.clear();
         self.snacks = SnackQueue::new();
         self.voiceprint.clear();
+        self.vocal_tract.clear();
         self.lane_images.clear();
         release_spectrogram_images();
         // The commits' saves land on the lingering page.

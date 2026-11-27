@@ -71,11 +71,12 @@ use crate::ui::song_practice_detail::widgets::track_context_menu::{
     bus_context_menu, clip_context_menu, menu_host, studio_menu, track_context_menu, BusMenu,
     StudioMenuItem, TrackMenu,
 };
-use crate::ui::song_practice_detail::widgets::track_row::bus_color;
+use crate::ui::song_practice_detail::widgets::track_row::{bus_color, channel_color};
 use crate::ui::song_practice_detail::widgets::track_row::{
     header_frame, header_name, take_color, track_menu_button, track_row, TIMELINE_H_MARGIN,
     TRACK_HEADER_W,
 };
+use crate::ui::song_practice_detail::widgets::vocal_tract_view::{self, VocalTract};
 
 /// What `vm.lyricsAsText()` gives a view (only the update side reads it).
 static NO_TEXT: fn() -> String = String::new;
@@ -388,12 +389,25 @@ impl SongPracticeDetailScreen {
                 },
             };
             let selected = selected_track_ref(vm, practice).map(|t| &**t);
+            let vocal_tract = VocalTract {
+                state: &self.vocal_tract,
+                live: a.live_monitor(),
+                source: match selected {
+                    _ if a.live_monitor() => vocal_tract_view::Source::Live,
+                    Some(t) => vocal_tract_view::Source::Take(
+                        &t.display_name,
+                        channel_color(t, &self.shown.vocal_takes),
+                    ),
+                    None => vocal_tract_view::Source::NoTake,
+                },
+            };
             bottom_dock::dock_content(
                 a.dock_tab(),
                 vm as &dyn AnalysisSource,
                 &self.voiceprint,
                 self.shown.summary.summary(selected),
                 mixer,
+                vocal_tract,
             )
         });
         bottom_dock(BottomDock {
