@@ -80,12 +80,29 @@ fn notes_and_cents_read_as_the_dart_labels() {
 }
 
 #[test]
-fn note_colours_ramp_from_in_tune_to_record_at_fifty_cents() {
-    assert_eq!(cents_color(0.0), Studio::IN_TUNE);
-    assert_eq!(cents_color(50.0), Studio::RECORD);
-    assert_eq!(cents_color(500.0), Studio::RECORD);
-    let mid = cents_color(25.0);
-    assert!((mid.r - (Studio::IN_TUNE.r + Studio::RECORD.r) / 2.0).abs() < 1e-6);
+fn the_sung_line_is_in_tune_green_and_out_of_tune_orange() {
+    assert_eq!(contour_color(true), Studio::IN_TUNE);
+    assert_eq!(contour_color(false), Studio::OUT_OF_TUNE);
+}
+
+#[test]
+fn the_header_sums_up_the_range_and_the_average_deviation() {
+    let note = |start_frame, end_frame, semitone, median_cents| PitchNote {
+        start_frame,
+        end_frame,
+        semitone,
+        median_cents,
+    };
+    // C4 for 10 frames at +6¢, D5 for 30 at +2¢: avg +3¢.
+    assert_eq!(
+        pitch_summary(&[note(0, 9, 60, 6.0), note(10, 39, 74, 2.0)]).as_deref(),
+        Some("C4 – D5 · avg +3¢")
+    );
+    assert_eq!(
+        pitch_summary(&[note(0, 9, 57, -12.0)]).as_deref(),
+        Some("A3 · avg −12¢")
+    );
+    assert_eq!(pitch_summary(&[]), None);
 }
 
 // -------------------------------------------------- voice_metrics_test
@@ -348,29 +365,21 @@ fn whole_take_plan(p: &PitchLanePainter, size: Size) -> PitchLanePlan {
     let Some(a) = p.axes(size) else {
         return PitchLanePlan::default();
     };
-    let block_h = a.height / a.span * 0.62;
+    let block_h = TARGET_NOTE_HEIGHT;
     let mut notes = Vec::new();
     for (i, n) in p.notes.iter().enumerate() {
         let x0 = a.x_of_frame(n.start_frame);
         let x1 = a.x_of_frame(n.end_frame).max(x0 + 2.0);
         let yc = a.y_of(n.semitone as f64);
-        let col = cents_color(n.median_cents.abs());
-        let is_worst = p.worst.contains(&i);
         notes.push(PitchOp::Block {
             index: i,
             left: x0,
             top: yc - block_h / 2.0,
             right: x1,
             bottom: yc + block_h / 2.0,
-            fill: alpha(col, 0.26),
-            stroke: if is_worst {
-                Studio::RECORD
-            } else {
-                alpha(col, 0.7)
-            },
-            stroke_width: if is_worst { 1.6 } else { 1.0 },
+            fill: TARGET_NOTE,
         });
-        if is_worst {
+        if p.worst.contains(&i) {
             let mut ly = yc - block_h / 2.0 - 11.0;
             if ly < 1.0 {
                 ly = yc + block_h / 2.0 + 2.0;
@@ -379,7 +388,7 @@ fn whole_take_plan(p: &PitchLanePainter, size: Size) -> PitchLanePlan {
                 text: cents_str(n.median_cents),
                 x: x0 + 2.0,
                 y: ly + 5.0,
-                color: Studio::RECORD,
+                color: Studio::OUT_OF_TUNE,
             });
         }
     }
@@ -393,7 +402,11 @@ fn whole_take_plan(p: &PitchLanePainter, size: Size) -> PitchLanePlan {
             };
             let q = (a.x_of_frame(fr), a.y_of(hz_to_midi(hz)));
             if let Some(from) = prev {
-                contour.push(PitchOp::Contour { from, to: q });
+                contour.push(PitchOp::Contour {
+                    from,
+                    to: q,
+                    in_tune: n.in_tune(),
+                });
             }
             prev = Some(q);
         }
@@ -717,7 +730,7 @@ fn the_pitch_lane_names_the_note_the_frame_under_it_sings() {
     };
     let mut ui = iced_test::simulator(lane(at_last_a3));
     assert!(ui.find("A3 +0¢").is_ok());
-    assert!(ui.find("PITCH").is_ok());
+    assert!(ui.find("Pitch").is_ok());
     let mut ui = iced_test::simulator(lane(in_last_cell));
     assert!(ui.find("C4 +0¢").is_ok());
 }
@@ -782,7 +795,7 @@ fn no_analysis_yet_shows_the_hints() {
     let lane = pitch_lane(&track(0, 1000), 20000, 250, 180.0, true, None);
     let mut ui = iced_test::simulator(Element::<()>::from(lane.clone()));
     assert!(ui.find("Analyzing pitch…").is_ok());
-    assert!(ui.find("PITCH").is_ok());
+    assert!(ui.find("Pitch").is_ok());
     render_lane(lane);
     // Loading hides even metrics already in hand.
     let mut ui = iced_test::simulator(Element::<()>::from(pitch_lane(

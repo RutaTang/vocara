@@ -7,6 +7,15 @@
 //! long-pressed and dragged onto another to reorder. Right-click anywhere
 //! opens a context menu.
 //!
+//! It is drawn as `rust/DESIGN.md`'s track header and clips: a 212 px
+//! header with a 3 px stripe in the track's colour ([`take_color`]), the
+//! name as typed (12 px medium), M / S, the 8 px-knob volume slider and
+//! 24 px icon buttons (`PANEL_SELECTED` when selected); each clip filled
+//! with the colour at 10 % (16 % selected), outlined at 32 %
+//! (`CLIP_SELECTED_OUTLINE` selected), a 13 px header band holding the
+//! name, and its waveform as a filled peak envelope (a muted take's clips at
+//! 60 %); notes as small diamonds along the clip's bottom.
+//!
 //! The row takes plain data (the take, the viewport, what is selected) and
 //! reports [`Message`]s; the screen holds what the row cannot: which menu is
 //! open (it wraps the row in `track_context_menu::menu_host`, which opens
@@ -87,11 +96,13 @@ use iced::{
 use vocara_model::models::audio_track::{AudioClip, AudioTrack};
 use vocara_model::util::dart_num::round_to_i64;
 
-use super::track_context_menu::{argb, default_take_color, selected_lane_color};
+use super::track_context_menu::argb;
 use crate::ui::core::icons::{self, Icon};
-use crate::ui::core::theme::{alpha, bare_button, boxed, fill, font, Studio};
-use crate::ui::core::widgets::opacity_layer::Effects as _;
-use crate::ui::core::widgets::studio_controls::{studio_fader, studio_mini_button};
+use crate::ui::core::theme::{alpha, boxed, clip, fill, font, type_scale, Studio};
+use crate::ui::core::widgets::controls::{icon_button, labelled, msr_button, MsrKind};
+use crate::ui::core::widgets::line_icon::{glyphs, line_icon, line_icon_inherit};
+use crate::ui::core::widgets::opacity_layer::{opacity_layer, Effects as _};
+use crate::ui::core::widgets::studio_controls::studio_fader;
 use crate::ui::core::widgets::studio_text::studio_text;
 use crate::ui::core::widgets::waveform_painter::{
     visible_peak_slice, LiveWaveformPainter, PeakSlice, PlayheadPainter, TimelineGridPainter,
@@ -104,15 +115,31 @@ mod tests;
 
 /// Width of the per-track header column (Logic/Cubase style): name,
 /// mute/solo, volume and actions live here; the waveform fills the timeline
-/// to its right.
-pub const TRACK_HEADER_W: f32 = 208.0;
+/// to its right (`DESIGN.md`: the track header column is 212).
+pub const TRACK_HEADER_W: f32 = 212.0;
 
-/// A track row's height.
-pub const TRACK_ROW_HEIGHT: f32 = 74.0;
+/// A track row's height, its 1 px bottom line included.
+pub const TRACK_ROW_HEIGHT: f32 = 60.0;
 
 /// Horizontal inset applied to the timeline column (ruler + lanes + loop
-/// band) so the tracks line up with the section labels and drop-hint boxes.
-pub const TIMELINE_H_MARGIN: f32 = 14.0;
+/// band): none, the header column sits flush with the arrange's left edge
+/// and the lanes run to its right edge.
+pub const TIMELINE_H_MARGIN: f32 = 0.0;
+
+/// How far a clip sits in from its row's top and bottom.
+pub const CLIP_INSET: f32 = 4.0;
+
+/// The header's padding: 8 top and bottom, 10 right, 14 left (the stripe's
+/// 3 px included).
+const HEADER_PADDING: Padding = Padding {
+    top: 8.0,
+    right: 10.0,
+    bottom: 8.0,
+    left: 11.0,
+};
+
+/// The stripe in the track's colour down the header's left edge.
+pub const STRIPE_W: f32 = 3.0;
 
 /// Live recording peaks arrive one per this many ms (matches the view
 /// model).
@@ -279,32 +306,37 @@ pub fn clip_selected(lane_selected: bool, selected_clip_id: Option<&str>, clip_i
     lane_selected && selected_clip_id.is_none_or(|id| id == clip_id)
 }
 
-/// A lane's base color: a custom tint if set; otherwise the backing shares
-/// the master's signature accent, and a vocal take gets a stable per-take
-/// palette color (so takes read as distinct, not a flat gray). The color
-/// never changes with selection (Logic style) — selection is shown by the
-/// header background and the selected clip's outer border only.
-pub fn lane_accent(track: &AudioTrack) -> Color {
+/// A lane's colour (`DESIGN.md`, Track colours): a custom tint if set; the
+/// backing's neutral; else the `index`th vocal track's colour
+/// ([`Studio::track_color`], in the order the takes are listed), so takes
+/// read as distinct. The colour never changes with selection (Logic style) —
+/// selection is shown by the header background and the selected clip's
+/// outline only.
+pub fn take_color(track: &AudioTrack, index: usize) -> Color {
     if let Some(value) = track.color_value {
         argb(value)
     } else if track.is_backing() {
-        Studio::ACCENT
+        Studio::TRACK_BACKING
     } else {
-        default_take_color(&track.id)
+        Studio::track_color(index)
     }
 }
 
-/// The note marker's box (16 × 16, centred on the note's x, 1 px off the
-/// lane's bottom) in a lane `size`.
+/// The side of a note's diamond on a clip.
+pub const NOTE_DIAMOND: f32 = 5.0;
+
+/// The note marker's box (16 × 16, centred on the note's x and on its
+/// diamond, which sits 3 px above the clip's bottom) in a lane `size`.
 fn note_box(x: f64, size: Size) -> Rectangle {
+    let center_y = size.height - CLIP_INSET - 3.0 - NOTE_DIAMOND / 2.0;
     Rectangle::new(
-        Point::new(x as f32 - 8.0, size.height - 1.0 - 16.0),
+        Point::new(x as f32 - 8.0, center_y - 8.0),
         Size::new(16.0, 16.0),
     )
 }
 
-/// Where a note marker takes a tap: its 12 px glyph, centred in the box
-/// (the marker's `GestureDetector` deferred to its child, the icon).
+/// Where a note marker takes a tap: 12 × 12 about its diamond (a target
+/// larger than the mark).
 fn note_hit_box(x: f64, size: Size) -> Rectangle {
     let b = note_box(x, size);
     Rectangle::new(Point::new(b.x + 2.0, b.y + 2.0), Size::new(12.0, 12.0))
@@ -404,6 +436,7 @@ pub enum Message {
 pub struct TrackRow<'a, M> {
     track: &'a AudioTrack,
     label: String,
+    color: Color,
     timeline_duration_ms: i64,
     view_start_ms: i64,
     position_ms: i64,
@@ -436,6 +469,7 @@ pub fn track_row<'a, M>(
     TrackRow {
         track,
         label: label.into(),
+        color: take_color(track, 0),
         timeline_duration_ms,
         view_start_ms: 0,
         position_ms,
@@ -455,6 +489,12 @@ pub fn track_row<'a, M>(
 }
 
 impl<'a, M> TrackRow<'a, M> {
+    /// The lane's colour ([`take_color`]; the first take's until set).
+    pub fn color(mut self, color: Color) -> Self {
+        self.color = color;
+        self
+    }
+
     /// The absolute time (ms) at the lane's left edge: with the visible
     /// span, the timeline viewport.
     pub fn view_start_ms(mut self, ms: i64) -> Self {
@@ -556,12 +596,11 @@ impl<'a, M: 'a> From<TrackRow<'a, M>> for Element<'a, M> {
     }
 }
 
-/// The 74 px main row: the header and the lane, a 1 px `Studio.border`
-/// line under them, the drop line over them while a dragged lane hovers,
-/// and a `Studio.hover` wash (55 %) under them when selected.
+/// The 60 px main row: the header and the lane, a 1 px `BORDER_SUBTLE`
+/// line under them, and the drop line over them while a dragged lane
+/// hovers. Selection shows in the header (and the clips), not as a wash.
 fn main_row<'a, M>(r: &TrackRow<'a, M>) -> Element<'a, Message> {
-    let accent = lane_accent(r.track);
-    let selected = r.selected;
+    let accent = r.color;
     container(column![
         // Always there (0 px when not dropping), so the row below it keeps
         // its widget state as the line comes and goes.
@@ -573,57 +612,86 @@ fn main_row<'a, M>(r: &TrackRow<'a, M>) -> Element<'a, Message> {
         container(Space::new())
             .width(Length::Fill)
             .height(1)
-            .style(fill(Studio::BORDER)),
+            .style(fill(Studio::BORDER_SUBTLE)),
     ])
     .width(Length::Fill)
     .height(TRACK_ROW_HEIGHT)
-    .style(move |_| {
-        if selected {
-            boxed(Some(alpha(Studio::HOVER, 0.55)), 0.0, None)
-        } else {
-            container::Style::default()
-        }
-    })
     .into()
 }
 
 // -------------------------------------------------------------- the header
 
+/// A header's frame (`DESIGN.md`, Track header): [`TRACK_HEADER_W`] wide,
+/// `PANEL` (`PANEL_SELECTED` when selected), the 3 px stripe in `accent`
+/// down its left edge, `content` padded 8 / 10 / 8 / 14, a 1 px `BORDER`
+/// line down its right edge.
+pub fn header_frame<'a, M: 'a>(
+    content: impl Into<Element<'a, M>>,
+    accent: Color,
+    selected: bool,
+) -> Element<'a, M> {
+    container(row![
+        container(Space::new())
+            .width(STRIPE_W)
+            .height(Length::Fill)
+            .style(fill(accent)),
+        container(content)
+            .padding(HEADER_PADDING)
+            .width(Length::Fill)
+            .height(Length::Fill),
+        container(Space::new())
+            .width(1)
+            .height(Length::Fill)
+            .style(fill(Studio::BORDER)),
+    ])
+    .width(TRACK_HEADER_W)
+    .height(Length::Fill)
+    .style(fill(if selected {
+        Studio::PANEL_SELECTED
+    } else {
+        Studio::PANEL
+    }))
+    .into()
+}
+
+/// A header's name: 12 px medium `TEXT_PRIMARY`, as the user typed it,
+/// ellipsized.
+pub fn header_name<'a, M: 'a>(name: impl Into<String>) -> Element<'a, M> {
+    studio_text(name.into())
+        .size(type_scale::BODY)
+        .line_height(iced::Pixels(type_scale::LINE))
+        .font(font::MEDIUM)
+        .color(Studio::TEXT_PRIMARY)
+        .width(Length::Fill)
+        .ellipsis(1)
+        .into()
+}
+
 /// `_TrackHeader`: the fixed-width left control column for a track
-/// (Logic/Cubase mixer-strip style): a 3 px color bar, the name + ⋯ menu,
-/// and a row of mute/solo, volume and add-note controls. A tap on it
-/// selects the lane; a right-click opens the lane menu. The label is 11.5
-/// px w700 with 0.3 letter spacing, ellipsized.
+/// (Logic/Cubase mixer-strip style): the stripe, the chevron, the name and
+/// the ⋯ menu; then mute/solo, the volume slider and the add-note /
+/// add-technique buttons. A tap on it selects the lane; a right-click opens
+/// the lane menu.
 fn header<'a, M>(r: &TrackRow<'a, M>, accent: Color) -> Element<'a, Message> {
     let track = r.track;
-    let mut top = row![].align_y(Vertical::Center);
+    let mut top = row![].spacing(6).align_y(Vertical::Center);
     if r.can_expand {
         top = top.push(disclose_button(r.expanded, r.expandable));
     }
     if r.armed {
-        top = top
-            .push(
-                container(Space::new().width(7).height(7))
-                    .style(|_| boxed(Some(Studio::RECORD), 3.5, None)),
-            )
-            .push(Space::new().width(6));
+        top = top.push(
+            container(Space::new().width(7).height(7))
+                .style(|_| boxed(Some(Studio::RECORD), 3.5, None)),
+        );
     }
     top = top
-        .push(
-            studio_text(r.label.to_uppercase())
-                .size(11.5)
-                .font(font::BOLD)
-                .letter_spacing(0.3)
-                .color(Studio::TEXT_PRIMARY)
-                .width(Length::Fill)
-                .ellipsis(1),
-        )
+        .push(header_name(r.label.clone()))
         .push(track_menu_button(Message::ContextMenu));
     let mut controls = row![
-        ms_toggle("M", track.muted, Studio::RECORD, Message::ToggleMute),
+        msr_button(MsrKind::Mute, track.muted, Some(Message::ToggleMute)).size(20.0, 18.0),
         Space::new().width(4),
-        ms_toggle("S", track.soloed, Studio::ACCENT, Message::ToggleSolo),
-        Space::new().width(10),
+        msr_button(MsrKind::Solo, track.soloed, Some(Message::ToggleSolo)).size(20.0, 18.0),
+        Space::new().width(8),
         container(studio_fader(
             track.volume,
             Message::Volume,
@@ -636,30 +704,17 @@ fn header<'a, M>(r: &TrackRow<'a, M>, accent: Color) -> Element<'a, Message> {
     // track gets no add buttons.
     if !track.is_backing() {
         controls = controls
-            .push(Space::new().width(8))
-            .push(studio_mini_button(
-                Icon::StickyNote,
-                Message::AddNote,
-                Studio::TEXT_SECONDARY,
-            ))
-            .push(Space::new().width(6))
-            .push(studio_mini_button(
-                Icon::Waypoints,
+            .push(Space::new().width(4))
+            .push(header_button(glyphs::NOTE, ADD_NOTE, Message::AddNote))
+            .push(header_button(
+                glyphs::PULSE,
+                ADD_TECHNIQUE,
                 Message::AddTechnique,
-                Studio::TEXT_SECONDARY,
             ));
     }
-    let content = container(column![top, Space::new().height(Length::Fill), controls])
-        .padding(Padding {
-            top: 8.0,
-            right: 8.0,
-            bottom: 8.0,
-            left: 9.0,
-        })
-        .width(Length::Fill)
-        .height(Length::Fill);
+    let content = column![top, Space::new().height(Length::Fill), controls].width(Length::Fill);
     let area = mouse_area(Wrap::<Message, TapState>::new(
-        content,
+        container(content).width(Length::Fill).height(Length::Fill),
         Box::new(|state, event, bounds, cursor, shell| match event {
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Right)) => {
                 if cursor.is_over(bounds) && !shell.is_event_captured() {
@@ -674,26 +729,27 @@ fn header<'a, M>(r: &TrackRow<'a, M>, accent: Color) -> Element<'a, Message> {
         }),
     ))
     .interaction(mouse::Interaction::Pointer);
-    let selected = r.selected;
-    container(row![
-        container(Space::new())
-            .width(3)
-            .height(Length::Fill)
-            .style(fill(accent)),
-        area,
-        container(Space::new())
-            .width(1)
-            .height(Length::Fill)
-            .style(fill(Studio::BORDER)),
-    ])
-    .width(TRACK_HEADER_W)
-    .height(Length::Fill)
-    .style(fill(if selected {
-        Studio::SURFACE_RAISED
-    } else {
-        Studio::PANEL
-    }))
-    .into()
+    header_frame(area, accent, r.selected)
+}
+
+/// The add-note button's tooltip (and label).
+pub const ADD_NOTE: &str = "Add note at playhead";
+
+/// The add-technique button's tooltip (and label).
+pub const ADD_TECHNIQUE: &str = "Add technique at playhead";
+
+/// A header's icon button: a 24 px panel icon button with a 12 px glyph and
+/// its tooltip.
+fn header_button<'a>(
+    glyph: crate::ui::core::widgets::line_icon::Glyph,
+    tip: &'static str,
+    on_press: Message,
+) -> Element<'a, Message> {
+    icon_button(glyph, on_press)
+        .panel()
+        .icon_size(12.0)
+        .tooltip(tip)
+        .into()
 }
 
 /// A tap (`GestureDetector.onTap`) in flight: the primary press, while it
@@ -735,44 +791,53 @@ impl TapState {
     }
 }
 
-/// `_DiscloseButton`: the chevron that folds the inline analysis lanes in
-/// or out — down and coral when out. Inert when the row has no toggle
-/// (a tap then selects the lane, as Dart's null `onTap` let it).
+/// The chevron's label while the lanes are folded in, and out.
+pub const SHOW_LANES: &str = "Show analysis lanes";
+pub const HIDE_LANES: &str = "Hide analysis lanes";
+
+/// `_DiscloseButton`: the 10 px chevron that folds the inline analysis
+/// lanes in or out — right, or down when out. Inert when the row has no
+/// toggle (a tap then selects the lane, as Dart's null `onTap` let it).
 fn disclose_button<'a>(expanded: bool, expandable: bool) -> Element<'a, Message> {
-    let glyph = container(icons::icon(
+    let glyph = container(line_icon_inherit(
         if expanded {
-            Icon::ChevronDown
+            glyphs::CHEVRON_DOWN
         } else {
-            Icon::ChevronRight
+            glyphs::CHEVRON_RIGHT
         },
-        14.0,
-        if expanded {
-            Studio::ACCENT
-        } else {
-            Studio::TEXT_SECONDARY
-        },
+        10.0,
     ))
-    .padding(Padding {
-        right: 4.0,
-        ..Padding::ZERO
-    });
-    button(glyph)
+    .center_x(10)
+    .center_y(16);
+    let target = button(glyph)
         .padding(0)
-        .style(bare_button)
-        .on_press_maybe(expandable.then_some(Message::ToggleExpand))
-        .into()
+        .style(|_, status| button::Style {
+            background: None,
+            text_color: if matches!(status, button::Status::Hovered | button::Status::Pressed) {
+                Studio::TEXT_PRIMARY
+            } else {
+                Studio::TEXT_FAINT
+            },
+            border: Border::default(),
+            shadow: Shadow::default(),
+            snap: false,
+        })
+        .on_press_maybe(expandable.then_some(Message::ToggleExpand));
+    labelled(target, if expanded { HIDE_LANES } else { SHOW_LANES })
 }
 
-/// `TrackMenuButton`: the ⋯ overflow button — opens the track context menu
-/// at its own position, on the press (`onTapDown`). Wrap whatever holds it
-/// in the menu host: the host keeps that press for the menu.
+/// The ⋯ button's label.
+pub const TRACK_MENU: &str = "Track menu";
+
+/// `TrackMenuButton`: the 20 × 18 ⋯ overflow button (a 14 px `TEXT_FAINT`
+/// glyph) — opens the track context menu at its own position, on the press
+/// (`onTapDown`). Wrap whatever holds it in the menu host: the host keeps
+/// that press for the menu.
 pub fn track_menu_button<'a, M: Clone + 'a>(on_tap: M) -> Element<'a, M> {
-    let glyph =
-        container(icons::icon(Icon::Ellipsis, 16.0, Studio::TEXT_SECONDARY)).padding(Padding {
-            left: 4.0,
-            ..Padding::ZERO
-        });
-    Wrap::<M, ()>::new(
+    let glyph = container(line_icon(glyphs::MORE, 14.0, Studio::TEXT_FAINT))
+        .center_x(20)
+        .center_y(18);
+    let target = Wrap::<M, ()>::new(
         glyph,
         Box::new(move |_, event, bounds, cursor, shell| {
             if let Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) = event {
@@ -787,45 +852,8 @@ pub fn track_menu_button<'a, M: Clone + 'a>(on_tap: M) -> Element<'a, M> {
         cursor
             .is_over(bounds)
             .then_some(mouse::Interaction::Pointer)
-    }))
-    .into()
-}
-
-/// `MsToggle`: a 20 × 18 mute / solo key, radius 3, its 10 px w700 letter
-/// in `active_color` (on a 20 % wash, 60 % outline) when on.
-pub fn ms_toggle<'a, M: Clone + 'a>(
-    label: &'a str,
-    active: bool,
-    active_color: Color,
-    on_tap: M,
-) -> Element<'a, M> {
-    let face = container(text(label).size(10).font(font::BOLD).color(if active {
-        active_color
-    } else {
-        Studio::TEXT_SECONDARY
-    }))
-    .center_x(20)
-    .center_y(18)
-    .style(move |_| {
-        boxed(
-            Some(if active {
-                alpha(active_color, 0.2)
-            } else {
-                Studio::SURFACE_RAISED
-            }),
-            3.0,
-            Some(if active {
-                alpha(active_color, 0.6)
-            } else {
-                Studio::BORDER
-            }),
-        )
-    });
-    button(face)
-        .padding(0)
-        .style(bare_button)
-        .on_press(on_tap)
-        .into()
+    }));
+    labelled(target, TRACK_MENU)
 }
 
 // ---------------------------------------------------------------- the lane
@@ -877,8 +905,8 @@ impl LaneGeometry {
         for (id, start, duration) in self.clips.iter().rev() {
             if let Some(v) = visible_span(self.dur, self.view_start, width, *start, *duration, 0) {
                 let block = Rectangle::new(
-                    Point::new(v.left as f32, 3.0),
-                    Size::new(v.width as f32, (size.height - 6.0).max(0.0)),
+                    Point::new(v.left as f32, CLIP_INSET),
+                    Size::new(v.width as f32, (size.height - 2.0 * CLIP_INSET).max(0.0)),
                 );
                 if block.contains(at) {
                     return Hit::Clip(id.clone());
@@ -1029,11 +1057,13 @@ impl LaneState {
     }
 }
 
-/// `_Body`: the timeline lane — the empty-lane background and grid, each
-/// clip as a block, the forming take while recording, the note markers and
-/// the playhead — and its input (see the module docs).
+/// `_Body`: the timeline lane — the bar lines, each clip as a block, the
+/// forming take while recording, the note markers and the playhead — and
+/// its input (see the module docs).
 fn body<'a, M>(r: &TrackRow<'a, M>, accent: Color) -> Element<'a, Message> {
     let track = r.track;
+    let label = r.label.clone();
+    let muted = track.muted;
     let dur = r.timeline_duration_ms; // the visible span
     let view_start = r.view_start_ms;
     let position_ms = r.position_ms;
@@ -1042,21 +1072,17 @@ fn body<'a, M>(r: &TrackRow<'a, M>, accent: Color) -> Element<'a, Message> {
     let recording = r.recording;
     let lanes = responsive(move |size| {
         let width = f64::from(size.width);
-        let block_height = (size.height - 6.0).max(0.0);
+        let block_height = (size.height - 2.0 * CLIP_INSET).max(0.0);
         let mut layers: Vec<Element<'a, Message>> = vec![
-            // Empty-lane background + grid (bottom of the stack).
-            container(
-                canvas_widget(TimelineGridPainter {
-                    timeline_duration_ms: dur,
-                    color: Studio::GRID,
-                    start_ms: view_start,
-                })
-                .width(Length::Fill)
-                .height(Length::Fill),
-            )
+            // The bar lines (bottom of the stack), on the arrange's own
+            // background.
+            canvas_widget(TimelineGridPainter {
+                timeline_duration_ms: dur,
+                color: Studio::GRID,
+                start_ms: view_start,
+            })
             .width(Length::Fill)
             .height(Length::Fill)
-            .style(fill(Studio::INSET))
             .into(),
         ];
         // Each clip — its own block, by id.
@@ -1066,12 +1092,14 @@ fn body<'a, M>(r: &TrackRow<'a, M>, accent: Color) -> Element<'a, Message> {
             };
             let region = clip_region(
                 clip,
+                &label,
                 &v,
                 accent,
                 clip_selected(lane_selected, selected_clip_id.as_deref(), &clip.id),
+                muted,
                 block_height,
             );
-            layers.push(pin(region).x(v.left as f32).y(3.0).into());
+            layers.push(pin(region).x(v.left as f32).y(CLIP_INSET).into());
         }
         // The forming clip while this lane is the armed recording target.
         if let Some((peaks, start_ms)) = recording {
@@ -1087,14 +1115,14 @@ fn body<'a, M>(r: &TrackRow<'a, M>, accent: Color) -> Element<'a, Message> {
                 layers.push(
                     pin(forming_clip(painter, v.width as f32, block_height))
                         .x(v.left as f32)
-                        .y(3.0)
+                        .y(CLIP_INSET)
                         .into(),
                 );
             }
         }
         for note in &track.notes {
             let at = note_box(x_of(note.position_ms, dur, view_start, width), size);
-            layers.push(pin(note_marker(accent)).x(at.x).y(at.y).into());
+            layers.push(pin(note_marker()).x(at.x).y(at.y).into());
         }
         layers.push(
             canvas_widget(PlayheadPainter {
@@ -1136,16 +1164,16 @@ fn body<'a, M>(r: &TrackRow<'a, M>, accent: Color) -> Element<'a, Message> {
     .into()
 }
 
-/// A `color` box with the region's border overlaid (not inset): `width`
-/// wide, radius 4.
-fn border_overlay<'a>(color: Color, width: f32) -> Element<'a, Message> {
+/// A `color` box with the region's 1 px outline overlaid (not inset),
+/// radius 4.
+fn border_overlay<'a>(color: Color) -> Element<'a, Message> {
     container(Space::new())
         .width(Length::Fill)
         .height(Length::Fill)
         .style(move |_| container::Style {
             border: Border {
                 color,
-                width,
+                width: 1.0,
                 radius: 4.0.into(),
             },
             ..container::Style::default()
@@ -1153,77 +1181,114 @@ fn border_overlay<'a>(color: Color, width: f32) -> Element<'a, Message> {
         .into()
 }
 
-/// The region's 4 px color cap, rounded where the region is.
-fn region_cap<'a>(color: Color) -> Element<'a, Message> {
-    container(Space::new())
-        .width(Length::Fill)
-        .height(4)
-        .style(move |_| container::Style {
-            background: Some(color.into()),
-            border: Border {
-                radius: iced::border::Radius {
-                    top_left: 4.0,
-                    top_right: 4.0,
-                    bottom_right: 0.0,
-                    bottom_left: 0.0,
-                },
-                ..Border::default()
+/// The region's 13 px header band in `color`, holding `name` (10 px,
+/// `name_color`), rounded where the region is.
+fn region_header<'a>(name: &str, color: Color, name_color: Color) -> Element<'a, Message> {
+    container(
+        studio_text(name.to_string())
+            .size(type_scale::AXIS)
+            .line_height(iced::Pixels(clip::HEADER_HEIGHT))
+            .color(name_color)
+            .wrapping(Wrapping::None),
+    )
+    .padding(Padding::from([0, 6]))
+    .width(Length::Fill)
+    .height(clip::HEADER_HEIGHT)
+    .clip(true)
+    .style(move |_| container::Style {
+        background: Some(color.into()),
+        border: Border {
+            radius: iced::border::Radius {
+                top_left: 4.0,
+                top_right: 4.0,
+                bottom_right: 0.0,
+                bottom_left: 0.0,
             },
-            ..container::Style::default()
-        })
-        .into()
+            ..Border::default()
+        },
+        ..container::Style::default()
+    })
+    .into()
 }
 
-/// `_Region`: a Logic Pro-style audio region — a rounded, tinted block with
-/// a colored cap strip and the waveform drawn inside (or "Analyzing…" until
-/// its peaks are in), so the clip's extent is unmistakable.
+/// A clip's name colour in its header band: white selected, else a light
+/// neutral.
+pub const CLIP_NAME: Color = Color::from_rgb8(0xD4, 0xD4, 0xDC);
+
+/// `_Region`: an audio region (`DESIGN.md`, Track colours) — filled with
+/// the track's `color` at 10 % (16 % selected), outlined at 32 %
+/// (`CLIP_SELECTED_OUTLINE` selected), a 13 px header band at 22 % (34 %
+/// selected) with the take's `name`, and the waveform under it (or
+/// "Analyzing…" until its peaks are in); a muted take's at 60 %.
 fn clip_region<'a>(
     clip: &AudioClip,
+    name: &str,
     v: &VisibleSpan,
     color: Color,
     selected: bool,
+    muted: bool,
     height: f32,
 ) -> Element<'a, Message> {
     let inner: Element<'a, Message> = if clip.has_waveform() {
         WaveformPainter::sliced(clip_peaks(clip), v.slice.clone(), color)
+            .opacity(if muted {
+                clip::WAVEFORM_MUTED
+            } else {
+                clip::WAVEFORM
+            })
             .into_canvas()
             .into()
     } else {
-        center(text("Analyzing…").size(10).color(Studio::TEXT_FAINT)).into()
+        center(
+            text("Analyzing…")
+                .size(type_scale::AXIS)
+                .color(Studio::TEXT_FAINT),
+        )
+        .into()
+    };
+    let (fill_alpha, header_alpha) = if selected {
+        (clip::FILL_SELECTED, clip::HEADER_SELECTED)
+    } else {
+        (clip::FILL, clip::HEADER)
     };
     let block = container(column![
-        region_cap(alpha(color, 0.9)),
+        region_header(
+            name,
+            alpha(color, header_alpha),
+            if selected { Color::WHITE } else { CLIP_NAME },
+        ),
         container(inner)
             .id(waveform_widget_id(&clip.id))
-            .padding([3, 0])
+            .padding([1, 0])
             .width(Length::Fill)
             .height(Length::Fill),
     ])
     .width(Length::Fill)
     .height(Length::Fill)
-    .style(move |_| boxed(Some(alpha(color, 0.14)), 4.0, None))
+    .style(move |_| boxed(Some(alpha(color, fill_alpha)), 4.0, None))
     .clip(true);
-    // Fill stays constant; only the outer border brightens when selected
-    // (Logic style) — a lift of the lane's own hue, not pure white — so the
-    // waveform inside reads the same either way. Overlaid, not inset (as
-    // the forming clip): the painter maps the clip's full width, and an
-    // inset drew its edges up to 4 px off the ruler and playhead, shifted
-    // the waveform a pixel on selection, and squeezed a take as recording
-    // stopped.
-    let border = if selected {
-        border_overlay(selected_lane_color(color), 2.0)
+    // The fill and the waveform keep their colour; the outline marks the
+    // selection. Overlaid, not inset (as the forming clip): the painter maps
+    // the clip's full width, and an inset drew its edges off the ruler and
+    // playhead and shifted the waveform a pixel on selection.
+    let border = border_overlay(if selected {
+        Studio::CLIP_SELECTED_OUTLINE
     } else {
-        border_overlay(alpha(color, 0.55), 1.0)
-    };
-    container(stack![block, border])
+        alpha(color, clip::OUTLINE)
+    });
+    let region = container(stack![block, border])
         .id(clip_widget_id(&clip.id))
         .width(v.width as f32)
-        .height(height)
-        .into()
+        .height(height);
+    if muted {
+        opacity_layer(clip::MUTED_OPACITY, region).into()
+    } else {
+        region.into()
+    }
 }
 
-/// `_FormingClip`: the clip forming while recording. Draws its waveform
-/// full-width (border as an overlay, not an inset) at a fixed
+/// `_FormingClip`: the clip forming while recording, in `RECORD`. Draws its
+/// waveform full-width (border as an overlay, not an inset) at a fixed
 /// pixels-per-sample, so the painter width is exactly the clip width and the
 /// already-drawn waveform stays pixel-stable as the take grows — the
 /// wobble-free way Logic / Pro Tools / Cubase show a live take, rather than
@@ -1231,7 +1296,11 @@ fn clip_region<'a>(
 fn forming_clip<'a>(painter: LiveWaveformPainter, width: f32, height: f32) -> Element<'a, Message> {
     let color = Studio::RECORD;
     let block = container(column![
-        region_cap(alpha(color, 0.9)),
+        region_header(
+            "Recording",
+            alpha(color, clip::HEADER_SELECTED),
+            Color::WHITE
+        ),
         // Vertical inset only: horizontal padding would shrink the painter
         // and break the fixed pixels-per-sample mapping.
         container(
@@ -1239,61 +1308,76 @@ fn forming_clip<'a>(painter: LiveWaveformPainter, width: f32, height: f32) -> El
                 .width(Length::Fill)
                 .height(Length::Fill)
         )
-        .padding([3, 0])
+        .padding([1, 0])
         .width(Length::Fill)
         .height(Length::Fill),
     ])
     .width(Length::Fill)
     .height(Length::Fill)
-    .style(move |_| boxed(Some(alpha(color, 0.14)), 4.0, None))
+    .style(move |_| boxed(Some(alpha(color, clip::FILL_SELECTED)), 4.0, None))
     .clip(true);
-    container(stack![block, border_overlay(alpha(color, 0.55), 1.0)])
+    container(stack![block, border_overlay(alpha(color, 0.55))])
         .width(width)
         .height(height)
         .into()
 }
 
-/// `_NoteMarker`: a 12 px sticky-note glyph in the lane's color, centred in
-/// a 16 px box (the lane's input opens the note on a tap).
-fn note_marker<'a>(color: Color) -> Element<'a, Message> {
-    container(icons::icon(Icon::StickyNote, 12.0, color))
-        .center_x(16)
-        .center_y(16)
-        .into()
+/// `_NoteMarker`: a 5 px `TEXT_PRIMARY` diamond centred in a 16 px box (the
+/// lane's input opens the note on a tap).
+fn note_marker<'a>() -> Element<'a, Message> {
+    canvas_widget(Diamond).width(16).height(16).into()
+}
+
+/// A note's diamond: a [`NOTE_DIAMOND`] square turned 45°, radius 1.
+struct Diamond;
+
+impl iced::widget::canvas::Program<Message> for Diamond {
+    type State = ();
+
+    fn draw(
+        &self,
+        _: &(),
+        renderer: &Renderer,
+        _: &Theme,
+        bounds: Rectangle,
+        _: mouse::Cursor,
+    ) -> Vec<iced::widget::canvas::Geometry> {
+        let mut frame = iced::widget::canvas::Frame::new(renderer, bounds.size());
+        let c = Point::new(bounds.width / 2.0, bounds.height / 2.0);
+        // The square's half-diagonal.
+        let r = NOTE_DIAMOND * std::f32::consts::FRAC_1_SQRT_2;
+        let diamond = iced::widget::canvas::Path::new(|b| {
+            b.move_to(Point::new(c.x, c.y - r));
+            b.line_to(Point::new(c.x + r, c.y));
+            b.line_to(Point::new(c.x, c.y + r));
+            b.line_to(Point::new(c.x - r, c.y));
+            b.close();
+        });
+        frame.fill(&diamond, Studio::TEXT_PRIMARY);
+        vec![frame.into_geometry()]
+    }
 }
 
 // ------------------------------------------------------- the reorder drag
 
 /// `_DragGhost`: the floating label shown under the pointer while
-/// long-press dragging a lane — a grip glyph and the label (11 px w700, 0.8
-/// letter spacing) on a raised, coral-ringed chip with a soft shadow.
+/// long-press dragging a lane — a grip glyph and the name (12 px medium, as
+/// typed) on a menu-like card with a soft shadow.
 fn drag_ghost<'a>(label: &str) -> Element<'a, Message> {
     container(
         row![
-            icons::icon(Icon::GripVertical, 14.0, Studio::TEXT_SECONDARY),
-            Space::new().width(8),
-            studio_text(label.to_uppercase())
-                .size(11)
-                .font(font::BOLD)
-                .letter_spacing(0.8)
+            icons::icon(Icon::GripVertical, 13.0, Studio::TEXT_FAINT),
+            Space::new().width(6),
+            studio_text(label.to_string())
+                .size(type_scale::BODY)
+                .font(font::MEDIUM)
                 .color(Studio::TEXT_PRIMARY)
                 .wrapping(Wrapping::None),
         ]
         .align_y(Vertical::Center),
     )
-    .padding([8, 12])
-    .style(|_| container::Style {
-        shadow: Shadow {
-            color: Color::from_rgba8(0, 0, 0, 0x66 as f32 / 255.0),
-            offset: Vector::new(0.0, 4.0),
-            blur_radius: 12.0,
-        },
-        ..boxed(
-            Some(Studio::SURFACE_RAISED),
-            6.0,
-            Some(Studio::ACCENT_BRIGHT),
-        )
-    })
+    .padding([6, 10])
+    .style(crate::ui::core::theme::menu)
     .into()
 }
 

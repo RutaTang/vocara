@@ -1406,17 +1406,19 @@ fn narrow(name: &str) -> Harness {
 }
 
 /// The centre pane's right edge in a narrow page.
-const CENTRE_RIGHT: f32 = 960.0 - 300.0;
+const CENTRE_RIGHT: f32 =
+    960.0 - crate::ui::song_practice_detail::widgets::lyrics_panel::PANEL_WIDTH;
 
-/// The interpretation dropdown's chevron: the one on the VOCAL TAKES row.
-fn dropdown_chevron(h: &Harness) -> iced::Rectangle {
-    let row = h.find("VOCAL TAKES").expect("the takes header").bounds();
-    let chevron = glyph(Icon::ChevronDown);
-    (0..)
-        .map_while(|n| h.ui().find(nth(&chevron, n)).ok())
+/// The interpretation pop-up's chevron's right edge (the pop-up reading
+/// `name`): its label, the 8 px gap and the 10 px chevron on from it.
+fn dropdown_chevron_right(h: &Harness, name: &str) -> f32 {
+    let row = h.find("Vocal takes").expect("the takes header").bounds();
+    let label = (0..)
+        .map_while(|n| h.ui().find(nth(name, n)).ok())
         .map(|t| t.bounds())
         .find(|b| (b.center_y() - row.center_y()).abs() < 12.0)
-        .expect("the dropdown's chevron")
+        .expect("the pop-up's label");
+    label.x + label.width + 8.0 + 10.0
 }
 
 // takes_header_test: at the smallest window a user-named interpretation of a
@@ -1426,21 +1428,18 @@ fn dropdown_chevron(h: &Harness) -> iced::Rectangle {
 fn a_long_interpretation_name_gives_way_instead_of_overflowing() {
     let h = narrow("Powerful belt, second verse");
     assert!(h.shows("Powerful belt, second verse"));
-    let chevron = dropdown_chevron(&h);
+    let chevron = dropdown_chevron_right(&h, "Powerful belt, second verse");
     assert!(
-        chevron.x + chevron.width <= CENTRE_RIGHT - 14.0 + 0.5,
-        "the chevron stays inside the row: {chevron:?}"
+        chevron <= CENTRE_RIGHT - 10.0 - 6.0 + 0.5,
+        "the chevron stays inside the row: {chevron}"
     );
 }
 
 #[test]
 fn the_dropdown_stays_flush_right() {
     let h = narrow("Tender");
-    let chevron = dropdown_chevron(&h);
-    assert!(
-        CENTRE_RIGHT - (chevron.x + chevron.width) < 40.0,
-        "{chevron:?}"
-    );
+    let chevron = dropdown_chevron_right(&h, "Tender");
+    assert!(CENTRE_RIGHT - chevron < 40.0, "{chevron}");
 }
 
 // -------------------------------------------------------- the transport
@@ -1720,18 +1719,40 @@ fn a_clip_dragged_on_a_folded_out_take_is_analyzed_where_it_lands() {
 #[test]
 fn expanding_a_take_flips_its_chevron_and_reveals_its_lanes() {
     let mut h = Harness::open(Setup::default());
-    assert!(h.shows(&glyph(Icon::ChevronRight)));
-    h.click(&glyph(Icon::ChevronRight));
+    assert!(h.shows(track_row::SHOW_LANES));
+    let pitch = h.count("Pitch");
+    h.click(track_row::SHOW_LANES);
     h.settle();
     assert!(h.vm().analysis().is_track_expanded("t1"));
-    assert!(h.shows("PITCH"), "the pitch lane folds out");
+    assert!(h.shows(track_row::HIDE_LANES), "the chevron turns down");
+    // The lane tab and the pitch lane's header.
+    assert_eq!(h.count("Pitch"), pitch + 2, "the pitch lane folds out");
 }
 
 // ------------------------------------------------------------------ drops
 
+/// The name `name` in the arrange's header column (a take's, the
+/// backing's, a bus's or the master's), not a namesake elsewhere (the
+/// inspector's title, a clip's header band, a section row's label): the last
+/// match within the column, which starts where the section labels do, 14 px
+/// to their left.
+fn header_label(h: &Harness, name: &str) -> iced::Rectangle {
+    let section = h
+        .find("Vocal takes")
+        .expect("the takes section row")
+        .bounds();
+    let column = section.x - 14.0..section.x - 14.0 + track_row::TRACK_HEADER_W;
+    (0..)
+        .map_while(|n| h.ui().find(nth(name, n)).ok())
+        .map(|t| t.bounds())
+        .filter(|b| column.contains(&b.x))
+        .last()
+        .unwrap_or_else(|| panic!("{name} in the header column"))
+}
+
 /// Where the lane of `name` (its header label) is, to drop on.
 fn lane_at(h: &Harness, name: &str) -> Point {
-    let label = h.find(name).unwrap_or_else(|| panic!("{name}")).bounds();
+    let label = header_label(h, name);
     // Over the lane's timeline, right of its header.
     Point::new(label.x + 400.0, label.y + 20.0)
 }
@@ -1757,7 +1778,7 @@ fn a_drop_lays_its_files_end_to_end_from_the_drop_playhead() {
         ..Setup::default()
     });
     h.at_ms(5000);
-    let lane = lane_at(&h, "TAKE 1");
+    let lane = lane_at(&h, "Take 1");
     h.drop_at(lane, &["/src/a.wav", "/src/b.wav"]);
     h.pump_until(|_| analyze.parked() == 1);
     // Playback runs on while the first file imports.
@@ -1783,7 +1804,7 @@ fn a_drop_on_a_set_backing_says_it_became_takes_once_they_have_landed() {
         analyze: analyze.analyzer(),
         ..Setup::default()
     });
-    let lane = lane_at(&h, "BACKING");
+    let lane = lane_at(&h, "Backing");
     h.drop_at(lane, &["/src/a.wav", "/src/b.wav"]);
     h.pump_until(|_| analyze.parked() == 1);
     let notice = backing_set_toast("Accompaniment");
@@ -1842,7 +1863,7 @@ fn dropping_an_audio_file_imports_the_backing_track() {
 #[test]
 fn a_drop_with_no_supported_audio_says_so() {
     let mut h = Harness::open(Setup::default());
-    let lane = lane_at(&h, "TAKE 1");
+    let lane = lane_at(&h, "Take 1");
     h.drop_at(lane, &["/src/lyrics.txt", "/src/voice.opus"]);
     assert_eq!(h.screen.snack(), Some(NO_AUDIO_IN_DROP));
     assert_eq!(h.files.imports.load(Ordering::SeqCst), 0);
@@ -1862,7 +1883,7 @@ fn a_drop_hint_clicked_browses_for_its_zone() {
 #[test]
 fn adding_a_note_via_the_take_header_saves_it_on_the_take() {
     let mut h = Harness::open(Setup::default());
-    h.click(&glyph(Icon::StickyNote));
+    h.click(track_row::ADD_NOTE);
     let editor = h.screen.note_editor().expect("the note editor opened");
     assert_eq!(editor.title(), "Note at 00:00");
     h.send(Message::NoteEditor(note_editor::Message::Edit(
@@ -1898,7 +1919,7 @@ fn the_note_editor_and_the_picker_come_in_and_go_over_150_ms() {
 
     // The note editor comes in.
     let before = Instant::now();
-    h.click(&glyph(Icon::StickyNote));
+    h.click(track_row::ADD_NOTE);
     let after = Instant::now();
     assert_comes_in(&h.screen.editor_motion, before, after);
     assert_eq!(frames(&h, after), 1, "frames while it comes in");
@@ -1926,7 +1947,7 @@ fn the_note_editor_and_the_picker_come_in_and_go_over_150_ms() {
 
     // The picker the same.
     let before = Instant::now();
-    h.click(&glyph(Icon::Waypoints));
+    h.click(track_row::ADD_TECHNIQUE);
     let after = Instant::now();
     assert_comes_in(&h.screen.picker_motion, before, after);
     h.screen.picker_motion = DialogMotion::shown();
@@ -1953,7 +1974,7 @@ fn the_technique_picker_lists_the_library_and_adds_the_pick() {
         ..Setup::default()
     });
     h.at_ms(2000);
-    h.click(&glyph(Icon::Waypoints));
+    h.click(track_row::ADD_TECHNIQUE);
     let picker = h.screen.technique_picker().expect("the picker opened");
     assert_eq!(picker.title(), "Add technique at 00:02");
     assert!(picker.is_loading());
@@ -2196,7 +2217,7 @@ fn a_lanes_menu_offers_the_take_as_it_is_now_after_a_rename() {
 #[test]
 fn the_interpretation_switcher_opens_its_menu_and_creates_one() {
     let mut h = Harness::open(Setup::default());
-    h.click(&glyph(Icon::Drama));
+    h.click("Interpretation 1");
     assert_eq!(h.screen.open_menu(), Some(&OpenMenu::Interpretations));
     assert!(h.shows("New interpretation"));
     assert_eq!(h.count("Interpretation 1"), 2, "the chip, and its menu row");
@@ -2226,7 +2247,7 @@ fn the_new_take_button_adds_an_empty_vocal_lane() {
     h.click("New take");
     h.settle();
     assert_eq!(h.practice().vocal_tracks.len(), 2);
-    assert!(h.shows("TAKE 2"));
+    assert!(h.shows("Take 2"));
 }
 
 // ----------------------------------------------------- the catch-up guard
@@ -2261,8 +2282,8 @@ fn a_reopen_behind_a_landing_save_shows_the_workspace_but_takes_no_input() {
     second.pump_until(|h| h.vm().practice().is_some());
     assert!(second.vm().catching_up());
     assert!(second.shows(FINISHING_SAVE));
-    assert!(second.shows("TAKE 1"), "the workspace shows beneath");
-    let lane = lane_at(&second, "TAKE 1");
+    assert!(second.shows("Take 1"), "the workspace shows beneath");
+    let lane = lane_at(&second, "Take 1");
     second.drop_at(lane, &["/src/a.wav"]);
     assert_eq!(second.screen.snack(), Some(WAIT_FOR_SAVE));
     assert_eq!(second.files.imports.load(Ordering::SeqCst), 0);
@@ -2635,11 +2656,18 @@ fn with_buses(ids: &[&str]) -> Harness {
 }
 
 /// Where `name`'s timeline fader sits: in its header's bottom row, right of
-/// M and S.
-fn fader_at(h: &Harness, name: &str) -> Point {
-    let label = h.find(name).unwrap_or_else(|| panic!("{name}")).bounds();
-    Point::new(label.x + 90.0, label.y + TRACK_ROW_HEIGHT - 26.0)
+/// M and S, `down` px under the name's top (31 in a take's 60 px row, whose
+/// bottom row holds 24 px icon buttons; 26 in a bus's 52 px row).
+fn fader_at(h: &Harness, name: &str, down: f32) -> Point {
+    let label = header_label(h, name);
+    Point::new(label.x + 90.0, label.y + down)
 }
+
+/// A take's fader under its name.
+const TAKE_FADER: f32 = 31.0;
+
+/// A bus's fader under its name.
+const BUS_FADER: f32 = 26.0;
 
 // kept_subtree_fresh_build_test: 'a bus fader, a bus deleted above it' —
 // unkeyed, a bus deleted above one whose fader was being dragged handed the
@@ -2648,7 +2676,7 @@ fn fader_at(h: &Harness, name: &str) -> Point {
 fn a_bus_fader_keeps_its_drag_when_a_bus_above_it_is_deleted() {
     let mut h = with_buses(&["a", "b"]);
     let mut ui = LiveUi::new(h.size);
-    let at = fader_at(&h, "Bus b");
+    let at = fader_at(&h, "Bus b", BUS_FADER);
     let mut messages = ui.run(
         h.screen.view(),
         [
@@ -2673,7 +2701,10 @@ fn a_bus_fader_keeps_its_drag_when_a_bus_above_it_is_deleted() {
     h.settle();
     let messages = ui.run(
         h.screen.view(),
-        [live_ui::move_to(at.x + 20.0, at.y - TRACK_ROW_HEIGHT)],
+        [live_ui::move_to(
+            at.x + 20.0,
+            at.y - super::view::BUS_ROW_HEIGHT,
+        )],
     );
     assert!(
         messages.iter().all(|m| !matches!(
@@ -2699,7 +2730,7 @@ fn a_take_fader_keeps_its_drag_when_a_take_above_it_is_deleted() {
         ..Setup::default()
     });
     let mut ui = LiveUi::new(h.size);
-    let at = fader_at(&h, "TAKE 2");
+    let at = fader_at(&h, "Take 2", TAKE_FADER);
     let messages = ui.run(
         h.screen.view(),
         [
@@ -2739,8 +2770,8 @@ fn a_take_fader_keeps_its_drag_when_a_take_above_it_is_deleted() {
 fn the_master_fader_keeps_its_drag_when_a_bus_is_added_above_it() {
     let mut h = with_buses(&["a"]);
     let mut ui = LiveUi::new(h.size);
-    let master = h.find("MASTER").expect("the master lane").bounds();
-    let at = Point::new(master.x + 60.0, master.y + TRACK_ROW_HEIGHT - 28.0);
+    let master = header_label(&h, "Master");
+    let at = Point::new(master.x + 60.0, master.y + 27.0);
     let messages = ui.run(
         h.screen.view(),
         [
@@ -2760,7 +2791,10 @@ fn the_master_fader_keeps_its_drag_when_a_bus_is_added_above_it() {
     h.settle();
     let messages = ui.run(
         h.screen.view(),
-        [live_ui::move_to(at.x + 20.0, at.y + TRACK_ROW_HEIGHT)],
+        [live_ui::move_to(
+            at.x + 20.0,
+            at.y + super::view::BUS_ROW_HEIGHT,
+        )],
     );
     assert!(
         messages

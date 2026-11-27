@@ -339,19 +339,20 @@ fn the_lanes_show_their_labels_and_chips() {
         Element::from(lanes),
     );
     for label in [
-        "LANES",
+        // The tabs, which the lanes' header cells repeat.
         "Pitch",
         "Loudness",
         "Spectrogram",
         "Power",
         "Notes",
         "Techniques",
-        "PITCH",
-        "LOUDNESS",
-        "SPECTROGRAM",
-        "POWER SPECTRUM",
-        "NOTES",
-        "TECHNIQUES",
+        // The header cells' own.
+        "At playhead",
+        "Power spectrum",
+        "At the playhead",
+        "2 notes",
+        "2 markers",
+        // The markers.
         "breath",
         "Twang",
         "Belt",
@@ -361,9 +362,10 @@ fn the_lanes_show_their_labels_and_chips() {
     // Only the lanes that are on.
     let only_notes = analysis_lanes(&t, BTreeSet::from([AnalysisLane::Notes]), 2000, 250);
     let mut ui = iced_test::simulator(Element::from(only_notes));
-    assert!(ui.find("NOTES").is_ok());
-    assert!(ui.find("LOUDNESS").is_err());
-    assert!(ui.find("Loudness").is_ok(), "every chip, on or off");
+    assert!(ui.find("2 notes").is_ok());
+    assert!(ui.find("Power spectrum").is_err());
+    assert!(ui.find("2 markers").is_err());
+    assert!(ui.find("Loudness").is_ok(), "every tab, on or off");
 }
 
 #[test]
