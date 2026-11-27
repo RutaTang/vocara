@@ -1471,14 +1471,14 @@ fn the_transport_toggles_play_and_pause_and_stop_resets_it() {
 #[test]
 fn the_bottom_dock_opens_and_closes() {
     let mut h = Harness::open(Setup::default());
-    assert!(h.shows(&glyph(Icon::PanelBottomOpen)), "starts closed");
-    h.click(&glyph(Icon::PanelBottomOpen));
+    assert!(h.shows(bottom_dock::toggle_label(false)), "starts closed");
+    h.click(bottom_dock::toggle_label(false));
     assert!(h.vm().analysis().dock_open());
-    assert!(h.shows(&glyph(Icon::PanelBottomClose)));
+    assert!(h.shows(bottom_dock::toggle_label(true)));
     // A tab opens the dock on it.
-    h.click(&glyph(Icon::PanelBottomClose));
+    h.click(bottom_dock::toggle_label(true));
     assert!(!h.vm().analysis().dock_open());
-    h.click("MIXER");
+    h.click("Mixer");
     assert!(h.vm().analysis().dock_open());
     assert_eq!(h.vm().analysis().dock_tab(), DockTab::Mixer);
     assert!(h.shows("MASTER"), "the mixer desk's master strip");
@@ -1505,7 +1505,7 @@ fn a_dock_taller_than_the_window_leaves_the_timeline_whole() {
         .find(&glyph(Icon::ChevronLeft))
         .expect("the transport's back chevron")
         .bounds();
-    let tabs = h.find("MIXER").expect("the dock's tab strip").bounds();
+    let tabs = h.find("Mixer").expect("the dock's tab strip").bounds();
     // The timeline keeps its least height between the transport and the
     // dock's tab strip (under the grabber), and the dock's bottom shows.
     let transport_bottom = transport.y + transport.height;

@@ -26,12 +26,12 @@ fn dock<'a>(open: bool, tab: DockTab, supports_live: bool) -> BottomDock<'a> {
 }
 
 #[test]
-fn every_tab_is_labelled_as_dart_labelled_it() {
+fn every_tab_is_labelled_in_sentence_case() {
     let labels: Vec<&str> = DockTab::ALL.iter().map(|t| tab_label(*t)).collect();
     assert_eq!(
         labels,
         [
-            "Analysis Summary",
+            "Summary",
             "Spectrogram",
             "Power",
             "LTAS",
@@ -47,18 +47,36 @@ fn every_tab_is_labelled_as_dart_labelled_it() {
     );
 }
 
+// The strip shows the analysis tabs in DESIGN.md's groups, each once, and
+// the Mixer apart at its end.
+#[test]
+fn the_strip_groups_every_analysis_tab_once() {
+    let shown: Vec<DockTab> = STRIP_GROUPS
+        .iter()
+        .flat_map(|g| g.iter().copied())
+        .collect();
+    assert_eq!(shown.len(), DockTab::ALL.len() - 1);
+    for t in DockTab::ALL {
+        let times = shown.iter().filter(|s| **s == t).count();
+        assert_eq!(times, usize::from(t != DockTab::Mixer), "{t:?}");
+    }
+    assert_eq!(STRIP_GROUPS[0], [DockTab::AnalysisSummary]);
+    assert_eq!(STRIP_GROUPS[1][0], DockTab::Pitch);
+    assert_eq!(STRIP_GROUPS[2][0], DockTab::Spectrogram);
+}
+
 #[test]
 fn the_closed_dock_shows_its_tabs_and_the_open_toggle() {
     let mut ui = iced_test::simulator(bottom_dock(dock(false, DockTab::Spectrogram, true)));
     for t in DockTab::ALL {
-        assert!(
-            ui.find(tab_label(t).to_uppercase().as_str()).is_ok(),
-            "{t:?}"
-        );
+        let label = tab_label(t);
+        assert!(ui.find(label).is_ok(), "{t:?}");
+        // Sentence case (an acronym such as "LTAS" reads as it is).
+        if label != label.to_uppercase() {
+            assert!(ui.find(label.to_uppercase().as_str()).is_err(), "{t:?}");
+        }
     }
-    assert!(ui
-        .find(char::from(Icon::PanelBottomOpen).to_string().as_str())
-        .is_ok());
+    assert!(ui.find(toggle_label(false)).is_ok());
     // No Take/Live toggle and no content while closed.
     assert!(ui.find("Live").is_err());
     assert!(ui.find("CONTENT").is_err());
@@ -69,9 +87,7 @@ fn the_open_dock_shows_its_content_and_the_live_toggle_where_the_tab_has_one() {
     let mut ui = iced_test::simulator(bottom_dock(dock(true, DockTab::Spectrogram, true)));
     assert!(ui.find("CONTENT").is_ok());
     assert!(ui.find("Live").is_ok());
-    assert!(ui
-        .find(char::from(Icon::PanelBottomClose).to_string().as_str())
-        .is_ok());
+    assert!(ui.find(toggle_label(true)).is_ok());
     let mut ui = iced_test::simulator(bottom_dock(dock(true, DockTab::Range, false)));
     assert!(ui.find("Live").is_err());
 }
@@ -79,9 +95,8 @@ fn the_open_dock_shows_its_content_and_the_live_toggle_where_the_tab_has_one() {
 #[test]
 fn a_tab_and_the_toggle_report_their_calls() {
     let mut ui = iced_test::simulator(bottom_dock(dock(false, DockTab::Spectrogram, false)));
-    ui.click("POWER").expect("the Power tab");
-    ui.click(char::from(Icon::PanelBottomOpen).to_string().as_str())
-        .expect("the toggle");
+    ui.click("Power").expect("the Power tab");
+    ui.click(toggle_label(false)).expect("the toggle");
     let messages: Vec<Message> = ui.into_messages().collect();
     assert!(matches!(
         messages.as_slice(),

@@ -787,51 +787,76 @@ pub fn register_tab<'a>(src: &'a dyn AnalysisSource) -> Element<'a, Message> {
     })
 }
 
-/// `SourceToggle(live: ..., onSelect: ...)`: the dock's Take | Live
-/// segmented switch; a segment's tap is [`Message::SelectLive`].
+/// `SourceToggle(live: ..., onSelect: ...)`: the dock's Take | Live switch,
+/// drawn as `DESIGN.md`'s segmented control at 20 px (a strip's height): a
+/// `SEGMENTED` well with an inset outline, the selected segment
+/// `SEGMENT_SELECTED` in `TEXT_PRIMARY` medium. Live marks itself with a
+/// small `RECORD` dot while it is on (the mic is live). A segment's tap is
+/// [`Message::SelectLive`], the selected one's too (as Dart's did).
 pub fn source_toggle<'a>(live: bool) -> Element<'a, Message> {
-    container(row![
-        toggle_segment("Take", !live, Message::SelectLive(false)),
-        toggle_segment("Live", live, Message::SelectLive(true)),
-    ])
+    container(
+        row![
+            toggle_segment("Take", !live, false, Message::SelectLive(false)),
+            toggle_segment("Live", live, live, Message::SelectLive(true)),
+        ]
+        .align_y(Vertical::Center),
+    )
     .padding(2)
-    .style(inset(7.0))
+    .height(SOURCE_TOGGLE_HEIGHT)
+    .style(|_: &Theme| {
+        boxed(
+            Some(Studio::SEGMENTED),
+            theme::radius::WELL,
+            Some(Studio::CONTROL_ACTIVE),
+        )
+    })
     .into()
 }
+
+/// The Take/Live toggle's height (a segmented control inside a strip).
+const SOURCE_TOGGLE_HEIGHT: f32 = 20.0;
 
 fn toggle_segment<'a>(
     label: &'static str,
     selected: bool,
+    live_dot: bool,
     on_tap: Message,
 ) -> Element<'a, Message> {
-    let fill_color = if label == "Live" {
-        Studio::RECORD
-    } else {
-        Studio::ACCENT
-    };
-    button(
-        text(label)
-            .size(12)
-            .font(font::SEMIBOLD)
-            .color(if selected {
-                Studio::BACKGROUND
+    let mut face = row![].spacing(5).align_y(Vertical::Center);
+    if live_dot {
+        face = face.push(dot(Studio::RECORD, 6.0));
+    }
+    face = face.push(
+        studio_text(label)
+            .size(theme::type_scale::LABEL)
+            .line_height(Pixels(theme::type_scale::LINE))
+            .font(if selected {
+                font::MEDIUM
+            } else {
+                font::REGULAR
+            }),
+    );
+    button(container(face).center_y(Length::Fill))
+        .padding(Padding::from([0, 9]))
+        .height(SOURCE_TOGGLE_HEIGHT - 4.0)
+        .style(move |_: &Theme, status| button::Style {
+            background: selected.then_some(Background::Color(Studio::SEGMENT_SELECTED)),
+            text_color: if selected
+                || matches!(status, button::Status::Hovered | button::Status::Pressed)
+            {
+                Studio::TEXT_PRIMARY
             } else {
                 Studio::TEXT_SECONDARY
-            }),
-    )
-    .padding([5, 12])
-    .style(move |_: &Theme, _| button::Style {
-        background: selected.then_some(Background::Color(fill_color)),
-        text_color: Studio::TEXT_PRIMARY,
-        border: Border {
-            radius: Radius::from(5.0),
-            ..Border::default()
-        },
-        shadow: Shadow::default(),
-        snap: false,
-    })
-    .on_press(on_tap)
-    .into()
+            },
+            border: Border {
+                radius: Radius::from(theme::radius::SMALL),
+                ..Border::default()
+            },
+            shadow: Shadow::default(),
+            snap: true,
+        })
+        .on_press(on_tap)
+        .into()
 }
 
 // ------------------------------------------------------ the take spectrogram
