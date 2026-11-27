@@ -737,12 +737,12 @@ fn menu_item<'a>(
     .width(Length::Fill)
     .height(height::PANEL_BUTTON)
     .padding([0, 8])
-    .style(|_, status| iced::widget::button::Style {
+    .style(|t, status| iced::widget::button::Style {
         border: iced::Border {
             radius: radius::SMALL.into(),
             ..iced::Border::default()
         },
-        ..theme::menu_item(&iced::Theme::Dark, status)
+        ..theme::menu_item(t, status)
     })
     .on_press(on_tap)
     .into()
