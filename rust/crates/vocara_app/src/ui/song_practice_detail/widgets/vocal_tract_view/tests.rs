@@ -178,6 +178,50 @@ fn an_unvoiced_estimate_holds_the_last_shape_and_dims_it() {
     assert!(!spring.animating());
 }
 
+#[test]
+fn before_any_voice_the_figure_follows_the_resting_estimates() {
+    // The tab opened before the engine had anything (the placeholder), then
+    // a pause in the take: the figure takes the engine's resting shape.
+    let mut spring = PoseSpring::default();
+    let t0 = Instant::now();
+    spring.push(articulate(&AH, false, Fit::Uncertain), t0);
+    spring.push(articulate(&OO, false, Fit::Good), t0 + MS * 10);
+    for step in 1..=20 {
+        spring.advance(t0 + MS * (10 + 50 * step));
+    }
+    let oo = articulate(&OO, false, Fit::Good);
+    assert_eq!(
+        spring.shown().expect("a pose").outlines.tongue,
+        oo.outlines.tongue
+    );
+    // Once voiced, a pause holds that shape.
+    spring.push(articulate(&EE, true, Fit::Good), t0 + MS * 1100);
+    for step in 1..=20 {
+        spring.advance(t0 + MS * (1100 + 50 * step));
+    }
+    spring.push(articulate(&AH, false, Fit::Good), t0 + MS * 2200);
+    for step in 1..=20 {
+        spring.advance(t0 + MS * (2200 + 50 * step));
+    }
+    let ee = articulate(&EE, true, Fit::Good);
+    assert_eq!(
+        spring.shown().expect("a pose").outlines.tongue,
+        ee.outlines.tongue
+    );
+}
+
+#[test]
+fn the_pitch_reads_the_sung_note_at_once_not_a_glide_from_silence() {
+    let mut spring = PoseSpring::default();
+    let t0 = Instant::now();
+    spring.push(articulate(&AH, false, Fit::Good), t0);
+    spring.push(ah(), t0 + MS * 5);
+    spring.advance(t0 + MS * 10);
+    let shown = spring.shown().expect("a pose");
+    assert!(spring.animating(), "the shape still moves");
+    assert_eq!(shown.components.f0_hz, ah().components.f0_hz);
+}
+
 // --------------------------------------------------------- projection
 
 #[test]

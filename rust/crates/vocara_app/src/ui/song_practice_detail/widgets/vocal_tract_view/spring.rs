@@ -79,8 +79,9 @@ impl Spring {
 }
 
 /// The pose on screen, following the estimates (see the module docs). An
-/// unvoiced estimate leaves the shape where it is and lets the figure dim
-/// ([`PoseSpring::rest`]).
+/// unvoiced estimate leaves a voiced shape where it is and lets the figure
+/// dim ([`PoseSpring::rest`]); until a first voiced one, the figure follows
+/// the unvoiced estimates (a resting shape to start from).
 #[derive(Debug, Default)]
 pub struct PoseSpring {
     /// The last voiced estimate: the layout and what is not a number.
@@ -90,6 +91,8 @@ pub struct PoseSpring {
     goal: Vec<f32>,
     rest: Option<Spring>,
     voiced: bool,
+    /// Whether a voiced estimate has come (the shape held from then on).
+    seen_voiced: bool,
     last: Option<Instant>,
 }
 
@@ -106,11 +109,11 @@ impl PoseSpring {
             .get_or_insert_with(|| Spring::new(if pose.voiced { 0.0 } else { 1.0 }, REST_SETTLE));
         rest.goal = if pose.voiced { 0.0 } else { 1.0 };
         self.voiced = pose.voiced;
-        let first = self.template.is_none();
-        if !pose.voiced && !first {
+        if !pose.voiced && self.seen_voiced {
             // Hold the last voiced shape.
             return;
         }
+        self.seen_voiced |= pose.voiced;
         let goal = pose.values();
         match &self.template {
             Some(shown) if shown.layout() == pose.layout() => {}
@@ -169,11 +172,14 @@ impl PoseSpring {
         moving || self.rest.is_some_and(|r| !r.settled())
     }
 
-    /// The pose on screen, if any estimate came yet.
+    /// The pose on screen, if any estimate came yet. The pitch is the
+    /// estimate's, not on a spring: a note read mid-glide (from no voice,
+    /// 0 Hz, up to the sung one) would name notes nobody sang.
     pub fn shown(&self) -> Option<TractPose> {
         let template = self.template.as_ref()?;
         let mut pose = template.with_values(&self.x);
         pose.voiced = self.voiced;
+        pose.components.f0_hz = template.components.f0_hz;
         Some(pose)
     }
 
