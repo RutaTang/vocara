@@ -1,0 +1,21 @@
+[package]
+name = "vocara_tract"
+description = "Vocara's vocal-tract model: CHIMERA's articulatory anatomy and airway acoustics (ported), its 2D and 3D geometry, and the inversion of measured formants into articulator positions"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+# MIT, as the CHIMERA code it ports (LICENSE-CHIMERA).
+license = "MIT"
+publish.workspace = true
+
+[dependencies]
+# Every transcendental function goes through libm (src/math.rs), as in CHIMERA: the model's
+# geometry and formants are bit-identical on every target, and match CHIMERA's fixtures. Already
+# in the workspace's graph (num-traits), at the version CHIMERA pins.
+libm = "0.2.16"
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true
