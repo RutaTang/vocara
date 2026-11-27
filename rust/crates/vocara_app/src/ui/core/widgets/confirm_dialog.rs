@@ -246,6 +246,12 @@ pub enum Message {
     Confirm,
     /// The prompt's text changed.
     Input(String),
+    /// A dialog's second action beside its confirm button, which keeps it
+    /// open: the update dialog's Cancel while its download runs, and its
+    /// Open Download Page after an update failed. (Its Later, a barrier tap
+    /// and Escape are [`Message::Cancel`], which close it and leave the
+    /// download running.) The other dialogs have none.
+    Secondary,
 }
 
 /// What a [`Message`] did to an open dialog.
@@ -318,6 +324,8 @@ impl DialogState {
                 Some(DialogOutcome::OpenUrl(url)) => DialogStep::OpenUrl(url),
                 None => DialogStep::Stay,
             },
+            // Only the update dialog has a second action.
+            (Message::Secondary, _) => DialogStep::Stay,
             (message, Dialog::NewTechnique(d)) => closed(d.update(message)),
             (message, Dialog::RenameExample(d)) => closed(d.update(message)),
             (Message::Input(text), _) => {
@@ -1067,12 +1075,18 @@ mod tests {
 
     #[test]
     fn the_update_dialog_opens_the_browser_and_stays_and_closes_with_nothing() {
+        use vocara_services::self_update::SelfUpdate;
         use vocara_services::update_check_service::UpdateInfo;
-        let mut state = DialogState::new(UpdateDownloadDialog::new(UpdateInfo {
-            version: "9.9.9".into(),
-            url: "https://example.com/download".into(),
-            notes: "Notes.".into(),
-        }));
+        // A release from before the self-update (no image): its page.
+        let mut state = DialogState::new(UpdateDownloadDialog::new(
+            UpdateInfo {
+                version: "9.9.9".into(),
+                url: "https://example.com/download".into(),
+                notes: "Notes.".into(),
+                dmg: None,
+            },
+            std::sync::Arc::new(SelfUpdate::unavailable("not here")),
+        ));
         let messages = run(&mut state, |ui| {
             assert!(ui.find("Vocara 9.9.9 is available").is_ok());
             ui.click("Open Download Page").expect("the open button");

@@ -21,6 +21,7 @@ use vocara_model::diagnostics::DiagnosticsLog;
 use vocara_services::app_settings_service::{AppSettingsService, DeviceQueries};
 use vocara_services::audio_file_service::{AudioFileService, AudioFiles};
 use vocara_services::local_storage_service::LocalStorageService;
+use vocara_services::self_update::SelfUpdate;
 use vocara_services::source_separation_service::{
     FakeSourceSeparationService, NullSourceSeparationService, ProcessSourceSeparationService,
     SourceSeparationService,
@@ -52,8 +53,14 @@ pub struct Services {
 
     /// `ChangeNotifierProvider<UpdateCheckService>`: ONE app-wide checker, so
     /// the home banner and the Settings row share the result and the
-    /// once-per-run auto-check state.
+    /// once-per-run auto-check state, and the answer to "check
+    /// automatically?".
     pub update_check: Arc<UpdateCheckService>,
+
+    /// The self-update: ONE per app run, so the Home banner, the update
+    /// dialog and Settings all show the same download, and the app quits
+    /// for its relaunch once it is staged.
+    pub self_update: Arc<SelfUpdate>,
 
     /// `Provider<TechniqueMediaService>`.
     pub technique_media: Arc<dyn TechniqueMediaFiles>,
@@ -96,11 +103,14 @@ impl Services {
         let local_storage = Arc::new(LocalStorageService::new(environment.bundle_id()));
         let app_settings = Arc::new(AppSettingsService::new(local_storage.clone()));
         start_settings_load(&app_settings);
+        let update_check = Arc::new(UpdateCheckService::new(local_storage.clone()));
+        start_update_preference_load(&update_check);
         Self::with_parts(
             library,
             environment,
             local_storage.clone(),
-            Arc::new(UpdateCheckService::new()),
+            update_check,
+            Arc::new(SelfUpdate::production(local_storage.clone())),
             create_source_separation_service(environment, local_storage),
             app_settings,
         )
@@ -108,9 +118,10 @@ impl Services {
 
     /// The services a test boots with: storage in a fresh temporary folder
     /// (never the real application support directory), an update check that
-    /// is always offline, and a separation fake that reports unavailable —
-    /// what Dart's widget tests overrode (`separationOverride`, the stub
-    /// fetcher).
+    /// is always offline (its "check automatically?" unanswered, kept in
+    /// memory), a self-update that cannot replace a test binary, and a
+    /// separation fake that reports unavailable — what Dart's widget tests
+    /// overrode (`separationOverride`, the stub fetcher).
     pub fn detached(library: Arc<Library>, environment: AppEnvironment) -> Self {
         static SEQ: AtomicU64 = AtomicU64::new(0);
         let root: PathBuf = std::env::temp_dir().join(format!(
@@ -135,18 +146,23 @@ impl Services {
                 Box::new(|_| Err(FetchError("offline".to_string()))),
                 UpdateCheckService::APP_VERSION,
             )),
+            Arc::new(SelfUpdate::unavailable(
+                "Vocara is not running from an installed app",
+            )),
             Arc::new(FakeSourceSeparationService { available: false }),
             app_settings,
         )
     }
 
-    /// The services with the given storage, update check, separation and
-    /// settings; the rest built over [local_storage] as `buildProviders` did.
+    /// The services with the given storage, update check, self-update,
+    /// separation and settings; the rest built over [local_storage] as
+    /// `buildProviders` did.
     pub fn with_parts(
         library: Arc<Library>,
         environment: AppEnvironment,
         local_storage: Arc<LocalStorageService>,
         update_check: Arc<UpdateCheckService>,
+        self_update: Arc<SelfUpdate>,
         separation: Arc<dyn SourceSeparationService>,
         app_settings: Arc<AppSettingsService>,
     ) -> Self {
@@ -158,11 +174,28 @@ impl Services {
             spectrograms: Arc::new(SpectrogramService::new()),
             local_storage,
             update_check,
+            self_update,
             separation,
             app_settings,
             library,
             environment,
         }
+    }
+}
+
+/// Reads the answer to "check for updates automatically?" on its own thread,
+/// so Settings' switch shows it without reading the disk on the UI thread
+/// (until it lands the switch reads off, and nothing is checked: only a yes
+/// lets the automatic check run).
+fn start_update_preference_load(update_check: &Arc<UpdateCheckService>) {
+    let update_check = update_check.clone();
+    let spawned = std::thread::Builder::new()
+        .name("update-preference-load".into())
+        .spawn(move || {
+            let _ = update_check.auto_check_preference();
+        });
+    if let Err(e) = spawned {
+        DiagnosticsLog::instance().log("update", &format!("preference load failed: {e}"));
     }
 }
 

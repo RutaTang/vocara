@@ -8,13 +8,16 @@
 #   1  Validate  - fmt/clippy/tests over the whole Rust workspace in both
 #                  feature modes, and the Lean proofs and their vectors
 #   2  Build     - universal build (rust/packaging/macos/bundle.sh)
-#                  -> Developer ID deep re-sign -> DMG
+#                  -> Developer ID deep re-sign (and the identity the
+#                     in-app updater pins, checked) -> DMG
 #                  -> notarize -> staple -> Gatekeeper assessment
+#                  -> a signed DMG is a notarized DMG
 #                  -> launch the app from the DMG (unsandboxed, hardened
 #                  runtime), then update to it from the last sandboxed
 #                  release (its library must leave the App Sandbox container)
 #   3  Publish   - the DMG + SHA256SUMS + latest.json (the in-app update
-#                  check's manifest) as this public repo's GitHub release
+#                  check's manifest, naming the DMG, its size and SHA-256
+#                  for the self-update) as this public repo's GitHub release
 #
 # There is no backend deploy phase yet: sync is local-only P0 today. When the
 # self-hosted sync server lands (P1, see docs/sync-protocol.md), its deploy
@@ -42,6 +45,15 @@ env:
   # rust/crates/vocara_services/tests/update_check_pins.rs): this one. The
   # guard checks that it is the repo the workflow runs in, and public.
   RELEASES_REPO: RutaTang/vocara
+  # What every installed Vocara pins an update to: the in-app updater
+  # installs a release only when its app is signed with this identifier by
+  # this team (vocara_services::self_update::install, requirement_arg), read
+  # from the RUNNING app's own signature. So they must never change: a
+  # release signed otherwise would be refused by every install, forever. The
+  # build checks the signed app against them, and update_check_pins.rs pins
+  # UPDATE_IDENTIFIER to bundle.sh's prod bundle id.
+  UPDATE_IDENTIFIER: com.rutatang.vocara
+  UPDATE_TEAM_ID: TP7LCYW3NY
 
 # Least privilege by default; only the release job (which creates the GitHub
 # release) is granted contents: write. Third-party actions are pinned to
@@ -294,6 +306,16 @@ jobs:
           SIG="$(codesign --display --verbose=2 "$APP_PATH" 2>&1)"
           grep -q "Authority=Developer ID" <<<"$SIG" && grep -qE "flags=.*runtime" <<<"$SIG" \
             || { echo "::error::app is not Developer ID signed with hardened runtime"; exit 1; }
+          # The identity the in-app updater pins an update to, on the build
+          # every install will be pinning against (its Team ID shows as ***
+          # in the log: it is also a secret's value, which GitHub masks).
+          grep -E '^(Identifier|TeamIdentifier|Authority)=' <<<"$SIG"
+          ID="$(sed -n 's/^Identifier=//p' <<<"$SIG")"
+          TEAM="$(sed -n 's/^TeamIdentifier=//p' <<<"$SIG")"
+          if [ "$ID" != "$UPDATE_IDENTIFIER" ] || [ "$TEAM" != "$UPDATE_TEAM_ID" ]; then
+            echo "::error::signed as $ID by team $TEAM, but every install only accepts updates signed as $UPDATE_IDENTIFIER by team $UPDATE_TEAM_ID"
+            exit 1
+          fi
 
       - name: Create and sign DMG
         id: dmg
@@ -341,6 +363,24 @@ jobs:
           xcrun stapler staple "${{ steps.dmg.outputs.dmg }}"
           spctl --assess --type open --context context:primary-signature -v "${{ steps.dmg.outputs.dmg }}" \
             || { echo "::error::Gatekeeper rejected the stapled DMG"; exit 1; }
+
+      # Deliberately its own step. The in-app updater REQUIRES a stapled
+      # notarization ticket on the DMG it installs
+      # (vocara_services::self_update::install, REQUIRE_NOTARIZATION) and
+      # evaluates exactly this predicate on the user's Mac; it may require one
+      # only because no signed DMG can be published without one, and this is
+      # where that promise is kept, since no Rust test reads this file. As its
+      # own step, a later edit that narrows or skips the notarizing or the
+      # stapling cannot carry the check away with it: a release the updater
+      # would refuse ("Update failed", with a Try again that can never
+      # succeed) fails here instead.
+      - name: A signed DMG is a notarized DMG
+        env:
+          DMG: ${{ steps.dmg.outputs.dmg }}
+        run: |
+          set -euo pipefail
+          xcrun stapler validate "$DMG"
+          spctl --assess --type open --context context:primary-signature "$DMG"
 
       # The notarized app is the one users get, and the only build with this
       # signature: launched here, from the stapled DMG, before anything is
@@ -438,8 +478,19 @@ jobs:
       # The notes are the tag's own message (`git tag -a`), empty for a
       # lightweight tag: the release's body, which v0.1.0's update check
       # shows (it reads this repo's releases API), and latest.json's notes.
-      # latest.json links the release page.
+      # latest.json links the release page (`url`, what every version before
+      # the self-update reads, with `latest` and `notes`), and names the DMG
+      # for the self-update (`dmg`: the address of this release's asset, its
+      # size and its SHA-256), which the app downloads, checks against both,
+      # and installs only after checking the app inside against its own
+      # signing identity. The size and digest are the published file's: the
+      # file this job downloaded and is about to attach, checked against
+      # what the build measured, so the two jobs agree on the bytes.
       - name: Write the update manifest
+        env:
+          DMG_NAME: ${{ needs.build-macos.outputs.dmg_name }}
+          BUILT_SHA256: ${{ needs.build-macos.outputs.sha256 }}
+          BUILT_SIZE: ${{ needs.build-macos.outputs.size }}
         run: |
           set -euo pipefail
           TAG="$GITHUB_REF_NAME"
@@ -449,10 +500,24 @@ jobs:
             NOTES="$(git for-each-ref --format='%(contents:subject)%0a%0a%(contents:body)' "refs/tags/$TAG")"
           fi
           printf '%s\n' "$NOTES" > artifacts/notes.md
+          DMG="artifacts/$DMG_NAME"
+          [ -f "$DMG" ] || { echo "::error::$DMG_NAME is not among the artifacts"; exit 1; }
+          SHA256="$(sha256sum "$DMG" | cut -d ' ' -f 1)"
+          SIZE="$(stat -c%s "$DMG")"
+          if [ "$SHA256" != "$BUILT_SHA256" ] || [ "$SIZE" != "$BUILT_SIZE" ]; then
+            echo "::error::the DMG to publish ($SIZE bytes, $SHA256) is not the one built ($BUILT_SIZE bytes, $BUILT_SHA256)"
+            exit 1
+          fi
+          grep -Eq '^[0-9a-f]{64}$' <<<"$SHA256" && [ "$SIZE" -gt 0 ] \
+            || { echo "::error::unusable digest or size: $SHA256 $SIZE"; exit 1; }
           jq -n --arg latest "${TAG#v}" \
             --arg url "https://github.com/$RELEASES_REPO/releases/tag/$TAG" \
             --arg notes "$NOTES" \
-            '{latest: $latest, url: $url, notes: $notes}' > artifacts/latest.json
+            --arg dmg_url "https://github.com/$RELEASES_REPO/releases/download/$TAG/$DMG_NAME" \
+            --argjson dmg_size "$SIZE" \
+            --arg dmg_sha256 "$SHA256" \
+            '{latest: $latest, url: $url, notes: $notes,
+              dmg: {url: $dmg_url, size: $dmg_size, sha256: $dmg_sha256}}' > artifacts/latest.json
           cat artifacts/latest.json
 
       # GitHub serves releases/latest/download/latest.json (and the

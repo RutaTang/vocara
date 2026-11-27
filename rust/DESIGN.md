@@ -225,6 +225,45 @@ Line height 16 px for 11–12 px text unless noted.
   labels sentence case 11 px `TEXT_SECONDARY`; buttons right-aligned:
   secondary (transparent + outline), primary filled `ACCENT`. The barrier is
   black at 50 %.
+- **Update banner** (the library, under its toolbar): the full width,
+  `ACCENT` at 8 % with a 1 px `BORDER` line under it, 8 / 32 px padding; a
+  14 px icon, a 12 px medium `TEXT_PRIMARY` line (one line, ellipsized; two
+  for a failure), then its buttons, 8 apart, and a 28 px icon button with a
+  14 px cross ("Dismiss" tooltip). One state at a time:
+  - *offer*: the `ACCENT_BRIGHT` up-arrow, "Vocara 0.4.0 is available.",
+    "What's new" (secondary) and "Update now" (the screen's one primary,
+    filled `ACCENT`, a download icon); where Vocara cannot replace itself, a
+    single secondary "Download" instead (the dialog says why);
+  - *downloading*: the download icon, "Downloading Vocara 0.4.0…", the
+    count "12.3 MB of 41.2 MB" (11 px tabular `TEXT_SECONDARY`), a 160 × 4
+    progress bar and a secondary "Cancel"; no dismiss;
+  - *installing*: a 12 px `TEXT_SECONDARY` spinner and "Installing Vocara
+    0.4.0… Vocara will relaunch."; nothing to press;
+  - *failed*: the `WARN_TEXT` triangle, "Update failed: <why>", "Details"
+    (secondary) and "Try again" (primary) while the release is on offer, and
+    the dismiss.
+- **Progress bar**: 4 px, radius 2, track `CONTROL_ACTIVE`, fill the
+  neutral slider fill `#8A8A96` (progress is not a selection: no accent).
+- **Update dialog** (480 wide, the dialog card): the 13 px semibold title
+  "Vocara 0.4.0 is available", the release notes (12 px `TEXT_SECONDARY`, at
+  most 200 px, scrolling), then by state: "Later" and "Update now"; while
+  downloading, the line and count over a full-width progress bar with a
+  secondary "Cancel" at its right, "Update now" disabled; installing, the
+  spinner and "Installing… Vocara will relaunch."; failed, the `WARN_TEXT`
+  triangle and "Update failed: <why>", then "Later", "Open Download Page"
+  (secondary) and "Try again" (primary); where Vocara cannot update itself,
+  "Vocara can't update itself here: <why>." over the release page's URL in a
+  field well (selectable), then "Later" and "Open Download Page" (primary).
+  Later, Escape and the barrier close it and leave a download running.
+- **First-launch question** (a confirm dialog, the refresh icon in its
+  accent badge): "Check for Vocara updates automatically?", its 12 px
+  explanation, and "Don't check" / "Check automatically" (primary, not
+  destructive). Asked once, only over the library.
+- **Settings → About**: the "Check for updates" row's line follows an
+  update under way ("Downloading Vocara 0.4.0… 12.3 MB of 41.2 MB",
+  "Installing…", "Update failed: …"), and "Check automatically" is a switch
+  row (clock icon, title over its 11 px explanation, the switch at the
+  right).
 - **Text fields**: 28 px (single line), radius 6, `INSET` `#0F0F12` with an
   inset outline; focused outline `ACCENT` at 60 %; 12 px text; placeholder
   `TEXT_FAINT`.

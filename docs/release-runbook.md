@@ -8,6 +8,8 @@ The release users download, and the `latest.json` the app's update check
 reads, are this public repository's (`RELEASES_REPO` in the workflow; its
 guard checks that it is this repository and that it is public), published
 with the workflow's own token: no other repository or token is needed.
+Installed copies update themselves from it (see "In-app updates" below for
+what that requires of every release).
 
 ## Bundle-id freeze warning
 
@@ -161,25 +163,134 @@ ad-hoc local bundle, or CI's manual `release-launch` job) may be asked about or
 refused; refused, the app opens the container, fails there and says why in its
 fatal window, rather than opening an empty library.
 
-## In-app update check
+## In-app updates
+
+Vocara updates itself: one click on "Update now" downloads the release's
+DMG, verifies it, swaps the app bundle and relaunches the new version. The
+design is the owner's Clew updater's, ported
+(`rust/crates/vocara_services/src/self_update/`; the UI in
+`rust/crates/vocara_app/src/ui/home/widgets/update_notice.rs`).
+
+### The check, and consent
 
 `UpdateCheckService` reads
-`https://github.com/RutaTang/vocara/releases/latest/download/latest.json`
-(once per run, and from Settings) and shows a notify-only banner (no
-auto-install). GitHub serves that path from the newest release of this
-repository that is not a prerelease; the release workflow writes the file:
+`https://github.com/RutaTang/vocara/releases/latest/download/latest.json`.
+GitHub serves that path from the newest release of this repository that is
+not a prerelease. The app checks **automatically only with the user's
+consent**: on the first launch (once Home has been on top a moment, never
+over an open practice) it asks "Check for Vocara updates automatically?";
+until that is answered no automatic check runs, and "Don't check" (or
+Escape) is kept as a no. The answer lives in
+`settings/updates.json` under the app's data root (`{"autoCheck": true}`),
+and Settings → About has the switch ("Check automatically") and the manual
+"Check for updates", which always works.
+
+### The manifest
+
+The release workflow's "Write the update manifest" step writes:
 
 ```json
-{"latest": "1.2.0", "url": "https://github.com/RutaTang/vocara/releases/tag/v1.2.0", "notes": "..."}
+{"latest": "1.2.0",
+ "url": "https://github.com/RutaTang/vocara/releases/tag/v1.2.0",
+ "notes": "...",
+ "dmg": {"url": "https://github.com/RutaTang/vocara/releases/download/v1.2.0/Vocara-1.2.0.dmg",
+         "size": 41234567,
+         "sha256": "<64 lowercase hex digits>"}}
 ```
 
-`rust/crates/vocara_services/tests/update_check_pins.rs` fails if `MANIFEST_URL` and the
-workflow's `RELEASES_REPO` stop naming the same repo. v0.1.0 reads this
-repository's releases API (`api.github.com/repos/RutaTang/vocara/releases/latest`:
-the release's tag, page and body, which is the tag's message), which
-answers without a login now that the repository is public, so v0.1.0
-installs are offered the next release too.
-Auto-update via Sparkle was considered and deliberately deferred.
+`latest`, `url` and `notes` are what every version before the self-update
+reads (0.2 and 0.3 ignore `dmg` and keep offering the release page). The
+`dmg` entry is the published asset's address, exact size and SHA-256,
+measured on the very file the release job attaches and cross-checked against
+what the build job measured. A release whose manifest has no usable `dmg`
+is still offered, with "Open Download Page". v0.1.0 reads this repository's
+releases API instead (the release's tag, page and body), which answers
+without a login now that the repository is public.
+
+### What happens on "Update now"
+
+1. **Can this copy replace itself?** Not a dev build (`cargo run`), not one
+   running from the DMG (read-only volume) or from App Translocation, not one
+   in a folder this account cannot write, not an ad-hoc-signed build (no Team
+   ID to anchor an update to). Asked before anything is downloaded; if it
+   cannot, the banner offers "Download" and the dialog says why and offers
+   the release page.
+2. **Download**: HTTPS only (redirects included), only from
+   `https://github.com/RutaTang/vocara/releases/download/<tag>/<name>.dmg`,
+   capped at the manifest's size (and 512 MB), cancellable, into a private
+   0700 directory under the app's data root (`<data root>/updates/dl-…`,
+   never `/tmp`). Its size and SHA-256 must match the manifest's. That is
+   integrity, not trust.
+3. **Verify** (on the Mac, `self_update/install/macos.rs`):
+   - the DMG must pass `spctl --assess --type open --context
+     context:primary-signature` — a stapled notarization ticket is
+     **required**;
+   - the DMG is attached read-only (`hdiutil attach -plist`, read as a
+     property list), and its `vocara.app` (a folder, not a link) must pass
+     `codesign --verify --deep --strict -R '=anchor apple generic and
+     identifier "<running app's identifier>" and certificate
+     1[field.1.2.840.113635.100.6.2.6] exists and certificate
+     leaf[field.1.2.840.113635.100.6.1.13] exists and certificate
+     leaf[subject.OU] = "<running app's Team ID>"'` — pinned to the RUNNING
+     app's own identity, read from its own signature, nothing hard-coded —
+     and what it declares must equal that identity;
+   - its `CFBundleShortVersionString` must be exactly the version offered,
+     and newer than the running app's (the running bundle's own version);
+   - it is copied with `ditto` into a private staging directory and verified
+     again there; the image is detached.
+4. **Swap**: a detached `bash -c` helper (its script an argument, never a
+   file; tools by absolute path) waits up to three minutes for Vocara to
+   exit, moves the installed app aside, copies the staged one into place,
+   removes the backup and relaunches with `open`. On any failure it restores
+   the previous version, relaunches that, and leaves the reason in
+   `<data root>/updates/last-update-failed` (and a line in `update.log`
+   there), which the relaunched Vocara shows once ("Update failed: …").
+5. **Quit**: Vocara quits through its normal quit path (the quit guard:
+   separation sidecars stopped, recordings finalized), which is what the
+   helper waits for.
+
+### What must stay true
+
+- **A signed DMG is a notarized DMG.** The updater refuses an un-notarized
+  image, which is safe only because the workflow cannot publish one: its
+  "A signed DMG is a notarized DMG" step asserts the exact `spctl` predicate
+  the updater evaluates, on its own so that no edit to the notarizing steps
+  can skip it. If notarization is ever made optional, `REQUIRE_NOTARIZATION`
+  in `self_update/install.rs` has to change in the same commit.
+- **The same Team ID and bundle id, forever.** Every installed Vocara
+  accepts an update only if it is signed with its own identifier
+  (`com.rutatang.vocara`) by its own team (`TP7LCYW3NY`), with a Developer
+  ID Application certificate. A release signed otherwise would be refused by
+  every install ("the update's signature is invalid"), and its users could
+  only move by downloading it by hand. The workflow checks the signed app
+  against `UPDATE_IDENTIFIER` / `UPDATE_TEAM_ID` (its "Verify signature"
+  step prints what it pins), and `update_check_pins.rs` pins
+  `UPDATE_IDENTIFIER` to bundle.sh's prod bundle id. A new certificate from
+  the same team is fine (the requirement names the team, not a key).
+- **The DMG holds `vocara.app` at its top**, where the installer looks
+  (`APP_ON_IMAGE`; pinned by `update_check_pins.rs`).
+- **The bundle's version is the tag's**: the updater compares versions by
+  `CFBundleShortVersionString`, which bundle.sh stamps from the workspace
+  version that the Guard matches against the tag.
+- **The app is not sandboxed** (a sandboxed app cannot replace its own
+  bundle in /Applications) and is signed with the hardened runtime; the
+  updater runs `codesign`, `spctl`, `hdiutil`, `ditto` and `bash`, which
+  need no entitlement.
+
+`rust/crates/vocara_services/tests/update_check_pins.rs` fails if
+`MANIFEST_URL` and the workflow's `RELEASES_REPO` stop naming the same repo,
+if the manifest step stops writing the `dmg` fields, if the notarization
+step goes, or if the pinned identifier stops being the prod bundle id.
+
+### Checking an update by hand
+
+After publishing, on a Mac with the previous release installed in
+/Applications (as an admin user): Settings → About → Check for updates →
+"Update now"; Vocara should download, quit, and come back as the new
+version (`/Applications/vocara.app/Contents/Info.plist`). If it comes back as
+the old version with "Update failed: …", the reason is also in
+`~/Library/Application Support/com.rutatang.vocara/updates/update.log` (the
+data root's `updates` folder).
 
 ## Troubleshooting
 

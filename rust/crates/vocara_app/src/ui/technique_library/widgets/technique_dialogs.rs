@@ -82,6 +82,8 @@ impl NewTechniqueDialog {
             Message::Confirm => self
                 .trimmed()
                 .map(|name| DialogResult::Text(Some(name.to_string()))),
+            // It has no second action.
+            Message::Secondary => None,
         }
     }
 
