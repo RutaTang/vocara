@@ -26,9 +26,13 @@
 
 pub mod airway;
 pub mod anatomy;
+pub mod codebook;
+pub mod components;
 pub mod forward;
 pub mod geom;
+pub mod inversion;
 mod math;
 pub mod optimize;
 pub mod physics;
+pub mod posture;
 pub mod vowels;
