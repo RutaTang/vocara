@@ -1,7 +1,8 @@
 //! The transport bar's tests: `detail_transport_bar_test.dart` (the gating
-//! of play / stop / loop / follow / REC, the play icon, the zoom icons, the
-//! counts, a long title, the busy spinner), the counter's format and fixed
-//! width, the zoom slider, and the bar's layout through its pure functions.
+//! of go to start / play / stop / loop / follow / Record, the play icon,
+//! the zoom icons, the counts, a long title, the busy spinner), the time
+//! display's format and fixed width, the zoom slider, and the bar's layout
+//! through its pure functions.
 //!
 //! What is worth pinning is the GATING, because every gate here protects a
 //! state the engine cannot recover from on its own: play and stop are dead
@@ -9,6 +10,9 @@
 //! a live take is how you get the backing bleeding into the capture), and
 //! the loop toggle is dead until a loop region exists. A gate that silently
 //! opens is not visible anywhere below this widget.
+//!
+//! The icon-only controls are found and clicked by their tooltips, which
+//! are their labels (`controls::labelled`).
 
 use std::sync::Arc;
 
@@ -18,6 +22,8 @@ use vocara_model::models::audio_track::{AudioTrack, AudioTrackKind};
 use vocara_model::util::dart_date_time::DateTime;
 
 use super::*;
+use crate::ui::core::widgets::controls::{thin_slider_value, GROUP_BUTTON_WIDTH};
+use crate::ui::core::widgets::studio_text::{testing, Spec};
 
 /// A real window, not a small default: the transport is centred and the
 /// title and zoom control get the room either side of it.
@@ -70,21 +76,10 @@ fn pump(bar: TransportBar<'_>) -> Simulator<'_, Message> {
     Simulator::with_size(Settings::default(), WINDOW, detail_transport_bar(bar))
 }
 
-fn glyph(icon: Icon) -> String {
-    char::from(icon).to_string()
-}
-
-/// What a click on `icon`'s button reports.
-fn tap(bar: TransportBar<'_>, icon: Icon) -> Vec<Message> {
+/// What a click on the control labelled `label` reports.
+fn tap(bar: TransportBar<'_>, label: &str) -> Vec<Message> {
     let mut ui = pump(bar);
-    ui.click(glyph(icon).as_str())
-        .expect("the icon is on the bar");
-    ui.into_messages().collect()
-}
-
-fn tap_text(bar: TransportBar<'_>, label: &str) -> Vec<Message> {
-    let mut ui = pump(bar);
-    ui.click(label).expect("the label is on the bar");
+    ui.click(label).expect("the control is on the bar");
     ui.into_messages().collect()
 }
 
@@ -95,37 +90,41 @@ fn bounds_of(ui: &mut Simulator<'_, Message>, label: &str) -> Rectangle {
 // ------------------------------------------------ detail_transport_bar_test
 
 #[test]
-fn an_empty_practice_has_play_and_stop_dead() {
+fn an_empty_practice_has_play_stop_and_go_to_start_dead() {
     let p = practice(&[], "Hai Kuo");
-    assert!(tap(bar(&p), Icon::Play).is_empty());
-    assert!(tap(bar(&p), Icon::Square).is_empty());
-    // Follow-cursor is a view preference, not a transport action.
+    assert!(tap(bar(&p), "Play").is_empty());
+    assert!(tap(bar(&p), "Stop").is_empty());
+    assert!(tap(bar(&p), "Go to start").is_empty());
+    // Follow-playhead is a view preference, not a transport action.
     assert_eq!(
-        tap(bar(&p), Icon::LocateFixed),
+        tap(bar(&p), "Follow playhead"),
         vec![Message::ToggleFollowCursor]
     );
 }
 
 #[test]
-fn a_practice_with_a_take_can_play_and_stop() {
+fn a_practice_with_a_take_can_play_stop_and_go_to_start() {
     let p = practice(&["t1"], "Hai Kuo");
-    assert_eq!(tap(bar(&p), Icon::Play), vec![Message::TogglePlay]);
-    assert_eq!(tap(bar(&p), Icon::Square), vec![Message::Stop]);
+    assert_eq!(tap(bar(&p), "Play"), vec![Message::TogglePlay]);
+    assert_eq!(tap(bar(&p), "Stop"), vec![Message::Stop]);
+    assert_eq!(tap(bar(&p), "Go to start"), vec![Message::GoToStart]);
 }
 
 #[test]
-fn play_is_dead_while_recording_even_with_takes_loaded() {
+fn play_and_go_to_start_are_dead_while_recording_even_with_takes_loaded() {
     let p = practice(&["t1"], "Hai Kuo");
     let recording = TransportBar {
         is_recording: true,
         ..bar(&p)
     };
-    // Starting playback into a live take bleeds the backing into it.
-    assert!(tap(recording, Icon::Play).is_empty());
+    // Starting playback into a live take bleeds the backing into it;
+    // jumping the backing misaligns the rest of the take.
+    assert!(tap(recording, "Play").is_empty());
+    assert!(tap(recording, "Go to start").is_empty());
 }
 
 #[test]
-fn play_is_dead_while_rec_is_still_arming() {
+fn play_is_dead_while_record_is_still_arming() {
     // isRecording flips only once the mic delivers: Play in that window
     // started the backing, which the take then jumped back to its start.
     let p = practice(&["t1"], "Hai Kuo");
@@ -133,7 +132,7 @@ fn play_is_dead_while_rec_is_still_arming() {
         is_starting_take: true,
         ..bar(&p)
     };
-    assert!(tap(arming, Icon::Play).is_empty());
+    assert!(tap(arming, "Play").is_empty());
 }
 
 #[test]
@@ -145,7 +144,7 @@ fn stop_while_recording_ends_the_take_not_the_transport() {
         is_recording: true,
         ..bar(&p)
     };
-    assert_eq!(tap(recording, Icon::Square), vec![Message::StopRecording]);
+    assert_eq!(tap(recording, "Stop"), vec![Message::StopRecording]);
 }
 
 #[test]
@@ -155,40 +154,49 @@ fn the_loop_toggle_is_dead_until_a_loop_region_exists() {
         has_loop: false,
         ..bar(&p)
     };
-    assert!(tap(no_region, Icon::Repeat).is_empty());
-    assert_eq!(tap(bar(&p), Icon::Repeat), vec![Message::ToggleLoop]);
+    assert!(tap(no_region, "Loop").is_empty());
+    assert_eq!(tap(bar(&p), "Loop"), vec![Message::ToggleLoop]);
+}
+
+#[test]
+fn input_monitoring_toggles() {
+    let p = practice(&[], "Hai Kuo");
+    assert_eq!(
+        tap(bar(&p), "Input monitoring"),
+        vec![Message::ToggleInputMonitor]
+    );
 }
 
 #[test]
 fn the_play_icon_follows_the_transport_state() {
     let p = practice(&["t1"], "Hai Kuo");
     let mut ui = pump(bar(&p));
-    assert!(ui.find(glyph(Icon::Play).as_str()).is_ok());
-    assert!(ui.find(glyph(Icon::Pause).as_str()).is_err());
+    assert!(ui.find("Play").is_ok());
+    assert!(ui.find("Pause").is_err());
 
     let playing = TransportBar {
         is_playing: true,
         ..bar(&p)
     };
     let mut ui = pump(playing);
-    assert!(ui.find(glyph(Icon::Pause).as_str()).is_ok());
-    assert!(ui.find(glyph(Icon::Play).as_str()).is_err());
+    assert!(ui.find("Pause").is_ok());
+    assert!(ui.find("Play").is_err());
 }
 
 #[test]
-fn rec_starts_a_take_and_stops_the_one_in_flight() {
+fn record_starts_a_take_and_stops_the_one_in_flight() {
     let p = practice(&["t1"], "Hai Kuo");
-    assert_eq!(tap_text(bar(&p), "REC"), vec![Message::StartRecording]);
+    assert_eq!(tap(bar(&p), RECORD_LABEL), vec![Message::StartRecording]);
     let live = TransportBar {
         is_recording: true,
         ..bar(&p)
     };
     // A live take never restarts.
-    assert_eq!(tap_text(live, "REC"), vec![Message::StopRecording]);
+    assert_eq!(tap(live, RECORD_LABEL), vec![Message::StopRecording]);
 }
 
 #[test]
-fn stop_and_rec_while_the_take_is_still_arming_cancel_it() {
+fn stop_and_record_while_the_take_is_still_arming_cancel_it() {
     // isRecording flips only once the mic delivers (permission, take setup
     // and the ready handshake come first), so a Stop there only stopped the
     // transport and the take rolled moments later.
@@ -197,18 +205,21 @@ fn stop_and_rec_while_the_take_is_still_arming_cancel_it() {
         is_starting_take: true,
         ..bar(&p)
     };
-    assert_eq!(tap(arming, Icon::Square), vec![Message::StopRecording]);
-    assert_eq!(tap_text(arming, "REC"), vec![Message::StopRecording]);
+    assert_eq!(tap(arming, "Stop"), vec![Message::StopRecording]);
+    assert_eq!(tap(arming, RECORD_LABEL), vec![Message::StopRecording]);
 }
 
 #[test]
 fn the_zoom_icons_step_the_timeline_out_and_in() {
     let p = practice(&["t1"], "Hai Kuo");
-    assert_eq!(
-        tap(bar(&p), Icon::ZoomOut),
-        vec![Message::ZoomTimeline(1.25)]
-    );
-    assert_eq!(tap(bar(&p), Icon::ZoomIn), vec![Message::ZoomTimeline(0.8)]);
+    assert_eq!(tap(bar(&p), "Zoom out"), vec![Message::ZoomTimeline(1.25)]);
+    assert_eq!(tap(bar(&p), "Zoom in"), vec![Message::ZoomTimeline(0.8)]);
+}
+
+#[test]
+fn back_goes_back() {
+    let p = practice(&["t1"], "Hai Kuo");
+    assert_eq!(tap(bar(&p), "Back"), vec![Message::Back]);
 }
 
 #[test]
@@ -230,17 +241,19 @@ fn the_counts_read_from_the_mixer_singular_at_one_take() {
 // very long one overflowed the bar.
 const LONG: &str = "A Considerably Longer Song Title Than Most";
 
+/// The transport group's left edge: the go-to-start button's.
+fn transport_left(ui: &mut Simulator<'_, Message>) -> f32 {
+    let start = bounds_of(ui, "Go to start");
+    start.center_x() - GROUP_BUTTON_WIDTH / 2.0
+}
+
 #[test]
 fn a_long_title_ends_before_the_transport() {
     let p = practice(&[], LONG);
     let mut ui = pump(bar(&p));
     let title = bounds_of(&mut ui, LONG);
-    let play = bounds_of(&mut ui, &glyph(Icon::Play));
-    let play_left = play.center_x() - ROUND_BUTTON / 2.0;
-    assert!(
-        title.x + title.width <= play_left,
-        "{title:?} vs {play_left}"
-    );
+    let left = transport_left(&mut ui);
+    assert!(title.x + title.width <= left, "{title:?} vs {left}");
 }
 
 #[test]
@@ -249,76 +262,84 @@ fn a_long_title_never_overflows_the_bar() {
     let p = practice(&[], &long);
     let mut ui = pump(bar(&p));
     let counts = bounds_of(&mut ui, "0 takes · 0 notes");
-    let play = bounds_of(&mut ui, &glyph(Icon::Play));
+    let left = transport_left(&mut ui);
     // The counts still show, before the transport; the title gave way.
-    assert!(counts.x + counts.width <= play.center_x() - ROUND_BUTTON / 2.0);
+    assert!(counts.x + counts.width <= left);
     let title = bounds_of(&mut ui, &long);
     assert!(title.x + title.width <= counts.x);
     // The transport stays centred on the bar.
-    let lcd = bounds_of(&mut ui, "00:00 / 00:30");
-    assert!(lcd.x > WINDOW.width / 2.0 - 200.0 && lcd.x < WINDOW.width / 2.0 + 100.0);
+    let time = bounds_of(&mut ui, "00:00.0");
+    assert!(time.x > WINDOW.width / 2.0 - 200.0 && time.x < WINDOW.width / 2.0 + 100.0);
 }
 
 #[test]
-fn busy_shows_the_spinner() {
-    // The spinner widens the transport by its 14 px gap and 13 px box, and
-    // the transport stays centred: play moves left by half of that.
+fn busy_shows_the_spinner_and_the_transport_stays_put() {
     let p = practice(&["t1"], "Hai Kuo");
-    let idle = bounds_of(&mut pump(bar(&p)), &glyph(Icon::Play));
-    let busy = bounds_of(
-        &mut pump(TransportBar {
-            busy: true,
-            ..bar(&p)
-        }),
-        &glyph(Icon::Play),
-    );
-    assert!((idle.x - busy.x - 13.5).abs() < 0.6, "{idle:?} {busy:?}");
-}
-
-// ------------------------------------------------------------- the counter
-
-#[test]
-fn the_counter_reads_the_playhead_over_the_timeline() {
-    let p = practice(&["t1"], "Hai Kuo");
-    let mut ui = pump(TransportBar {
-        position: Duration::from_millis(61_500),
+    let mut idle = pump(bar(&p));
+    assert!(idle.find(BUSY_LABEL).is_err());
+    let idle_play = bounds_of(&mut idle, "Play");
+    let mut busy = pump(TransportBar {
+        busy: true,
         ..bar(&p)
     });
-    let counter = ui.find("01:01 / 00:30").expect("the counter").bounds();
-    // A `Text` under the screen's Material: the theme's height 1, a 14 px
-    // line (not Inter's natural 17).
-    assert_eq!(counter.height, 14.0, "{counter:?}");
-    assert_eq!(lcd_text(Duration::ZERO, 0), "00:00 / 00:00");
+    let spinner = bounds_of(&mut busy, BUSY_LABEL);
+    let counts = bounds_of(&mut busy, "1 take · 0 notes");
+    // After the counts, on the left; the transport does not move.
+    assert!(spinner.x > counts.x + counts.width, "{spinner:?}");
+    assert_eq!(bounds_of(&mut busy, "Play"), idle_play);
+}
+
+// ------------------------------------------------------- the time display
+
+#[test]
+fn the_time_display_reads_the_playhead_over_the_timeline() {
+    let p = practice(&["t1"], "Hai Kuo");
+    let mut ui = pump(TransportBar {
+        position: Duration::from_millis(61_560),
+        ..bar(&p)
+    });
+    assert!(ui.find("01:01.5").is_ok());
+    assert!(ui.find("00:30.0").is_ok());
+    assert_eq!(time_text(0), "00:00.0");
+    // The tenth is truncated, never rounded up.
+    assert_eq!(time_text(59_999), "00:59.9");
+    assert_eq!(time_text(180_000), "03:00.0");
+    assert_eq!(time_text(6_000_000), "100:00.0");
+    // A negative length reads as zero.
+    assert_eq!(time_text(-5), "00:00.0");
     assert_eq!(
-        lcd_text(Duration::from_millis(59_999), 180_000),
-        "00:59 / 03:00"
+        time_display(Duration::from_millis(12_400), 48_000),
+        ("00:12.4".to_string(), "00:48.0".to_string())
     );
-    assert_eq!(
-        lcd_text(Duration::from_millis(6_000_000), 6_000_000),
-        "100:00 / 100:00"
-    );
-    // A negative timeline length reads as zero, as formatClock clamps it.
-    assert_eq!(lcd_text(Duration::ZERO, -5), "00:00 / 00:00");
+}
+
+/// The time display's playhead reading's width for `content`.
+fn time_width(content: &str) -> f32 {
+    let spec = Spec {
+        line_height: 18.0,
+        letter_spacing: 0.2,
+        tabular: true,
+        ..testing::spec(content, type_scale::TIME, font::MEDIUM)
+    };
+    testing::laid(&spec, f32::INFINITY).min_bounds.width
 }
 
 #[test]
-fn the_counter_keeps_its_width_as_the_clock_runs() {
-    // Tabular figures: the transport would shift a pixel every second
+fn the_time_display_keeps_its_width_as_the_clock_runs() {
+    // Tabular figures: the transport would shift a pixel every tenth
     // otherwise.
-    let widths: Vec<f32> = ["00:00 / 03:00", "11:11 / 03:00", "48:59 / 03:00"]
+    let widths: Vec<f32> = ["00:00.0", "11:11.1", "48:59.4"]
         .iter()
-        .map(|s| counter_width(s))
+        .map(|s| time_width(s))
         .collect();
     assert!(widths[0] > 0.0);
-    // Inter kerns its tabular 4 by about a hundredth of a pixel (HarfBuzz
-    // did in Flutter too): the counter moves by less than a twentieth of a
-    // pixel, never the pixel a second proportional figures would.
+    // Inter kerns its tabular 4 by about a hundredth of a pixel: the
+    // display moves by less than a twentieth of a pixel, never the pixel a
+    // tenth proportional figures would.
     assert!(
         widths.iter().all(|w| (w - widths[0]).abs() < 0.05),
         "{widths:?}"
     );
-    // Each character is followed by its 1 px of letter spacing.
-    assert!(counter_width("00") > counter_width("0") + 1.0);
 }
 
 // ----------------------------------------------------------- the zoom slider
@@ -327,16 +348,18 @@ fn the_counter_keeps_its_width_as_the_clock_runs() {
 fn the_zoom_slider_sets_the_zoom_live_and_commits_on_release() {
     let p = practice(&["t1"], "Hai Kuo");
     let mut ui = pump(bar(&p));
-    let zoom_in = bounds_of(&mut ui, &glyph(Icon::ZoomIn));
-    // The slider ends 8 px before the zoom-in icon's 2 px pad.
-    let right = zoom_in.x - 2.0 - 8.0;
+    let zoom_in = bounds_of(&mut ui, "Zoom in");
+    // The slider ends 6 px before the zoom-in button.
+    let right = zoom_in.x - 6.0;
     let left = right - ZOOM_SLIDER_WIDTH;
     let y = zoom_in.center_y();
-    ui.point_at(Point::new(left + 24.0, y));
+    // The knob's centre runs from its radius in at either end.
+    let at = |v: f32| left + ZOOM_KNOB / 2.0 + v * (ZOOM_SLIDER_WIDTH - ZOOM_KNOB);
+    ui.point_at(Point::new(at(0.25), y));
     let _ = ui.simulate([
         Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
         Event::Mouse(mouse::Event::CursorMoved {
-            position: Point::new(left + 72.0, y),
+            position: Point::new(at(0.75), y),
         }),
         Event::Mouse(mouse::Event::CursorMoved {
             position: Point::new(left + 500.0, y),
@@ -360,13 +383,11 @@ fn the_zoom_slider_sets_the_zoom_live_and_commits_on_release() {
 
 #[test]
 fn the_zoom_slider_maps_its_width_onto_zero_to_one() {
-    assert_eq!(zoom_value_at(0.0), 0.0);
-    assert_eq!(zoom_value_at(48.0), 0.5);
-    assert_eq!(zoom_value_at(-10.0), 0.0);
-    assert_eq!(zoom_value_at(200.0), 1.0);
-    assert_eq!(zoom_knob_x(0.0, 96.0), 3.0);
-    assert_eq!(zoom_knob_x(1.0, 96.0), 93.0);
-    assert_eq!(zoom_knob_x(2.0, 96.0), 93.0);
+    let value = |dx: f32| thin_slider_value(dx, ZOOM_SLIDER_WIDTH, ZOOM_KNOB);
+    assert_eq!(value(ZOOM_KNOB / 2.0), 0.0);
+    assert_eq!(value(ZOOM_SLIDER_WIDTH / 2.0), 0.5);
+    assert_eq!(value(-10.0), 0.0);
+    assert_eq!(value(200.0), 1.0);
 }
 
 // ---------------------------------------------------------------- the pure
@@ -391,6 +412,7 @@ fn a_backing_alone_can_play() {
     let c = controls(&bar(&p));
     assert_eq!(c.play, Some(Message::TogglePlay));
     assert_eq!(c.stop, Some(Message::Stop));
+    assert_eq!(c.go_to_start, Some(Message::GoToStart));
     assert_eq!(c.rec, Message::StartRecording);
     assert!(!c.taking);
 }
@@ -411,4 +433,21 @@ fn the_bar_centres_the_transport_and_bounds_the_sides() {
     assert_eq!(side_room(1000.0, 400.0), 288.0);
     // ...and nothing, never less, when the transport takes it all.
     assert_eq!(side_room(300.0, 400.0), 0.0);
+}
+
+#[test]
+fn the_transport_sits_centred_in_the_toolbar_as_the_mockup_draws_it() {
+    let p = practice(&["t1"], "Hai Kuo");
+    let mut ui = pump(bar(&p));
+    let play = bounds_of(&mut ui, "Play");
+    let record = bounds_of(&mut ui, RECORD_LABEL);
+    let start = transport_left(&mut ui);
+    let end = record.x + record.width;
+    // Centred on the bar, its controls on the 51 px row's middle.
+    assert!(
+        ((start + end) / 2.0 - WINDOW.width / 2.0).abs() < 14.0,
+        "{start} {end}"
+    );
+    assert!((play.center_y() - (BAR_HEIGHT - 1.0) / 2.0).abs() < 1.0);
+    assert_eq!(play.height, height::TOOLBAR_GROUP);
 }

@@ -166,7 +166,7 @@ fn send(app: &mut App, message: Message) {
 }
 
 fn back(app: &mut App) {
-    click(app, &glyph(Icon::ChevronLeft));
+    click(app, "Back");
 }
 
 // home_reopen_test: 'the transport back chevron returns Home ready to open
@@ -232,7 +232,7 @@ fn a_deep_linked_practice_boots_with_its_takes_and_its_chevron_goes_home() {
     assert_eq!(app.routes(), [Some(Route::Song { id: id.clone() })]);
     assert!(shows(&app, "TAKE 1") && shows(&app, "TAKE 2"));
     assert!(
-        shows(&app, &glyph(Icon::Play)),
+        shows(&app, "Play"),
         "transport play is available once the practice has tracks"
     );
 

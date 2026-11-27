@@ -1383,10 +1383,10 @@ fn a_practice_that_cannot_be_loaded_says_so_and_has_a_way_back() {
     });
     // Loading: a spinner under the bar with the back chevron.
     assert!(h.vm().load_running());
-    assert!(h.shows(&glyph(Icon::ChevronLeft)));
+    assert!(h.shows("Back"));
     h.settle();
     assert!(h.shows(NOT_LOADED));
-    h.click(&glyph(Icon::ChevronLeft));
+    h.click("Back");
     assert_eq!(h.leaves(), 1);
 }
 
@@ -1450,18 +1450,18 @@ fn the_dropdown_stays_flush_right() {
 #[test]
 fn the_transport_toggles_play_and_pause_and_stop_resets_it() {
     let mut h = Harness::open(Setup::default());
-    assert!(h.shows(&glyph(Icon::Play)), "starts paused");
-    h.click(&glyph(Icon::Play));
+    assert!(h.shows("Play"), "starts paused");
+    h.click("Play");
     assert!(h.vm().playback().is_playing(), "the engine's event drained");
-    assert!(h.shows(&glyph(Icon::Pause)));
-    h.click(&glyph(Icon::Pause));
-    assert!(h.shows(&glyph(Icon::Play)));
+    assert!(h.shows("Pause"));
+    h.click("Pause");
+    assert!(h.shows("Play"));
 
-    h.click(&glyph(Icon::Play));
-    assert!(h.shows(&glyph(Icon::Pause)));
-    h.click(&glyph(Icon::Square));
+    h.click("Play");
+    assert!(h.shows("Pause"));
+    h.click("Stop");
     assert!(!h.vm().playback().is_playing());
-    assert!(h.shows(&glyph(Icon::Play)));
+    assert!(h.shows("Play"));
     assert!(!*guard(&h.engine.playing));
 }
 
@@ -1481,7 +1481,7 @@ fn the_bottom_dock_opens_and_closes() {
     h.click("MIXER");
     assert!(h.vm().analysis().dock_open());
     assert_eq!(h.vm().analysis().dock_tab(), DockTab::Mixer);
-    assert!(h.shows("MASTER"), "the mixer desk's master strip");
+    assert!(h.shows("Stereo Out"), "the mixer desk's master strip");
 }
 
 // playhead_repaint_test: 'a dock taller than the window leaves the timeline
@@ -1502,7 +1502,7 @@ fn a_dock_taller_than_the_window_leaves_the_timeline_whole() {
     }
     h.size = Size::new(1440.0, 560.0);
     let transport = h
-        .find(&glyph(Icon::ChevronLeft))
+        .find("Back")
         .expect("the transport's back chevron")
         .bounds();
     let tabs = h.find("MIXER").expect("the dock's tab strip").bounds();
@@ -2408,7 +2408,7 @@ fn back_while_rec_is_still_arming_cancels_the_take_before_the_page_leaves() {
     h.pump_until(|h| h.repo.stored().vocal_tracks.len() == 2);
     assert!(h.vm().recording().is_starting_take(), "REC made a take");
 
-    h.click(&glyph(Icon::ChevronLeft));
+    h.click("Back");
     assert_eq!(h.leaves(), 0, "not before the start is cancelled");
     ready.open(); // the handshake lands
     h.settle();
@@ -2428,9 +2428,9 @@ fn two_back_taps_in_recs_arm_window_leave_the_page_once() {
         detail_transport_bar::Message::StartRecording,
     ));
     h.pump_until(|h| h.repo.stored().vocal_tracks.len() == 2);
-    h.click(&glyph(Icon::ChevronLeft));
+    h.click("Back");
     // The page is still there (nothing visibly happened): tap Back again.
-    h.click(&glyph(Icon::ChevronLeft));
+    h.click("Back");
     ready.open();
     h.settle();
     assert_eq!(h.leaves(), 1);
@@ -2449,10 +2449,10 @@ fn a_second_back_while_the_take_lands_leaves_the_page_once() {
     h.pump_until(|h| h.vm().is_recording());
     // The finalize's waveform analysis takes a while (a long take).
     analyze.gated.store(true, Ordering::SeqCst);
-    h.click(&glyph(Icon::ChevronLeft));
+    h.click("Back");
     h.pump_until(|_| analyze.parked() == 1);
     assert_eq!(h.leaves(), 0, "the take is still landing");
-    h.click(&glyph(Icon::ChevronLeft));
+    h.click("Back");
     analyze.release_last();
     h.settle();
     assert_eq!(h.leaves(), 1);

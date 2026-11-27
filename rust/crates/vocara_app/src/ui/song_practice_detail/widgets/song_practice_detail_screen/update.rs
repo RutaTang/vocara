@@ -355,6 +355,11 @@ impl SongPracticeDetailScreen {
     fn transport(&mut self, m: transport::Message, step: &mut Step) {
         let fx = match m {
             transport::Message::Back => return self.back(step),
+            // Guarded while a take is in flight, as a ruler click is.
+            transport::Message::GoToStart => {
+                self.vm.seek(std::time::Duration::ZERO);
+                return;
+            }
             transport::Message::TogglePlay => self.vm.playback_do(|p, h| p.toggle_play(h)),
             transport::Message::Stop => self.vm.playback_do(|p, h| p.stop(h)),
             transport::Message::StopRecording => self.vm.stop_recording(),
