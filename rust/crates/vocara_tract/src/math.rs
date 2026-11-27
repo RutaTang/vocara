@@ -43,6 +43,10 @@ pub fn acos(x: f64) -> f64 {
     libm::acos(x)
 }
 #[inline(always)]
+pub fn asin(x: f64) -> f64 {
+    libm::asin(x)
+}
+#[inline(always)]
 pub fn cbrt(x: f64) -> f64 {
     libm::cbrt(x)
 }

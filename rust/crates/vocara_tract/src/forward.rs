@@ -23,7 +23,9 @@ use crate::airway::frequency::TransferSolver;
 use crate::airway::human::{HumanAirway, ANALYSIS_RATE};
 use crate::airway::network::LinearElements;
 use crate::anatomy::{BodyMix, HumanArtic, HumanBody, HumanFrame, HumanVocalTract};
+use crate::head3d::Head3d;
 use crate::math::{exp, ln, log10, sqrt};
+use crate::outline::OutlineBuilder;
 
 /// The most formants [`TractModel::formants`] reports.
 pub const MAX_FORMANTS: usize = 4;
@@ -116,6 +118,9 @@ pub struct TractModel {
     airway: HumanAirway,
     el: LinearElements,
     solver: TransferSolver,
+    pub(crate) outline_builder: OutlineBuilder,
+    /// the 3D head's rest shapes and buffers, built on first use
+    pub(crate) head: Option<Box<Head3d>>,
 }
 
 impl TractModel {
@@ -127,6 +132,8 @@ impl TractModel {
             airway: HumanAirway::new(ANALYSIS_RATE, body.body()),
             el: LinearElements::default(),
             solver: TransferSolver::default(),
+            outline_builder: OutlineBuilder::default(),
+            head: None,
         }
     }
 

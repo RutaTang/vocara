@@ -265,3 +265,25 @@ pub fn tangent_angle(c: Vec2, r: f64, p: Vec2, upper: bool) -> Option<f64> {
     let off = acos(r / d);
     Some(if upper { base + off } else { base - off })
 }
+
+/// Chaikin's corner cutting of a closed polygon (CHIMERA's `chaikin`, as its views smooth the
+/// lips and the velum): `it` rounds, the result closed (its first point repeated at the end),
+/// into `out` (cleared first). A last point equal to the first is dropped before cutting.
+pub fn chaikin_closed(p: &[Vec2], it: usize, out: &mut Vec<Vec2>, scratch: &mut Vec<Vec2>) {
+    out.clear();
+    let closed = p.len() > 1 && p[0] == p[p.len() - 1];
+    out.extend_from_slice(if closed { &p[..p.len() - 1] } else { p });
+    for _ in 0..it {
+        scratch.clear();
+        let n = out.len();
+        for i in 0..n {
+            let (a, b) = (out[i], out[(i + 1) % n]);
+            scratch.push(v(a.x * 0.75 + b.x * 0.25, a.y * 0.75 + b.y * 0.25));
+            scratch.push(v(a.x * 0.25 + b.x * 0.75, a.y * 0.25 + b.y * 0.75));
+        }
+        std::mem::swap(out, scratch);
+    }
+    if let Some(&first) = out.first() {
+        out.push(first);
+    }
+}

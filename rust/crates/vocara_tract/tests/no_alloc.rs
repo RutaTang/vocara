@@ -1,12 +1,15 @@
 //! Once warm, a frame allocates nothing: the inversion (fits, restarts from the codebook,
-//! holds through unvoiced frames) and the forward model's formants. Counted with a global
-//! allocator of this test binary's own, so this file holds this one test.
+//! holds through unvoiced frames), the forward model's formants, the 2D cut-away and the 3D
+//! head of the estimate. Counted with a global allocator of this test binary's own, so this
+//! file holds this one test.
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use vocara_tract::anatomy::{BodyMix, BodyName};
+use vocara_tract::components::{TractComponents, VocalFolds};
 use vocara_tract::forward::TractModel;
 use vocara_tract::inversion::{FormantFrame, Inverter};
+use vocara_tract::lines::{Lines3d, Outlines2d};
 use vocara_tract::posture::{sung_vowels, Posture};
 
 struct Counting;
@@ -69,16 +72,29 @@ fn a_warm_frame_allocates_nothing() {
         })
         .collect();
     let mut inv = Inverter::new(body);
-    // warm: the codebook, the priors, every buffer at its working size
-    for f in &frames[..400] {
+    let (mut flat, mut head) = (Outlines2d::default(), Lines3d::default());
+    let folds = |f: &FormantFrame| VocalFolds {
+        f0_hz: f.f0 * f.confidence,
+        breathiness: 0.2,
+        register: 0.5,
+    };
+    let mut frame = |inv: &mut Inverter, f: &FormantFrame, model: &mut TractModel| {
         inv.update(f);
+        let a = inv.estimate().articulation;
+        std::hint::black_box(model.formants(&a));
+        std::hint::black_box(TractComponents::of(&a, body));
+        model.outlines(&a, &mut flat);
+        model.head3d(&a, &folds(f), &mut head);
+    };
+    // warm: the codebook, the priors, the head's rest shapes, every buffer at its working size
+    for f in &frames[..400] {
+        frame(&mut inv, f, &mut model);
     }
     COUNTING.store(true, Ordering::Relaxed);
     let mut restarts = 0;
     for f in &frames[400..] {
-        inv.update(f);
+        frame(&mut inv, f, &mut model);
         restarts += usize::from(inv.last_evaluations() >= 8);
-        std::hint::black_box(model.formants(&inv.estimate().articulation));
     }
     COUNTING.store(false, Ordering::Relaxed);
     assert!(
