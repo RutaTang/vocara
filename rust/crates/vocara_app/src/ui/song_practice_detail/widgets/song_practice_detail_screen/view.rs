@@ -861,7 +861,6 @@ impl SongPracticeDetailScreen {
                 Space::new().width(10),
                 container(studio_fader(
                     bus.volume,
-                    accent,
                     move |volume| Message::SetBusVolumeLive {
                         bus_id: fader_id.clone(),
                         volume,
@@ -948,7 +947,6 @@ impl SongPracticeDetailScreen {
             row![
                 container(studio_fader(
                     volume,
-                    Studio::ACCENT,
                     Message::SetMasterVolumeLive,
                     Message::CommitMasterVolume,
                 ))
@@ -1197,23 +1195,11 @@ fn separation_overlay<'a>(progress: Option<f64>, can_cancel: bool) -> Element<'a
     })))
 }
 
-/// The toast: a floating snack bar (set 16 in from the page's edges at its
-/// bottom by the queue, `snack::FLOATING_MARGIN`), `Studio.surfaceRaised`,
-/// radius 8, `Studio.border`, 13 px text. (The app draws it too, once the
-/// page has handed it over.)
+/// The toast: the shared floating snack bar (`snack::floating_bar`, set 16
+/// in from the page's edges at its bottom by the queue). (The app draws it
+/// too, once the page has handed it over.)
 pub(super) fn snack_bar(message: &str) -> Element<'_, Infallible> {
-    let bar = container(text(message).size(13).color(Studio::TEXT_PRIMARY))
-        .width(Length::Fill)
-        .padding(Padding::from([14, 16]))
-        .style(|_: &Theme| container::Style {
-            shadow: Shadow {
-                color: alpha(Color::BLACK, 0.4),
-                offset: Vector::new(0.0, 3.0),
-                blur_radius: 8.0,
-            },
-            ..boxed(Some(Studio::SURFACE_RAISED), 8.0, Some(Studio::BORDER))
-        });
-    bar.into()
+    crate::ui::snack::floating_bar(message)
 }
 
 /// A section label of the lane list ("MASTER TRACK", "FX BUSES"' text): 11

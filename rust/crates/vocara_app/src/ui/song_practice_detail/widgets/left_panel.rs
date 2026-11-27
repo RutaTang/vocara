@@ -1148,7 +1148,6 @@ fn channel_footer<'a, M: Clone + 'a>(
             row![
                 container(studio_fader(
                     strip.volume,
-                    Studio::ACCENT,
                     move |v| on(volume_channel.volume_live(v)),
                     on(channel.mix_commit()),
                 ))
@@ -1330,7 +1329,6 @@ fn sends_section<'a, M: Clone + 'a>(
                 Space::new().width(6),
                 container(studio_fader(
                     send_fader_value(send.level_db),
-                    Studio::ACCENT,
                     move |v| on(level_channel.send_level(i, send_level_at(v))),
                     on(Message::CommitFx),
                 ))

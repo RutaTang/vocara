@@ -342,12 +342,12 @@ fn a_clip_drag_whose_lane_scrolls_out_of_the_lane_list_still_commits_its_moves()
 
 /// The volume fader's box in a vocal take's header at the window's
 /// top-left: past the 3 px bar and the 9 px padding, the M and S keys and
-/// their gaps (54 px); before the two mini buttons and their gaps (62 px),
-/// the 8 px padding and the 1 px border; 16 px tall, centred on the 22 px
-/// control row at the bottom of the padded column.
+/// their gaps (54 px); before the two mini buttons (22 px each) and their
+/// gaps (58 px), the 8 px padding and the 1 px border; 16 px tall, centred
+/// on the 22 px control row at the bottom of the padded column.
 fn fader_box() -> Rectangle {
     let left = 3.0 + 9.0 + 54.0;
-    let right = TRACK_HEADER_W - 1.0 - 8.0 - 62.0;
+    let right = TRACK_HEADER_W - 1.0 - 8.0 - 58.0;
     let row_bottom = TRACK_ROW_HEIGHT - 1.0 - 8.0;
     Rectangle::new(
         Point::new(left, row_bottom - 11.0 - 8.0),

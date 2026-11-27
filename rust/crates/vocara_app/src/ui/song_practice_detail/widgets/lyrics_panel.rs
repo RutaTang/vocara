@@ -1274,7 +1274,7 @@ fn editor_style(_: &Theme, _: text_editor::Status) -> text_editor::Style {
         border: Border::default(),
         placeholder: Studio::TEXT_FAINT,
         value: Studio::TEXT_PRIMARY,
-        selection: alpha(theme::Zinc::PRIMARY, 0.40),
+        selection: theme::SELECTION,
     }
 }
 

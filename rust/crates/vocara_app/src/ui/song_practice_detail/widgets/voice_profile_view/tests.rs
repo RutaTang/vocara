@@ -185,17 +185,17 @@ fn both_views_render_a_normal_take() {
     pump_views(&src);
     let mut ui = simulator(range, &src);
     let shown = texts(&mut ui);
-    for label in ["RANGE", "TESSITURA", "A3 – A3"] {
+    for label in ["Range", "Tessitura", "A3 – A3"] {
         assert!(shown.iter().any(|t| t == label), "{label} in {shown:?}");
     }
     let mut ui = simulator(dynamics, &src);
     let shown = texts(&mut ui);
     for label in [
-        "DYNAMIC RANGE",
-        "SOFTEST",
-        "LOUDEST",
-        "LOUDNESS OVER TIME",
-        "SPAN",
+        "Dynamic range",
+        "Softest",
+        "Loudest",
+        "Loudness over time",
+        "Span",
     ] {
         assert!(shown.iter().any(|t| t == label), "{label} in {shown:?}");
     }
@@ -346,7 +346,7 @@ fn both_views_render_a_fed_monitor() {
     let src = live(&sine(24000, 220.0, SR as f64));
     pump_views(&src);
     let mut ui = simulator(dynamics, &src);
-    assert!(ui.find("LOUDNESS (LIVE)").is_ok());
+    assert!(ui.find("Loudness (live)").is_ok());
     assert!(ui.find(LIVE_DYNAMICS_HINT).is_err());
 }
 
@@ -481,10 +481,10 @@ fn the_range_view_marks_the_passaggio() {
         "19 semitones",
         "C4 – A♯4",
         "comfortable zone",
-        "PASSAGGIO",
+        "Passaggio",
         "E4",
         "abrupt shift",
-        "RANGE  ·  tessitura highlighted, passaggio marked",
+        "Range · tessitura highlighted, passaggio marked",
     ] {
         assert!(shown.iter().any(|t| t == label), "{label} in {shown:?}");
     }

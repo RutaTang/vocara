@@ -26,7 +26,7 @@ mod tests {
         let messages: Vec<Message> = {
             let mut ui = iced_test::simulator(state.view());
             assert!(ui.find("New song practice").is_ok());
-            assert!(ui.find("TITLE").is_ok());
+            assert!(ui.find("Title").is_ok());
             assert!(ui.find("Cancel").is_ok());
             ui.click("Create").expect("the create button");
             ui.into_messages().collect()

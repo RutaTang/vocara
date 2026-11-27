@@ -320,9 +320,10 @@ fn a_fixed_snack_bar_is_drawn_revealed_from_the_bottom_edge() {
 }
 
 #[test]
-fn a_fixed_snack_bar_has_forui_s_rounded_corners() {
+fn a_fixed_snack_bar_is_the_rounded_toast_card() {
+    use crate::ui::core::theme::Studio;
     use crate::ui::core::widgets::animated::testing::BACKGROUND;
-    // forui's snackBarTheme shape: radius 8, no border side.
+    // The toast card: radius 8, an inset 1 px outline, the raised fill.
     let mut window = Frames::new(Size::new(200.0, 60.0));
     window.frame(fixed_bar("Saved"), &[], Instant::now());
     let bar = theme::SNACK_BAR_DEFAULT_BACKGROUND;
@@ -330,9 +331,19 @@ fn a_fixed_snack_bar_has_forui_s_rounded_corners() {
     // The corners' 8 px arcs leave their outermost pixels unpainted...
     assert!(near(at(0.0, 0.0), BACKGROUND), "{:?}", at(0.0, 0.0));
     assert!(near(at(199.0, 0.0), BACKGROUND), "{:?}", at(199.0, 0.0));
-    // ... while the straight edges are the bar's, with no border.
-    assert!(near(at(0.0, 20.0), bar), "{:?}", at(0.0, 20.0));
-    assert!(near(at(100.0, 0.0), bar), "{:?}", at(100.0, 0.0));
+    // ... the straight edges are its outline, inside the bar ...
+    assert!(
+        near(at(0.0, 20.0), Studio::BORDER_STRONG),
+        "{:?}",
+        at(0.0, 20.0)
+    );
+    assert!(
+        near(at(100.0, 0.0), Studio::BORDER_STRONG),
+        "{:?}",
+        at(100.0, 0.0)
+    );
+    // ... and inside it the fill.
+    assert!(near(at(1.0, 20.0), bar), "{:?}", at(1.0, 20.0));
     assert!(near(at(8.0, 8.0), bar), "{:?}", at(8.0, 8.0));
 }
 

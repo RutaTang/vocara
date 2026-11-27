@@ -1407,25 +1407,18 @@ fn warning_banner<'a>(message: &'a str) -> Element<'a, Message> {
 /// percentage.
 fn reverb_card<'a>(wet: f64) -> Element<'a, Message> {
     let value = wet.clamp(0.0, 1.0);
-    // Flutter's track sits the overlay radius (12) in from each end; iced's
-    // runs edge to edge with the thumb's centre a radius (6) in.
+    // The design's thin slider (`DESIGN.md`, Slider): its track runs edge
+    // to edge with the knob's centre a radius (5) in; the 24 px row keeps
+    // its hit area.
     let reverb = container(material_slider(
         slider(0.0..=1.0, value, |wet| {
             Message::Choose(Choice::MonitorReverb(wet))
         })
         .step(0.01)
         .height(24)
-        .style(clear_style(6.0)),
+        .style(clear_style(SliderLook::STUDIO.thumb_radius)),
         value as f32,
-        SliderLook {
-            track_height: 3.0,
-            active_track: Studio::ACCENT,
-            inactive_track: Studio::INSET,
-            thumb: Studio::ACCENT,
-            thumb_radius: 6.0,
-            // `RoundSliderOverlayShape(overlayRadius: 12)`.
-            overlay_radius: 12.0,
-        },
+        SliderLook::STUDIO,
     ))
     .id(REVERB_SLIDER)
     .padding(Padding::from([0, 6]))

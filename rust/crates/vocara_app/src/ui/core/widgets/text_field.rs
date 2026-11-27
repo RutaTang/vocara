@@ -87,10 +87,9 @@ pub use caret::set_scale_factor;
 pub use editor::{text_editor, Content, TextEditor};
 pub use input::{text_input, TextInput};
 
-/// The caret color of a field that sets none: `TextField`'s macOS
-/// `cursorColor` fallback, `CupertinoTheme.of(context).primaryColor`, which
-/// under a Material theme is its `colorScheme.primary` (zinc's).
-pub const DEFAULT_CARET: iced::Color = crate::ui::core::theme::Zinc::PRIMARY;
+/// The caret color of a field that sets none: the accent (`DESIGN.md`'s
+/// text fields; the Flutter app's fell back to the zinc primary).
+pub const DEFAULT_CARET: iced::Color = crate::ui::core::theme::Studio::ACCENT;
 
 #[cfg(test)]
 mod tests;

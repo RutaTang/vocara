@@ -367,13 +367,20 @@ impl<M> overlay::Overlay<M, Theme, Renderer> for Tip<'_, '_, M> {
             renderer,
             &layout::Limits::new(Size::ZERO, bounds),
         );
+        // On whole pixels, so its outline's edges are crisp (and the layer
+        // it fades in holds all of them).
+        let size = node.size();
+        let node = layout::Node::with_children(
+            Size::new(size.width.ceil(), size.height.ceil()),
+            node.children().to_vec(),
+        );
         let at = position_dependent_box(
             bounds,
             node.size(),
             self.target.center(),
             self.target.height / 2.0 + self.gap,
         );
-        node.move_to(at)
+        node.move_to(Point::new(at.x.round(), at.y.round()))
     }
 
     fn draw(
@@ -413,7 +420,7 @@ mod tests {
     use iced::{Color, Point, Size};
 
     use super::*;
-    use crate::ui::core::theme::Zinc;
+    use crate::ui::core::theme::Studio;
     use crate::ui::core::widgets::animated::testing::{near, over, Frames, BACKGROUND, MS};
 
     /// A 40 × 20 target at the top left, its tip 10 below it.
@@ -440,8 +447,8 @@ mod tests {
     fn tip_at(opacity: f32) -> Color {
         over(
             Color {
-                a: Zinc::FOREGROUND.a * opacity,
-                ..Zinc::FOREGROUND
+                a: Studio::SURFACE.a * opacity,
+                ..Studio::SURFACE
             },
             BACKGROUND,
         )
@@ -524,11 +531,8 @@ mod tests {
         window.frame(view(), &[], t0);
         window.frame(view(), &[], t0 + 150 * MS);
         let full = pixels(&window);
-        // Its text's ink, darker than the fill, on it.
-        let ink = full
-            .iter()
-            .filter(|p| p.r < 0.6 && **p != BACKGROUND)
-            .count();
+        // Its text's ink, lighter than the fill, on it.
+        let ink = full.iter().filter(|p| p.r > 0.5).count();
         assert!(ink > 10, "its text ({ink} pixels)");
         let mut window = Frames::new(Size::new(200.0, 100.0));
         window.point_at(Point::new(20.0, 10.0));

@@ -226,7 +226,7 @@ fn every_insert_editor_renders_with_its_plugin_on() {
         "Depth",
         "Rate",
         "Ceiling",
-        "SPACE",
+        "Space",
         "Space…",
         "Size",
         "Damping",

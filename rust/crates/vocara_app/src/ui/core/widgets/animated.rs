@@ -36,6 +36,9 @@ pub struct Decoration {
     pub border: Color,
     pub border_width: f32,
     pub radius: Radius,
+    /// The shadow under the box (`BoxDecoration.boxShadow`'s one): none by
+    /// default.
+    pub shadow: Shadow,
 }
 
 impl Decoration {
@@ -46,6 +49,7 @@ impl Decoration {
             border: Color::TRANSPARENT,
             border_width: 0.0,
             radius: radius.into(),
+            shadow: Shadow::default(),
         }
     }
 
@@ -56,15 +60,31 @@ impl Decoration {
             border,
             border_width: width,
             radius: radius.into(),
+            shadow: Shadow::default(),
         }
+    }
+
+    /// The same box casting `shadow`.
+    pub fn with_shadow(mut self, shadow: Shadow) -> Self {
+        self.shadow = shadow;
+        self
     }
 }
 
 /// `BoxDecoration.lerp`: the color, the border's color and width, the
-/// radius.
+/// radius, the shadow.
 impl Lerp for Decoration {
     fn lerp(self, to: Self, t: f32) -> Self {
+        let (a, b) = (self.shadow, to.shadow);
         Self {
+            shadow: Shadow {
+                color: a.color.lerp(b.color, t),
+                offset: Vector::new(
+                    a.offset.x.lerp(b.offset.x, t),
+                    a.offset.y.lerp(b.offset.y, t),
+                ),
+                blur_radius: a.blur_radius.lerp(b.blur_radius, t).max(0.0),
+            },
             background: self.background.lerp(to.background, t),
             border: self.border.lerp(to.border, t),
             border_width: self.border_width.lerp(to.border_width, t).max(0.0),
@@ -111,6 +131,13 @@ fn faded(d: Decoration) -> Decoration {
             ..d.background
         },
         border: Color { a: 0.0, ..d.border },
+        shadow: Shadow {
+            color: Color {
+                a: 0.0,
+                ..d.shadow.color
+            },
+            ..d.shadow
+        },
         ..d
     }
 }
@@ -662,13 +689,16 @@ impl<M> Widget<M, Theme, Renderer> for AnimatedContainer<'_, M> {
         let state = tree.state.downcast_ref::<State<Look>>();
         let decoration = state.shown().decoration;
         let bounds = layout.bounds();
-        let quad = |renderer: &mut Renderer, background: Color, border: Border| {
-            if background.a > 0.0 || (border.width > 0.0 && border.color.a > 0.0) {
+        let quad = |renderer: &mut Renderer, background: Color, border: Border, shadow: Shadow| {
+            if background.a > 0.0
+                || (border.width > 0.0 && border.color.a > 0.0)
+                || shadow.color.a > 0.0
+            {
                 renderer.fill_quad(
                     renderer::Quad {
                         bounds,
                         border,
-                        shadow: Shadow::default(),
+                        shadow,
                         snap: false,
                     },
                     Background::Color(background),
@@ -689,7 +719,7 @@ impl<M> Widget<M, Theme, Renderer> for AnimatedContainer<'_, M> {
             } else {
                 border(d)
             };
-            quad(renderer, d.background, under);
+            quad(renderer, d.background, under, d.shadow);
         }
         self.content.as_widget().draw(
             &tree.children[0],
@@ -704,7 +734,7 @@ impl<M> Widget<M, Theme, Renderer> for AnimatedContainer<'_, M> {
             // A layer of its own: the child may have drawn in layers above
             // this one (a `hover`'s top face does).
             renderer.with_layer(bounds, |renderer| {
-                quad(renderer, Color::TRANSPARENT, border(d));
+                quad(renderer, Color::TRANSPARENT, border(d), Shadow::default());
             });
         }
     }

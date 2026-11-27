@@ -19,7 +19,7 @@ use iced::widget::{column, container, Space};
 use iced::{widget, Background, Border, Color, Element, Length, Padding, Theme};
 use vocara_model::util::dart_string;
 
-use crate::ui::core::theme::{self, alpha, font, Studio, Zinc};
+use crate::ui::core::theme::{self, font, Studio};
 use crate::ui::core::widgets::studio_text::studio_text;
 use crate::ui::core::widgets::text_field::editor::{self as text_editor, text_editor};
 use crate::ui::core::widgets::text_field::text_input;
@@ -164,7 +164,7 @@ fn studio_editor(_: &Theme, status: text_editor::Status) -> text_editor::Style {
         } else {
             Studio::TEXT_PRIMARY
         },
-        selection: alpha(Zinc::PRIMARY, 0.40),
+        selection: crate::ui::core::theme::SELECTION,
     }
 }
 
@@ -230,19 +230,19 @@ impl<'a, M: Clone + 'a> From<StudioField<'a, M>> for Element<'a, M> {
                 editor.into()
             }
         };
+        // The caption: sentence case, 11 px `TEXT_SECONDARY` (`DESIGN.md`'s
+        // field labels); the well: the text field's (`theme::field_well`).
         column![
-            studio_text(f.label.to_uppercase())
-                .size(10.5)
-                .font(font::BOLD)
-                .letter_spacing(0.6)
-                .color(Studio::TEXT_FAINT),
+            studio_text(f.label)
+                .size(crate::ui::core::theme::type_scale::LABEL)
+                .color(Studio::TEXT_SECONDARY),
             Space::new().height(6),
             // 10 by 12 inside the well's 1 px border (a Flutter
             // `Container`'s padding includes its decoration's border).
             container(field)
                 .width(Length::Fill)
                 .padding(Padding::from([11, 13]))
-                .style(theme::inset(8.0)),
+                .style(theme::field_well(false)),
         ]
         .into()
     }
@@ -296,19 +296,20 @@ mod tests {
     }
 
     #[test]
-    fn the_caption_is_upper_cased_over_the_field() {
+    fn the_caption_reads_in_sentence_case_over_the_field() {
         let mut ui = iced_test::simulator(Element::from(
             studio_field("Aliases (comma separated)", "Edge")
                 .hint("e.g. Edge")
                 .on_input(Msg::Input),
         ));
-        assert!(ui.find("ALIASES (COMMA SEPARATED)").is_ok());
+        assert!(ui.find("Aliases (comma separated)").is_ok());
+        assert!(ui.find("ALIASES (COMMA SEPARATED)").is_err());
         assert!(ui.find("Edge").is_ok(), "the field shows its value");
     }
 
     #[test]
     fn the_field_sits_in_its_well_as_the_collapsed_decoration_put_it() {
-        // The caption (10.5 px) and 6 above the well; the well's 10 by 12
+        // The caption (11 px) and 6 above the well; the well's 10 by 12
         // inside its 1 px border; then the field, forui's content padding
         // less compact density's: 10 across and 6 down, so a line (14 px
         // at 1.45) and 12.
@@ -323,12 +324,11 @@ mod tests {
         ));
         let field = ui.find(id).expect("the field").bounds();
         // SkParagraph's lines: 14 × 1.45 = 20.3 makes a line of 20, and
-        // the caption's 10.5 × 1 a line of 10 (its ascent and descent,
-        // scaled to 10.5, add up to a hair under it).
+        // the caption's 11 × 1 a line of 11.
         let line = field_line();
         assert_eq!(line, 20.0);
         assert_eq!(field.x, 13.0, "{field:?}");
-        assert_eq!(field.y, 10.0 + 6.0 + 11.0, "{field:?}");
+        assert_eq!(field.y, 11.0 + 6.0 + 11.0, "{field:?}");
         assert_eq!(field.width, 300.0 - 2.0 * 13.0, "{field:?}");
         assert!((field.height - (line + 12.0)).abs() < 1e-3, "{field:?}");
 
@@ -397,7 +397,7 @@ mod tests {
                 .id(id.clone())
                 .on_action(edit_or_move),
         ));
-        assert!(ui.find("DESCRIPTION").is_ok());
+        assert!(ui.find("Description").is_ok());
         ui.click(id).expect("the editor");
         let _ = ui.typewrite("x");
         assert!(ui.into_messages().any(|m| m == Msg::Edit));

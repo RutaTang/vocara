@@ -18,6 +18,10 @@
 //!   engine's spot shadow for a light 600 px up and 800 px wide (`drawShadow`:
 //!   offset down by about the elevation, blurred by 4/3 of it, black at
 //!   25 %), its faint ambient part left out.
+//!
+//! The app draws it in `DESIGN.md`'s look ([`SliderLook::STUDIO`]: a 2 px
+//! track, the neutral fill, a 10 px `TEXT_PRIMARY` knob, no overlay and no
+//! taller active part); the Material geometry stays for any other look.
 
 use std::time::Duration;
 
@@ -37,9 +41,9 @@ use crate::ui::core::theme::Zinc;
 /// How long the overlay takes to grow or shrink (`kRadialReactionDuration`).
 pub const REACTION: Duration = Duration::from_millis(100);
 
-/// How much taller the track is before the thumb
+/// How much taller Material's track is before the thumb
 /// (`additionalActiveTrackHeight`).
-const ADDITIONAL_ACTIVE_TRACK_HEIGHT: f32 = 2.0;
+pub const ADDITIONAL_ACTIVE_TRACK_HEIGHT: f32 = 2.0;
 
 /// The thumb's elevation at rest and under the full overlay
 /// (`RoundSliderThumbShape`'s `elevation`, `pressedElevation`).
@@ -98,11 +102,29 @@ fn spot_shadow(elevation: f32) -> Shadow {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SliderLook {
     pub track_height: f32,
+    /// How much taller the active part is ([`ADDITIONAL_ACTIVE_TRACK_HEIGHT`]
+    /// in Material's look; none in the design's).
+    pub active_track_extra: f32,
     pub active_track: Color,
     pub inactive_track: Color,
     pub thumb: Color,
     pub thumb_radius: f32,
     pub overlay_radius: f32,
+}
+
+impl SliderLook {
+    /// `DESIGN.md`'s slider: a 2 px `controls::SLIDER_TRACK` track filled in
+    /// `controls::SLIDER_FILL` up to a 10 px `TEXT_PRIMARY` knob, no
+    /// overlay (the iced slider under it takes `clear_style(5.0)`).
+    pub const STUDIO: SliderLook = SliderLook {
+        track_height: 2.0,
+        active_track_extra: 0.0,
+        active_track: super::controls::SLIDER_FILL,
+        inactive_track: super::controls::SLIDER_TRACK,
+        thumb: crate::ui::core::theme::Studio::TEXT_PRIMARY,
+        thumb_radius: super::controls::KNOB / 2.0,
+        overlay_radius: 0.0,
+    };
 }
 
 /// `slider` (drawing nothing of its own) drawn as `look`, its thumb (its
@@ -151,10 +173,10 @@ impl<M> MaterialSlider<'_, M> {
         });
         let active_track = (thumb.x > track.x + half).then(|| {
             Rectangle::new(
-                Point::new(track.x, track.y - ADDITIONAL_ACTIVE_TRACK_HEIGHT / 2.0),
+                Point::new(track.x, track.y - look.active_track_extra / 2.0),
                 Size::new(
                     thumb.x + half - track.x,
-                    track.height + ADDITIONAL_ACTIVE_TRACK_HEIGHT,
+                    track.height + look.active_track_extra,
                 ),
             )
         });
@@ -451,6 +473,7 @@ mod tests {
         thumb: Color::TRANSPARENT,
         thumb_radius: 6.0,
         overlay_radius: 12.0,
+        active_track_extra: ADDITIONAL_ACTIVE_TRACK_HEIGHT,
     };
 
     const ACTIVE: Color = Color::from_rgb8(200, 80, 60);
@@ -464,6 +487,7 @@ mod tests {
         thumb: THUMB,
         thumb_radius: 6.0,
         overlay_radius: 12.0,
+        active_track_extra: ADDITIONAL_ACTIVE_TRACK_HEIGHT,
     };
 
     /// A 200 × 24 slider at the middle (its thumb, 6 round, at (100, 12)).

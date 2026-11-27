@@ -40,7 +40,7 @@ use vocara_model::util::dart_string;
 use vocara_model::util::format::format_clock_ms;
 
 use crate::ui::core::icons::{self, Icon};
-use crate::ui::core::theme::{self, alpha, font, Studio, Zinc};
+use crate::ui::core::theme::{self, alpha, font, Studio};
 use crate::ui::core::widgets::confirm_dialog::{barrier, Fade};
 use crate::ui::core::widgets::focus_traversal::focus_scope;
 use crate::ui::core::widgets::studio_button::{studio_button, StudioButtonVariant};
@@ -341,7 +341,7 @@ fn field_style(_: &iced::Theme, _: text_editor::Status) -> text_editor::Style {
         border: Border::default(),
         placeholder: Studio::TEXT_FAINT,
         value: Studio::TEXT_PRIMARY,
-        selection: alpha(Zinc::PRIMARY, 0.40),
+        selection: crate::ui::core::theme::SELECTION,
     }
 }
 

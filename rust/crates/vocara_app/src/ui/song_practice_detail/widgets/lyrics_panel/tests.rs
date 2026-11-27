@@ -1022,12 +1022,13 @@ fn a_tall_panel_keeps_its_toolbar_and_the_pinned_sync_hint() {
 
     let (vm, state, mut ui) = short_panel(LyricsMode::Edit, 600.0);
     assert!(bounds_of(&mut ui, &state, &vm, &glyph(Icon::Pencil)).is_some());
-    // The editor keeps its normal spacing: Save's 34 px button ends 12 px
-    // above the panel's bottom.
+    // The editor keeps its normal spacing: Save's button ends 12 px above
+    // the panel's bottom.
     let save = bounds_of(&mut ui, &state, &vm, "Save")
         .expect("Save")
         .bounds();
-    let button_bottom: f32 = save.center_y() + 17.0;
+    let button_bottom: f32 =
+        save.center_y() + crate::ui::core::widgets::studio_button::HEIGHT / 2.0;
     assert!(
         (600.0 - button_bottom - 12.0).abs() < 0.5,
         "Save ends at {button_bottom}"

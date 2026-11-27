@@ -1,13 +1,18 @@
-//! The shared widgets (port of `client/lib/ui/core/widgets`).
+//! The shared widgets (port of `client/lib/ui/core/widgets`), and the
+//! design system's own (`rust/DESIGN.md`): the desktop controls
+//! ([`controls`]) and the line icons drawn to one optical size
+//! ([`line_icon`]).
 
 pub mod animated;
 pub mod cap_label;
 pub mod confirm_dialog;
+pub mod controls;
 pub mod dismissible;
 pub mod fading_scrollbar;
 pub mod fatal_open_screen;
 pub mod focus_traversal;
 pub mod holds_keyboard;
+pub mod line_icon;
 pub mod material_slider;
 pub mod material_switch;
 pub mod material_tooltip;
