@@ -125,7 +125,6 @@ use super::vocal_tract_view::{self, VocalTractState};
 use super::voiceprint_view::VoiceprintState;
 use crate::app::library::RemoteAppliedBroadcast;
 use crate::services::Services;
-use vocara_services::self_update::SelfUpdate;
 use crate::ui::core::motion;
 use crate::ui::core::widgets::confirm_dialog::{DialogMotion, DialogResult};
 use crate::ui::core::widgets::spectrogram_painter::{release_spectrogram_images, RenderRequest};
@@ -140,6 +139,7 @@ use crate::ui::song_practice_detail::view_model::song_practice_detail_view_model
 };
 use crate::ui::{Screen, SnackBar, Update};
 use crate::util::busy_gate::BusyOutcome;
+use vocara_services::self_update::SelfUpdate;
 
 // ------------------------------------------------------------------ constants
 

@@ -31,8 +31,8 @@ use super::{
 use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::motion::Curve;
 use crate::ui::core::theme::{self, alpha, bare_button, boxed, fill, font, Studio};
-use crate::ui::core::widgets::click_through::click_through;
 use crate::ui::core::widgets::animated::{animated, animated_container, Decoration};
+use crate::ui::core::widgets::click_through::click_through;
 use crate::ui::core::widgets::controls::{
     ghost_button, msr_button, popup_button, segmented, MsrKind,
 };

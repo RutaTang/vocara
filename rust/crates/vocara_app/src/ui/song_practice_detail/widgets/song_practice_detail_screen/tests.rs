@@ -2236,7 +2236,8 @@ fn deleting_a_clip_asks_first_as_deleting_a_take_does() {
 fn a_toast_takes_no_press_meant_for_what_it_covers() {
     let mut h = Harness::open(Setup::default());
     let covered = h.find("Vocal tract").expect("the dock's tab").bounds();
-    h.screen.toast("Wait for the current edit to finish.".into());
+    h.screen
+        .toast("Wait for the current edit to finish.".into());
     // In, all the way.
     h.send(Message::SnackFrame(Instant::now() + Duration::from_secs(1)));
     let toast = h

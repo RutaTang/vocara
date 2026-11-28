@@ -1654,13 +1654,19 @@ mod tests {
             icon_button_fill(button::Status::Hovered, true),
             Some(TOGGLE_ON)
         );
-        assert_eq!(icon_button_fill(button::Status::Active, true), Some(TOGGLE_ON));
+        assert_eq!(
+            icon_button_fill(button::Status::Active, true),
+            Some(TOGGLE_ON)
+        );
         assert_ne!(TOGGLE_ON, Studio::HOVER);
         // In a toolbar group, drawn: hovered, the one on keeps its fill.
         let view = |on: bool| -> Element<'static, Msg> {
-            container(
-                ToolbarGroup::new().push(group_toggle(glyphs::LOOP, "Loop", Some(Msg::Go), on)),
-            )
+            container(ToolbarGroup::new().push(group_toggle(
+                glyphs::LOOP,
+                "Loop",
+                Some(Msg::Go),
+                on,
+            )))
             .padding(10)
             .into()
         };

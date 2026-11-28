@@ -560,7 +560,10 @@ fn a_container_left_with_files_but_no_library_is_not_named_for_the_app() {
     let home = tempfile::tempdir().unwrap();
     let at = Locations::under_home(home.path(), bundle_id);
     write(&at.container.join("logs/diagnostics.log"), b"[storage] ...");
-    write(&at.container.join("stems_cache/ab.vocal.wav"), b"RIFF a stem");
+    write(
+        &at.container.join("stems_cache/ab.vocal.wav"),
+        b"RIFF a stem",
+    );
     write(
         &at.unsandboxed.join("vocara.db"),
         b"SQLite format 3\0 moved",
