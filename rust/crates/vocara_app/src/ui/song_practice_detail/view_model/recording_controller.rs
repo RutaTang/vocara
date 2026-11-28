@@ -2597,6 +2597,7 @@ impl RecordingController {
                 | GraphAudioPlaybackService::EVENT_AEC_BYPASSED
                 | GraphAudioPlaybackService::EVENT_INPUT_FELL_BACK
                 | GraphAudioPlaybackService::EVENT_RECORD_LIMIT
+                | GraphAudioPlaybackService::EVENT_RECORD_FAILED
                 | GraphAudioPlaybackService::EVENT_OUTPUT_REROUTED,
         );
         // A chosen output plugged back in is switched back to (the Settings
@@ -2656,6 +2657,15 @@ impl RecordingController {
             // can bleed into the take. Silent degradation is worse than the
             // notice.
             host.toast(AEC_BYPASSED_NOTICE);
+        }
+        if events & GraphAudioPlaybackService::EVENT_RECORD_FAILED != 0 && self.is_recording() {
+            // A write to the take's WAV failed (a full disk, a revoked
+            // permission): nothing more of the take reaches the disk while
+            // the clock runs on, and the singer sang on into nothing until
+            // Stop said so. Stop now, as for the limit below: the finalize
+            // keeps what landed and says whether it could be read.
+            host.toast(RECORD_WRITE_FAILED_NOTICE);
+            self.stop_take();
         }
         if events & GraphAudioPlaybackService::EVENT_RECORD_LIMIT != 0 && self.is_recording() {
             // The take reached the longest recording a WAV header can
@@ -2772,6 +2782,11 @@ impl Drop for RecordingController {
         self.mic.dispose();
     }
 }
+
+/// What the song page says when a write to the take's WAV failed mid-take
+/// and the take was stopped for it.
+const RECORD_WRITE_FAILED_NOTICE: &str = "Recording stopped: the take could not be written to \
+     disk, which may be full. What was recorded up to then is being saved.";
 
 /// The finalize's read of the stopped take (the busy gate's action, on a
 /// worker). `Err` is the finalize throwing.

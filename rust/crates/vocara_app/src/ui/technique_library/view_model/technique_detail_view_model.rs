@@ -906,6 +906,7 @@ impl TechniqueDetailViewModel {
         match event {
             MicEvent::InputDeviceLost => self.on_input_device_lost(next),
             MicEvent::RecordLimitReached => self.on_record_limit_reached(next),
+            MicEvent::RecordWriteFailed => self.on_record_write_failed(next),
             MicEvent::DeviceNotice(message) => self.on_device_notice(message),
             MicEvent::LevelTick(_) => {}
         }
@@ -939,6 +940,28 @@ impl TechniqueDetailViewModel {
                 .to_string()
         } else {
             "Recording stopped at the six-hour maximum length.".to_string()
+        });
+        if self.recording_example {
+            self.stop_example_recording_into(next, false);
+        } else {
+            self.stop_practice_with(false, Keep::default(), next);
+        }
+    }
+
+    /// A write to the take's WAV failed mid-take (a full disk, a revoked
+    /// permission): stop it now, as at the limit, instead of recording on
+    /// into nothing until Stop. The stop's dirty path then keeps what landed
+    /// if it can be read, and says so.
+    fn on_record_write_failed(&mut self, next: &mut Next) {
+        // A practice take is never saved (only analyzed), so it is told no
+        // such thing.
+        self.recording_notice = Some(if self.recording_example {
+            "Recording stopped: the example could not be written to disk, which may be \
+             full. What was recorded up to then is being saved."
+                .to_string()
+        } else {
+            "Recording stopped: the take could not be written to disk, which may be full."
+                .to_string()
         });
         if self.recording_example {
             self.stop_example_recording_into(next, false);

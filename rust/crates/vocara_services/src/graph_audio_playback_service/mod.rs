@@ -1138,6 +1138,7 @@ impl GraphAudioPlaybackService {
     pub const EVENT_INPUT_FELL_BACK: u32 = events::INPUT_FELL_BACK;
     pub const EVENT_RECORD_LIMIT: u32 = events::RECORD_LIMIT;
     pub const EVENT_OUTPUT_REROUTED: u32 = events::OUTPUT_REROUTED;
+    pub const EVENT_RECORD_FAILED: u32 = events::RECORD_FAILED;
 
     /// [`GraphAudioPlaybackService::set_input_channel`] modes: Auto, the
     /// input carrying the mic (a mic on either input of a 2-input interface
@@ -1255,7 +1256,8 @@ impl GraphAudioPlaybackService {
     /// system default, the take reached the longest recording a WAV header
     /// can describe so capture past it is refused and the owner must
     /// finalize, playback not on the selected output so the engine has muted
-    /// the monitor for as long as that holds). Only the claimed bits are
+    /// the monitor for as long as that holds, a write to the take's WAV failed
+    /// so the owner must stop it now). Only the claimed bits are
     /// cleared; bits outside the mask stay pending for their own consumer, so
     /// the song page's 1 s watch and the technique page's 50 ms level tick no
     /// longer steal each other's events. 0 when the engine is down.

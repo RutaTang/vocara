@@ -147,6 +147,10 @@ pub mod events {
     /// Playback is not on the selected output device; the engine mutes the
     /// monitor for as long as that holds.
     pub const OUTPUT_REROUTED: u32 = 32;
+    /// A write to the recording's WAV failed (a full disk, a revoked
+    /// permission): the take on disk stops growing, so the owner must stop
+    /// it now, keeping what landed. Raised until the stop.
+    pub const RECORD_FAILED: u32 = 64;
 }
 
 #[cfg(feature = "device")]
@@ -164,6 +168,7 @@ const _: () = {
     assert!(events::INPUT_FELL_BACK == device::EVENT_INPUT_FELL_BACK);
     assert!(events::RECORD_LIMIT == device::EVENT_RECORD_LIMIT);
     assert!(events::OUTPUT_REROUTED == device::EVENT_OUTPUT_REROUTED);
+    assert!(events::RECORD_FAILED == device::EVENT_RECORD_FAILED);
 };
 
 /// Why a call on an engine instance failed.
@@ -268,9 +273,10 @@ mod tests {
                 AEC_BYPASSED,
                 INPUT_FELL_BACK,
                 RECORD_LIMIT,
-                OUTPUT_REROUTED
+                OUTPUT_REROUTED,
+                RECORD_FAILED
             ],
-            [1, 2, 4, 8, 16, 32]
+            [1, 2, 4, 8, 16, 32, 64]
         );
     }
 

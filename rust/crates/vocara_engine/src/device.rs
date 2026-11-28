@@ -54,6 +54,13 @@ pub const EVENT_RECORD_LIMIT: u32 = 16;
 /// long as this holds (see [`OutputBinding`]): "headphones are selected" stops
 /// being evidence that the monitor is safe once playback has moved elsewhere.
 pub const EVENT_OUTPUT_REROUTED: u32 = 32;
+/// A write to the active recording's WAV failed (a full disk, a revoked permission, a volume
+/// gone): from then on the take on disk stops growing while the recording clock keeps running,
+/// and the singer would learn it only at Stop, after singing on into nothing. The writer thread
+/// raises it on every failed write of the take (as the fan-out re-raises
+/// [`EVENT_RECORD_LIMIT`]) until the stop lands, so the UI can stop the take at once, keeping
+/// what reached the disk; the take's Stop still reports it damaged. A fresh take clears it.
+pub const EVENT_RECORD_FAILED: u32 = 64;
 
 /// Latched when a stream teardown failed to synchronously stop its callback (a cpal `pause()`
 /// error, or `AudioOutputUnitStop` failing in `vpio`). The renderer gate's `false` state means
@@ -3075,7 +3082,8 @@ mod drift_tests {
 
 /// Background WAV writer: owns the recording ring consumer for the engine's lifetime and writes
 /// frames to a file only while a recording is active. Never touches the audio thread. Mono (the
-/// vocal mic's left channel) at `ENGINE_SR`.
+/// vocal mic's left channel) at `ENGINE_SR`. A write failing mid-take raises
+/// [`EVENT_RECORD_FAILED`] in the engine's device-event word as it happens, besides the Stop ack.
 pub struct RecordWriter {
     tx: mpsc::Sender<WriterCmd>,
     join: Option<JoinHandle<()>>,
@@ -3092,11 +3100,13 @@ enum WriterCmd {
 }
 
 impl RecordWriter {
-    pub fn spawn(rec: Consumer<[Smp; CHANNELS]>) -> RecordWriter {
+    /// `event` is the engine's device-event word, where a failed write raises
+    /// [`EVENT_RECORD_FAILED`].
+    pub fn spawn(rec: Consumer<[Smp; CHANNELS]>, event: Arc<AtomicU32>) -> RecordWriter {
         let (tx, rx) = mpsc::channel::<WriterCmd>();
         let join = std::thread::Builder::new()
             .name("vocara-rec-writer".to_string())
-            .spawn(move || writer_run(rec, rx))
+            .spawn(move || writer_run(rec, rx, event))
             .ok();
         RecordWriter { tx, join }
     }
@@ -3137,12 +3147,21 @@ impl Drop for RecordWriter {
     }
 }
 
-fn writer_run(mut rec: Consumer<[Smp; CHANNELS]>, rx: mpsc::Receiver<WriterCmd>) {
+fn writer_run(
+    mut rec: Consumer<[Smp; CHANNELS]>,
+    rx: mpsc::Receiver<WriterCmd>,
+    event: Arc<AtomicU32>,
+) {
     let mut wav: Option<crate::wav::WavStream> = None;
     // Sticky IO-error flag for the current recording: set on any create/write/finalize
     // failure and reported through Stop's ack, so the caller learns the take is damaged
     // instead of the UI silently reporting success (disk full, revoked permission).
     let mut failed = false;
+    // A failure while the take is still running is also raised at once, so the UI stops the
+    // take instead of recording on into nothing until the singer presses Stop.
+    let raise_failed = || {
+        event.fetch_or(EVENT_RECORD_FAILED, Ordering::Release);
+    };
     // A command the idle wait below already took off the channel, applied first.
     let mut next: Option<WriterCmd> = None;
     loop {
@@ -3234,13 +3253,15 @@ fn writer_run(mut rec: Consumer<[Smp; CHANNELS]>, rx: mpsc::Receiver<WriterCmd>)
             }
         }
         // Drain available frames; write the left channel (mono) when recording. A write
-        // failure sets the sticky flag (reported at Stop) but keeps draining, so the ring
-        // never backs up and any samples that still fit on disk are kept.
+        // failure sets the sticky flag (reported at Stop) and raises EVENT_RECORD_FAILED, but
+        // keeps draining, so the ring never backs up and any samples that still fit on disk
+        // are kept.
         let mut wrote = false;
         while let Some(f) = rec.pop() {
             if let Some(w) = wav.as_mut() {
                 if w.write_sample(f[0]).is_err() {
                     failed = true;
+                    raise_failed();
                 }
                 wrote = true;
             }
@@ -3257,6 +3278,7 @@ fn writer_run(mut rec: Consumer<[Smp; CHANNELS]>, rx: mpsc::Receiver<WriterCmd>)
             if let Some(w) = wav.as_mut() {
                 if w.sync_header_if_due().is_err() {
                     failed = true;
+                    raise_failed();
                 }
             }
         } else if wav.is_none() {
@@ -5513,7 +5535,7 @@ mod record_writer_tests {
     #[test]
     fn start_fails_when_file_cannot_be_created() {
         let (_prod, cons) = spsc::<[Smp; CHANNELS]>(64);
-        let w = RecordWriter::spawn(cons);
+        let w = RecordWriter::spawn(cons, Default::default());
         // A path under a directory that does not exist cannot be created.
         assert!(
             !w.start("/nonexistent-vocara-dir/take.wav"),
@@ -5529,7 +5551,7 @@ mod record_writer_tests {
     #[test]
     fn a_failed_start_does_not_poison_the_next_take() {
         let (mut prod, cons) = spsc::<[Smp; CHANNELS]>(1024);
-        let w = RecordWriter::spawn(cons);
+        let w = RecordWriter::spawn(cons, Default::default());
         // The failed create is fully reported by its own ack; the sticky flag must
         // describe only takes, so the NEXT take starts with a clean slate.
         assert!(!w.start("/nonexistent-vocara-dir/take.wav"));
@@ -5548,7 +5570,7 @@ mod record_writer_tests {
     #[test]
     fn clean_recording_writes_all_frames_and_reports_success() {
         let (mut prod, cons) = spsc::<[Smp; CHANNELS]>(1024);
-        let w = RecordWriter::spawn(cons);
+        let w = RecordWriter::spawn(cons, Default::default());
         let path = temp_wav("clean");
         assert!(
             w.start(path.to_str().unwrap()),
@@ -5578,7 +5600,7 @@ mod record_writer_tests {
     #[test]
     fn failure_flag_resets_for_the_next_recording() {
         let (mut prod, cons) = spsc::<[Smp; CHANNELS]>(64);
-        let w = RecordWriter::spawn(cons);
+        let w = RecordWriter::spawn(cons, Default::default());
         assert!(!w.start("/nonexistent-vocara-dir/take.wav"));
         assert!(!w.stop());
         // The sticky error from the lost take must not bleed into a new, healthy one.
@@ -5600,7 +5622,7 @@ mod record_writer_tests {
     #[test]
     fn an_idle_writer_parks_instead_of_polling() {
         let (mut prod, cons) = spsc::<[Smp; CHANNELS]>(64);
-        let w = RecordWriter::spawn(cons);
+        let w = RecordWriter::spawn(cons, Default::default());
         // The writer drains the ring once on its way to the idle wait: a thread first scheduled
         // after the pushes below drained them there, correctly, and failed the test. A command
         // round-trip first (a Stop with no take only acks): once it is answered the thread is
@@ -5633,7 +5655,7 @@ mod record_writer_tests {
         use super::{writer_run, WriterCmd};
         let (mut prod, cons) = spsc::<[Smp; CHANNELS]>(1024);
         let (tx, rx) = std::sync::mpsc::channel();
-        let join = std::thread::spawn(move || writer_run(cons, rx));
+        let join = std::thread::spawn(move || writer_run(cons, rx, Default::default()));
         let path = temp_wav("shutdown_tail");
         let (ack, ack_rx) = std::sync::mpsc::channel();
         tx.send(WriterCmd::Start(path.to_str().unwrap().to_string(), ack))
@@ -5670,7 +5692,7 @@ mod record_writer_tests {
             assert!(prod.push([0.5, 0.0])); // stale frames from the previous take
         }
         let (tx, rx) = std::sync::mpsc::channel();
-        let join = std::thread::spawn(move || writer_run(cons, rx));
+        let join = std::thread::spawn(move || writer_run(cons, rx, Default::default()));
         let path = temp_wav("stale_start");
         let (ack, ack_rx) = std::sync::mpsc::channel();
         tx.send(WriterCmd::Start(path.to_str().unwrap().to_string(), ack))
@@ -5727,7 +5749,7 @@ mod record_writer_tests {
         use super::{writer_run, WriterCmd};
         let (mut prod, cons) = spsc::<[Smp; CHANNELS]>(64);
         let (tx, rx) = std::sync::mpsc::channel();
-        let join = std::thread::spawn(move || writer_run(cons, rx));
+        let join = std::thread::spawn(move || writer_run(cons, rx, Default::default()));
         // Take A's file creates cleanly but fails its FIRST data write (the injected
         // stand-in for a disk filling mid-take).
         let path_a = temp_wav(&format!("sticky_a_{}", crate::wav::TEST_FAIL_FIRST_WRITE));
@@ -5762,10 +5784,55 @@ mod record_writer_tests {
         let _ = std::fs::remove_file(&path_b);
     }
 
+    /// A write failing mid-take (the disk filling up) is raised as EVENT_RECORD_FAILED while
+    /// the take still runs, so the UI can stop it then rather than learn it at Stop, after the
+    /// singer sang on into nothing; the Stop still reports the take damaged. A healthy take
+    /// raises nothing.
+    #[test]
+    fn a_write_failing_mid_take_is_raised_at_once() {
+        use super::EVENT_RECORD_FAILED;
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc;
+        let (mut prod, cons) = spsc::<[Smp; CHANNELS]>(64);
+        let event = Arc::new(AtomicU32::new(0));
+        let w = RecordWriter::spawn(cons, Arc::clone(&event));
+
+        let healthy = temp_wav("raised_healthy");
+        assert!(w.start(healthy.to_str().unwrap()));
+        assert!(prod.push([0.5, 0.0]));
+        while prod.free() != prod.capacity() {
+            std::thread::yield_now();
+        }
+        assert!(w.stop());
+        assert_eq!(
+            event.load(Ordering::Acquire),
+            0,
+            "a healthy take raises nothing"
+        );
+
+        let failing = temp_wav(&format!("raised_{}", crate::wav::TEST_FAIL_FIRST_WRITE));
+        assert!(
+            w.start(failing.to_str().unwrap()),
+            "the file itself creates"
+        );
+        assert!(prod.push([0.5, 0.0]));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while event.load(Ordering::Acquire) & EVENT_RECORD_FAILED == 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the failed write was never raised"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(!w.stop(), "the Stop still reports the take damaged");
+        let _ = std::fs::remove_file(&healthy);
+        let _ = std::fs::remove_file(&failing);
+    }
+
     #[test]
     fn start_while_recording_finalizes_the_previous_take_and_starts_clean() {
         let (mut prod, cons) = spsc::<[Smp; CHANNELS]>(1024);
-        let w = RecordWriter::spawn(cons);
+        let w = RecordWriter::spawn(cons, Default::default());
         let p1 = temp_wav("restart_a");
         let p2 = temp_wav("restart_b");
         assert!(w.start(p1.to_str().unwrap()));

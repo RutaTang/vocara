@@ -2098,6 +2098,38 @@ fn the_record_limit_stops_the_take_and_keeps_it() {
     assert_eq!(s.saves, 1);
 }
 
+/// A write to the take's WAV failed mid-take (the disk full): the device
+/// watch stops the take on the tick that hears of it, as at the limit, and
+/// the finalize keeps what landed and says it may be incomplete.
+#[test]
+fn a_failed_write_stops_the_take_at_once_and_keeps_what_landed() {
+    let f = finalizer();
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let graph = Graph::new();
+    let mic = FakeMic::new(&f);
+    let mut s = Screen::new(Opts::new(&f).mic(&mic).graph(&graph));
+    guard(&s.files.s).dir = Some(dir.path().to_path_buf());
+    s.record();
+    let path = mic.s().last_path.clone().expect("armed");
+    std::fs::write(&path, b"partial").expect("the partial on disk");
+    mic.s().clean = false;
+    graph.s().pending_events = GraphAudioPlaybackService::EVENT_RECORD_FAILED
+        | GraphAudioPlaybackService::EVENT_RECORD_LIMIT;
+    s.watch_tick();
+    assert!(!s.c.is_recording(), "stopped on the tick");
+    assert!(s.pump_until(|s| !s.c.is_stopping()));
+    assert_eq!(
+        s.host.toasts,
+        [
+            "Recording stopped: the take could not be written to disk, which may be full. \
+             What was recorded up to then is being saved.",
+            "Recording hit a disk error. The take may be incomplete.",
+        ]
+    );
+    assert_eq!(s.saves, 1, "what landed is kept");
+    assert_eq!(mic.s().stop_calls, 1);
+}
+
 #[test]
 fn a_lost_input_stops_every_consumer_with_one_notice() {
     let f = finalizer();
