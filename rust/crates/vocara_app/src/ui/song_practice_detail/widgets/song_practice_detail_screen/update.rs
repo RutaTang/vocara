@@ -1266,7 +1266,11 @@ impl SongPracticeDetailScreen {
             },
             NoteTarget::Edit { track_id, note_id } => {
                 if result.deleted {
-                    self.vm.delete_note(&track_id, &note_id)
+                    // Asked first, as removing a technique marker is: the
+                    // note went at once, with nothing to go back to.
+                    let dialog = ConfirmDialog::new("Delete this note?")
+                        .body("This removes the note from this take. This cannot be undone.");
+                    return self.ask(dialog, Asked::DeleteNote { track_id, note_id }, step);
                 } else if let Some(content) = result.content {
                     self.vm.update_note_content(&track_id, &note_id, &content)
                 } else {
@@ -1583,6 +1587,9 @@ impl SongPracticeDetailScreen {
             Asked::ClearLyricTimes if confirmed => self.vm.clear_lyric_times(),
             Asked::ImportLyrics(path) if confirmed => return self.import_lyrics_now(path, step),
             Asked::SaveEmptyLyrics(ticket) if confirmed => return self.save_lyrics(ticket, step),
+            Asked::DeleteNote { track_id, note_id } if confirmed => {
+                self.vm.delete_note(&track_id, &note_id)
+            }
             _ => return,
         };
         self.absorb(fx, step);

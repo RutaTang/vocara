@@ -2055,6 +2055,47 @@ fn adding_a_note_via_the_take_header_saves_it_on_the_take() {
     assert_eq!(notes, ["breath runs out here"]);
 }
 
+// A note's Delete removed it at once, with no undo, where removing a
+// technique marker asks first.
+#[test]
+fn deleting_a_note_asks_first() {
+    let mut t = take("t1", "Take 1");
+    t.notes = vec![PracticeNote {
+        id: "n1".into(),
+        position_ms: 3_000,
+        end_ms: None,
+        content: "flat here".into(),
+        created_at: at(),
+        updated_at: at(),
+    }];
+    let mut h = Harness::open(Setup {
+        practice: practice(vec![t]),
+        ..Setup::default()
+    });
+    let notes = |h: &Harness| h.repo.stored().vocal_tracks[0].notes.len();
+    let delete = |h: &mut Harness| {
+        h.send(Message::Lyrics(lyrics_panel::Message::EditNote {
+            track_id: "t1".into(),
+            note_id: "n1".into(),
+        }));
+        assert!(h.screen.note_editor().is_some(), "the note editor opened");
+        h.send(Message::NoteEditor(note_editor::Message::Delete));
+    };
+    delete(&mut h);
+    let Dialog::Confirm(confirm) = h.dialog() else {
+        panic!("a confirmation");
+    };
+    assert_eq!(confirm.title, "Delete this note?");
+    h.answer(DialogResult::Confirmed(false));
+    h.settle();
+    assert_eq!(notes(&h), 1, "cancelled");
+
+    delete(&mut h);
+    h.answer(DialogResult::Confirmed(true));
+    h.settle();
+    assert_eq!(notes(&h), 0);
+}
+
 #[test]
 fn the_note_editor_and_the_picker_come_in_and_go_over_150_ms() {
     use crate::ui::core::widgets::confirm_dialog::testing::{assert_comes_in, assert_goes};
