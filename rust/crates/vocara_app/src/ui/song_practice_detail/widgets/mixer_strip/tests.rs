@@ -391,6 +391,83 @@ fn the_fader_maps_its_travel_linearly_and_clamps() {
     // span holds at 1 px instead of flipping the clamp.
     assert_eq!(vertical_fader_value(6.5, 10.0), 0.5);
     assert_eq!(vertical_fader_value(0.0, 0.5), 1.0);
+    // The cap's centre is where the level reads.
+    for v in [0.0, 0.3, 0.5, 1.0] {
+        let y = vertical_fader_y(v, 216.0);
+        assert!((vertical_fader_value(y, 216.0) - v).abs() < 1e-6, "{v}");
+    }
+}
+
+/// A take at `volume`.
+fn take_at(volume: f64) -> Vec<Arc<AudioTrack>> {
+    vec![Arc::new(AudioTrack {
+        volume,
+        ..(*take(0)).clone()
+    })]
+}
+
+#[test]
+fn a_press_on_the_cap_holds_it_where_it_was_grabbed() {
+    let tracks = take_at(0.5);
+    let mut ui = simulator(STRIP, desk(&tracks, &[], false).view());
+    let fader = bus_fader(&mut ui, 0, &strip_db(0.5));
+    let cap = vertical_fader_y(0.5, fader.height);
+    assert_eq!(cap_grab(cap + 4.0, 0.5, fader.height), Some(4.0));
+    assert_eq!(cap_grab(cap + 30.0, 0.5, fader.height), None);
+    // Pressed 4 px below the cap's centre: the level stays; 20 px up from
+    // there, it reads the cap 20 px up.
+    let at = on_column(fader, cap + 4.0);
+    drive(&mut ui, &drag_steps(at, &[Point::new(at.x, at.y - 20.0)]));
+    let messages: Vec<_> = ui.into_messages().collect();
+    let v = volumes(&messages);
+    assert_eq!(v.len(), 1, "the press alone moved nothing: {v:?}");
+    let expected = vertical_fader_value(cap - 20.0, fader.height);
+    assert!((v[0].1 - expected).abs() < 1e-3, "{v:?} vs {expected}");
+    assert_eq!(count_of(&messages, &Message::CommitTrackVolume), 1);
+    // A click on the cap, unmoved, neither changes nor saves the level.
+    let mut ui = simulator(STRIP, desk(&tracks, &[], false).view());
+    ui.point_at(on_column(fader, cap - 3.0));
+    let _ = ui.simulate([press(), release()]);
+    assert!(ui.into_messages().next().is_none());
+    // Off the cap, a press still sets the level where it lands.
+    let mut ui = simulator(STRIP, desk(&tracks, &[], false).view());
+    ui.point_at(on_column(fader, cap + 40.0));
+    let _ = ui.simulate([press(), release()]);
+    let messages: Vec<_> = ui.into_messages().collect();
+    let v = volumes(&messages);
+    assert!((v[0].1 - vertical_fader_value(cap + 40.0, fader.height)).abs() < 1e-3);
+    assert_eq!(count_of(&messages, &Message::CommitTrackVolume), 1);
+}
+
+#[test]
+fn a_double_click_resets_a_fader_to_0_db() {
+    let tracks = take_at(0.5);
+    let mut ui = simulator(STRIP, desk(&tracks, &[], false).view());
+    let fader = bus_fader(&mut ui, 0, &strip_db(0.5));
+    ui.point_at(on_column(fader, vertical_fader_y(0.5, fader.height)));
+    let _ = ui.simulate([press(), release()]);
+    let _ = ui.simulate([press(), release()]);
+    let messages: Vec<_> = ui.into_messages().collect();
+    assert_eq!(
+        messages,
+        vec![
+            Message::SetTrackVolumeLive {
+                id: "t0".to_string(),
+                volume: 1.0,
+            },
+            Message::CommitTrackVolume,
+        ]
+    );
+    assert_eq!(fader_db(1.0), "0.0");
+    // The master's too.
+    let mut ui = simulator(STRIP, desk(&tracks, &[], false).view());
+    let master = master_fader(&mut ui);
+    ui.point_at(on_column(master, master.height - FADER_PAD));
+    let _ = ui.simulate([press(), release()]);
+    let _ = ui.simulate([press(), release()]);
+    let messages: Vec<_> = ui.into_messages().collect();
+    assert!(messages.contains(&Message::SetMasterVolumeLive { gain: 1.0 }));
+    assert_eq!(messages.last(), Some(&Message::CommitMasterVolume));
 }
 
 // ------------------------------------------ strips keep their own drag
@@ -804,7 +881,9 @@ fn the_input_strip_sets_the_record_gain_and_commits_the_gains() {
     let label = text_at(&mut ui, "50%", 0).expect("the monitor's reading");
     let field = text_at(&mut ui, "+20.0", 0).expect("the record gain's field");
     let fader = fader_between(label, field, 1);
-    let c = on_column(fader, fader.height / 2.0);
+    // Pressed off its cap (below it) and dragged up: the press sets the
+    // gain, the drag raises it.
+    let c = on_column(fader, fader.height - FADER_PAD);
     drive(&mut ui, &drag_steps(c, &[Point::new(c.x, c.y - 40.0)]));
     let messages: Vec<_> = ui.into_messages().collect();
     let dbs: Vec<f64> = messages
