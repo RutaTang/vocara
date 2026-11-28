@@ -339,6 +339,24 @@ pub fn bus_color(bus: &vocara_model::models::fx_bus::FxBus) -> Color {
 /// The side of a note's diamond on a clip.
 pub const NOTE_DIAMOND: f32 = 5.0;
 
+/// How far a note's diamond reaches either side of its centre: the
+/// square's half-diagonal.
+const NOTE_REACH: f32 = NOTE_DIAMOND * std::f32::consts::FRAC_1_SQRT_2;
+
+/// Where a note's diamond is centred across a lane `width` wide: at its
+/// time, held a diamond's reach inside the lane's ends, so a note at the
+/// lane's edge (one at 0:00) shows whole. Centred on the edge, half of it
+/// was drawn off the lane, under the playhead. A note out of the view stays
+/// where it is, out of sight.
+fn note_x(position_ms: i64, dur: i64, view_start: i64, width: f64) -> f64 {
+    let x = x_of(position_ms, dur, view_start, width);
+    let reach = f64::from(NOTE_REACH);
+    if !(0.0..=width).contains(&x) || width < 2.0 * reach {
+        return x;
+    }
+    x.clamp(reach, width - reach)
+}
+
 /// The note marker's box (16 × 16, centred on the note's x and on its
 /// diamond, which sits 3 px above the clip's bottom) in a lane `size`.
 fn note_box(x: f64, size: Size) -> Rectangle {
@@ -921,7 +939,8 @@ impl LaneGeometry {
     fn hit(&self, at: Point, size: Size) -> Hit {
         let width = f64::from(size.width);
         for (id, position) in self.notes.iter().rev() {
-            if note_hit_box(x_of(*position, self.dur, self.view_start, width), size).contains(at) {
+            if note_hit_box(note_x(*position, self.dur, self.view_start, width), size).contains(at)
+            {
                 return Hit::Note(id.clone());
             }
         }
@@ -1175,7 +1194,7 @@ fn body<'a, M>(r: &TrackRow<'a, M>, accent: Color) -> Element<'a, Message> {
             }
         }
         for note in &track.notes {
-            let at = note_box(x_of(note.position_ms, dur, view_start, width), size);
+            let at = note_box(note_x(note.position_ms, dur, view_start, width), size);
             layers.push(pin(note_marker()).x(at.x).y(at.y).into());
         }
         layers.push(
@@ -1405,8 +1424,7 @@ impl iced::widget::canvas::Program<Message> for Diamond {
     ) -> Vec<iced::widget::canvas::Geometry> {
         let mut frame = iced::widget::canvas::Frame::new(renderer, bounds.size());
         let c = Point::new(bounds.width / 2.0, bounds.height / 2.0);
-        // The square's half-diagonal.
-        let r = NOTE_DIAMOND * std::f32::consts::FRAC_1_SQRT_2;
+        let r = NOTE_REACH;
         let diamond = iced::widget::canvas::Path::new(|b| {
             b.move_to(Point::new(c.x, c.y - r));
             b.line_to(Point::new(c.x + r, c.y));

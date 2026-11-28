@@ -870,6 +870,45 @@ fn a_note_marker_opens_its_note() {
     );
 }
 
+// A note at 0:00 was centred on the lane's left edge: half its diamond
+// showed, under the playhead.
+#[test]
+fn a_note_at_either_end_of_the_lane_shows_its_whole_diamond() {
+    let note = |id: &str, position_ms: i64| PracticeNote {
+        id: id.into(),
+        position_ms,
+        end_ms: None,
+        content: id.into(),
+        created_at: created(),
+        updated_at: created(),
+    };
+    let track = leaked(AudioTrack {
+        notes: vec![note("start", 0), note("end", VIEWPORT_MS)],
+        ..take("t1", VIEWPORT_MS, Vec::new())
+    });
+    let mut ui = LiveUi::new(WINDOW);
+    let frame = ui.snapshot(row_of(track));
+    // The diamond's middle row; its centre is NOTE_REACH (3.5 px) in from
+    // each end, so 5.5 px in is still inside it.
+    let y = (TRACK_ROW_HEIGHT - 1.0 - CLIP_INSET - 3.0 - NOTE_DIAMOND / 2.0) as usize;
+    let white = |p: [u8; 4]| {
+        let c = Studio::TEXT_PRIMARY.into_rgba8();
+        (0..3).all(|i| (i32::from(p[i]) - i32::from(c[i])).abs() <= 8)
+    };
+    let left = frame.pixel(TRACK_HEADER_W as usize + 5, y);
+    assert!(white(left), "{left:?}");
+    let right = frame.pixel((TRACK_HEADER_W + LANE_W) as usize - 6, y);
+    assert!(white(right), "{right:?}");
+    // And a tap on what shows opens it.
+    let mut ui = sim(row_of(track));
+    ui.point_at(Point::new(TRACK_HEADER_W + 6.0, y as f32));
+    let _ = ui.simulate(iced_test::simulator::click());
+    assert_eq!(
+        ui.into_messages().collect::<Vec<_>>(),
+        vec![Message::EditNote("start".into())]
+    );
+}
+
 #[test]
 fn the_add_buttons_are_for_vocal_takes_only() {
     let track = take("t1", 5000, Vec::new());
