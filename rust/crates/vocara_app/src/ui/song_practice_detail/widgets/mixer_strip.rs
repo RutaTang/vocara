@@ -79,6 +79,7 @@ use vocara_model::models::audio_track::AudioTrack;
 use vocara_model::models::fx_bus::FxBus;
 use vocara_services::app_settings_service::AppSettingsService;
 
+use super::left_panel::MASTER;
 use super::mixer_shared::{keyed_row, tap, MenuItem, Opens, PopupMenu};
 use super::track_row::{bus_color, channel_color};
 use crate::ui::core::theme::{self, alpha, font, radius, type_scale, Studio};
@@ -426,11 +427,11 @@ pub fn bus_accent(bus: &FxBus) -> Color {
     bus_color(bus)
 }
 
-/// Display name of the bus `id` routes to, or "Master" when it's
+/// Display name of the bus `id` routes to, or [`MASTER`] when it's
 /// none/missing.
 pub fn bus_name<'b>(buses: &'b [Arc<FxBus>], id: Option<&str>) -> &'b str {
     id.and_then(|id| buses.iter().find(|b| b.id == id))
-        .map_or("Master", |b| b.name.as_str())
+        .map_or(MASTER, |b| b.name.as_str())
 }
 
 /// A strip's frame (`DESIGN.md`, Mixer strip): `width` wide, radius 6,
@@ -724,7 +725,7 @@ fn track_channel<'a>(
         let output = if !t.is_backing() && !buses.is_empty() {
             let routed = t.bus_id.as_deref();
             let mut options = vec![MenuItem::new(
-                "Master",
+                MASTER,
                 vec![Message::SetTrackBus {
                     id: id.to_string(),
                     bus_id: None,
@@ -745,7 +746,7 @@ fn track_channel<'a>(
             }
             route_popup(bus_name(buses, routed), options)
         } else {
-            fixed_output("Master")
+            fixed_output(MASTER)
         };
         vec![
             title(&t.display_name, selected),
@@ -823,7 +824,7 @@ fn bus_channel<'a>(b: &'a FxBus, selected: bool, buses: &'a [Arc<FxBus>]) -> Ele
     let id = b.id.as_str();
     let body = strip_body(move |squeezed| {
         let mut options = vec![MenuItem::new(
-            "Master",
+            MASTER,
             vec![Message::SetBusOutput {
                 id: id.to_string(),
                 output_bus_id: None,

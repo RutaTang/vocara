@@ -34,6 +34,7 @@ use iced::{
     Rectangle, Renderer, Shadow, Size, Theme, Vector,
 };
 
+use super::track_context_menu::{MenuRow as StudioRow, SELECTED_CHECK};
 use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::theme::{self, height, radius, type_scale, Studio};
 use crate::ui::core::widgets::animated::{animated_container, Decoration};
@@ -937,27 +938,32 @@ impl<M> overlay::Overlay<M, Theme, Renderer> for MenuOverlay<'_, '_, M> {
 }
 
 /// `_MenuRow`: an `InkWell` row — `Studio.hover` under the pointer — with
-/// the label (danger: `Studio.record`, selected: `Studio.accent`), its
-/// optional subtitle, and a check when selected. A pick reports the item's
-/// messages and closes the menu.
+/// the label, its optional subtitle, and a check when selected. A pick
+/// reports the item's messages and closes the menu.
 struct MenuRow<'a, M> {
     content: Element<'a, M>,
     on_tap: Vec<M>,
     picked: Rc<Cell<bool>>,
 }
 
+/// A row's label colour and weight: the inspector menus' (`DESIGN.md`,
+/// Menus, `track_context_menu::MenuRow`), so every menu marks its current
+/// item alike — the label in medium weight, an [`SELECTED_CHECK`] check at
+/// its end. (Here the label went coral, there it stayed white.)
+fn label_style<M>(item: &MenuItem<M>) -> (iced::Color, iced::Font) {
+    let row = StudioRow::new("", ())
+        .danger(item.danger)
+        .selected(item.selected);
+    (row.color(), row.font())
+}
+
 impl<'a, M: Clone + 'a> MenuRow<'a, M> {
     fn new(item: MenuItem<M>, picked: Rc<Cell<bool>>) -> Self {
-        let color = if item.danger {
-            Studio::RECORD
-        } else if item.selected {
-            Studio::ACCENT
-        } else {
-            Studio::TEXT_PRIMARY
-        };
+        let (color, font) = label_style(&item);
         let mut labels = column![container(
             text(item.label)
                 .size(13)
+                .font(font)
                 .color(color)
                 .wrapping(Wrapping::None)
         )
@@ -973,7 +979,7 @@ impl<'a, M: Clone + 'a> MenuRow<'a, M> {
         }
         let mut content = row![labels.width(Length::Fill)].align_y(Vertical::Center);
         if item.selected {
-            content = content.push(icons::icon(Icon::Check, 14.0, Studio::ACCENT));
+            content = content.push(icons::icon(Icon::Check, 14.0, SELECTED_CHECK));
         }
         Self {
             content: container(content).padding([9, 14]).into(),
@@ -1141,6 +1147,23 @@ impl<'a, M: Clone + 'a> From<MenuRow<'a, M>> for Element<'a, M> {
 mod tests {
     use super::*;
     use crate::ui::song_practice_detail::widgets::track_context_menu::argb;
+
+    #[test]
+    fn a_row_marks_the_current_item_as_the_inspector_menus_do() {
+        // The current item: a white label in medium weight, and the
+        // inspector menus' check (the label was coral here).
+        let item = MenuItem::new("Master", vec![()]).selected(true);
+        assert_eq!(
+            label_style(&item),
+            (Studio::TEXT_PRIMARY, crate::ui::core::theme::font::MEDIUM)
+        );
+        let plain = MenuItem::new("Bus 1", vec![()]);
+        assert_eq!(
+            label_style(&plain),
+            (Studio::TEXT_PRIMARY, crate::ui::core::theme::font::REGULAR)
+        );
+        assert_eq!(SELECTED_CHECK, Studio::ACCENT_BRIGHT);
+    }
 
     #[test]
     fn argb_reads_like_flutters_color() {

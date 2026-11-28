@@ -588,11 +588,24 @@ impl<M> MenuRow<M> {
             Studio::TEXT_SECONDARY
         }
     }
+
+    /// The label's weight: medium on the current item.
+    pub fn font(&self) -> iced::Font {
+        if self.selected {
+            font::MEDIUM
+        } else {
+            font::REGULAR
+        }
+    }
 }
+
+/// The check at the end of a menu's current item.
+pub const SELECTED_CHECK: Color = Studio::ACCENT_BRIGHT;
 
 impl<'a, M: Clone + 'a> From<MenuRow<M>> for Element<'a, M> {
     fn from(r: MenuRow<M>) -> Self {
         let color = r.color();
+        let weight = r.font();
         let mut content = row![].spacing(ICON_GAP).align_y(Vertical::Center);
         if let Some(icon) = r.icon {
             content = content.push(
@@ -605,11 +618,7 @@ impl<'a, M: Clone + 'a> From<MenuRow<M>> for Element<'a, M> {
         let mut labels = column![studio_text(r.label)
             .size(type_scale::BODY)
             .line_height(Pixels(type_scale::LINE))
-            .font(if r.selected {
-                font::MEDIUM
-            } else {
-                font::REGULAR
-            })
+            .font(weight)
             .color(color)
             .ellipsis(1)]
         .width(Length::Fill);
@@ -626,7 +635,7 @@ impl<'a, M: Clone + 'a> From<MenuRow<M>> for Element<'a, M> {
         }
         content = content.push(labels);
         if r.selected {
-            content = content.push(icons::icon(Icon::Check, MENU_ICON, Studio::ACCENT_BRIGHT));
+            content = content.push(icons::icon(Icon::Check, MENU_ICON, SELECTED_CHECK));
         }
         let row = button(container(content).center_y(Length::Fill))
             .width(Length::Fill)

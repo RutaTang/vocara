@@ -116,8 +116,10 @@ const SCROLLED_DRY_HEIGHT: f32 = 120.0;
 const SEND_MENU_WIDTH: f32 = 160.0;
 const OUTPUT_MENU_WIDTH: f32 = 180.0;
 
-/// The output routing's "no bus" destination.
-pub const STEREO_OUT: &str = "Stereo Out";
+/// The output routing's "no bus" destination: the master, by the name the
+/// arrange and the mixer give it. (The inspector called it "Stereo Out"
+/// while the mixer strips' menus said "Master": one output, two names.)
+pub const MASTER: &str = "Master";
 
 // Pass / warn / flag indicator colors for the scorecard dots (the status
 // tokens: in tune, warn, off).
@@ -495,9 +497,9 @@ pub fn short_clock(ms: i64) -> String {
 }
 
 /// The Output pop-up's label: the destination bus's name, else
-/// [`STEREO_OUT`].
+/// [`MASTER`].
 pub fn output_name(dest: Option<&str>, buses: &[Arc<FxBus>]) -> String {
-    let mut name = STEREO_OUT.to_string();
+    let mut name = MASTER.to_string();
     for b in buses {
         if Some(b.id.as_str()) == dest {
             name = b.name.clone();
@@ -1377,10 +1379,9 @@ fn routing_section<'a, M: Clone + 'a>(
         insp,
         &menu,
         || {
-            let mut items = vec![
-                StudioMenuItem::new(STEREO_OUT, on(strip.channel.route(None)))
-                    .selected(dest.is_none()),
-            ];
+            let mut items =
+                vec![StudioMenuItem::new(MASTER, on(strip.channel.route(None)))
+                    .selected(dest.is_none())];
             items.extend(strip.outputs.iter().map(|b| {
                 StudioMenuItem::new(b.name.clone(), on(strip.channel.route(Some(&b.id))))
                     .selected(dest == Some(b.id.as_str()))
