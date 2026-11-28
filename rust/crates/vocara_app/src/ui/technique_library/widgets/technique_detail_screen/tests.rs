@@ -1002,6 +1002,78 @@ fn a_failed_start_says_why() {
     assert!(h.shows(analysis::RECORD_PRACTICE), "ready for another try");
 }
 
+// ------------------------------------------------------ an update
+
+// Record once an update installs, as on the song page: the relaunch's quit
+// would stop the take seconds in, so it is not started at all, and the page
+// says why.
+#[test]
+fn record_is_refused_while_an_update_installs() {
+    use crate::ui::home::widgets::update_notice::testing::{image, release, updates};
+    use vocara_services::self_update::Phase;
+    let fake = updates(false);
+    let (installed, installing) = std::sync::mpsc::channel();
+    *fake.installer.held.lock().unwrap() = Some(installing);
+    fake.updater.prepare();
+    assert!(fake.updater.start(&release(Some(&image()))));
+    fake.wait_for(&Phase::Installing);
+    let refused = |record: &dyn Fn(&mut Harness)| {
+        let mut h = Harness::loaded(Setup::new(two_examples()));
+        h.size = Size::new(1200.0, 1400.0);
+        h.screen.self_update = Arc::clone(&fake.updater);
+        record(&mut h);
+        h.settle();
+        assert!(!h.vm().starting() && !h.vm().mic_live(), "nothing started");
+        assert!(!h.setup.finalizer.has_active());
+        assert_eq!(h.screen.snack(), Some(RECORD_AFTER_THE_UPDATE));
+    };
+    refused(&|h| h.click(analysis::RECORD_PRACTICE));
+    refused(&|h| {
+        h.edit();
+        h.click("Record an example");
+    });
+    // The install goes on.
+    drop(installed);
+    fake.settle();
+    assert_eq!(fake.updater.phase(), Phase::Relaunching);
+}
+
+// A Record start holds an update from the press, as the song page's REC
+// does: the take lists itself with the quit registry only once it arms, so
+// an update's last look before its swap, landing in that window, saw no
+// work, and the relaunch's quit cut the take short.
+#[test]
+fn a_record_start_holds_an_update_from_the_press_until_it_settles() {
+    let mut h = Harness::loaded(Setup::new(two_examples()));
+    h.size = Size::new(1200.0, 1400.0);
+    let finalizer = Arc::clone(&h.setup.finalizer);
+    assert!(!finalizer.has_active());
+    h.hold(JobKind::StartRecording);
+    h.click(analysis::RECORD_PRACTICE);
+    h.settle();
+    assert!(finalizer.has_active(), "the start counts from the press");
+    // Armed, the take is listed by the real recorder itself (this fake one
+    // lists nothing).
+    h.release(JobKind::StartRecording);
+    assert!(h.vm().is_recording_practice());
+    assert!(!finalizer.has_active(), "the start let go");
+    h.click(analysis::STOP);
+    h.settle();
+
+    // An example's start that throws is let go too.
+    h.edit();
+    h.hold(JobKind::StartRecording);
+    h.setup.recorder.st().mode = StartMode::Throw;
+    h.click("Record an example");
+    h.settle();
+    assert!(finalizer.has_active());
+    // A quit meanwhile cancels the start, and waits for nothing.
+    finalizer.finalize_all();
+    assert!(!h.vm().starting(), "the quit cancelled the start");
+    h.release(JobKind::StartRecording);
+    assert!(!finalizer.has_active(), "the start let go");
+}
+
 // ------------------------------------------------------ a practice take
 
 // technique_practice_take_test: 'Edit is refused while a practice take is

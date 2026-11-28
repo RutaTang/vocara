@@ -76,7 +76,7 @@ use iced::advanced::layout::{self, Layout};
 use iced::advanced::widget::{tree, Operation, Tree};
 use iced::advanced::{overlay, renderer, Clipboard, Shell, Widget};
 use iced::widget::image::{self, FilterMethod};
-use iced::widget::{container, mouse_area, opaque, stack, Space};
+use iced::widget::{container, mouse_area, stack, Space};
 use iced::{
     keyboard, mouse, window, Color, ContentFit, Element, Event, Length, Rectangle, Renderer, Size,
     Subscription, Task, Theme, Vector,
@@ -393,7 +393,10 @@ impl TechniqueVideoPlayer {
 
     /// The fullscreen route's page while the video is fullscreen: the video
     /// filling the window over black, its own controls over it; it takes
-    /// every click and every key (its shortcuts first).
+    /// every key (its shortcuts first). Every click on it is taken as well:
+    /// by the controls, which cover the whole picture, and by the app's
+    /// backdrop around the page's overlay (`toolbar::window_backdrop`),
+    /// which stands in for an `opaque` here.
     pub fn fullscreen_view(&self) -> Option<Element<'_, Message>> {
         if !self.fullscreen || !self.transport.has_player() {
             return None;
@@ -416,7 +419,7 @@ impl TechniqueVideoPlayer {
                 }
             }),
         );
-        Some(holds_keyboard(opaque(keys)))
+        Some(holds_keyboard(keys))
     }
 }
 

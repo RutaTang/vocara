@@ -1992,9 +1992,11 @@ pub fn lyrics_focus_overlay<'a>(
             Message::ImportLyricsFromFile(paths.into_iter().next().unwrap_or_default())
         }
     });
-    // An opaque layer: nothing beneath it sees the pointer.
+    // An opaque layer: nothing beneath it sees the pointer. It lies over
+    // the page's toolbar, whose part of the title-bar band stays the
+    // window's where nothing in the view takes the press.
     let leaves_on_escape = Wrap::<Message, ()>::new(
-        iced::widget::opaque(target),
+        crate::ui::core::widgets::toolbar::window_backdrop(target),
         Box::new(|_, event, _, _, shell| {
             let escape = matches!(
                 event,

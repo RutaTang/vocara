@@ -137,7 +137,7 @@ use vocara_services::mic_recording_controller::{
 };
 use vocara_services::monitor_service::{LiveMonitor, MonitorService};
 use vocara_services::playback_engine::PlaybackEngine;
-use vocara_services::recording_finalizer::RecordingFinalizer;
+use vocara_services::recording_finalizer::{Finalizer, RecordingFinalizer};
 use vocara_services::technique_media_service::TechniqueMediaFiles;
 use vocara_store::db::AssetStore;
 use vocara_store::repositories::TechniqueRepository;
@@ -254,6 +254,38 @@ type Cont = Box<dyn FnOnce(&mut TechniqueDetailViewModel, Value, &mut Next) + Se
 
 /// What a sub-flow hands its caller back.
 type Then<T> = Box<dyn FnOnce(&mut TechniqueDetailViewModel, T, &mut Next) + Send>;
+
+/// A recording start listed with the quit registry until it settles, which
+/// is what the update waits on (`self_update::work_in_flight`); taken off
+/// the list when dropped, however the start ends. A quit meanwhile cancels
+/// the start, as Cancel does, and waits for nothing: a take not armed yet
+/// has nothing to save, and a start at the permission prompt would hold the
+/// quit for its whole budget. So it begins no work a quit must budget for
+/// (`starts_work` false), where the song page's start drops an empty take.
+struct StartListed {
+    finalizer: Arc<RecordingFinalizer>,
+    cancel_for_quit: Finalizer,
+}
+
+impl StartListed {
+    fn new(finalizer: &Arc<RecordingFinalizer>, recorder: &Arc<dyn MicRecorder>) -> Self {
+        let cancel_for_quit = {
+            let recorder = Arc::clone(recorder);
+            Finalizer::new(move || recorder.invalidate_pending_start())
+        };
+        finalizer.register(&cancel_for_quit, false);
+        StartListed {
+            finalizer: Arc::clone(finalizer),
+            cancel_for_quit,
+        }
+    }
+}
+
+impl Drop for StartListed {
+    fn drop(&mut self) {
+        self.finalizer.unregister(&self.cancel_for_quit);
+    }
+}
 
 /// Why a recording start threw rather than answered.
 struct StartThrew {
@@ -1817,11 +1849,17 @@ impl TechniqueDetailViewModel {
         let pending = self
             .recorder
             .begin_start(RecordingPathStrategy::temp_dir(prefix));
+        // Listed with the quit registry from the press until the start
+        // settles, its landing included. The take lists itself only once it
+        // arms, after the permission prompt, the mic's open and its first
+        // frames: an update's last look before its swap, landing in that
+        // window, saw no work, and the relaunch's quit cut the take short.
+        let listed = StartListed::new(&self.finalizer, &self.recorder);
         self.notify();
         self.spawn(
             next,
             JobKind::StartRecording,
-            &Keep::default(),
+            &Keep::default().with(listed),
             move || {
                 pending.run().map_err(|e| StartThrew {
                     file_system: e.downcast_ref::<std::io::Error>().is_some(),

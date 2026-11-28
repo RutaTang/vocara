@@ -314,6 +314,57 @@ fn the_fullscreen_button_enters_fullscreen_and_escape_leaves() {
     assert_eq!(request, Some(WindowRequest::ExitFullscreen));
 }
 
+// The fullscreen view lies over the window's title-bar band, whose presses
+// nothing over it takes are the window's (the app's backdrop around the
+// page's overlay): a double press on the picture there left fullscreen and
+// zoomed the window too.
+#[test]
+fn a_double_press_on_the_fullscreen_picture_in_the_band_zooms_no_window() {
+    use crate::ui::core::widgets::toolbar::{self, drag_region, window_backdrop};
+    use iced::time::Instant;
+    use std::time::Duration;
+    #[derive(Debug, Clone)]
+    enum Window {
+        Video(Message),
+        Drag,
+        Maximize,
+    }
+    /// The view as the app shows it.
+    fn view(video: &TechniqueVideoPlayer) -> Element<'_, Window> {
+        let page = video.fullscreen_view().expect("in fullscreen");
+        drag_region(
+            window_backdrop(page.map(Window::Video)),
+            Window::Drag,
+            Window::Maximize,
+        )
+    }
+    let players = FakeMediaPlayers::new();
+    let (mut video, _handle) = started(&players);
+    video.update(Message::Key(Shortcut::ToggleFullscreen), &players, false);
+    // A tap, then the frame after it: the video times its taps by the
+    // frames, the window by the clock.
+    let tap_then_frame = |at: Instant| {
+        let mut events = click();
+        events.push(Event::Window(iced::window::Event::RedrawRequested(at)));
+        events
+    };
+    let mut ui = simulator(view(&video));
+    ui.point_at(Point::new(512.0, toolbar::HEIGHT / 2.0));
+    let t0 = Instant::now();
+    let _ = ui.simulate([Event::Window(iced::window::Event::RedrawRequested(t0))]);
+    let _ = ui.simulate(tap_then_frame(t0 + Duration::from_millis(600)));
+    std::thread::sleep(Duration::from_millis(60));
+    let _ = ui.simulate(tap_then_frame(t0 + Duration::from_millis(800)));
+    let sent: Vec<Window> = ui.into_messages().collect();
+    assert!(
+        matches!(
+            sent.as_slice(),
+            [Window::Video(Message::Controls(Command::ToggleFullscreen))]
+        ),
+        "{sent:?}"
+    );
+}
+
 #[test]
 fn a_take_does_not_block_the_fullscreen_controls() {
     let players = FakeMediaPlayers::new();

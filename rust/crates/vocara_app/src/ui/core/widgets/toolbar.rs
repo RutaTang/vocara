@@ -18,8 +18,8 @@
 //!   gesture only on a press nothing under it took (a button, a field, a
 //!   slider capture theirs; so does a disabled button). A surface over the
 //!   whole window that takes every press (a dialog's barrier, the lyrics
-//!   Focus view, a video's fullscreen) lets the band's presses that none of
-//!   its controls took through to the window ([`window_backdrop`]): the
+//!   Focus view, a video's fullscreen) lets the band's presses that nothing
+//!   in it took through to the window ([`window_backdrop`]): the
 //!   content view answers `mouseDownCanMoveWindow` NO
 //!   (`vocara_services::window_toolbar`), so AppKit never moves the window
 //!   by itself, and under such a surface it could not be moved at all.
@@ -231,14 +231,16 @@ pub fn drag_region<'a, M: Clone + 'a>(
     .into()
 }
 
-/// `content`, a surface over the whole window that takes every press over
-/// it, as `opaque` does (a dialog's barrier, a full-window view), whose
-/// part of the title-bar band is still the window's: a primary press there
-/// that none of its controls took goes on to the [`drag_region`] around it,
-/// which moves or zooms the window from it. A control there keeps its
-/// press: one that took it and shows itself under the pointer (a button's
-/// pointer, a field's caret); an `opaque` inside, which shows nothing
-/// there, is no control.
+/// `content` as a surface over the whole window (a dialog's barrier, a
+/// full-window view) whose part of the title-bar band is still the
+/// window's: a primary press there that nothing in it took goes on to the
+/// [`drag_region`] around it, which moves or zooms the window from it.
+/// Whatever took its press keeps it (a button, a field, a scrollbar's
+/// thumb), whatever cursor it shows.
+///
+/// It takes every press over it, and shows the arrow where the content
+/// shows nothing, as `opaque` does: it stands in for one. An `opaque`
+/// inside would take every press itself, and leave the window none.
 pub fn window_backdrop<'a, M: 'a>(content: impl Into<Element<'a, M>>) -> Element<'a, M> {
     Element::new(Backdrop {
         content: content.into(),
@@ -324,20 +326,14 @@ impl<M> Widget<M, Theme, Renderer> for Backdrop<'_, M> {
         viewport: &Rectangle,
     ) {
         let over = cursor.position_over(layout.bounds());
-        // What the surface shows under a press in the band, before it is
-        // handled: a control shows itself there.
-        let shown = (over.is_some() && is_band_press(event, cursor)).then(|| {
-            self.content
-                .as_widget()
-                .mouse_interaction(tree, layout, cursor, viewport, renderer)
-        });
         self.content.as_widget_mut().update(
             tree, event, layout, cursor, renderer, clipboard, shell, viewport,
         );
-        if let (Some(at), Some(shown)) = (over, shown) {
-            let control = shell.is_event_captured()
-                && !matches!(shown, mouse::Interaction::None | mouse::Interaction::Idle);
-            if !control {
+        // A press the content took is its own, whatever it shows under the
+        // pointer: a scrollbar's thumb shows the arrow, and read by its
+        // cursor, a drag on it near the top moved the window instead.
+        if let Some(at) = over.filter(|_| is_band_press(event, cursor)) {
+            if !shell.is_event_captured() {
                 LET_THROUGH.set(Some(at));
             }
         }
@@ -382,7 +378,7 @@ impl<M> Widget<M, Theme, Renderer> for Backdrop<'_, M> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use iced::widget::{button, column, opaque, stack, text};
+    use iced::widget::{button, column, stack, text};
     use iced::Point;
 
     #[derive(Debug, Clone, PartialEq)]
@@ -566,10 +562,10 @@ mod tests {
 
     #[test]
     fn a_full_window_view_lets_its_empty_band_through_and_keeps_its_controls() {
-        // The lyrics Focus view or a video's fullscreen: an opaque view over
-        // the whole window with a control in the band.
+        // The lyrics Focus view or a video's fullscreen: a view over the
+        // whole window with a control in the band.
         let view = || {
-            window_backdrop(opaque(
+            window_backdrop(
                 column![
                     row![
                         Space::new().width(Length::Fill),
@@ -580,7 +576,7 @@ mod tests {
                 ]
                 .width(Length::Fill)
                 .height(Length::Fill),
-            ))
+            )
         };
         let window = || drag_region(stack![page(), view()], Msg::Drag, Msg::Maximize);
         let mut ui = iced_test::simulator(window());
@@ -599,5 +595,99 @@ mod tests {
         let mut ui = iced_test::simulator(window());
         pan_then_double_tap(&mut ui, Point::new(300.0, 200.0));
         assert!(ui.into_messages().next().is_none());
+    }
+
+    #[test]
+    fn a_control_in_the_band_that_shows_the_arrow_keeps_its_press() {
+        // A scrollbar's thumb takes its press and shows the arrow (or
+        // nothing, which the surface shows as the arrow). Read by its
+        // cursor, it was no control: a drag on the lyrics Focus view's
+        // thumb at the top of its list moved the window.
+        for shows in [mouse::Interaction::Idle, mouse::Interaction::None] {
+            let thumb = move || {
+                Wrap::<Msg, ()>::new(
+                    Space::new().width(20).height(HEIGHT),
+                    Box::new(|_, event, bounds, cursor, shell| {
+                        let press = matches!(event, Event::Mouse(mouse::Event::ButtonPressed(_)));
+                        if press && cursor.is_over(bounds) {
+                            shell.publish(Msg::Pressed);
+                            shell.capture_event();
+                        }
+                    }),
+                )
+                .interaction(Box::new(move |_, bounds, cursor| {
+                    cursor.is_over(bounds).then_some(shows)
+                }))
+            };
+            let view = move || {
+                window_backdrop(
+                    column![
+                        row![thumb(), Space::new().width(Length::Fill)].height(HEIGHT),
+                        Space::new().height(Length::Fill),
+                    ]
+                    .width(Length::Fill)
+                    .height(Length::Fill),
+                )
+            };
+            let window = || drag_region(stack![page(), view()], Msg::Drag, Msg::Maximize);
+            let mut ui = iced_test::simulator(window());
+            pan_then_double_tap(&mut ui, Point::new(10.0, 26.0));
+            assert_eq!(
+                ui.into_messages().collect::<Vec<_>>(),
+                vec![Msg::Pressed; 3],
+                "{shows:?}"
+            );
+            // Beside it, the band is still the window's.
+            let mut ui = iced_test::simulator(window());
+            pan_then_double_tap(&mut ui, Point::new(300.0, 20.0));
+            assert_eq!(
+                ui.into_messages().collect::<Vec<_>>(),
+                vec![Msg::Drag, Msg::Maximize],
+                "{shows:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_drag_on_a_scrollbars_thumb_in_the_band_scrolls_and_moves_no_window() {
+        // The lyrics Focus view's list at its top: the thumb lies in the
+        // band.
+        use crate::ui::core::widgets::animated::testing::{Frames, MS};
+        use crate::ui::core::widgets::fading_scrollbar::{fading_scrollbar, scrollable};
+        use iced::time::Instant;
+        #[derive(Debug, Clone, PartialEq)]
+        enum Window {
+            Scrolled(f32),
+            Drag,
+            Maximize,
+        }
+        let view = || {
+            let list = scrollable(column![Space::new().width(100).height(300)])
+                .width(100)
+                .height(100)
+                .on_scroll(|viewport| Window::Scrolled(viewport.absolute_offset().y));
+            drag_region(
+                window_backdrop(fading_scrollbar(list)),
+                Window::Drag,
+                Window::Maximize,
+            )
+        };
+        let mut window = Frames::new(Size::new(120.0, 120.0));
+        let t0 = Instant::now();
+        // The pointer on the thumb shows the bar.
+        window.point_at(Point::new(94.0, 10.0));
+        window.frame(view(), &[], t0);
+        window.frame(view(), &[], t0 + 300 * MS);
+        let mut sent = window.frame_messages(view(), &[press()], t0 + 316 * MS).1;
+        window.point_at(Point::new(94.0, 36.0));
+        sent.extend(window.frame_messages(view(), &[], t0 + 332 * MS).1);
+        sent.extend(window.frame_messages(view(), &[release()], t0 + 348 * MS).1);
+        assert!(sent.contains(&Window::Scrolled(100.0)), "{sent:?}");
+        assert!(
+            !sent
+                .iter()
+                .any(|m| matches!(m, Window::Drag | Window::Maximize)),
+            "{sent:?}"
+        );
     }
 }
