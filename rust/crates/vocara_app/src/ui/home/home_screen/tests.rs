@@ -961,3 +961,29 @@ fn the_list_is_scrolled_back_when_a_page_pushed_over_home_is_popped() {
     let update = home.screen.returned(&home.services);
     assert!(widget_operations(update.task) >= 1, "the scroll back");
 }
+
+/// A library left in an older Vocara's sandbox folder: Home says so once a
+/// run, with the folder to show, however often it mounts.
+#[test]
+fn a_library_left_behind_is_told_once_a_run() {
+    let mut services = Services::detached(Arc::new(Library::in_memory()), AppEnvironment::Dev);
+    services.left_behind = Some(Arc::new(crate::services::LeftBehind::new(
+        std::path::PathBuf::from("/Users/me/Library/Containers/com.rutatang.vocara"),
+    )));
+    let mut home = Home::mount(services.clone());
+    let Some(DialogRequest {
+        dialog: Dialog::Confirm(notice),
+        ..
+    }) = &home.dialog
+    else {
+        panic!("the notice, through the app's dialog stack")
+    };
+    assert_eq!(notice.title, LEFT_BEHIND_TITLE);
+    assert_eq!(notice.confirm_label, LEFT_BEHIND_SHOW);
+    assert_eq!(notice.cancel_label, LEFT_BEHIND_LATER);
+    assert!(!notice.destructive);
+    home.answer(DialogResult::Confirmed(false));
+    // Mounted again this run: not told again.
+    let again = Home::mount(services);
+    assert!(again.dialog.is_none());
+}

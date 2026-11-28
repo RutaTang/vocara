@@ -12,7 +12,7 @@
 //! lands.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::app::library::Library;
@@ -80,6 +80,11 @@ pub struct Services {
     /// settings read, and `load` adopts only fields the user has not already
     /// set.
     pub app_settings: Arc<AppSettingsService>,
+
+    /// A library this launch left in an older Vocara's sandbox folder
+    /// (`sandbox_migration::library_left_behind`), for Home to tell the
+    /// user about; `None` in tests and nearly always in the app.
+    pub left_behind: Option<Arc<LeftBehind>>,
     //
     // `Provider<WaveformService>` has no field: the Rust waveform service is
     // free functions (`vocara_services::waveform_service`).
@@ -105,7 +110,7 @@ impl Services {
         start_settings_load(&app_settings);
         let update_check = Arc::new(UpdateCheckService::new(local_storage.clone()));
         start_update_preference_load(&update_check);
-        Self::with_parts(
+        let mut services = Self::with_parts(
             library,
             environment,
             local_storage.clone(),
@@ -113,7 +118,10 @@ impl Services {
             Arc::new(SelfUpdate::production(local_storage.clone())),
             create_source_separation_service(environment, local_storage),
             app_settings,
-        )
+        );
+        services.left_behind = vocara_services::sandbox_migration::library_left_behind()
+            .map(|folder| Arc::new(LeftBehind::new(folder)));
+        services
     }
 
     /// The services a test boots with: storage in a fresh temporary folder
@@ -179,7 +187,31 @@ impl Services {
             app_settings,
             library,
             environment,
+            left_behind: None,
         }
+    }
+}
+
+/// A library left in an older Vocara's sandbox folder (see
+/// [`Services::left_behind`]): where it is, and whether Home has told the
+/// user this run (once a run, however often Home mounts).
+#[derive(Debug)]
+pub struct LeftBehind {
+    pub folder: PathBuf,
+    told: AtomicBool,
+}
+
+impl LeftBehind {
+    pub fn new(folder: PathBuf) -> Self {
+        LeftBehind {
+            folder,
+            told: AtomicBool::new(false),
+        }
+    }
+
+    /// True the first time it is asked this run.
+    pub fn claim_notice(&self) -> bool {
+        !self.told.swap(true, Ordering::SeqCst)
     }
 }
 

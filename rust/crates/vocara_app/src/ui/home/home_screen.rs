@@ -109,6 +109,15 @@ pub const CONSENT_BODY: &str = "Vocara can ask GitHub for a newer release each t
 pub const CONSENT_YES: &str = "Check automatically";
 pub const CONSENT_NO: &str = "Don't check";
 
+/// The notice when the launch left a library in an older Vocara's sandbox
+/// folder (`Services::left_behind`).
+pub const LEFT_BEHIND_TITLE: &str = "Another library was found";
+pub const LEFT_BEHIND_BODY: &str = "An older version of Vocara kept a separate library in its \
+     old folder after this one moved yours. Its recordings are not in the library you see \
+     here. Vocara has left it untouched: open the folder to copy anything you need.";
+pub const LEFT_BEHIND_SHOW: &str = "Show in Finder";
+pub const LEFT_BEHIND_LATER: &str = "Not now";
+
 /// The toast when the answer could not be kept.
 pub const CONSENT_NOT_SAVED: &str =
     "Your update choice could not be saved. Vocara will ask again next time.";
@@ -186,9 +195,15 @@ pub enum Message {
     /// The opening dialog's hold for open `n` is over: push the practice.
     OpeningElapsed(u64),
     /// A card's trash: confirm deleting it.
-    Delete { id: String, title: String },
+    Delete {
+        id: String,
+        title: String,
+    },
     /// The delete confirmation closed.
-    DeleteConfirmed { id: String, confirmed: bool },
+    DeleteConfirmed {
+        id: String,
+        confirmed: bool,
+    },
     /// The error state's Retry.
     Retry,
     /// A command's outcome came back.
@@ -200,6 +215,12 @@ pub enum Message {
     Settled(String),
     /// Sync applied remote rows.
     RemoteApplied(RemoteApplied),
+    /// The left-behind library's notice is due, and its answer (show the
+    /// folder, or not).
+    LeftBehindDue,
+    LeftBehindAnswered(bool),
+    /// The folder was handed to Finder.
+    LeftBehindShown,
     /// The practice list scrolled to this offset (kept, to put the list
     /// back where it was when a page pushed over Home is popped).
     ListScrolled(f32),
@@ -280,6 +301,10 @@ pub struct HomeScreen {
     list_id: iced::widget::Id,
     list_scroll: f32,
 
+    /// A library left in an older Vocara's sandbox folder, to tell the user
+    /// about once a run.
+    left_behind: Option<Arc<crate::services::LeftBehind>>,
+
     /// The failure toasts (one at a time: each replaces the one up).
     snacks: SnackQueue,
 
@@ -340,6 +365,7 @@ impl HomeScreen {
             consent_pending: false,
             list_id: iced::widget::Id::unique(),
             list_scroll: 0.0,
+            left_behind: services.left_behind.clone(),
             snacks: SnackQueue::new(),
             loading: None,
             now: Instant::now(),
@@ -349,7 +375,11 @@ impl HomeScreen {
         let startup = Task::perform(crate::util::blocking(move || updater.startup()), |_| {
             Message::UpdaterStarted
         });
-        (screen, Task::batch([run(first), startup]))
+        let notice = match &screen.left_behind {
+            Some(left) if left.claim_notice() => Task::done(Message::LeftBehindDue),
+            _ => Task::none(),
+        };
+        (screen, Task::batch([run(first), startup, notice]))
     }
 
     /// The view model.
@@ -626,6 +656,37 @@ impl Screen for HomeScreen {
             // owes one after it.
             Message::Settled(_) => run_all([self.vm.refresh()]).into(),
             Message::RemoteApplied(event) => run_all([self.vm.on_remote_applied(&event)]).into(),
+            Message::LeftBehindDue => Update::dialog(
+                ConfirmDialog::new(LEFT_BEHIND_TITLE)
+                    .body(LEFT_BEHIND_BODY)
+                    .confirm_label(LEFT_BEHIND_SHOW)
+                    .cancel_label(LEFT_BEHIND_LATER)
+                    .destructive(false)
+                    .icon(Icon::Library),
+                |result| Message::LeftBehindAnswered(result.confirmed()),
+            ),
+            Message::LeftBehindAnswered(show) => {
+                let Some(folder) = self
+                    .left_behind
+                    .as_ref()
+                    .filter(|_| show)
+                    .map(|left| left.folder.clone())
+                else {
+                    return Update::none();
+                };
+                Update::task(Task::perform(
+                    crate::util::blocking(move || {
+                        let opener = if cfg!(target_os = "macos") {
+                            "open"
+                        } else {
+                            "xdg-open"
+                        };
+                        let _ = std::process::Command::new(opener).arg(&folder).status();
+                    }),
+                    |_| Message::LeftBehindShown,
+                ))
+            }
+            Message::LeftBehindShown => Update::none(),
             Message::ListScrolled(y) => {
                 self.list_scroll = y;
                 Update::none()

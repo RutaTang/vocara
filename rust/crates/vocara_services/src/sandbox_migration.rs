@@ -39,7 +39,7 @@
 //!
 //! | A | C | |
 //! |---|---|---|
-//! | a library | anything | A opens. C is left exactly as it is — never merged, never overwritten — and logged when it holds anything ([`Outcome::BothHold`]). |
+//! | a library | anything | A opens. C is left exactly as it is — never merged, never overwritten — and, when it holds a library, named for the app to tell the user ([`Outcome::BothHold`], [`library_left_behind`]). |
 //! | no library | nothing (missing, empty) | A opens ([`Outcome::NothingToMove`]): a fresh install, or one moved before. |
 //! | nothing (missing, empty) | anything | C is moved to A ([`Outcome::Moved`]). |
 //! | files, but no library | anything | C stays and opens ([`Why::UnsandboxedNotEmpty`]): nothing is merged into A or deleted from it. |
@@ -52,10 +52,14 @@
 //! library, the settings, the asset folders and the diagnostics log all open
 //! there, as they did while sandboxed, so the user never meets an empty
 //! library while theirs sits in the container. A later launch moves it if
-//! it then can. Both holding a library only happens when someone ran an
-//! unsandboxed build of the same flavor (a debug bundle, `cargo run`) beside
-//! a sandboxed release: the unsandboxed one is what every build from now on
-//! keeps using, so it wins, and the container's is left for whoever made it.
+//! it then can. Both hold a library when an older, sandboxed Vocara was
+//! opened after a newer one had moved the library out (a copy left in
+//! /Applications while the new one ran from its disk image): it starts a
+//! fresh library in its container, and takes recorded there are in no
+//! library the app opens. Or when someone ran an unsandboxed build of the
+//! same flavor (a debug bundle, `cargo run`) beside a sandboxed release. The
+//! unsandboxed one is what every build from now on keeps using, so it wins;
+//! the container's is left as it is, and Home tells the user where it is.
 //!
 //! The move first takes the library's single-instance lock
 //! ([`library_lock::hold_for_move`]). An older, sandboxed Vocara that is
@@ -388,10 +392,30 @@ pub fn settle_in(bundle_id: &str, at: &Locations, patience: &Patience) -> Outcom
     if let Outcome::StaysInContainer(_) = outcome {
         app_support::root_at(bundle_id, at.container.clone());
     }
+    if let Outcome::BothHold = outcome {
+        *left_behind_lock() = Some(at.container.clone());
+    }
     if let Some(entry) = outcome.describe(bundle_id) {
         DiagnosticsLog::instance().log(LOG_AREA, &entry);
     }
     outcome
+}
+
+/// The library this launch left in the App Sandbox container because the
+/// unsandboxed folder held one too ([`Outcome::BothHold`]): an older,
+/// sandboxed Vocara opened after a newer one had moved the library out
+/// starts a fresh one there, and the takes recorded in it are in no
+/// library this app opens. Nothing merges or moves it; the app says it is
+/// there (Home asks once a run, with the folder to show).
+pub fn library_left_behind() -> Option<PathBuf> {
+    left_behind_lock().clone()
+}
+
+fn left_behind_lock() -> std::sync::MutexGuard<'static, Option<PathBuf>> {
+    static LEFT_BEHIND: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+    LEFT_BEHIND
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// Settles where [env]'s data lives ([`settle_in`] for its bundle id, under

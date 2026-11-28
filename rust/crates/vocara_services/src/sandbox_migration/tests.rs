@@ -531,6 +531,27 @@ fn a_library_that_moved_roots_nothing() {
 }
 
 #[test]
+fn a_library_left_behind_in_the_container_is_named_for_the_app() {
+    // An older, sandboxed Vocara started a fresh library in its container
+    // after this one moved the first out: both hold one, the unsandboxed
+    // opens, and the app is told where the other is.
+    let bundle_id = "test.sandbox-migration.left-behind";
+    let home = tempfile::tempdir().unwrap();
+    let at = Locations::under_home(home.path(), bundle_id);
+    seed_library(&at.container);
+    write(
+        &at.unsandboxed.join("vocara.db"),
+        b"SQLite format 3\0 moved",
+    );
+    assert!(matches!(
+        settle_in(bundle_id, &at, &quick()),
+        Outcome::BothHold
+    ));
+    assert_eq!(library_left_behind(), Some(at.container.clone()));
+    assert!(at.container.join("vocara.db").exists(), "left as it is");
+}
+
+#[test]
 fn every_entry_names_its_folders_in_words_the_log_keeps() {
     let e = || io::Error::from_raw_os_error(libc::EPERM);
     let outcomes = [

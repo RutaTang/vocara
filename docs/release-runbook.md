@@ -137,10 +137,12 @@ whole decision table):
 
 - container holds data, Application Support holds nothing (missing, or empty
   but for Finder's `.DS_Store`): **moved**;
-- Application Support already holds a library (someone ran an unsandboxed
-  build of the same flavor beside a sandboxed release): **it opens**, and the
-  container's is left exactly as it is, nothing merged or overwritten
-  (logged);
+- Application Support already holds a library (an older, sandboxed Vocara
+  was opened after a newer one moved the library out, and started a fresh
+  one in its container; or someone ran an unsandboxed build of the same
+  flavor beside a sandboxed release): **it opens**, the container's is left
+  exactly as it is, nothing merged or overwritten, and Home tells the user
+  once a launch where it is, with Show in Finder;
 - the move cannot be done — another Vocara (an older, sandboxed one) still
   has the library open, the folders are on different volumes, the system
   refuses, Application Support holds stray files but no library — **the
