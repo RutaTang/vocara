@@ -546,6 +546,81 @@ fn deleting_a_clip_keeps_the_notes_another_clip_still_covers() {
     assert_eq!(lane.notes[1].end_ms, Some(3000), "clamped at the gap");
 }
 
+#[test]
+fn a_moved_clip_takes_the_notes_and_markers_on_its_audio_with_it() {
+    // The clip moved and its notes stayed where they were, off its audio.
+    let lane = AudioTrack {
+        clips: vec![
+            clip("orig", "/pool/o.wav", 0, 3000),
+            clip("punch", "/pool/p.wav", 1000, 1000),
+        ],
+        notes: vec![
+            note("before", 500, None),
+            // Under the punch-in: heard is the punch, so it rides it.
+            note("on-punch", 1500, None),
+            // Starts on the punch, ends on the original's audio after it:
+            // decided by its start.
+            note("from-punch", 1800, Some(2600)),
+            note("after", 2500, None),
+        ],
+        technique_markers: vec![marker("m-punch", 1200), marker("m-orig", 2200)],
+        ..AudioTrack::new("lane", AudioTrackKind::Vocal, "Take 1", at())
+    };
+    let (f, mut s) = Fixture::open(Setup {
+        practice: seed_practice(Some(vec![lane])),
+        ..Setup::default()
+    });
+    // The drag passes over "after" on its way and back: it stays put.
+    s.vm.move_clip_start_live("lane", "punch", 2000);
+    s.vm.move_clip_start_live("lane", "punch", 1300);
+    let live = s.track("lane");
+    let at_of = |id: &str| {
+        live.notes
+            .iter()
+            .find(|n| n.id == id)
+            .map(|n| n.position_ms)
+    };
+    assert_eq!(
+        at_of("on-punch"),
+        Some(1800),
+        "the live drag shows it moving"
+    );
+    assert_eq!(at_of("after"), Some(2500));
+    s.act(|vm| vm.commit_track_move());
+    s.settle();
+    let stored = f.repo.stored();
+    let lane = stored
+        .vocal_tracks
+        .iter()
+        .find(|t| t.id == "lane")
+        .expect("the lane");
+    let notes: Vec<(&str, i64, Option<i64>)> = lane
+        .notes
+        .iter()
+        .map(|n| (n.id.as_str(), n.position_ms, n.end_ms))
+        .collect();
+    assert_eq!(
+        notes,
+        [
+            ("before", 500, None),
+            ("on-punch", 1800, None),
+            ("from-punch", 2100, Some(2900)),
+            ("after", 2500, None),
+        ]
+    );
+    let markers: Vec<(&str, i64)> = lane
+        .technique_markers
+        .iter()
+        .map(|m| (m.id.as_str(), m.position_ms))
+        .collect();
+    assert_eq!(markers, [("m-punch", 1500), ("m-orig", 2200)]);
+    // The next drag starts from where this one left everything.
+    s.vm.move_clip_start_live("lane", "punch", 1400);
+    s.act(|vm| vm.commit_track_move());
+    s.settle();
+    assert_eq!(s.track("lane").notes[1].position_ms, 1900);
+}
+
 // --- Persist before delete -----------------------------------------------------------
 
 #[test]

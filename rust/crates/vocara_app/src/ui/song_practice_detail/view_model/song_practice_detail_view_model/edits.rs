@@ -27,8 +27,8 @@ use super::super::recording_controller::RecordingOp;
 use super::jobs::{self, Failure, Output, ProgressCell};
 use super::persist::{Pending, SaveKind, SaveThen};
 use super::{
-    clamp_marker_end, clamp_note_end, normalize_marker_range, uncovered_spans, Call, Effect,
-    JobKind, Reply, SelectionBefore, SongPracticeDetailViewModel, Started,
+    clamp_marker_end, clamp_note_end, normalize_marker_range, uncovered_spans, Call, ClipRiders,
+    Effect, JobKind, Reply, SelectionBefore, SongPracticeDetailViewModel, Started,
 };
 
 // --- Step state -------------------------------------------------------------------
@@ -1605,13 +1605,17 @@ impl SongPracticeDetailViewModel {
     #[must_use]
     pub fn commit_track_move(&mut self) -> Vec<Effect> {
         self.c.moving_live.clear();
+        self.c.clip_riders = None;
         self.save(SaveThen::CommitMove);
         self.finish()
     }
 
     /// Moves a single clip along the timeline live (model only) while
-    /// dragging. Persist once on release with
-    /// [`SongPracticeDetailViewModel::commit_track_move`].
+    /// dragging, and with it the notes and technique markers on its audio
+    /// (see `ClipRiders`: what lay on the clip when the drag began, a range
+    /// by where it starts). Persist once on release with
+    /// [`SongPracticeDetailViewModel::commit_track_move`], which saves the
+    /// clip and its notes together, as the lane shows them all along.
     pub fn move_clip_start_live(&mut self, track_id: &str, clip_id: &str, start_ms: i64) {
         let Some(track) = self.c.track_by_id(track_id) else {
             return;
@@ -1631,6 +1635,16 @@ impl SongPracticeDetailViewModel {
         if clip.start_ms == clamped {
             return;
         }
+        // Taken on the drag's first move, while the clip is still where the
+        // drag found it.
+        let riders = match self.c.clip_riders.take() {
+            Some(r) if r.track_id == track_id && r.clip_id == clip_id => r,
+            _ => match ClipRiders::of(&track, clip_id) {
+                Some(r) => r,
+                None => return,
+            },
+        };
+        let delta = clamped - riders.start_ms;
         let clip_id = clip_id.to_string();
         self.c.update_track(track_id, &|t| AudioTrack {
             clips: t
@@ -1647,8 +1661,11 @@ impl SongPracticeDetailViewModel {
                     }
                 })
                 .collect(),
+            notes: riders.moved_notes(&t.notes, delta, timeline),
+            technique_markers: riders.moved_markers(&t.technique_markers, delta, timeline),
             ..t.clone()
         });
+        self.c.clip_riders = Some(riders);
         self.c.notify();
     }
 
