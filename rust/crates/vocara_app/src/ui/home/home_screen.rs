@@ -622,7 +622,11 @@ impl Screen for HomeScreen {
                 Update::none()
             }
             Message::ConsentDue => {
-                if !std::mem::take(&mut self.consent_pending) {
+                // Answered meanwhile (Settings' switch, while Home was
+                // covered): asking now would put a "no" over that answer.
+                if !std::mem::take(&mut self.consent_pending)
+                    || self.updates.auto_check_preference_now().is_some()
+                {
                     return Update::none();
                 }
                 Update::dialog(

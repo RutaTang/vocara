@@ -435,7 +435,7 @@ fn bundled_components() -> Vec<LicenseEntry> {
 
 {}",
                 entry(
-                    "CHIMERA — the vocal tract view's anatomy, airway acoustics and                      head drawing (jamesondh/chimera-vocal-synth)",
+                    "CHIMERA — the vocal tract view's anatomy, airway acoustics and head drawing (jamesondh/chimera-vocal-synth)",
                     "MIT License (MIT)",
                     "below",
                     Some("ported to Rust in the Vocara app (its vocara_tract crate)"),
@@ -1308,6 +1308,11 @@ mod tests {
         assert!(chimera[0]
             .text
             .contains("153c7c8f22108c400e8556950a2c3b61f3f62aa2"));
+        // Its title reads as one sentence (no run of spaces from a wrapped
+        // literal).
+        assert!(chimera[0]
+            .text
+            .contains("airway acoustics and head drawing"));
         // The video controls' play/pause keyframes are Flutter's, under its
         // BSD license, in full.
         let flutter = data.licenses_of("Flutter");

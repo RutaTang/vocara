@@ -714,6 +714,23 @@ fn the_auto_check_asks_first_and_a_yes_checks_at_once() {
     assert!(home.screen.snack().is_none());
 }
 
+/// Answered in Settings while the question waited (Home covered): it is
+/// not asked over that answer, which a "no" would have overwritten.
+#[test]
+fn an_answer_given_in_settings_meanwhile_is_not_asked_over() {
+    let fetches = Arc::new(AtomicUsize::new(0));
+    let updates = advertising(&fetches, None, false);
+    let mut home = home_with_updates(updates.clone());
+    home.fire(Timer::UpdateCheck);
+    assert!(home.screen.timers().contains(&Timer::Consent));
+    // Settings' switch, turned on while Home was covered.
+    updates.set_auto_check(true);
+    home.fire(Timer::Consent);
+    assert!(home.dialog.is_none(), "not asked again");
+    assert!(!home.screen.timers().contains(&Timer::Consent));
+    assert_eq!(updates.auto_check_preference_now(), Some(true));
+}
+
 /// A no (the "Don't check" button, Escape or a click on the barrier, as
 /// macOS's own updaters take it) is kept, and contacts nobody; the question
 /// is not asked again this run, however often Home mounts.

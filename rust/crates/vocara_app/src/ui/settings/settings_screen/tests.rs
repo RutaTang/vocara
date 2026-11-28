@@ -739,6 +739,31 @@ fn a_choice_still_waiting_when_the_page_leaves_is_applied_after_the_one_in_fligh
     assert_eq!(page.settings().monitor_reverb_wet(), 0.8);
 }
 
+// Settings left with a choice still waiting behind one in flight, then
+// opened again and a newer choice made: the newer one lands last. (Each page
+// kept its own line once, so the reopened page's choice ran at once and the
+// left page's older one landed after it.)
+#[test]
+fn a_choice_on_a_reopened_page_lands_after_the_left_pages_waiting_ones() {
+    let mut page = Setup::new().mount();
+    let in_flight = page.send_held(Message::Choose(Choice::MonitorReverb(0.3)));
+    let waiting = page.send_held(Message::Choose(Choice::MonitorReverb(0.8)));
+    assert!(run_task(waiting).is_empty());
+    page.screen.dispose(&page.services);
+    // Opened again over the same services, and a newer choice made there.
+    let hooks = test_hooks(page._storage.path());
+    let (reopened, _first) = SettingsScreen::with_hooks(&page.services, hooks);
+    page.screen = reopened;
+    let newer = page.send_held(Message::Choose(Choice::MonitorReverb(0.5)));
+    let newer = std::thread::spawn(move || run_task(newer));
+    // It waits for the left page's choices.
+    std::thread::sleep(Duration::from_millis(50));
+    assert_eq!(page.settings().monitor_reverb_wet(), 0.2);
+    page.drive(in_flight);
+    newer.join().expect("the newer choice applied");
+    assert_eq!(page.settings().monitor_reverb_wet(), 0.5);
+}
+
 #[test]
 fn the_reverb_readout_rounds_the_wet_amount() {
     let mut page = Setup::new().mount();

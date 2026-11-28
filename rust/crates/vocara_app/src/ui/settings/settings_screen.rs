@@ -63,7 +63,8 @@ use std::convert::Infallible;
 use std::hash::{Hash, Hasher};
 use std::io;
 use std::path::PathBuf;
-use std::sync::{Arc, Condvar, Mutex, PoisonError};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex, PoisonError, Weak};
 use std::time::{Duration, Instant};
 
 use crate::ui::core::text;
@@ -486,9 +487,9 @@ pub struct SettingsScreen {
     /// The choice being applied, and those waiting their turn.
     applying: Option<Choice>,
     queued: VecDeque<Choice>,
-    /// The order the choices' threads run in, and the next turn to give.
-    turns: Arc<Turns>,
-    turns_given: u64,
+    /// The order the choices' threads run in: one line for every Settings
+    /// page over this settings service ([`turn_line`]).
+    turns: Arc<TurnLine>,
 
     /// The manual update check this page started is in flight.
     checking_updates: bool,
@@ -549,8 +550,7 @@ impl SettingsScreen {
             refresh_owed: false,
             applying: None,
             queued: VecDeque::new(),
-            turns: Arc::default(),
-            turns_given: 0,
+            turns: turn_line(&services.app_settings),
             checking_updates: false,
             asking_repair: false,
             repairing: false,
@@ -672,19 +672,12 @@ impl SettingsScreen {
             return Task::none();
         };
         self.applying = Some(choice.clone());
-        let turn = self.next_turn();
+        let turn = self.turns.next_turn();
         let (turns, settings) = (Arc::clone(&self.turns), Arc::clone(&self.settings));
         Task::perform(
-            crate::util::blocking(move || turns.take(turn, || choice.apply(&settings))),
+            crate::util::blocking(move || turns.turns.take(turn, || choice.apply(&settings))),
             |_| Message::Chosen,
         )
-    }
-
-    /// The turn of the next thread applying choices.
-    fn next_turn(&mut self) -> u64 {
-        let turn = self.turns_given;
-        self.turns_given += 1;
-        turn
     }
 
     /// Replaces any toast on screen with `text` (`clearSnackBars`, then
@@ -824,10 +817,48 @@ impl SettingsScreen {
     }
 }
 
+/// The order choices are applied in for one settings service, shared by
+/// every Settings page over it: a page reopened while the one before it
+/// still flushes its waiting choices takes its turns after them, so an
+/// older choice never lands after a newer one (which a line per page let
+/// happen: the reopened page's first choice ran at once, and the left
+/// page's flush, still waiting on a slow device switch, applied its older
+/// choice last).
+#[derive(Debug, Default)]
+struct TurnLine {
+    turns: Turns,
+    given: AtomicU64,
+}
+
+impl TurnLine {
+    /// The turn of the next thread applying choices.
+    fn next_turn(&self) -> u64 {
+        self.given.fetch_add(1, Ordering::SeqCst)
+    }
+}
+
+/// The line of [settings]: the same for every page over the same service
+/// (the app has one; each test its own).
+fn turn_line(settings: &Arc<AppSettingsService>) -> Arc<TurnLine> {
+    type Lines = Vec<(Weak<AppSettingsService>, Arc<TurnLine>)>;
+    static LINES: Mutex<Lines> = Mutex::new(Vec::new());
+    let mut lines = LINES.lock().unwrap_or_else(PoisonError::into_inner);
+    lines.retain(|(service, _)| service.strong_count() > 0);
+    if let Some((_, line)) = lines
+        .iter()
+        .find(|(service, _)| std::ptr::eq(service.as_ptr(), Arc::as_ptr(settings)))
+    {
+        return Arc::clone(line);
+    }
+    let line = Arc::new(TurnLine::default());
+    lines.push((Arc::downgrade(settings), Arc::clone(&line)));
+    line
+}
+
 /// The order the choices are applied in across threads: each thread takes
-/// its turn, given when the page started it, after every earlier one has
-/// had its own (the page's tasks, then the flush of what still waited when
-/// the page left).
+/// its turn, given when a page started it, after every earlier one has had
+/// its own (the pages' tasks, then the flush of what still waited when a
+/// page left).
 #[derive(Debug, Default)]
 struct Turns {
     served: Mutex<u64>,
@@ -1021,12 +1052,12 @@ impl Screen for SettingsScreen {
         if waiting.is_empty() {
             return;
         }
-        let turn = self.next_turn();
+        let turn = self.turns.next_turn();
         let (turns, settings) = (Arc::clone(&self.turns), Arc::clone(&self.settings));
         let spawned = std::thread::Builder::new()
             .name("settings-flush".into())
             .spawn(move || {
-                turns.take(turn, || {
+                turns.turns.take(turn, || {
                     for choice in waiting {
                         choice.apply(&settings);
                     }
