@@ -2314,6 +2314,89 @@ fn deleting_a_clip_asks_first_as_deleting_a_take_does() {
     assert_eq!(clips, ["c1"]);
 }
 
+// A toast spans the page's bottom for seconds, over the dock's tabs (and
+// the lyrics' Save or Tap, the inspector's last row): a press on it goes to
+// what it covers, which it swallowed.
+#[test]
+fn a_toast_takes_no_press_meant_for_what_it_covers() {
+    let mut h = Harness::open(Setup::default());
+    let covered = h.find("Vocal tract").expect("the dock's tab").bounds();
+    h.screen
+        .toast("Wait for the current edit to finish.".into());
+    // In, all the way.
+    h.send(Message::SnackFrame(Instant::now() + Duration::from_secs(1)));
+    let toast = h
+        .find("Wait for the current edit to finish.")
+        .expect("the toast")
+        .bounds();
+    assert!(toast.y < covered.y, "over the tab");
+    // Where both are: the tab's top, under the card's foot.
+    let at = Point::new(covered.center_x(), covered.y + 3.0);
+    let messages: Vec<Message> = {
+        let mut ui = h.ui();
+        ui.point_at(at);
+        ui.simulate(iced_test::simulator::click());
+        ui.into_messages().collect()
+    };
+    h.feed(messages);
+    assert_eq!(h.vm().analysis().dock_tab(), DockTab::VocalTract);
+}
+
+// Escape leaves the lyrics Focus view on the page too, through the window
+// backdrop the page lays it on.
+#[test]
+fn escape_leaves_the_lyrics_focus_view_on_the_page() {
+    let mut h = Harness::open(Setup::default());
+    h.send(Message::Lyrics(lyrics_panel::Message::SetLyricsFocus(true)));
+    assert!(h.vm().lyrics_focus());
+    let escape = iced_test::simulator::press_key(
+        iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape),
+        None,
+    );
+    let messages: Vec<Message> = {
+        let mut ui = h.ui();
+        let _ = ui.simulate([escape]);
+        ui.into_messages().collect()
+    };
+    h.feed(messages);
+    assert!(!h.vm().lyrics_focus());
+}
+
+// Sync's Clear asks first, as Delete clip does: one click took a whole
+// song's tap timing at once, saved, with nothing to go back to.
+#[test]
+fn clearing_the_lyric_times_asks_first() {
+    use vocara_model::models::lyric_line::LyricLine;
+    let mut p = practice(vec![take("t1", "Take 1")]);
+    p.lyrics = vec![
+        LyricLine::new("First line", Some(1200)),
+        LyricLine::new("Second line", Some(4800)),
+    ];
+    let mut h = Harness::open(Setup {
+        practice: p,
+        ..Setup::default()
+    });
+    let times = |h: &Harness| -> Vec<Option<i64>> {
+        h.repo.stored().lyrics.iter().map(|l| l.time_ms).collect()
+    };
+    h.send(Message::Lyrics(lyrics_panel::Message::ClearLyricTimes));
+    let Dialog::Confirm(confirm) = h.dialog() else {
+        panic!("a confirmation");
+    };
+    assert_eq!(confirm.title, "Clear all line times?");
+    h.answer(DialogResult::Confirmed(false));
+    h.settle();
+    assert_eq!(times(&h), [Some(1200), Some(4800)], "cancelled");
+
+    h.send(Message::Lyrics(lyrics_panel::Message::ClearLyricTimes));
+    h.answer(DialogResult::Confirmed(true));
+    h.settle();
+    assert_eq!(times(&h), [None, None]);
+    // With nothing timed there is nothing to ask about.
+    h.send(Message::Lyrics(lyrics_panel::Message::ClearLyricTimes));
+    assert!(h.dialog.is_none());
+}
+
 // playhead_repaint_test: 'deleting the backing's clip asks to delete the
 // backing' — a backing lane is its one clip.
 #[test]
@@ -2629,6 +2712,29 @@ fn a_second_back_while_the_take_lands_leaves_the_page_once() {
     h.settle();
     assert_eq!(h.leaves(), 1);
     assert_eq!(h.repo.stored().vocal_tracks.len(), 2, "the take landed");
+}
+
+// REC once an update installs, or relaunches: the relaunch's quit would stop
+// the take seconds in, so it is not started at all, and the page says why.
+#[test]
+fn rec_is_refused_once_an_update_installs() {
+    use crate::ui::home::widgets::update_notice::testing::{image, release, updates};
+    use vocara_services::self_update::Phase;
+    let (mut h, _mic) = take_flow(None, ok_analyze());
+    let fake = updates(false);
+    fake.updater.prepare();
+    assert!(fake.updater.start(&release(Some(&image()))));
+    fake.settle();
+    assert_eq!(fake.updater.phase(), Phase::Relaunching);
+    h.screen.self_update = Arc::clone(&fake.updater);
+    h.send(Message::Transport(
+        detail_transport_bar::Message::StartRecording,
+    ));
+    h.settle();
+    assert!(!h.vm().is_recording());
+    assert!(!h.vm().recording().is_starting_take());
+    assert_eq!(h.screen.snack(), Some(RECORD_AFTER_THE_UPDATE));
+    assert_eq!(take_ids(&h.repo.stored()), ["take1"], "no take made");
 }
 
 // The quit hook: a quit while a take records asks the page (on the quit's

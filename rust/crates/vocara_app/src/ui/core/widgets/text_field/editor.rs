@@ -61,6 +61,7 @@ pub use iced::widget::text_editor::{
 use super::super::pan_zoom::{self, Scroll, TOUCH_SLOP};
 use super::show_on_screen::{self, Request};
 use super::toolbar::{self, Item};
+use super::undo::{self, History, Kind, Snapshot};
 use super::{caret, DEFAULT_CARET};
 
 /// `RendererEditor` of the app's renderer.
@@ -726,6 +727,51 @@ pub struct State {
     pub(super) requests: Vec<Request>,
     /// The trackpad gesture its `Scrollable`'s drag took last.
     pan: Option<Pan>,
+    /// Its edits, for ⌘Z and ⇧⌘Z (`undo`). The owner performs each edit
+    /// after the update that publishes it, so what one left is taken in
+    /// once the text has changed ([`State::sync`]).
+    history: History<Cursor>,
+    /// The text before the edits published since the field last saw its
+    /// text change, while it waits for its owner to perform them.
+    pending: Option<String>,
+    /// An undo's or a redo's caret, put back once the owner has its text in.
+    restore: Option<Snapshot<Cursor>>,
+}
+
+impl State {
+    /// Takes in what became of the edits it published: once the text has
+    /// changed from before them, what they left (and an undo's caret put
+    /// back); with none waiting, a text changed from outside the field
+    /// forgets the history.
+    fn sync(&mut self, content: &Content) {
+        let text = content.text();
+        if let Some(restore) = self.restore.take() {
+            if restore.text == text {
+                content.0.borrow_mut().editor.move_to(restore.cursor);
+            } else if self.pending.is_some() {
+                self.restore = Some(restore);
+            }
+        }
+        match self.pending.take() {
+            Some(before) if before == text => self.pending = Some(before),
+            Some(_) => self.history.left(Snapshot {
+                text,
+                cursor: content.cursor(),
+            }),
+            None => self.history.follow(&text),
+        }
+    }
+
+    /// Takes in that an edit of `kind` is published, the text and caret
+    /// `content`'s now.
+    fn record(&mut self, content: &Content, kind: Kind) {
+        let before = Snapshot {
+            text: content.text(),
+            cursor: content.cursor(),
+        };
+        self.pending.get_or_insert_with(|| before.text.clone());
+        self.history.record(before, kind, Instant::now());
+    }
 }
 
 /// A trackpad gesture that started on the field while its text could
@@ -884,11 +930,13 @@ impl<Message> toolbar::Field<Message> for Menu<'_, Message> {
             Item::Cut if !self.read_only => {
                 if let Some(selection) = self.content.selection() {
                     clipboard.write(clipboard::Kind::Standard, selection);
+                    self.state.record(self.content, Kind::Other);
                     self.sink.act(Action::Edit(Edit::Delete), shell);
                 }
             }
             Item::Paste if !self.read_only => {
                 if let Some(contents) = clipboard.read(clipboard::Kind::Standard) {
+                    self.state.record(self.content, Kind::Other);
                     self.sink
                         .act(Action::Edit(Edit::Paste(Arc::new(contents))), shell);
                 }
@@ -995,6 +1043,12 @@ impl<Message> Widget<Message, Theme, Renderer> for TextEditor<'_, Message> {
 
         let state = tree.state.downcast_mut::<State>();
         let is_redraw = matches!(event, Event::Window(window::Event::RedrawRequested(_now)),);
+        if state.focus.is_some()
+            && !self.read_only
+            && (is_redraw || matches!(event, Event::Keyboard(_) | Event::InputMethod(_)))
+        {
+            state.sync(self.content);
+        }
         // What the views around took is gone; what they did not, stale.
         state.requests.clear();
         if is_redraw {
@@ -1133,6 +1187,35 @@ impl<Message> Widget<Message, Theme, Renderer> for TextEditor<'_, Message> {
                     );
                     shell.capture_event();
                 }
+                Update::History(redo) => {
+                    if !self.read_only {
+                        let current = Snapshot {
+                            text: self.content.text(),
+                            cursor: self.content.cursor(),
+                        };
+                        let step = if redo {
+                            state.history.redo(current)
+                        } else {
+                            state.history.undo(current)
+                        };
+                        if let Some(step) = step {
+                            // The whole text put back, through the owner as
+                            // every edit is; its caret once it is in.
+                            state.toolbar = None;
+                            state.pending.get_or_insert_with(|| self.content.text());
+                            sink.act(Action::SelectAll, shell);
+                            sink.act(
+                                Action::Edit(Edit::Paste(Arc::new(step.text.clone()))),
+                                shell,
+                            );
+                            state.restore = Some(step);
+                            if let Some(focus) = &mut state.focus {
+                                focus.updated_at = Instant::now();
+                            }
+                        }
+                    }
+                    shell.capture_event();
+                }
                 Update::InputMethod(update) => match update {
                     Ime::Toggle(is_open) => {
                         state.preedit = is_open.then(input_method::Preedit::new);
@@ -1151,6 +1234,7 @@ impl<Message> Widget<Message, Theme, Renderer> for TextEditor<'_, Message> {
                     Ime::Commit(text) => {
                         if !self.read_only {
                             state.toolbar = None;
+                            state.record(self.content, Kind::Typing);
                             sink.act(Action::Edit(Edit::Paste(Arc::new(text))), shell);
                         }
                     }
@@ -1165,13 +1249,15 @@ impl<Message> Widget<Message, Theme, Renderer> for TextEditor<'_, Message> {
                         clipboard: &mut dyn Clipboard,
                         shell: &mut Shell<'_, Message>,
                     ) {
-                        let edit = |state: &mut State, shell: &mut Shell<'_, Message>, edit| {
-                            if !read_only {
-                                // A change to the text closes the menu.
-                                state.toolbar = None;
-                                sink.act(Action::Edit(edit), shell);
-                            }
-                        };
+                        let edit =
+                            |state: &mut State, shell: &mut Shell<'_, Message>, edit, kind| {
+                                if !read_only {
+                                    // A change to the text closes the menu.
+                                    state.toolbar = None;
+                                    state.record(content, kind);
+                                    sink.act(Action::Edit(edit), shell);
+                                }
+                            };
 
                         match binding {
                             Binding::Unfocus => {
@@ -1188,12 +1274,17 @@ impl<Message> Widget<Message, Theme, Renderer> for TextEditor<'_, Message> {
                                 if let Some(selection) = content.selection().filter(|_| !read_only)
                                 {
                                     clipboard.write(clipboard::Kind::Standard, selection);
-                                    edit(state, shell, Edit::Delete);
+                                    edit(state, shell, Edit::Delete, Kind::Other);
                                 }
                             }
                             Binding::Paste => {
                                 if let Some(contents) = clipboard.read(clipboard::Kind::Standard) {
-                                    edit(state, shell, Edit::Paste(Arc::new(contents)));
+                                    edit(
+                                        state,
+                                        shell,
+                                        Edit::Paste(Arc::new(contents)),
+                                        Kind::Other,
+                                    );
                                 }
                             }
                             Binding::Move(motion) => {
@@ -1212,16 +1303,16 @@ impl<Message> Widget<Message, Theme, Renderer> for TextEditor<'_, Message> {
                                 sink.act(Action::SelectAll, shell);
                             }
                             Binding::Insert(c) => {
-                                edit(state, shell, Edit::Insert(c));
+                                edit(state, shell, Edit::Insert(c), Kind::Typing);
                             }
                             Binding::Enter => {
-                                edit(state, shell, Edit::Enter);
+                                edit(state, shell, Edit::Enter, Kind::Typing);
                             }
                             Binding::Backspace => {
-                                edit(state, shell, Edit::Backspace);
+                                edit(state, shell, Edit::Backspace, Kind::Deleting);
                             }
                             Binding::Delete => {
-                                edit(state, shell, Edit::Delete);
+                                edit(state, shell, Edit::Delete, Kind::Deleting);
                             }
                             Binding::Sequence(sequence) => {
                                 for binding in sequence {
@@ -1495,6 +1586,8 @@ enum Update<Message> {
     Scroll(f32),
     InputMethod(Ime),
     Binding(Binding<Message>),
+    /// ⌘Z (`false`) or ⇧⌘Z (`true`), while it is focused.
+    History(bool),
 }
 
 enum Ime {
@@ -1590,6 +1683,12 @@ impl<Message> Update<Message> {
                 } else {
                     Status::Active
                 };
+
+                if state.focus.is_some() {
+                    if let Some(redo) = undo::undo_key(key.to_latin(*physical_key), *modifiers) {
+                        return Some(Self::History(redo));
+                    }
+                }
 
                 let key_press = KeyPress {
                     key: key.clone(),

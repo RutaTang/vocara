@@ -4,7 +4,7 @@
 //! | Control | Builder | Size |
 //! |---|---|---|
 //! | Icon button | [`icon_button`] | 24 (panels) or 28 (toolbar) square |
-//! | Toolbar group | [`ToolbarGroup`], [`group_button`] | 30 tall, 34 wide buttons, 1 × 16 dividers |
+//! | Toolbar group | [`ToolbarGroup`], [`group_button`], [`group_toggle`] | 30 tall, 34 wide buttons, 1 × 16 dividers |
 //! | Ghost button | [`ghost_button`] | 22 tall |
 //! | Pop-up button | [`popup_button`] | 22 tall, an up-down chevron |
 //! | Primary / secondary button (dialogs) | [`primary_button`], [`secondary_button`] | 28 tall |
@@ -34,7 +34,7 @@ use std::borrow::Cow;
 use iced::alignment::{Horizontal, Vertical};
 use iced::border::Radius;
 use iced::widget::canvas::{self, gradient, Frame, Geometry, Gradient, Path, Stroke};
-use iced::widget::{button, canvas as canvas_widget, container, row, Space};
+use iced::widget::{button, canvas as canvas_widget, container, row, stack, Space};
 use iced::{
     mouse, Background, Border, Color, Element, Length, Padding, Point, Rectangle, Renderer, Shadow,
     Size, Theme, Vector,
@@ -186,7 +186,8 @@ impl<'a, M> IconButton<'a, M> {
         self
     }
 
-    /// Shown as on (a toggle): the icon in `TEXT_PRIMARY`.
+    /// Shown as on (a toggle): the icon in `TEXT_PRIMARY` on a
+    /// [`TOGGLE_ON`] fill, under the pointer too ([`icon_button_fill`]).
     pub fn active(mut self, active: bool) -> Self {
         self.active = active;
         self
@@ -204,6 +205,24 @@ impl<'a, M> IconButton<'a, M> {
             self.on_press = None;
         }
         self
+    }
+}
+
+/// The fill behind a toggle that is on (`DESIGN.md`, Toggle): a selected
+/// segment's, as a selected tab or segment shows it. `CONTROL_ACTIVE`, a
+/// selected tab's on a panel, would hardly show on a toolbar group's
+/// `SURFACE_RAISED` or next to the `HOVER` fill.
+pub const TOGGLE_ON: Color = Studio::SEGMENT_SELECTED;
+
+/// The fill of an icon button: [`TOGGLE_ON`] while it is on — under the
+/// pointer too, as a selected tab keeps its fill, so a click on it shows at
+/// once — else `HOVER` under the pointer.
+pub fn icon_button_fill(status: button::Status, active: bool) -> Option<Color> {
+    match status {
+        _ if active => Some(TOGGLE_ON),
+        button::Status::Disabled => None,
+        _ if is_hovered(status) => Some(Studio::HOVER),
+        _ => None,
     }
 }
 
@@ -232,10 +251,8 @@ impl<'a, M: Clone + 'a> From<IconButton<'a, M>> for Element<'a, M> {
             .height(side)
             .on_press_maybe(b.on_press)
             .style(move |_, status| {
-                let fill = (is_hovered(status) && status != button::Status::Disabled)
-                    .then_some(Studio::HOVER);
                 styled(
-                    fill,
+                    icon_button_fill(status, active),
                     icon_button_color(status, active, accent),
                     corner,
                     None,
@@ -500,6 +517,37 @@ fn holding_presses<'a, M: 'a>(target: impl Into<Element<'a, M>>, disabled: bool)
         }),
     )
     .into()
+}
+
+/// How far a [`group_toggle`]'s fill sits in from the button's edges: clear
+/// of the group's rounded corners, as a segment sits in its control.
+pub const TOGGLE_INSET: f32 = 3.0;
+
+/// A [`group_button`] that stays on or off (Loop, Follow playhead, Input
+/// monitoring). On, its icon in `TEXT_PRIMARY` sits on a [`TOGGLE_ON`] fill
+/// [`TOGGLE_INSET`] in from its edges, radius 4 — under the pointer too, so
+/// a click on it shows at once (the icon's colour alone did not change
+/// while the pointer was over it). Off, it is a plain group button.
+pub fn group_toggle<'a, M: Clone + 'a>(
+    icon: impl Into<IconSource>,
+    tip: impl Into<String>,
+    on_press: Option<M>,
+    on: bool,
+) -> Element<'a, M> {
+    let toggle = group_button(icon, tip, on_press, on);
+    if !on {
+        return toggle;
+    }
+    let fill = container(
+        container(Space::new())
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(|_| crate::ui::core::theme::boxed(Some(TOGGLE_ON), radius::SMALL, None)),
+    )
+    .padding(TOGGLE_INSET)
+    .width(GROUP_BUTTON_WIDTH)
+    .height(height::TOOLBAR_GROUP);
+    stack![fill, toggle].into()
 }
 
 // ------------------------------------------------------- text buttons
@@ -1618,6 +1666,48 @@ mod tests {
         Event::Mouse(mouse::Event::CursorMoved {
             position: Point::new(x, y),
         })
+    }
+
+    /// A toggle shows its state under the pointer, where the click lands: on
+    /// and off draw differently while hovered (the icon's colour alone was
+    /// the same for both, so a click seemed to do nothing).
+    #[test]
+    fn a_toggle_on_and_one_off_draw_differently_under_the_pointer() {
+        assert_eq!(
+            icon_button_fill(button::Status::Hovered, false),
+            Some(Studio::HOVER)
+        );
+        assert_eq!(
+            icon_button_fill(button::Status::Hovered, true),
+            Some(TOGGLE_ON)
+        );
+        assert_eq!(
+            icon_button_fill(button::Status::Active, true),
+            Some(TOGGLE_ON)
+        );
+        assert_ne!(TOGGLE_ON, Studio::HOVER);
+        // In a toolbar group, drawn: hovered, the one on keeps its fill.
+        let view = |on: bool| -> Element<'static, Msg> {
+            container(ToolbarGroup::new().push(group_toggle(
+                glyphs::LOOP,
+                "Loop",
+                Some(Msg::Go),
+                on,
+            )))
+            .padding(10)
+            .into()
+        };
+        let hovered = |on: bool| {
+            let mut window = Frames::new(Size::new(100.0, 80.0));
+            window.point_at(Point::new(27.0, 25.0));
+            window.frame(view(on), &[move_to(27.0, 25.0)], Instant::now());
+            window.frame(view(on), &[], Instant::now());
+            // Inside the button, clear of the glyph and the group's outline.
+            window.pixel(Point::new(15.0, 15.0))
+        };
+        let (off, on) = (hovered(false), hovered(true));
+        assert!(near(off, Studio::SURFACE_RAISED), "{off:?}");
+        assert!(near(on, TOGGLE_ON), "{on:?}");
     }
 
     #[test]

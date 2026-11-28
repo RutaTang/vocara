@@ -13,7 +13,7 @@ use vocara_model::util::format::format_clock_ms;
 use super::{
     backing_set_toast, is_audio_path, ms, panel_data, Asked, Awaited, DropRun, DropZone,
     InterpretationAction, Message, NoteTarget, OpenMenu, OpenPicker, Owed, Render, RunKind,
-    SongPracticeDetailScreen, Source, Step, NO_AUDIO_IN_DROP,
+    SongPracticeDetailScreen, Source, Step, NO_AUDIO_IN_DROP, RECORD_AFTER_THE_UPDATE,
 };
 use crate::router::{Navigation, Route};
 use crate::ui::core::widgets::confirm_dialog::{ConfirmDialog, Dialog, DialogMotion, DialogResult};
@@ -372,7 +372,21 @@ impl SongPracticeDetailScreen {
             transport::Message::ToggleInputMonitor => {
                 self.vm.recording_do(|r, h| r.toggle_input_monitor(h))
             }
-            transport::Message::StartRecording => self.vm.recording_do(|r, h| r.start_recording(h)),
+            transport::Message::StartRecording => {
+                // Not once an update installs: it relaunches Vocara in
+                // seconds, and the quit would stop the take where it is (a
+                // take started earlier is waited for, and holds the update).
+                // Asked under the update's lock, so the install's last look
+                // before its swap sees this take, or this sees the install.
+                let vm = &mut self.vm;
+                let started = self
+                    .self_update
+                    .unless_installing(|| vm.recording_do(|r, h| r.start_recording(h)));
+                match started {
+                    Some(fx) => fx,
+                    None => return self.toast(RECORD_AFTER_THE_UPDATE.to_string()),
+                }
+            }
             transport::Message::ZoomTimeline(factor) => {
                 self.vm.playback_do(|p, h| p.zoom_timeline(h, factor))
             }
@@ -843,6 +857,14 @@ impl SongPracticeDetailScreen {
         }
         let now = Instant::now();
         let clock = self.vocal_tract.clock(live, self.vm.position(), now);
+        // Whose voice it reads: a formant one voice's frame misses is not
+        // filled in from another's.
+        if live {
+            self.vocal_tract.set_voice(vocal_tract_view::Voice::Live);
+        } else if let Some(take) = self.vm.selected_track() {
+            self.vocal_tract
+                .set_voice(vocal_tract_view::Voice::Take(take.id.clone()));
+        }
         if live {
             match self.vm.analysis().live_vocal_tract() {
                 Some(state) => {
@@ -948,7 +970,7 @@ impl SongPracticeDetailScreen {
             }
             P::StampNextLyric => self.vm.stamp_next_lyric(),
             P::StampLyricAt(index) => self.vm.stamp_lyric_at(index),
-            P::ClearLyricTimes => self.vm.clear_lyric_times(),
+            P::ClearLyricTimes => return self.clear_lyric_times(step),
             P::SeekToLyric(line) => {
                 self.vm.seek_to_lyric(&line);
                 return;
@@ -1447,6 +1469,20 @@ impl SongPracticeDetailScreen {
         self.ask(dialog, Asked::Separate(track_id.to_string()), step);
     }
 
+    /// Sync's Clear: asked first, as Delete take is. One click took every
+    /// line's tap time at once, saved, with nothing to go back to (Clear sits
+    /// beside Done). With no line timed there is nothing to lose.
+    fn clear_lyric_times(&mut self, step: &mut Step) {
+        if !self.vm.lyrics().iter().any(|l| l.time_ms.is_some()) {
+            let fx = self.vm.clear_lyric_times();
+            return self.absorb(fx, step);
+        }
+        let dialog = ConfirmDialog::new("Clear all line times?")
+            .body("Every line loses its time, and you tap the lines again from the first.")
+            .confirm_label("Clear times");
+        self.ask(dialog, Asked::ClearLyricTimes, step);
+    }
+
     fn rename_bus(&mut self, bus_id: String, current: &str, step: &mut Step) {
         let mut prompt = rename_dialog(current);
         prompt.title = "Rename bus".to_string();
@@ -1487,6 +1523,7 @@ impl SongPracticeDetailScreen {
             Asked::DeleteInterpretation(id) if confirmed => {
                 self.vm.versions_do(|v, h| v.delete(&id, h))
             }
+            Asked::ClearLyricTimes if confirmed => self.vm.clear_lyric_times(),
             _ => return,
         };
         self.absorb(fx, step);

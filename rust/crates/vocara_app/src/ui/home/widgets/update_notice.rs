@@ -122,10 +122,11 @@ pub fn installing_line(version: &str) -> String {
     format!("Installing Vocara {version}… Vocara will relaunch.")
 }
 
-/// What they say while the downloaded update waits for a take being
-/// recorded or saved (installing quits Vocara for the relaunch).
+/// What they say while the downloaded update waits for work the relaunch
+/// would cut short — a take being recorded or saved, an import, a
+/// separation (installing quits Vocara for the relaunch).
 pub fn waiting_line(version: &str) -> String {
-    format!("Vocara {version} is ready. It installs once your take is saved.")
+    format!("Vocara {version} is ready. It installs once your work is saved.")
 }
 
 /// What they say while it downloads, before its progress.
@@ -175,7 +176,7 @@ pub fn update_notice_banner<'a>(
         Phase::Downloading { done, total } => {
             downloading_banner(&updating_version(updater, offer.as_ref()), done, total)
         }
-        Phase::WaitingForTake => {
+        Phase::WaitingForWork => {
             progress_banner(waiting_line(&updating_version(updater, offer.as_ref())))
         }
         Phase::Installing | Phase::Relaunching => {
@@ -457,7 +458,7 @@ impl UpdateDownloadDialog {
     fn mode(&self) -> Mode {
         match self.updater.phase() {
             Phase::Downloading { done, total } => Mode::Downloading { done, total },
-            Phase::WaitingForTake => Mode::Waiting,
+            Phase::WaitingForWork => Mode::Waiting,
             Phase::Installing | Phase::Relaunching => Mode::Installing,
             phase => match self.updater.self_install(&self.info) {
                 SelfInstall::Blocked(reason) => Mode::Fallback(reason),

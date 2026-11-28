@@ -153,7 +153,9 @@ whole decision table):
   one in its container; or someone ran an unsandboxed build of the same
   flavor beside a sandboxed release): **it opens**, the container's is left
   exactly as it is, nothing merged or overwritten, and Home tells the user
-  once a launch where it is, with Show in Finder;
+  once a launch where it is, with Show in Finder. A container left with
+  files but no library (its library deleted, its logs, stems or models still
+  there) is only logged: there are no recordings in it to tell anyone about;
 - the move cannot be done — another Vocara (an older, sandboxed one) still
   has the library open, the folders are on different volumes, the system
   refuses, Application Support holds stray files but no library — **the

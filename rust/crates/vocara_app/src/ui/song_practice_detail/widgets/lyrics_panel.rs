@@ -1946,7 +1946,8 @@ fn tap_area<'a>(content: Element<'a, Message>, messages: Vec<Message>) -> Elemen
 /// The panel beneath takes no drop through it (see
 /// [`visible_drop_target`]), so the overlay takes it: a lyrics file dropped
 /// on the lyrics in focus did nothing at all. Nor the keyboard
-/// ([`holds_keyboard`]).
+/// ([`holds_keyboard`]), but for Escape, which leaves the view, as it leaves
+/// a video's fullscreen: the corner's 28 px button was the only way out.
 pub fn lyrics_focus_overlay<'a>(
     state: &'a LyricsPanelState,
     data: RightPanelData<'a>,
@@ -1985,5 +1986,21 @@ pub fn lyrics_focus_overlay<'a>(
         }
     });
     // An opaque layer: nothing beneath it sees the pointer.
-    holds_keyboard(iced::widget::opaque(target))
+    let leaves_on_escape = Wrap::<Message, ()>::new(
+        iced::widget::opaque(target),
+        Box::new(|_, event, _, _, shell| {
+            let escape = matches!(
+                event,
+                Event::Keyboard(keyboard::Event::KeyPressed {
+                    key: keyboard::Key::Named(keyboard::key::Named::Escape),
+                    ..
+                })
+            );
+            if escape && !shell.is_event_captured() {
+                shell.publish(Message::SetLyricsFocus(false));
+                shell.capture_event();
+            }
+        }),
+    );
+    holds_keyboard(leaves_on_escape)
 }

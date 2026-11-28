@@ -139,6 +139,7 @@ use crate::ui::song_practice_detail::view_model::song_practice_detail_view_model
 };
 use crate::ui::{Screen, SnackBar, Update};
 use crate::util::busy_gate::BusyOutcome;
+use vocara_services::self_update::SelfUpdate;
 
 // ------------------------------------------------------------------ constants
 
@@ -179,6 +180,10 @@ pub const WAIT_FOR_SAVE: &str = "Wait for your last save to finish.";
 
 /// A drop on the separation overlay.
 pub const WAIT_FOR_SEPARATION: &str = "Wait for the separation to finish.";
+
+/// REC while an update installs: Vocara relaunches in seconds.
+pub const RECORD_AFTER_THE_UPDATE: &str =
+    "Vocara is installing an update and will relaunch. Record once it's back.";
 
 /// Over the workspace while it catches up on a save.
 pub const FINISHING_SAVE: &str = "Finishing your last save…";
@@ -254,6 +259,7 @@ pub enum Asked {
     NewInterpretation,
     RenameInterpretation(String),
     DeleteInterpretation(String),
+    ClearLyricTimes,
 }
 
 /// A result that is cloneable (the screen's messages are) but landed once:
@@ -707,6 +713,9 @@ pub struct SongPracticeDetailScreen {
     quit_feed: Arc<WakeFeed>,
     /// The playback engine, whose events wake the page while it is paused.
     engine: Arc<dyn PlaybackEngine>,
+    /// The app's self-update: REC is refused while it installs (see
+    /// `RECORD_AFTER_THE_UPDATE`).
+    self_update: Arc<SelfUpdate>,
     /// Set once the page left the stack.
     disposed: bool,
     /// The work the page's teardown started (the saves of the commits it
@@ -812,6 +821,7 @@ impl SongPracticeDetailScreen {
             remote_applied: Arc::clone(&services.library.remote_applied),
             quit_feed,
             engine,
+            self_update: Arc::clone(&services.self_update),
             disposed: false,
             teardown: Vec::new(),
             shown: Shown::default(),

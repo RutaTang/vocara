@@ -76,9 +76,13 @@ impl Installer for FakeInstaller {
         self.blocker.lock().unwrap().clone()
     }
 
-    fn install(&self, _request: &InstallRequest<'_>) -> Result<(), String> {
+    fn install(&self, request: &InstallRequest<'_>) -> Result<(), String> {
         if let Some(e) = self.fails_with.lock().unwrap().clone() {
             return Err(e);
+        }
+        // As the Mac's installer does, right before it starts the helper.
+        if !(request.clear_to_swap)() {
+            return Err("the update was cancelled before the swap".into());
         }
         self.installs.fetch_add(1, Ordering::SeqCst);
         Ok(())
@@ -138,7 +142,7 @@ pub(crate) fn updates(held: bool) -> Updates {
 }
 
 /// [`updates`], its install waiting while `take` is set (a take being
-/// recorded or saved).
+/// recorded or saved, or other work the relaunch would cut short).
 pub(crate) fn updates_waiting_on(held: bool, take: Arc<std::sync::atomic::AtomicBool>) -> Updates {
     let dir = tempfile::tempdir().unwrap();
     let updates_dir = dir.path().join("updates");
@@ -159,7 +163,7 @@ pub(crate) fn updates_waiting_on(held: bool, take: Arc<std::sync::atomic::Atomic
             Arc::clone(&installer) as Arc<dyn Installer>,
             "1.0.0",
         )
-        .waiting_on_takes(move || take.load(std::sync::atomic::Ordering::SeqCst)),
+        .waiting_on_work(move || take.load(std::sync::atomic::Ordering::SeqCst)),
     );
     Updates {
         updater,

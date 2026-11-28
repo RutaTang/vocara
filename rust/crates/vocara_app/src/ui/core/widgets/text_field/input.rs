@@ -50,6 +50,7 @@ use super::super::pan_zoom::{self, Scroll as Wheel, TOUCH_SLOP};
 use super::super::scroll_fling::{self, MacOsVelocityTracker};
 use super::show_on_screen::{self, Request};
 use super::toolbar::{self, Item};
+use super::undo::{self, History, Kind, Snapshot};
 use super::{caret, DEFAULT_CARET};
 
 type Paragraph = <Renderer as text::Renderer>::Paragraph;
@@ -475,9 +476,17 @@ impl<Message> toolbar::Field<Message> for Menu<'_, Message> {
                         clipboard::Kind::Standard,
                         self.value.select(start, end).to_string(),
                     );
+                    let before = snapshot(self.value, state.cursor);
                     let mut editor = Editor::new(self.value, &mut state.cursor);
                     editor.delete();
                     shell.publish(on_input(editor.contents()));
+                    edited(
+                        &mut state.history,
+                        before,
+                        self.value,
+                        state.cursor,
+                        Kind::Other,
+                    );
                     // The edit's reveal, then a `bringIntoView` after the
                     // frame, which stops it.
                     state.scroll.schedule(Reveal::Jump);
@@ -491,9 +500,17 @@ impl<Message> toolbar::Field<Message> for Menu<'_, Message> {
                     return;
                 };
                 let content: String = content.chars().filter(|c| !c.is_control()).collect();
+                let before = snapshot(self.value, state.cursor);
                 let mut editor = Editor::new(self.value, &mut state.cursor);
                 editor.paste(Value::new(&content));
                 shell.publish(on_input(editor.contents()));
+                edited(
+                    &mut state.history,
+                    before,
+                    self.value,
+                    state.cursor,
+                    Kind::Other,
+                );
                 state.scroll.schedule(Reveal::Jump);
             }
         }
@@ -824,6 +841,31 @@ impl<'a, Message: Clone + 'a> Widget<Message, Theme, Renderer> for TextInput<'a,
                 if let Some(focus) = &mut state.is_focused {
                     let modifiers = state.keyboard_modifiers;
 
+                    // ⌘Z and ⇧⌘Z: the field's own history (`undo`).
+                    if let Some(redo) = undo::undo_key(key.to_latin(*physical_key), modifiers) {
+                        if let Some(on_input) = &self.on_input {
+                            let current = snapshot(&self.value, state.cursor);
+                            let step = if redo {
+                                state.history.redo(current)
+                            } else {
+                                state.history.undo(current)
+                            };
+                            if let Some(step) = step {
+                                self.value = Value::new(&step.text);
+                                state.cursor = step.cursor;
+                                shell.publish(on_input(step.text));
+
+                                focus.updated_at = Instant::now();
+                                state.toolbar = None;
+                                state.is_pasting = None;
+                                state.scroll.schedule(Reveal::Animate);
+                                update_cache(state, &self.value);
+                            }
+                        }
+                        shell.capture_event();
+                        return;
+                    }
+
                     match key.to_latin(*physical_key) {
                         Some('c') if state.keyboard_modifiers.command() => {
                             if let Some((start, end)) = state.cursor.selection(&self.value) {
@@ -853,12 +895,20 @@ impl<'a, Message: Clone + 'a> Widget<Message, Theme, Renderer> for TextInput<'a,
                                 self.value.select(start, end).to_string(),
                             );
 
+                            let before = snapshot(&self.value, state.cursor);
                             let mut editor = Editor::new(&mut self.value, &mut state.cursor);
                             editor.delete();
 
                             let message = (on_input)(editor.contents());
                             shell.publish(message);
                             shell.capture_event();
+                            edited(
+                                &mut state.history,
+                                before,
+                                &self.value,
+                                state.cursor,
+                                Kind::Other,
+                            );
 
                             focus.updated_at = Instant::now();
                             state.toolbar = None;
@@ -894,6 +944,13 @@ impl<'a, Message: Clone + 'a> Widget<Message, Theme, Renderer> for TextInput<'a,
 
                             shell.publish((on_input)(editor.contents()));
                             shell.capture_event();
+                            edited(
+                                &mut state.history,
+                                snapshot_of(&before),
+                                &self.value,
+                                state.cursor,
+                                Kind::Other,
+                            );
 
                             state.is_pasting = Some(content);
                             focus.updated_at = Instant::now();
@@ -934,6 +991,7 @@ impl<'a, Message: Clone + 'a> Widget<Message, Theme, Renderer> for TextInput<'a,
                         state.is_pasting = None;
 
                         if let Some(c) = text.chars().next().filter(|c| !c.is_control()) {
+                            let before = snapshot(&self.value, state.cursor);
                             let mut editor = Editor::new(&mut self.value, &mut state.cursor);
 
                             editor.insert(c);
@@ -941,6 +999,13 @@ impl<'a, Message: Clone + 'a> Widget<Message, Theme, Renderer> for TextInput<'a,
                             let message = (on_input)(editor.contents());
                             shell.publish(message);
                             shell.capture_event();
+                            edited(
+                                &mut state.history,
+                                before,
+                                &self.value,
+                                state.cursor,
+                                Kind::Typing,
+                            );
 
                             focus.updated_at = Instant::now();
                             state.toolbar = None;
@@ -991,6 +1056,13 @@ impl<'a, Message: Clone + 'a> Widget<Message, Theme, Renderer> for TextInput<'a,
                             let message = (on_input)(editor.contents());
                             shell.publish(message);
                             shell.capture_event();
+                            edited(
+                                &mut state.history,
+                                snapshot_of(&before),
+                                &self.value,
+                                state.cursor,
+                                Kind::Deleting,
+                            );
 
                             focus.updated_at = Instant::now();
                             state.toolbar = None;
@@ -1022,6 +1094,13 @@ impl<'a, Message: Clone + 'a> Widget<Message, Theme, Renderer> for TextInput<'a,
                             let message = (on_input)(editor.contents());
                             shell.publish(message);
                             shell.capture_event();
+                            edited(
+                                &mut state.history,
+                                snapshot_of(&before),
+                                &self.value,
+                                state.cursor,
+                                Kind::Deleting,
+                            );
 
                             focus.updated_at = Instant::now();
                             state.toolbar = None;
@@ -1168,6 +1247,41 @@ impl<'a, Message: Clone + 'a> Widget<Message, Theme, Renderer> for TextInput<'a,
 
                             shell.capture_event();
                         }
+                        // One line has no line above or below it: ↑ moves the
+                        // caret to the start and ↓ to the end (⇧ selecting),
+                        // as a macOS field does, and the field keeps the key.
+                        // Passed on, it reached a video's controls on a
+                        // technique page, which turned its volume.
+                        keyboard::Key::Named(
+                            named @ (key::Named::ArrowUp | key::Named::ArrowDown),
+                        ) => {
+                            let cursor_before = state.cursor;
+                            let to = if named == key::Named::ArrowUp {
+                                0
+                            } else {
+                                self.value.len()
+                            };
+
+                            if modifiers.shift() {
+                                state
+                                    .cursor
+                                    .select_range(state.cursor.start(&self.value), to);
+                            } else {
+                                state.cursor.move_to(to);
+                            }
+
+                            if cursor_before != state.cursor {
+                                focus.updated_at = Instant::now();
+
+                                shell.request_redraw();
+                            }
+
+                            let geometry = geometry(state, layout);
+                            let x = extent_x(state, &self.value);
+                            bring_into_view(state, &geometry, x);
+
+                            shell.capture_event();
+                        }
                         keyboard::Key::Named(key::Named::Escape) => {
                             state.is_focused = None;
                             state.is_dragging = None;
@@ -1230,6 +1344,7 @@ impl<'a, Message: Clone + 'a> Widget<Message, Theme, Renderer> for TextInput<'a,
                             return;
                         };
 
+                        let before = snapshot(&self.value, state.cursor);
                         let mut editor = Editor::new(&mut self.value, &mut state.cursor);
                         editor.paste(Value::new(text));
 
@@ -1241,6 +1356,13 @@ impl<'a, Message: Clone + 'a> Widget<Message, Theme, Renderer> for TextInput<'a,
                         let message = (on_input)(editor.contents());
                         shell.publish(message);
                         shell.capture_event();
+                        edited(
+                            &mut state.history,
+                            before,
+                            &self.value,
+                            state.cursor,
+                            Kind::Typing,
+                        );
 
                         update_cache(state, &self.value);
                     }
@@ -1525,10 +1647,44 @@ pub struct State {
     disabled: bool,
     /// The trackpad gesture that started on it last.
     pan: Option<Pan>,
+    /// Its edits, for ⌘Z and ⇧⌘Z (`undo`).
+    history: History<Cursor>,
 }
 
 fn state(tree: &mut Tree) -> &mut State {
     tree.state.downcast_mut::<State>()
+}
+
+/// The field's text and caret now, for its history.
+fn snapshot(value: &Value, cursor: Cursor) -> Snapshot<Cursor> {
+    Snapshot {
+        text: value.to_string(),
+        cursor,
+    }
+}
+
+/// A `(text, caret)` taken before an edit, for its history.
+fn snapshot_of((text, cursor): &(String, Cursor)) -> Snapshot<Cursor> {
+    Snapshot {
+        text: text.clone(),
+        cursor: *cursor,
+    }
+}
+
+/// Takes in an edit of `kind` that left `value` and `cursor` from
+/// `before`: a step of the history, unless it changed nothing.
+fn edited(
+    history: &mut History<Cursor>,
+    before: Snapshot<Cursor>,
+    value: &Value,
+    cursor: Cursor,
+    kind: Kind,
+) {
+    let after = snapshot(value, cursor);
+    if after.text != before.text {
+        history.record(before, kind, Instant::now());
+        history.left(after);
+    }
 }
 
 /// A trackpad gesture that started on the field: its pan so far, its

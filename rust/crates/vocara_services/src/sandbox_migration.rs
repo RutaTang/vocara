@@ -39,7 +39,7 @@
 //!
 //! | A | C | |
 //! |---|---|---|
-//! | a library | anything | A opens. C is left exactly as it is — never merged, never overwritten — and, when it holds a library, named for the app to tell the user ([`Outcome::BothHold`], [`library_left_behind`]). |
+//! | a library | anything | A opens. C is left exactly as it is — never merged, never overwritten — and, when it holds a library, named for the app to tell the user ([`Outcome::BothHold`], [`library_left_behind`]); when it holds files but no library (logs, stems, models left once its library was deleted), only logged ([`Outcome::FilesLeftInContainer`]). |
 //! | no library | nothing (missing, empty) | A opens ([`Outcome::NothingToMove`]): a fresh install, or one moved before. |
 //! | nothing (missing, empty) | anything | C is moved to A ([`Outcome::Moved`]). |
 //! | files, but no library | anything | C stays and opens ([`Why::UnsandboxedNotEmpty`]): nothing is merged into A or deleted from it. |
@@ -187,9 +187,15 @@ pub enum Outcome {
     NothingToMove,
     /// The container's folder is A now.
     Moved,
-    /// A holds a library and opens; the container holds something too and is
-    /// left exactly as it is.
+    /// A holds a library and opens; the container holds one too and is left
+    /// exactly as it is.
     BothHold,
+    /// A holds a library and opens; the container holds files but no
+    /// library (what is left once someone deleted the library from it: the
+    /// logs, the stems cache, the models), and is left as it is. Logged, but
+    /// nothing the app tells the user about: there are no recordings in it
+    /// to miss.
+    FilesLeftInContainer,
     /// A holds a library and opens; whether the container holds anything
     /// could not be told.
     ContainerUnchecked(io::Error),
@@ -232,6 +238,9 @@ impl Outcome {
             Outcome::BothHold => format!(
                 "both {unsandboxed} and {container} hold a library: {unsandboxed} opens, \
                  and the container's is left as it is (nothing merged, nothing overwritten)"
+            ),
+            Outcome::FilesLeftInContainer => format!(
+                "{unsandboxed} opens; {container} holds files but no library, left as they are"
             ),
             Outcome::ContainerUnchecked(e) => {
                 format!("{unsandboxed} opens; could not check {container} for a library ({e})")
@@ -316,7 +325,8 @@ fn migrate_with(
             // A's library opens, whatever the container holds.
             return match look(&at.container) {
                 Ok(Holds::Nothing) => Outcome::NothingToMove,
-                Ok(_) => Outcome::BothHold,
+                Ok(Holds::Library) => Outcome::BothHold,
+                Ok(Holds::Files) => Outcome::FilesLeftInContainer,
                 Err(e) => Outcome::ContainerUnchecked(e),
             };
         }

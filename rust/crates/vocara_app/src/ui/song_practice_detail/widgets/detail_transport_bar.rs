@@ -53,7 +53,7 @@ use vocara_model::models::song_practice::SongPractice;
 
 use crate::ui::core::theme::{alpha, boxed, font, height, radius, type_scale, Studio};
 use crate::ui::core::widgets::controls::{
-    group_button, icon_button, labelled, thin_slider, ToolbarGroup,
+    group_button, group_toggle, icon_button, labelled, thin_slider, ToolbarGroup,
 };
 use crate::ui::core::widgets::line_icon::glyphs;
 use crate::ui::core::widgets::material_tooltip::material_tooltip;
@@ -347,13 +347,13 @@ pub fn detail_transport_bar<'a>(bar: TransportBar<'a>) -> Element<'a, Message> {
         .push(play_button(bar.is_playing, c.play.clone()))
         .push(group_button(glyphs::STOP, "Stop", c.stop.clone(), false))
         .divider()
-        .push(group_button(
+        .push(group_toggle(
             glyphs::LOOP,
             "Loop",
             c.toggle_loop.clone(),
             bar.loop_enabled,
         ))
-        .push(group_button(
+        .push(group_toggle(
             glyphs::FOLLOW,
             "Follow playhead",
             Some(Message::ToggleFollowCursor),
@@ -363,7 +363,7 @@ pub fn detail_transport_bar<'a>(bar: TransportBar<'a>) -> Element<'a, Message> {
     // Input monitoring arms the mic (its meter and levels live in the
     // mixer's input strip).
     let recording = ToolbarGroup::new()
-        .push(group_button(
+        .push(group_toggle(
             glyphs::MONITOR,
             "Input monitoring",
             Some(Message::ToggleInputMonitor),

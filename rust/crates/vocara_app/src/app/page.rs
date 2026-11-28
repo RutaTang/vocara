@@ -144,6 +144,17 @@ impl Page {
         )
     }
 
+    /// Whether the page holds the window, so that no other page may come
+    /// over it now: it shows something over the whole window (a video's
+    /// fullscreen), or it is the song page while a take is recorded, arming
+    /// or landing (which its Back ends first).
+    pub fn holds_window(&self, id: PageId) -> bool {
+        match self {
+            Page::Song(song) if song.view_model().take_holds_screen() => true,
+            _ => self.overlay(id).is_some(),
+        }
+    }
+
     /// The page's subscription, its messages tagged with its id.
     pub fn subscription(&self, id: PageId, on_top: bool) -> Subscription<Message> {
         with_screen!(

@@ -58,6 +58,7 @@ use iced::futures::SinkExt;
 use iced::widget::{container, stack, Space};
 use iced::{window, Element, Length, Size, Subscription, Task, Theme};
 use vocara_model::diagnostics::DiagnosticsLog;
+use vocara_services::app_menu::PreferencesRequests;
 use vocara_services::quit_request::QuitRequests;
 use vocara_services::self_update::{ListenerId, SelfUpdate};
 
@@ -215,6 +216,9 @@ pub enum Message {
     /// logout: `NSApplication.terminate:`, see
     /// [`vocara_services::quit_request`]).
     QuitRequested,
+    /// The app menu's Preferences… (⌘,): show Settings
+    /// ([`vocara_services::app_menu::PreferencesRequests`]).
+    PreferencesRequested,
     /// The quit guard finished its work: exit.
     QuitGuardDone,
     /// The self-update moved (its download's progress, its install, its
@@ -576,6 +580,12 @@ impl App {
                 State::Running(running) => navigate(running, navigation),
                 _ => Task::none(),
             },
+            Message::PreferencesRequested => match &mut self.state {
+                State::Running(running) if opens_settings(running) => {
+                    navigate(running, Navigation::Push(Route::Settings))
+                }
+                _ => Task::none(),
+            },
             Message::Dialog(message) => self.dialog(message),
             Message::SnackBarExpired(seq) => {
                 if let State::Running(running) = &mut self.state {
@@ -870,6 +880,7 @@ impl App {
         let mut subscriptions = vec![
             window::close_requests().map(Message::CloseRequested),
             Subscription::run(quit_requests).map(|()| Message::QuitRequested),
+            Subscription::run(preferences_requests).map(|()| Message::PreferencesRequested),
             window::open_events().map(Message::WindowOpened),
         ];
         if let State::Running(running) = &self.state {
@@ -943,6 +954,27 @@ fn quit_requests() -> impl iced::futures::Stream<Item = ()> {
     iced::futures::stream::unfold(QuitRequests::global().subscribe(), |mut requests| async {
         requests.recv().await.map(|()| ((), requests))
     })
+}
+
+/// The app menu's Preferences… (⌘,), which the menu's app target hands to
+/// [`PreferencesRequests::global`], as a quit comes.
+fn preferences_requests() -> impl iced::futures::Stream<Item = ()> {
+    iced::futures::stream::unfold(
+        PreferencesRequests::global().subscribe(),
+        |mut requests| async { requests.recv().await.map(|()| ((), requests)) },
+    )
+}
+
+/// Whether Preferences… opens Settings now, as Home's gear does: not while
+/// a dialog is up (nothing beneath one takes a click), nor over a page that
+/// holds the window (a video's fullscreen, the song page while a take is
+/// recorded or saved), nor a second time over Settings.
+fn opens_settings(running: &Running) -> bool {
+    if !running.dialogs.is_empty() {
+        return false;
+    }
+    let (id, top) = running.router.top();
+    !matches!(top, Page::Settings(_)) && !top.holds_window(id)
 }
 
 /// Applies what a page's update asked for.

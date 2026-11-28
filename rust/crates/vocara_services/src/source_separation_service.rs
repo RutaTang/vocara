@@ -14,7 +14,7 @@ use std::io::{BufRead, BufReader, Read};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -79,6 +79,10 @@ pub type Progress<'a> = Option<&'a (dyn Fn(f64) + Send + Sync)>;
 pub struct SeparationTicket {
     run: Option<Arc<Run>>,
     prior: Option<Arc<Run>>,
+    /// Lists the run as running with the quit guard until
+    /// [`SourceSeparationService::separate_with`] returns, or the ticket is
+    /// dropped unused (see [`SeparationQuitGuard::has_active`]).
+    _running: Option<Running>,
 }
 
 /// Splits a full song into an instrumental and an isolated vocal stem.
@@ -136,6 +140,18 @@ type KillHook = Arc<dyn Fn() + Send + Sync>;
 pub struct SeparationQuitGuard {
     kills: Mutex<Vec<(u64, KillHook)>>,
     next: AtomicU64,
+    /// The separations running now (see [`SeparationQuitGuard::has_active`]).
+    running: AtomicUsize,
+}
+
+/// A separation listed as running with its quit guard, until dropped
+/// ([`SeparationQuitGuard::begin_run`]).
+pub struct Running(Arc<SeparationQuitGuard>);
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        self.0.running.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 impl SeparationQuitGuard {
@@ -168,6 +184,20 @@ impl SeparationQuitGuard {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .retain(|(k, _)| *k != id);
+    }
+
+    /// Lists a separation as running until the returned guard is dropped:
+    /// from the run's registration until it has wound down.
+    pub fn begin_run(self: &Arc<Self>) -> Running {
+        self.running.fetch_add(1, Ordering::SeqCst);
+        Running(Arc::clone(self))
+    }
+
+    /// Whether a separation is running: what [`SeparationQuitGuard::kill_all`]
+    /// would cut short, minutes of work lost (an update's relaunch waits for
+    /// it, `self_update::work_in_flight`).
+    pub fn has_active(&self) -> bool {
+        self.running.load(Ordering::SeqCst) > 0
     }
 
     /// Kills every in-flight separation (best-effort; one failure never
@@ -208,6 +238,7 @@ impl SourceSeparationService for NullSourceSeparationService {
         SeparationTicket {
             run: None,
             prior: None,
+            _running: None,
         }
     }
 
@@ -248,6 +279,7 @@ impl SourceSeparationService for FakeSourceSeparationService {
         SeparationTicket {
             run: None,
             prior: None,
+            _running: None,
         }
     }
 
@@ -371,6 +403,9 @@ struct Inner {
     resolved: Mutex<Option<Option<String>>>,
     sweep_done: Mutex<bool>,
     sweep_cv: Condvar,
+    /// The quit guard the service is registered with, where its runs are
+    /// listed as running.
+    guard: Arc<SeparationQuitGuard>,
 }
 
 /// Runs the Python separation sidecar (`assets/separation/separate.py`) as a
@@ -486,6 +521,7 @@ impl ProcessSourceSeparationService {
             resolved: Mutex::new(None),
             sweep_done: Mutex::new(false),
             sweep_cv: Condvar::new(),
+            guard: Arc::clone(&guard),
         });
         // Reclaim .tmp orphans left by runs that never got to clean up (hard
         // crash, force-quit, or the quit-path SIGKILL). Done here rather than
@@ -906,6 +942,7 @@ impl SourceSeparationService for ProcessSourceSeparationService {
         SeparationTicket {
             run: Some(run),
             prior,
+            _running: Some(self.inner.guard.begin_run()),
         }
     }
 

@@ -441,10 +441,10 @@ fn the_dialog_says_the_update_waits_for_the_take_and_can_be_cancelled() {
     fake.updater.prepare();
     let mut dialog = UpdateDownloadDialog::new(release(Some(&image())), fake.updater.clone());
     dialog.update(DialogMessage::Confirm);
-    fake.wait_for(&Phase::WaitingForTake);
+    fake.wait_for(&Phase::WaitingForWork);
     assert!(dialog_shows(
         &dialog,
-        "Vocara 9.9.9 is ready. It installs once your take is saved."
+        "Vocara 9.9.9 is ready. It installs once your work is saved."
     ));
     assert!(dialog_shows(&dialog, "Cancel update"));
     assert_eq!(dialog.update(DialogMessage::Secondary), None);
