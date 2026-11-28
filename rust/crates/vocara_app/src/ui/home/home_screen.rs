@@ -200,6 +200,9 @@ pub enum Message {
     Settled(String),
     /// Sync applied remote rows.
     RemoteApplied(RemoteApplied),
+    /// The practice list scrolled to this offset (kept, to put the list
+    /// back where it was when a page pushed over Home is popped).
+    ListScrolled(f32),
     /// Time for the update auto-check.
     UpdateCheckDue,
     /// The auto-check finished (or found no answer to whether it may run):
@@ -271,6 +274,12 @@ pub struct HomeScreen {
     /// nothing opening ([`Timer::Consent`]).
     consent_pending: bool,
 
+    /// The practice list's scrollable, and how far down it was last
+    /// scrolled: a page pushed over Home takes Home's widgets with it (the
+    /// pages beneath are not drawn), so its pop puts the offset back.
+    list_id: iced::widget::Id,
+    list_scroll: f32,
+
     /// The failure toasts (one at a time: each replaces the one up).
     snacks: SnackQueue,
 
@@ -329,6 +338,8 @@ impl HomeScreen {
             opens: 0,
             update_check_pending: true,
             consent_pending: false,
+            list_id: iced::widget::Id::unique(),
+            list_scroll: 0.0,
             snacks: SnackQueue::new(),
             loading: None,
             now: Instant::now(),
@@ -523,6 +534,17 @@ impl HomeScreen {
         )
     }
 
+    /// Puts the practice list back at the offset it was last scrolled to.
+    fn restore_list_scroll(&self) -> Task<Message> {
+        iced::widget::operation::scroll_to(
+            self.list_id.clone(),
+            iced::widget::scrollable::AbsoluteOffset {
+                x: None,
+                y: Some(self.list_scroll),
+            },
+        )
+    }
+
     fn body(&self) -> Element<'_, Message> {
         let vm = &self.vm;
         if vm.load().running() && vm.projects().is_empty() {
@@ -537,7 +559,7 @@ impl HomeScreen {
         if vm.projects().is_empty() {
             return empty_state();
         }
-        practice_grid(vm.projects(), &self.previews)
+        practice_grid(vm.projects(), &self.previews, &self.list_id)
     }
 }
 
@@ -604,6 +626,10 @@ impl Screen for HomeScreen {
             // owes one after it.
             Message::Settled(_) => run_all([self.vm.refresh()]).into(),
             Message::RemoteApplied(event) => run_all([self.vm.on_remote_applied(&event)]).into(),
+            Message::ListScrolled(y) => {
+                self.list_scroll = y;
+                Update::none()
+            }
             Message::UpdateCheckDue => {
                 if !self.update_check_pending {
                     return Update::none();
@@ -739,13 +765,15 @@ impl Screen for HomeScreen {
 
     /// The pushed practice was popped (Dart's awaited push completed).
     fn returned(&mut self, _services: &Services) -> Update<Message> {
+        // Back where it was: the pushed page took the list's widgets.
+        let restore = self.restore_list_scroll();
         let opening = match self.opening.take() {
             Some(o) if !o.dialog => o,
             other => {
                 // Not the practice this screen pushed (Techniques and
                 // Settings were not awaited).
                 self.opening = other;
-                return Update::none();
+                return Update::task(restore);
             }
         };
         // A take stopped there (or an import, a delete) can outlive the
@@ -766,7 +794,7 @@ impl Screen for HomeScreen {
                 move |_| Message::Settled(id),
             ));
         }
-        update
+        update.and_task(restore)
     }
 
     fn dispose(&mut self, _services: &Services) {
@@ -822,6 +850,7 @@ pub fn grid_columns(width: f32) -> usize {
 fn practice_grid<'a>(
     projects: &'a [PracticeSummary],
     previews: &'a HashMap<String, PracticePreview>,
+    list_id: &'a iced::widget::Id,
 ) -> Element<'a, Message> {
     responsive(move |size| {
         let now = DateTime::now();
@@ -876,6 +905,8 @@ fn practice_grid<'a>(
                 .padding(LIBRARY_PADDING)
                 .width(Length::Fill),
         )
+        .id(list_id.clone())
+        .on_scroll(|viewport| Message::ListScrolled(viewport.absolute_offset().y))
         .width(Length::Fill)
         .height(Length::Fill)
         .fading()

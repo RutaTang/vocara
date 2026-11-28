@@ -278,7 +278,7 @@ impl VocalTractState {
         // the vowel map's dot on a vowel nobody sang.
         if let Some(known) = self.pose.formants() {
             for (f, k) in pose.formants.iter_mut().zip(known) {
-                if !(*f > 0.0) {
+                if f.is_nan() || *f <= 0.0 {
                     *f = k;
                 }
             }

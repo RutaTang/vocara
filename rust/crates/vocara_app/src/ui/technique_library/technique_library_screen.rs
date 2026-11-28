@@ -143,6 +143,11 @@ pub struct TechniqueLibraryScreen {
     /// stacked identical screens the user must back out of twice). Released
     /// when the pushed page comes back.
     opening: bool,
+    /// The grid's scrollable, and how far down it was last scrolled: the
+    /// technique page pushed over the library takes its widgets with it
+    /// (the pages beneath are not drawn), so its pop puts the offset back.
+    grid_id: iced::widget::Id,
+    grid_scroll: f32,
     /// What the sync engine announces after applying remote rows (the
     /// library's broadcast): a freshness reload.
     remote_applied: Arc<RemoteAppliedBroadcast>,
@@ -164,6 +169,9 @@ pub enum Message {
     Back,
     /// The search text changed.
     Query(String),
+    /// The technique grid scrolled to this offset (kept, to put the grid
+    /// back where it was when the technique opened over it is popped).
+    GridScrolled(f32),
     /// The tag filter: open its menu, close it, or pick an entry (`None`
     /// for "All tags", [`UNTAGGED_FILTER`] for "Untagged").
     OpenTagMenu,
@@ -285,6 +293,8 @@ impl TechniqueLibraryScreen {
         let screen = Self {
             vm: Box::new(vm),
             opening: false,
+            grid_id: iced::widget::Id::unique(),
+            grid_scroll: 0.0,
             remote_applied: services.library.remote_applied.clone(),
             tag_menu: false,
             queued_deletes: VecDeque::new(),
@@ -311,6 +321,10 @@ impl TechniqueLibraryScreen {
     fn handle(&mut self, message: Message) -> Step {
         match message {
             Message::Back => Update::pop_or_go(Route::Home).into(),
+            Message::GridScrolled(y) => {
+                self.grid_scroll = y;
+                Step::none()
+            }
             Message::Query(q) => {
                 self.vm.set_query(q);
                 Step::none()
@@ -649,7 +663,15 @@ impl Screen for TechniqueLibraryScreen {
     fn returned(&mut self, _services: &Services) -> Update<Message> {
         let reload = self.vm.refresh();
         self.opening = false;
-        Step::effect(reload).into_update()
+        // Back where it was: the technique page took the grid's widgets.
+        let restore = iced::widget::operation::scroll_to(
+            self.grid_id.clone(),
+            iced::widget::scrollable::AbsoluteOffset {
+                x: None,
+                y: Some(self.grid_scroll),
+            },
+        );
+        Step::effect(reload).into_update().and_task(restore)
     }
 
     fn dispose(&mut self, _services: &Services) {
@@ -784,6 +806,8 @@ fn grid(screen: &TechniqueLibraryScreen) -> Element<'_, Message> {
                 .padding(LIBRARY_PADDING)
                 .width(Length::Fill),
         )
+        .id(screen.grid_id.clone())
+        .on_scroll(|viewport| Message::GridScrolled(viewport.absolute_offset().y))
         .width(Length::Fill)
         .height(Length::Fill)
         .fading()

@@ -932,3 +932,32 @@ fn a_failed_swap_is_reported_when_home_mounts() {
         "reported once"
     );
 }
+
+/// How many widget operations `task` carries (a scroll, a focus), its
+/// messages dropped.
+fn widget_operations(task: Task<Message>) -> usize {
+    use iced::futures::StreamExt;
+    use iced_test::runtime::Action;
+    let Some(stream) = iced_test::runtime::task::into_stream(task) else {
+        return 0;
+    };
+    iced::futures::executor::block_on(
+        stream
+            .filter(|action| std::future::ready(matches!(action, Action::Widget(_))))
+            .count(),
+    )
+}
+
+/// A page pushed over Home takes Home's widgets with it (the pages beneath
+/// are not drawn): popped, Home scrolls its list back to where it was,
+/// instead of showing it from the top.
+#[test]
+fn the_list_is_scrolled_back_when_a_page_pushed_over_home_is_popped() {
+    let mut home = Home::mount(Services::detached(
+        Arc::new(Library::in_memory()),
+        AppEnvironment::Dev,
+    ));
+    home.send(Message::ListScrolled(240.0));
+    let update = home.screen.returned(&home.services);
+    assert!(widget_operations(update.task) >= 1, "the scroll back");
+}
