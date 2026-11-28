@@ -209,11 +209,11 @@ impl UpdateCheckService {
     /// is the RUNNING version, the bundle's own
     /// (`self_update::current_version`), which falls back to this outside a
     /// bundle; release.yml checks that the bundle it builds says the same.
-    pub const APP_VERSION: &'static str = "0.4.0";
+    pub const APP_VERSION: &'static str = "0.4.1";
 
     /// The running app's build number: the bundle's `CFBundleVersion`
     /// (`packaging/macos/bundle.sh` reads it here), one more each release.
-    pub const APP_BUILD_NUMBER: &'static str = "4";
+    pub const APP_BUILD_NUMBER: &'static str = "5";
 
     /// The production service: HTTP fetch, compared with the running
     /// version (`self_update::current_version`: the bundle's), the answer to
