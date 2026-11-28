@@ -321,12 +321,19 @@ impl LineIcon {
     }
 }
 
-/// A drawn glyph, kept until its size, colour or stroke changes.
+/// A drawn glyph, kept until the glyph, its size, colour or stroke
+/// changes.
 #[derive(Default)]
 struct Drawn {
     cache: canvas::Cache,
-    key: RefCell<Option<(u32, [u8; 4], u32)>>,
+    key: RefCell<Option<DrawnKey>>,
 }
+
+/// What a drawn glyph was drawn as: the glyph (its name, unique to each,
+/// and its scale), its size, colour and stroke. The glyph is part of it: a button
+/// that swaps glyphs in place (Play for Pause, a chevron's way) keeps its
+/// widget state, and the cached drawing of the old glyph went on showing.
+type DrawnKey = (&'static str, u32, u32, [u8; 4], u32);
 
 impl<M> Widget<M, Theme, Renderer> for LineIcon {
     fn size(&self) -> Size<Length> {
@@ -367,6 +374,8 @@ impl<M> Widget<M, Theme, Renderer> for LineIcon {
         let color = self.color.unwrap_or(style.text_color);
         let state = tree.state.downcast_ref::<Drawn>();
         let key = (
+            self.glyph.name,
+            self.glyph.scale.to_bits(),
             bounds.width.to_bits() ^ bounds.height.to_bits().rotate_left(16),
             color.into_rgba8(),
             self.stroke.to_bits(),
@@ -911,5 +920,40 @@ mod tests {
         let large = inked(&frames, 16.0, 16.0, 48.0);
         assert!((2..=3).contains(&small), "{small}");
         assert_eq!(small, large);
+    }
+
+    /// A glyph swapped for another in place (Play for Pause) keeps the
+    /// widget's state: the new glyph is drawn, not the old one's cached
+    /// drawing.
+    #[test]
+    fn a_glyph_swapped_in_place_is_drawn_anew() {
+        use crate::ui::core::widgets::animated::testing::{near, Frames, BACKGROUND};
+        use iced::time::Instant;
+        use iced::widget::container;
+
+        const VERTICAL: Glyph = Glyph::new("vertical", &[Part::Stroke("M12 2v20")]);
+        const HORIZONTAL: Glyph = Glyph::new("horizontal", &[Part::Stroke("M2 12h20")]);
+        let inked =
+            |frames: &Frames, x: f32, y: f32| !near(frames.pixel(Point::new(x, y)), BACKGROUND);
+        let mut frames = Frames::new(Size::new(40.0, 40.0));
+        let t0 = Instant::now();
+        frames.frame(
+            container(Element::<()>::from(line_icon(VERTICAL, 32.0, Color::WHITE))),
+            &[],
+            t0,
+        );
+        assert!(inked(&frames, 16.0, 6.0), "the vertical bar");
+        assert!(!inked(&frames, 6.0, 16.0));
+        frames.frame(
+            container(Element::<()>::from(line_icon(
+                HORIZONTAL,
+                32.0,
+                Color::WHITE,
+            ))),
+            &[],
+            t0 + std::time::Duration::from_millis(16),
+        );
+        assert!(inked(&frames, 6.0, 16.0), "the horizontal bar");
+        assert!(!inked(&frames, 16.0, 6.0), "the vertical bar is gone");
     }
 }

@@ -47,6 +47,9 @@ pub use macos::install_on;
 
 #[cfg(target_os = "macos")]
 mod macos {
+    use std::ffi::CStr;
+
+    use objc2::runtime::{AnyClass, AnyObject, Bool, Imp, Sel};
     use objc2::{sel, MainThreadMarker, MainThreadOnly};
     use objc2_app_kit::{
         NSApplication, NSTitlebarSeparatorStyle, NSToolbar, NSWindow, NSWindowStyleMask,
@@ -72,9 +75,56 @@ mod macos {
         }
     }
 
+    /// `-(BOOL)mouseDownCanMoveWindow`.
+    type CanMoveWindow = unsafe extern "C-unwind" fn(*mut AnyObject, Sel) -> Bool;
+
+    /// The type encoding of [`CanMoveWindow`] (BOOL is `signed char` on
+    /// x86_64, `bool` elsewhere).
+    #[cfg(target_arch = "x86_64")]
+    const CAN_MOVE_TYPES: &CStr = c"c@:";
+    #[cfg(not(target_arch = "x86_64"))]
+    const CAN_MOVE_TYPES: &CStr = c"B@:";
+
+    /// The content view's answer: no mouse-down on it moves the window.
+    unsafe extern "C-unwind" fn cannot_move_window(_view: *mut AnyObject, _cmd: Sel) -> Bool {
+        Bool::NO
+    }
+
+    /// Makes a mouse-down on `window`'s content view never move the window
+    /// by itself. In a transparent, full-size title bar AppKit moves the
+    /// window from a mouse-down on any view that answers
+    /// `mouseDownCanMoveWindow` YES, which a view that is not opaque does by
+    /// default (winit's does): a drag on a control under the title bar (the
+    /// ruler's playhead, the zoom slider) dragged the window along. The
+    /// app's toolbar moves the window itself, from its empty area only
+    /// (`toolbar::drag_region`, `-performWindowDragWithEvent:`).
+    /// `class_addMethod` adds to the view's own class (winit's) and keeps a
+    /// method the class defines itself: idempotent.
+    fn keep_window_still(window: &NSWindow) {
+        let Some(view) = window.contentView() else {
+            return;
+        };
+        let class = std::ptr::from_ref::<AnyClass>(view.class()).cast_mut();
+        // SAFETY: `class` is the content view's live, registered class (the
+        // runtime takes its lock to add a method); the implementation has
+        // the signature `CAN_MOVE_TYPES` encodes, the one AppKit sends
+        // `mouseDownCanMoveWindow` with (receiver, selector; BOOL result);
+        // `CAN_MOVE_TYPES` is a static C string.
+        unsafe {
+            objc2::ffi::class_addMethod(
+                class,
+                sel!(mouseDownCanMoveWindow),
+                std::mem::transmute::<CanMoveWindow, Imp>(cannot_move_window),
+                CAN_MOVE_TYPES.as_ptr(),
+            );
+        }
+    }
+
     /// Gives `window` an empty unified toolbar, unless it has a toolbar
-    /// already; returns whether it gave one.
+    /// already; returns whether it gave one. Either way, a mouse-down on its
+    /// content no longer moves the window by itself ([`keep_window_still`]).
     pub fn install_on(window: &NSWindow) -> bool {
+        keep_window_still(window);
         if window.toolbar().is_some() {
             return false;
         }

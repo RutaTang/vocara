@@ -173,6 +173,13 @@ mod macos {
             // `isDescendantOf:` is true of the view itself too.
             view.isDescendantOf(&content)
         });
+        // A mouse-down on the content never moves the window by itself:
+        // the app's toolbar moves it from its empty area only.
+        let can_move: bool = unsafe { objc2::msg_send![&*content, mouseDownCanMoveWindow] };
+        check(
+            !can_move,
+            "a mouse-down on the content view does not move the window by itself",
+        );
         check(
             through,
             format!(

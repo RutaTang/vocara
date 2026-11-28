@@ -30,6 +30,8 @@ pub mod clipboard;
 pub mod conversion;
 // vocara: wheel events' gestures (see the module).
 pub mod gesture;
+// vocara: the pointer during a drag in from another app (see the module).
+mod drop_pointer;
 
 mod error;
 mod proxy;
@@ -1140,6 +1142,38 @@ async fn run_instance<P>(
                                 &mut system_theme,
                             );
                         } else {
+                            // vocara: a file hovering or dropped is judged
+                            // where the pointer is, which winit does not
+                            // report during a drag in from another app (see
+                            // `drop_pointer`): the cursor moves there first.
+                            if matches!(
+                                window_event,
+                                winit::event::WindowEvent::HoveredFile(_)
+                                    | winit::event::WindowEvent::DroppedFile(_)
+                            ) {
+                                if let Some(position) =
+                                    drop_pointer::position(&window.raw)
+                                {
+                                    // A dummy device id only names the
+                                    // device; nothing reads it back.
+                                    let moved = winit::event::WindowEvent::CursorMoved {
+                                        device_id: winit::event::DeviceId::dummy(),
+                                        position,
+                                    };
+                                    window.state.update(
+                                        &program,
+                                        &window.raw,
+                                        &moved,
+                                    );
+                                    if let Some(event) = conversion::window_event(
+                                        moved,
+                                        window.state.scale_factor(),
+                                        window.state.modifiers(),
+                                    ) {
+                                        events.push((id, event));
+                                    }
+                                }
+                            }
                             window.state.update(
                                 &program,
                                 &window.raw,
