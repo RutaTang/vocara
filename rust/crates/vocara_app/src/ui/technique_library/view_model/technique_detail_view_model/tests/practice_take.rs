@@ -166,3 +166,55 @@ fn a_page_whose_engine_failed_to_open_builds_a_new_one_for_the_next_take_and_kee
     assert_eq!(native.destroyed.load(Ordering::SeqCst), 1);
     assert!(!opened.is_available());
 }
+
+#[test]
+fn a_page_whose_mic_did_not_deliver_gets_a_fresh_engine_for_the_next_take() {
+    // A take refused as "the microphone did not start" marks its engine (the
+    // recording controller does, see `GraphAudioPlaybackService::input_failed`).
+    // Kept, a wedged audio host or mic unit failed every take until the page
+    // was reopened; replaced, the next press starts on a fresh one, the old one
+    // destroyed before the new one is handed out.
+    let wedged_native = Arc::new(StubEngine::default());
+    let wedged = Arc::new(GraphAudioPlaybackService::with_bindings(
+        wedged_native.clone(),
+        None,
+    ));
+    let fresh_native = Arc::new(StubEngine::default());
+    let fresh = Arc::new(GraphAudioPlaybackService::with_bindings(
+        fresh_native.clone(),
+        None,
+    ));
+    let engines = Arc::new(Mutex::new(VecDeque::from([wedged.clone(), fresh.clone()])));
+
+    let s = Setup::new(twang(ID, vec![]));
+    let mut deps = s.deps();
+    deps.create_engine = {
+        let engines = engines.clone();
+        Arc::new(move || engines.lock().unwrap().pop_front().unwrap())
+    };
+    let (mut vm, _load) = TechniqueDetailViewModel::new(deps);
+
+    assert!(Arc::ptr_eq(&vm.acquire_engine(), &wedged));
+    // A healthy take keeps it.
+    assert!(Arc::ptr_eq(&vm.acquire_engine(), &wedged));
+    wedged.mark_input_failed(true);
+
+    let next = vm.acquire_engine();
+    assert!(
+        Arc::ptr_eq(&next, &fresh),
+        "the next take gets a fresh engine"
+    );
+    assert_eq!(
+        wedged_native.destroyed.load(Ordering::SeqCst),
+        1,
+        "the wedged engine is destroyed, its mic with it"
+    );
+    assert!(!wedged.is_available());
+    assert!(!fresh.input_failed());
+    assert!(Arc::ptr_eq(&vm.acquire_engine(), &fresh), "and then kept");
+
+    for job in vm.dispose().jobs() {
+        drop(job.run());
+    }
+    assert_eq!(fresh_native.destroyed.load(Ordering::SeqCst), 1);
+}

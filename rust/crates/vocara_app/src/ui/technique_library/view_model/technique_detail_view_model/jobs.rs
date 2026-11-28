@@ -435,10 +435,16 @@ impl EngineSlot {
     /// take. One that failed to open (no output device then) never opens by
     /// itself, and kept, every take failed until the page was reopened: it
     /// is replaced, so connecting a device and pressing Record again works.
+    /// So is one whose microphone did not deliver on the last take (even
+    /// after the recording controller's reopen): its audio host and mic unit
+    /// may be wedged in a way no reopen on it clears, and this page plays
+    /// nothing through its engine, so a fresh one costs nothing but the build.
+    /// The old one is disposed first, here on the start's worker, so its mic
+    /// unit is gone before the new engine opens one.
     pub(super) fn acquire(&self) -> Arc<GraphAudioPlaybackService> {
         let engine = {
             let mut slot = self.lock();
-            if let Some(dud) = slot.take_if(|e| !e.is_available()) {
+            if let Some(dud) = slot.take_if(|e| !e.is_available() || e.input_failed()) {
                 PlaybackEngine::dispose(&*dud);
             }
             Arc::clone(slot.get_or_insert_with(|| (self.create)()))

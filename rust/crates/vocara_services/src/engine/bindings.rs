@@ -245,6 +245,26 @@ pub trait EngineBindings: Send + Sync {
         unexpected("ve_input_intent_seq")
     }
 
+    /// Asks the host to reopen the input stream if it is still generation
+    /// `generation` (`ve_reopen_input`; the state word's high bits): a take's
+    /// ready check that saw no frames. A newer stream (a slow open that
+    /// finished meanwhile) is kept; with no stream open and the input wanted,
+    /// one is opened. Fire-and-forget, like the other input calls.
+    fn reopen_input(&self, generation: u64) -> Result<(), EngineError> {
+        let _ = generation;
+        unexpected("ve_reopen_input")
+    }
+
+    /// Takes every queued engine diagnostics line (`ve_take_diagnostic`):
+    /// what the audio host and the mic unit decided (input syncs, negotiated
+    /// formats, failed stops), each naming its engine. Process-wide, oldest
+    /// first. Unlike the other calls, the default answers (with none) rather
+    /// than panicking: the lines are best-effort, and every poll drains them,
+    /// so a fake would otherwise have to stub it for any test that polls.
+    fn take_diagnostics(&self) -> Vec<String> {
+        Vec::new()
+    }
+
     /// The host's last SUCCESSFUL convergence as
     /// `(intent_seq << 24) | input_generation` (`ve_input_applied_state`).
     /// Ready contract: `(applied >> 24) >= arm_seq` and the state word shows
@@ -823,5 +843,14 @@ mod tests {
     #[should_panic(expected = "unexpected engine call ve_set_comp")]
     fn an_unexpected_call_with_arguments_fails_loudly_too() {
         let _ = Fake::default().set_comp(0, -18.0, 3.0, 6.0, 10.0, 100.0, 0.0, false);
+    }
+
+    /// The one call a fake need not stub: every device poll drains the
+    /// engine's diagnostics, and a fake has none to give.
+    #[test]
+    fn a_fake_has_no_diagnostics_and_a_reopen_it_did_not_expect_fails_loudly() {
+        assert!(Fake::default().take_diagnostics().is_empty());
+        let reopened = std::panic::catch_unwind(|| Fake::default().reopen_input(1));
+        assert!(reopened.is_err());
     }
 }
