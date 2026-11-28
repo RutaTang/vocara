@@ -4051,7 +4051,10 @@ fn audio_host_run(
                     let dead = input_cell.take_dead();
                     let change = health.observe(input_cell.frames_in(), dead, now);
                     log_health(gen, change, health.open_for(now));
-                    let why = if reopen_gen == Some(gen) {
+                    // Compared as the state word's consumers read it: 24 bits, like the
+                    // generation the applied pair carries.
+                    let asked = reopen_gen.is_some_and(|g| g & 0xFF_FFFF == gen & 0xFF_FFFF);
+                    let why = if asked {
                         Some("the take's ready check saw no frames".to_string())
                     } else {
                         health.stall(dead, now).map(|s| s.describe())
