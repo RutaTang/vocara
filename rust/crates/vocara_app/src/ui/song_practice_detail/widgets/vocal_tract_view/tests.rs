@@ -764,6 +764,31 @@ fn every_demo_pose_is_to_scale_and_of_one_layout() {
 }
 
 #[test]
+fn with_no_take_the_figure_rests_and_the_panel_reads_nothing() {
+    // The backing selected after a take: the header said "No take
+    // selected", yet the panel read the take's jaw, tongue and lips, and
+    // the figure kept its shape.
+    let t0 = Instant::now();
+    let mut st = VocalTractState::new();
+    st.feed(Some(ee()), 1.0, t0);
+    st.feed(None, 1.1, t0 + MS * 20);
+    for step in 1..=20 {
+        st.update(Message::Frame(t0 + MS * (20 + 50 * step)), t0);
+    }
+    let resting = articulate(&AH, false, Fit::Uncertain);
+    assert_eq!(st.shown().outlines.tongue, resting.outlines.tongue);
+    let r = st.readouts();
+    assert_eq!(r.status, Status::NoTake);
+    assert!(
+        r.rows.iter().all(|row| row.value == "\u{2014}"),
+        "{:?}",
+        r.rows
+    );
+    assert_eq!(r.vowel, None);
+    assert_eq!(r.rest, 1.0);
+}
+
+#[test]
 fn the_panel_says_when_the_estimate_is_being_worked_out() {
     let now = Instant::now();
     let mut st = VocalTractState::new();

@@ -297,13 +297,19 @@ impl VocalTractState {
     }
 
     /// Takes in the estimate for `clock` (`None`: nothing to read, Take
-    /// with no take), at `now`.
+    /// with no take), at `now`. With nothing to read the figure goes to its
+    /// resting shape, not the last one sung: with the backing selected it
+    /// kept the take's shape, and the panel its readings.
     pub fn feed(&mut self, estimate: Option<TractPose>, clock: f64, now: Instant) {
         if self.last_frame.is_none() {
             self.last_frame = Some(now);
         }
         self.no_source = estimate.is_none();
         self.why_none = None;
+        if self.no_source {
+            self.pose.clear();
+            self.known = None;
+        }
         let mut pose =
             estimate.unwrap_or_else(|| demo::articulate(&demo::AH, false, Fit::Uncertain));
         // A formant the analysis did not find this frame (0: unknown) keeps
@@ -437,7 +443,8 @@ impl VocalTractState {
                 hi,
                 position: positions[i],
                 band: if resting { None } else { bands[i] },
-                value: if resting && i == 6 {
+                // Nothing to read: no readings, rather than a shape's.
+                value: if self.no_source || (resting && i == 6) {
                     "\u{2014}".to_string()
                 } else {
                     values[i].clone()
