@@ -431,6 +431,10 @@ impl HomeScreen {
             dialog: true,
         });
         self.loading = Some(DialogMotion::opening(Instant::now()));
+        // The practice's audio engine is built while the dialog holds, off
+        // the UI thread: built as the page is pushed, opening the output
+        // (longer for Bluetooth headphones waking up) stalled its transition.
+        vocara_services::playback_engine_factory::prewarm_playback_engine();
     }
 
     /// The opening dialog's fade, while it is drawn.
