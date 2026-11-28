@@ -100,6 +100,71 @@ struct FakeState {
 
     /// Frames the fake reports as dropped by the recording ring at stop.
     dropped_frames: u64,
+
+    /// The generations `reopen_input` was asked to reopen, in order.
+    reopens: Vec<u64>,
+    /// The uids `actual_input_device` and `current_input_device` answer.
+    actual_input: String,
+    selected_input: String,
+    /// When set, the stream follows this timeline instead of the scripts.
+    plan: Option<Plan>,
+}
+
+/// A stream's life on the ready handshake's own clock, which the poll sleep
+/// moves (see [`controller_on_plan`]): when the arm's stream (generation 1)
+/// comes up and delivers, and what a reopen brings (generation 2, up
+/// [`REOPEN_UP`] after it is asked).
+#[derive(Clone)]
+struct Plan {
+    now: Arc<Mutex<Duration>>,
+    /// `None`: its open failed (nothing ever runs until a reopen).
+    up_at: Option<Duration>,
+    delivers_at: Option<Duration>,
+    /// How long after the reopen was asked the reopened stream delivers;
+    /// `None`: never.
+    reopen_delivers_after: Option<Duration>,
+    reopened_at: Option<Duration>,
+}
+
+/// How long the fake host takes to bring the reopened stream up.
+const REOPEN_UP: Duration = Duration::from_millis(100);
+
+impl Plan {
+    fn new(
+        up_at: Option<u64>,
+        delivers_at: Option<u64>,
+        reopen_delivers_after: Option<u64>,
+    ) -> Plan {
+        Plan {
+            now: Arc::default(),
+            up_at: up_at.map(ms),
+            delivers_at: delivers_at.map(ms),
+            reopen_delivers_after: reopen_delivers_after.map(ms),
+            reopened_at: None,
+        }
+    }
+
+    /// `(applied, state word, delivering)` now.
+    fn view(&self) -> (u64, u64, bool) {
+        let t = *self.now.lock().unwrap();
+        if let Some(r) = self.reopened_at {
+            let since = t.saturating_sub(r);
+            if since >= REOPEN_UP {
+                let delivering = self.reopen_delivers_after.is_some_and(|d| since >= d);
+                return ((1 << 24) | 2, (2 << 1) | 1, delivering);
+            }
+            // Generation 1 torn down, generation 2 not up yet.
+            return ((1 << 24) | 1, 1 << 1, false);
+        }
+        match self.up_at {
+            Some(up) if t >= up => (
+                (1 << 24) | 1,
+                (1 << 1) | 1,
+                self.delivers_at.is_some_and(|d| t >= d),
+            ),
+            _ => (0, 0, false),
+        }
+    }
 }
 
 impl Default for FakeState {
@@ -132,6 +197,10 @@ impl Default for FakeState {
             stream_state_script: vec![3],
             state_reads: 0,
             dropped_frames: 0,
+            reopens: Vec::new(),
+            actual_input: String::new(),
+            selected_input: String::new(),
+            plan: None,
         }
     }
 }
@@ -238,6 +307,13 @@ impl EngineBindings for Fake {
 
     fn record_written_frames(&self) -> u64 {
         let mut s = self.s();
+        if let Some(plan) = &s.plan {
+            if plan.view().2 {
+                s.written_value += 480;
+            }
+            s.written_reads += 1;
+            return s.written_value;
+        }
         if s.written_reads < s.record_written_script.len() {
             s.written_value = s.record_written_script[s.written_reads];
         } else {
@@ -253,12 +329,37 @@ impl EngineBindings for Fake {
 
     fn input_applied_state(&self) -> u64 {
         let s = &mut *self.s();
+        if let Some(plan) = &s.plan {
+            s.applied_reads += 1;
+            return plan.view().0;
+        }
         scripted(&s.applied_state_script, &mut s.applied_reads)
     }
 
     fn input_stream_state(&self) -> u64 {
         let s = &mut *self.s();
+        if let Some(plan) = &s.plan {
+            s.state_reads += 1;
+            return plan.view().1;
+        }
         scripted(&s.stream_state_script, &mut s.state_reads)
+    }
+
+    fn reopen_input(&self, generation: u64) -> Result<(), EngineError> {
+        let mut s = self.s();
+        s.reopens.push(generation);
+        if let Some(plan) = s.plan.as_mut() {
+            plan.reopened_at = Some(*plan.now.lock().unwrap());
+        }
+        Ok(())
+    }
+
+    fn actual_input_device(&self) -> String {
+        self.s().actual_input.clone()
+    }
+
+    fn current_input_device(&self) -> String {
+        self.s().selected_input.clone()
     }
 
     fn record_dropped_frames(&self) -> u64 {
@@ -395,13 +496,27 @@ fn pump_quiet(c: &MicRecordingController, clock: &FakeClock, n: u64) {
     pump(c, clock, n, &mut |_| {});
 }
 
-/// The fake engine behind a real service, the timer clock and a private quit
-/// registry.
+/// The fake engine behind a real service, the timer clock, a private quit
+/// registry and the controller's diagnostics lines.
 struct Rig {
     fake: Arc<Fake>,
     engine: Arc<GraphAudioPlaybackService>,
     clock: Arc<FakeClock>,
     finalizer: Arc<RecordingFinalizer>,
+    logs: Arc<Mutex<Vec<(String, String)>>>,
+}
+
+impl Rig {
+    /// The `mic` lines the controller wrote, in order.
+    fn mic_lines(&self) -> Vec<String> {
+        self.logs
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(area, _)| area == "mic")
+            .map(|(_, line)| line.clone())
+            .collect()
+    }
 }
 
 fn rig() -> Rig {
@@ -419,7 +534,18 @@ fn rig_with(finalizer: RecordingFinalizer) -> Rig {
         engine,
         clock: FakeClock::new(),
         finalizer: Arc::new(finalizer),
+        logs: Arc::default(),
     }
+}
+
+/// The rig's diagnostics collector, as the controller's log seam.
+fn log_sink(rig: &Rig) -> LogSink {
+    let logs = Arc::clone(&rig.logs);
+    Arc::new(move |area: &str, line: &str| {
+        logs.lock()
+            .unwrap()
+            .push((area.to_string(), line.to_string()))
+    })
 }
 
 /// Permission granted, everything else at its default.
@@ -449,7 +575,34 @@ fn controller_with_sleep(
         options,
         Seams {
             clock: Arc::new(move || clock.now()),
+            ready_clock: Arc::new(Instant::now),
             poll_sleep,
+            log: log_sink(rig),
+        },
+    )
+}
+
+/// A controller whose ready handshake runs on `plan`'s clock: each poll sleep
+/// moves it on by the sleep, so a wait of seconds takes no real time and the
+/// times in its lines are exact. The fake's stream follows the plan.
+fn controller_on_plan(rig: &Rig, plan: Plan, timeout: Duration) -> MicRecordingController {
+    let base = Instant::now();
+    let (read, step) = (Arc::clone(&plan.now), Arc::clone(&plan.now));
+    rig.fake.s().plan = Some(plan);
+    let engine = Arc::clone(&rig.engine);
+    let clock = Arc::clone(&rig.clock);
+    MicRecordingController::build(
+        Arc::new(move || Arc::clone(&engine)),
+        MicRecordingOptions {
+            ready_timeout: timeout,
+            finalizer: Some(Arc::clone(&rig.finalizer)),
+            ..granted()
+        },
+        Seams {
+            clock: Arc::new(move || clock.now()),
+            ready_clock: Arc::new(move || base + *read.lock().unwrap()),
+            poll_sleep: Arc::new(move |d| *step.lock().unwrap() += d),
+            log: log_sink(rig),
         },
     )
 }
@@ -1460,6 +1613,201 @@ fn a_mic_that_never_delivers_fails_with_input_not_delivering_disarmed_and_discar
     assert_eq!(rig.fake.s().stop_calls, 1);
     assert_eq!(dest.discarded(), [TAKE]);
     assert!(!rig.finalizer.has_active());
+    // Said, once, in the log; and the engine is marked for its owner.
+    let lines = rig.mic_lines();
+    let failures: Vec<_> = lines
+        .iter()
+        .filter(|l| l.starts_with("start: the microphone delivered nothing"))
+        .collect();
+    assert_eq!(failures.len(), 1, "{lines:?}");
+    assert!(rig.engine.input_failed());
+}
+
+// The start's one retry (see `ControllerStart::body`): a stream that does not
+// deliver by half the ready timeout is reopened, once, unless it came up less
+// than half the timeout ago; the reopened stream gets half the timeout of its
+// own; and the failure says what the check saw. These run the handshake on the
+// plan's clock, so the times are exact.
+
+/// The ready timeout these tests run with: the default, whose half is the
+/// engine's 2.5 s warm-up allowance.
+const READY: Duration = MicRecordingController::DEFAULT_READY_TIMEOUT;
+
+#[test]
+fn the_default_wait_outlasts_the_engines_warm_up_allowance_twice() {
+    // A Bluetooth headset switching to its headset profile delivers nothing
+    // for up to 2.5 s: the toast must not come before a stream has had that
+    // long, nor before the reopen has had it too.
+    assert!(READY >= 2 * vocara_engine::input_health::INPUT_WARMUP);
+}
+
+#[test]
+fn a_stream_that_never_delivers_is_reopened_at_half_the_timeout_and_the_reopen_arms_the_take() {
+    // The arm found a stream up at once (kept, or opened at once) that never
+    // delivers: an earlier session's unit left running, a stalled one.
+    let rig = rig();
+    let dest = Dest::new(TAKE);
+    let c = controller_on_plan(&rig, Plan::new(Some(0), None, Some(300)), READY);
+
+    let result = start(&c, &dest);
+
+    assert!(result.started(), "{result:?}");
+    assert_eq!(
+        rig.fake.s().reopens,
+        [1],
+        "one reopen, of the stream it armed on"
+    );
+    assert_eq!(
+        rig.mic_lines(),
+        [
+            "start: no frames 2500 ms after the arm; asking the engine to reopen the input \
+             (stream gen 1 running, written 0)",
+            "start: the reopened input delivered 2800 ms after the arm (reopen asked at 2500 ms)",
+        ]
+    );
+    assert!(!rig.engine.input_failed());
+    assert!(dest.discarded().is_empty());
+    c.stop();
+}
+
+#[test]
+fn a_stream_still_warming_up_gets_its_whole_allowance_before_any_reopen() {
+    // A cold open that came up at 1.5 s and delivers 2 s later (a headset
+    // switching profiles): at half the timeout it has been up only 1 s, and a
+    // reopen would restart its switch. It arms at 3.5 s, past the old 2 s
+    // timeout that refused it outright.
+    let rig = rig();
+    let dest = Dest::new(TAKE);
+    let c = controller_on_plan(&rig, Plan::new(Some(1500), Some(3500), None), READY);
+
+    let result = start(&c, &dest);
+
+    assert!(result.started(), "{result:?}");
+    assert!(rig.fake.s().reopens.is_empty());
+    assert!(rig.mic_lines().is_empty(), "{:?}", rig.mic_lines());
+    c.stop();
+}
+
+#[test]
+fn a_failed_open_is_retried_by_the_reopen() {
+    // The arm's open failed (nothing ever runs): the reopen at half the
+    // timeout is the host's second try, and it comes up and delivers.
+    let rig = rig();
+    let dest = Dest::new(TAKE);
+    let c = controller_on_plan(&rig, Plan::new(None, None, Some(200)), READY);
+
+    let result = start(&c, &dest);
+
+    assert!(result.started(), "{result:?}");
+    assert_eq!(rig.fake.s().reopens, [0]);
+    assert_eq!(
+        rig.mic_lines()[0],
+        "start: no frames 2500 ms after the arm; asking the engine to reopen the input \
+         (stream gen 0 not running, written 0)"
+    );
+    c.stop();
+}
+
+#[test]
+fn a_mic_still_silent_after_its_reopen_fails_with_one_line_saying_what_the_check_saw() {
+    let rig = rig();
+    {
+        let mut s = rig.fake.s();
+        s.frames_received_step = 0;
+        s.actual_input = "AppleUSBAudioEngine:Vendor:Mic:1234:1".into();
+        s.selected_input = "AppleUSBAudioEngine:Vendor:Mic:1234:1".into();
+    }
+    let dest = Dest::new(TAKE);
+    let c = controller_on_plan(&rig, Plan::new(Some(0), None, None), READY);
+
+    let result = start(&c, &dest);
+
+    assert_eq!(
+        result.failure(),
+        Some(MicRecordingFailure::InputNotDelivering)
+    );
+    assert_eq!(rig.fake.s().reopens, [1], "one reopen only");
+    let lines = rig.mic_lines();
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert_eq!(
+        lines[1],
+        "start: the microphone delivered nothing in 5000 ms (reopen asked at 2500 ms): \
+         arm seq 1, applied seq 1 gen 2, stream gen 2 running, written 0 -> 0, \
+         frames received +0, input open: the selected input, selected: a chosen input"
+    );
+    assert!(
+        !lines.iter().any(|l| l.contains("AppleUSBAudioEngine")),
+        "no device uid reaches the log"
+    );
+    assert!(rig.engine.input_failed());
+    // Disarmed and discarded, as any refused start.
+    assert_eq!(rig.fake.s().stop_calls, 1);
+    assert_eq!(dest.discarded(), [TAKE]);
+    assert!(!c.is_recording() && !c.is_starting());
+}
+
+#[test]
+fn a_stream_that_came_up_late_is_reopened_once_it_has_had_half_the_timeout_and_the_wait_extends() {
+    // Up at 2 s and silent: reopened at 4.5 s, once it has had its 2.5 s, and
+    // the reopened stream still gets 2.5 s of its own: the toast at 7 s.
+    let rig = rig();
+    let dest = Dest::new(TAKE);
+    let c = controller_on_plan(&rig, Plan::new(Some(2000), None, None), READY);
+
+    let result = start(&c, &dest);
+
+    assert_eq!(
+        result.failure(),
+        Some(MicRecordingFailure::InputNotDelivering)
+    );
+    assert_eq!(rig.fake.s().reopens, [1]);
+    let lines = rig.mic_lines();
+    assert!(
+        lines[0].starts_with("start: no frames 4500 ms after the arm;"),
+        "{lines:?}"
+    );
+    assert!(
+        lines[1].starts_with(
+            "start: the microphone delivered nothing in 7000 ms (reopen asked at 4500 ms)"
+        ),
+        "{lines:?}"
+    );
+}
+
+#[test]
+fn after_input_not_delivering_the_next_press_starts_from_nothing_the_failure_left() {
+    let rig = rig();
+    let first = Dest::new("/fake/a.wav");
+    let c = controller_on_plan(&rig, Plan::new(Some(0), None, None), READY);
+    assert_eq!(
+        start(&c, &first).failure(),
+        Some(MicRecordingFailure::InputNotDelivering)
+    );
+    assert!(rig.engine.input_failed());
+
+    // The mic works now (the hardware allows): the next press arms at once.
+    rig.fake.s().plan = None;
+    let second = Dest::new("/fake/b.wav");
+    let result = start(&c, &second);
+
+    assert_eq!(result, MicRecordingStart::Started("/fake/b.wav".into()));
+    assert!(
+        !rig.engine.input_failed(),
+        "cleared by the start that armed"
+    );
+    assert_eq!(
+        rig.fake.s().reopens,
+        [1],
+        "the working mic needed no reopen"
+    );
+    assert_eq!(rig.fake.s().start_calls, 2);
+    assert_eq!(
+        rig.fake.s().stop_calls,
+        1,
+        "only the failed arm was disarmed"
+    );
+    assert!(second.discarded().is_empty());
+    c.stop();
 }
 
 #[test]
