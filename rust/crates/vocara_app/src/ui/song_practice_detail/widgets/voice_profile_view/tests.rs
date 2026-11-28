@@ -402,35 +402,60 @@ fn profile(low: Option<i64>, high: Option<i64>) -> VoiceProfile {
 }
 
 #[test]
-fn the_range_bar_spans_the_range_with_two_semitones_each_side() {
-    // A3 (57) .. E5 (76): the axis is 55..78, 23 semitones over 230 px.
+fn the_range_bar_spans_whole_octaves_around_the_range() {
+    // A3 (57) .. E5 (76): two semitones each side reach 55 and 78, so the
+    // axis runs C3 (48) .. C6 (84), 36 semitones over 360 px.
     let mut p = profile(Some(57), Some(76));
     p.tess_lo_midi = Some(60);
     p.tess_hi_midi = Some(70);
     p.passaggio_midi = Some(64);
-    let bar = range_bar(&p, 230.0, 100.0).expect("a range");
+    let bar = range_bar(&p, 360.0, 100.0).expect("a range");
+    let whole = |(a, b): (f64, f64)| (a.round(), b.round());
     assert_eq!(bar.bar_y, 50.0);
-    assert_eq!(bar.range, (20.0, 210.0));
-    assert_eq!(bar.tessitura, Some((50.0, 150.0)));
-    assert_eq!(bar.passaggio, Some(90.0));
-    // C4 (60) and C5 (72).
-    assert_eq!(bar.grid, vec![50.0, 170.0]);
+    assert_eq!(whole(bar.range), (90.0, 280.0));
+    assert_eq!(bar.tessitura.map(whole), Some((120.0, 220.0)));
+    assert_eq!(bar.passaggio.map(f64::round), Some(160.0));
+    assert_eq!(
+        bar.grid,
+        vec![
+            (0.0, Some(48)),
+            (120.0, Some(60)),
+            (240.0, Some(72)),
+            (360.0, Some(84))
+        ]
+    );
     // No range, no bar.
     assert_eq!(range_bar(&profile(None, Some(60)), 230.0, 100.0), None);
 }
 
 #[test]
+fn a_narrow_range_has_an_axis_and_names_each_c_once() {
+    // G4 (67) .. C5 (72): the axis was 65..74, one gridline, its C5 named
+    // under the bar's own C5. Now C4 .. C6, and the C5 the bar's end names
+    // goes unnamed on the axis.
+    let bar = range_bar(&profile(Some(67), Some(72)), 240.0, 100.0).expect("a range");
+    assert_eq!(
+        bar.grid,
+        vec![(0.0, Some(60)), (120.0, None), (240.0, Some(84))]
+    );
+    assert_eq!(bar.range, (70.0, 120.0));
+}
+
+#[test]
 fn the_range_bar_never_leaves_the_panel() {
-    // One note: the axis is four semitones.
+    // One note: an octave each side of it.
     let mut p = profile(Some(60), Some(60));
     p.tess_lo_midi = Some(40);
     p.tess_hi_midi = Some(90);
     let bar = range_bar(&p, 100.0, 40.0).expect("a range");
     assert_eq!(bar.range, (50.0, 50.0));
     assert_eq!(bar.tessitura, Some((0.0, 100.0)));
-    // Below MIDI 0, the first C is the one at or above the axis' start.
+    // Below MIDI 0 the octaves still fall on Cs.
     let bar = range_bar(&profile(Some(-5), Some(3)), 120.0, 40.0).expect("a range");
-    assert_eq!(bar.grid, vec![70.0]);
+    assert_eq!(
+        bar.grid,
+        vec![(0.0, Some(-12)), (60.0, Some(0)), (120.0, Some(12))]
+    );
 }
 
 #[test]

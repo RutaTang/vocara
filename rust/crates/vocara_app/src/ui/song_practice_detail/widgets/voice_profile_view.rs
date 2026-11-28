@@ -358,8 +358,10 @@ fn profile_text(
 pub struct RangeBar {
     /// The bar's y (half the height).
     pub bar_y: f64,
-    /// A C-octave gridline's x, for each C on the axis.
-    pub grid: Vec<f64>,
+    /// A C-octave gridline's x for each C on the axis, and the note named
+    /// under it: none where a range end's label names that note already
+    /// (C5 read twice).
+    pub grid: Vec<(f64, Option<i64>)>,
     /// The full sung range.
     pub range: (f64, f64),
     /// The tessitura band, when known.
@@ -369,20 +371,21 @@ pub struct RangeBar {
 }
 
 /// The geometry of `p`'s range bar in a `width` × `height` box, or `None`
-/// without a range: an axis from two semitones under the low note to two
-/// over the high one, every x clamped to the box (never off-panel).
+/// without a range: an axis of whole octaves, from the C at or under two
+/// semitones below the low note to the C at or over two above the high
+/// one, so the range shows where it sits between at least two named Cs
+/// (two semitones each side gave a narrow range an axis of one gridline);
+/// every x clamped to the box (never off-panel).
 pub fn range_bar(p: &VoiceProfile, width: f64, height: f64) -> Option<RangeBar> {
     let (low, high) = (p.low_midi?, p.high_midi?);
-    let (min_midi, max_midi) = (low - 2, high + 2);
+    let min_midi = (low - 2).div_euclid(12) * 12;
+    let max_midi = (high + 2 + 11).div_euclid(12) * 12;
     let span = (max_midi - min_midi).clamp(1, 1 << 30) as f64;
     let x = |midi: i64| clamp_f64((midi - min_midi) as f64 / span * width, 0.0, width.max(0.0));
-    // `(minMidi / 12).ceil() * 12`.
-    let mut grid = Vec::new();
-    let mut mm = (min_midi as f64 / 12.0).ceil() as i64 * 12;
-    while mm <= max_midi {
-        grid.push(x(mm));
-        mm += 12;
-    }
+    let grid = (min_midi..=max_midi)
+        .step_by(12)
+        .map(|c| (x(c), (c != low && c != high).then_some(c)))
+        .collect();
     Some(RangeBar {
         bar_y: height * 0.5,
         grid,
@@ -438,9 +441,7 @@ impl<M> canvas::Program<M> for RangeBarPainter {
         };
         // C-octave gridlines and their names along the foot.
         let grid = Stroke::default().with_color(Studio::GRID).with_width(1.0);
-        // The first C on the axis, as `range_bar` finds its gridlines.
-        let first_c = ((low - 2) as f64 / 12.0).ceil() as i64 * 12;
-        for (i, &gx) in bar.grid.iter().enumerate() {
+        for &(gx, name) in &bar.grid {
             let gx = (gx as f32).round() + 0.5;
             line(
                 &mut frame,
@@ -450,15 +451,17 @@ impl<M> canvas::Program<M> for RangeBarPainter {
                 h - 22.0,
                 grid,
             );
-            frame.fill_text(profile_text(
-                note_name_for_midi(first_c + 12 * i as i64),
-                gx,
-                h - 18.0,
-                Studio::TEXT_DISABLED,
-                type_scale::AXIS,
-                font::REGULAR,
-                Alignment::Center,
-            ));
+            if let Some(c) = name {
+                frame.fill_text(profile_text(
+                    note_name_for_midi(c),
+                    gx,
+                    h - 18.0,
+                    Studio::TEXT_DISABLED,
+                    type_scale::AXIS,
+                    font::REGULAR,
+                    Alignment::Center,
+                ));
+            }
         }
         // Full sung range, then the tessitura over it.
         let band = |color: Color| {
