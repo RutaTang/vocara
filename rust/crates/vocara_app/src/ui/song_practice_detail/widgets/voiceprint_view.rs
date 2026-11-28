@@ -83,6 +83,7 @@ use super::pitch_lane::{note_vibrato_of, pitch_lane, pitch_notes_of, pitch_range
 use crate::ui::core::theme::{self, boxed, fill, font, type_scale, Studio};
 use crate::ui::core::widgets::cap_label::cap_label;
 use crate::ui::core::widgets::controls::{labelled, meter_color};
+use crate::ui::core::widgets::fading_scrollbar::{scrollable, Fading};
 use crate::ui::core::widgets::material_tooltip::material_tooltip;
 use crate::ui::core::widgets::painter::{KeyedCache, Same};
 use crate::ui::core::widgets::spectrogram_painter::{
@@ -1563,6 +1564,34 @@ pub(crate) fn plot_well<'a, M: 'a>(content: impl Into<Element<'a, M>>) -> Elemen
         .into()
 }
 
+/// The least height the Vowel, Range and Dynamics tabs lay out in, their
+/// padding included: their readouts and a usable chart.
+pub(crate) const PLOT_TAB_MIN_HEIGHT: f32 = 224.0;
+
+/// A tab `content` laid out at least [`PLOT_TAB_MIN_HEIGHT`] tall: on a
+/// dock shorter than that it scrolls, as the Summary does. At the dock's
+/// least height these tabs cut their readouts off or crushed their chart
+/// to a line.
+pub(crate) fn scrolls_when_short<'a, M: 'a>(
+    content: impl Fn() -> Element<'a, M> + 'a,
+) -> Element<'a, M> {
+    responsive(move |size| {
+        if size.height >= PLOT_TAB_MIN_HEIGHT {
+            return content();
+        }
+        scrollable(
+            container(content())
+                .width(Length::Fill)
+                .height(PLOT_TAB_MIN_HEIGHT),
+        )
+        .fading()
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
+    })
+    .into()
+}
+
 /// [`plot_well`]'s look.
 fn well_style(theme: &Theme) -> container::Style {
     theme::well(theme::radius::WELL)(theme)
@@ -1829,8 +1858,12 @@ fn axis_row<'a>(max_hz: f64, child: impl Into<Element<'a, Message>>) -> Element<
 
 /// `_vowelPanel`: the F1×F2 vowel chart (1.3 wide for 1 tall) as tall as the
 /// tab, with the readouts at the playhead beside it, the pair centred
-/// across the dock.
+/// across the dock; it scrolls on a short dock ([`scrolls_when_short`]).
 fn vowel_panel<'a>(f1: f64, f2: f64, live: bool) -> Element<'a, Message> {
+    scrolls_when_short(move || vowel_panel_body(f1, f2, live))
+}
+
+fn vowel_panel_body<'a>(f1: f64, f2: f64, live: bool) -> Element<'a, Message> {
     let body = responsive(move |size| {
         let room = Size::new(
             (size.width - VOWEL_READOUTS_WIDTH - VOWEL_GAP).max(0.0),

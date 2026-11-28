@@ -968,6 +968,34 @@ fn a_timbre_curve_breaks_where_there_is_no_voice_and_scales_to_the_voice() {
 }
 
 #[test]
+fn on_the_shortest_dock_the_vowel_tab_scrolls_to_its_readouts() {
+    // At the dock's least height (160, less its handle and tabs) the F2
+    // readout was cut off, with no way to reach it.
+    let src = Source {
+        track: Some(track(500)),
+        metrics: Some(step_metrics()),
+        duration_ms: 500,
+        position: Duration::from_millis(100),
+        ..Source::default()
+    };
+    let state = VoiceprintState::new();
+    let mut ui = simulator(vowel, &src, &state, Size::new(1100.0, 121.0));
+    let visible = |ui: &mut Simulator<'_, Message>, label: &str| {
+        ui.find(label)
+            .ok()
+            .and_then(|t| t.visible_bounds())
+            .is_some_and(|v| v.height > 1.0)
+    };
+    assert!(!visible(&mut ui, "frontness"), "F2's line lies below");
+    ui.point_at(Point::new(500.0, 60.0));
+    let _ = ui.simulate([iced::Event::Mouse(mouse::Event::WheelScrolled {
+        delta: mouse::ScrollDelta::Pixels { x: 0.0, y: -400.0 },
+    })]);
+    assert!(visible(&mut ui, "frontness"), "scrolled into view");
+    assert!(visible(&mut ui, "Reference"));
+}
+
+#[test]
 fn the_timbre_readouts_read_a_dash_where_there_is_no_voice() {
     let mut m = VoiceMetrics::clone(&step_metrics());
     m.active = (0..40).map(|f| u8::from(f >= 20)).collect();

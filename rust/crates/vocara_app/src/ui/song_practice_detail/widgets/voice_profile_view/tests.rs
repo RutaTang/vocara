@@ -463,6 +463,52 @@ fn a_break_of_six_db_or_more_reads_as_abrupt() {
     assert_eq!(passaggio_shift(0.0), "gradual shift");
 }
 
+/// The dock's tab at its least height (160, less its handle and tabs).
+const SHORT_DOCK: Size = Size {
+    width: 1100.0,
+    height: 121.0,
+};
+
+/// Whether `label` shows in `ui`'s viewport.
+fn visible(ui: &mut Simulator<'_, ()>, label: &str) -> bool {
+    ui.find(label)
+        .ok()
+        .and_then(|t| t.visible_bounds())
+        .is_some_and(|v| v.height > 1.0)
+}
+
+/// A wheel turn down over the middle of `ui`.
+fn scroll_down(ui: &mut Simulator<'_, ()>) {
+    ui.point_at(iced::Point::new(500.0, 60.0));
+    let _ = ui.simulate([iced::Event::Mouse(iced::mouse::Event::WheelScrolled {
+        delta: iced::mouse::ScrollDelta::Pixels { x: 0.0, y: -400.0 },
+    })]);
+}
+
+#[test]
+fn on_the_shortest_dock_range_and_dynamics_scroll_rather_than_crush() {
+    // At the dock's least height, Range clipped its chart and Dynamics
+    // crushed its loudness curve to a line; neither scrolled, as Summary
+    // does.
+    let src = analyzed(&sine(48000, 220.0, SR as f64));
+    for (view, header) in [
+        (range as View, "Sung range on a pitch axis"),
+        (dynamics as View, "Loudness over time"),
+    ] {
+        let mut ui = Simulator::with_size(Settings::default(), SHORT_DOCK, view(&src));
+        assert!(visible(&mut ui, header));
+        scroll_down(&mut ui);
+        assert!(!visible(&mut ui, header), "{header}: it scrolls");
+    }
+    // Dynamics keeps its whole layout: the span's scale lies below the
+    // viewport, scrolled into it.
+    let mut ui = Simulator::with_size(Settings::default(), SHORT_DOCK, dynamics(&src));
+    let end = ui.find("0 dBFS").expect("the span's end").bounds();
+    assert!(end.y > SHORT_DOCK.height, "{end:?}");
+    scroll_down(&mut ui);
+    assert!(visible(&mut ui, "0 dBFS"));
+}
+
 #[test]
 fn the_range_view_marks_the_passaggio() {
     let mut p = profile(Some(57), Some(76));
