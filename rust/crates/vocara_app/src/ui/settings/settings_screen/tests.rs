@@ -774,8 +774,8 @@ fn the_take_offset_slider_fills_from_its_middle() {
         slider.x + slider.width * 0.6,
     );
     let mut window = Frames::new(Size::new(900.0, 80.0));
-    // +100 ms (past the middle): filled between the middle and the knob,
-    // not at the left.
+    // Half the most it takes (past the middle): filled between the middle
+    // and the knob, not at the left.
     let positive = AppSettingsService::RECORDING_OFFSET_MAX_MS * 0.5;
     assert!(near(pixel(&mut window, positive, right), SLIDER_FILL));
     assert!(near(pixel(&mut window, positive, left), SLIDER_TRACK));
