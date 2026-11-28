@@ -40,6 +40,8 @@ fn one_source_engine() -> (
     // The live-input monitor ring is unfed in these tests (monitor gain stays 0).
     let (_mic_prod, mic_cons) = spsc::<[f32; CHANNELS]>(256);
     let (h, rt) = spawn(g, producers, mic_cons, 256);
+    // These tests check the streamed audio itself, from the first frame after play.
+    h.set_declick(false);
     (h, rt, 1)
 }
 

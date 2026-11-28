@@ -17,6 +17,7 @@ use std::thread::JoinHandle;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
 use crate::capture_layout::{InputChannelMix, INPUT_CHANNEL_AUTO};
+use crate::declick::{Declick, DECLICK_FRAMES};
 use crate::live::{RtCell, Shared};
 use crate::ring::{Consumer, Producer};
 use crate::sample::{Smp, CHANNELS, ENGINE_SR};
@@ -428,6 +429,11 @@ struct OutResampler {
     /// for the output clock ([`Shared::count_played`]). Kept across flushes: resetting it
     /// with `pos` lost up to a frame per seek, a bias the drift estimator read as drift.
     played_acc: f64,
+    /// The crossfade across a flush (see [`crate::declick`]): what the FIFO dropped was the
+    /// continuation of what the device last played, so the render after it starts up to a
+    /// kernel's reach and a quantum ahead, and the output glides there from the frame last
+    /// played instead of stepping.
+    declick: Declick,
 }
 
 /// Where one device frame's kernel reads: the polyphase row pair for its sub-phase (rows
@@ -543,6 +549,7 @@ impl OutResampler {
             max_block,
             flush_gen,
             played_acc: 0.0,
+            declick: Declick::default(),
         };
         r.reset_stream();
         r
@@ -617,6 +624,9 @@ impl OutResampler {
             let unconsumed = (content_end - self.consumed_floor).max(0);
             self.rt.transport().advance_consumed(unconsumed as u64);
             self.reset_stream();
+            if self.rt.transport().declick_enabled() {
+                self.declick.begin(DECLICK_FRAMES);
+            }
         }
         let mut done = 0;
         while done < out_frames {
@@ -651,6 +661,8 @@ impl OutResampler {
                 self.step,
                 &mut out[done * CHANNELS..(done + chunk) * CHANNELS],
             );
+            self.declick
+                .apply(&mut out[done * CHANNELS..(done + chunk) * CHANNELS], chunk);
             // Consumed cursor: the read position's integer progression over CONTENT
             // frames — identical semantics to the linear kernel, so every transport
             // test holds unchanged.
@@ -6343,9 +6355,47 @@ mod out_resampler_tests {
         let g = desc.compile(ENGINE_SR, BLOCK).unwrap();
         let (_mic_prod, mic_cons) = spsc::<[Smp; CHANNELS]>(256);
         let (h, rt) = spawn(g, HashMap::new(), mic_cons, 256);
+        // These tests read the audio right at each transport move, which the declick turns
+        // into a crossfade (it has its own test below).
+        h.set_declick(false);
         let cell = RtCell::new(rt);
         let res = OutResampler::new(44_100.0, BLOCK, Arc::clone(&cell), cell.claim());
         (h, res)
+    }
+
+    /// A seek or a pause drops what the FIFO had rendered ahead of the device, so the render
+    /// after it starts past the frame last played: the output glides there instead of
+    /// stepping.
+    #[test]
+    fn a_flush_glides_from_the_frame_last_played() {
+        let (h, mut res) = ramp_engine();
+        h.set_declick(true);
+        h.play();
+        let mut out = vec![0.0; 441 * CHANNELS];
+        let mut all = Vec::new();
+        for _ in 0..4 {
+            res.process(&mut out, 441);
+            all.extend_from_slice(&out);
+        }
+        h.seek(0); // mid-ramp (~0.19) back to its start
+        for _ in 0..2 {
+            res.process(&mut out, 441);
+            all.extend_from_slice(&out);
+        }
+        h.pause();
+        for _ in 0..2 {
+            res.process(&mut out, 441);
+            all.extend_from_slice(&out);
+        }
+        // Past the opening fade-in, the ramp moves ~1.1e-4 a device frame; the seek's jump
+        // and the pause's drop to silence each stepped by tenths.
+        let worst = all[300 * CHANNELS..]
+            .chunks(CHANNELS)
+            .zip(all[301 * CHANNELS..].chunks(CHANNELS))
+            .map(|(a, b)| (b[0] - a[0]).abs())
+            .fold(0.0f32, f32::max);
+        assert!(worst < 3e-3, "the output stepped by {worst}");
+        assert!(all[all.len() - 1].abs() < 1e-6, "paused: silence");
     }
 
     /// A small device buffer renders about what it plays, never a whole engine block when the

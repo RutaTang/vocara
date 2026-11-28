@@ -10,6 +10,7 @@ pub mod aec;
 pub mod build;
 pub mod capture_layout;
 pub mod command;
+pub mod declick;
 pub mod engine;
 pub mod feed;
 pub mod graph;
