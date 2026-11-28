@@ -566,6 +566,34 @@ impl Node for EqNode {
             band.reset();
         }
     }
+
+    /// Each band's filter history carries (a fresh one restarted every EQ'd track from zero
+    /// state, a click); the coefficients stay this node's. A band mid cross-fade hands over
+    /// the history of the filter it was fading to, the one that carries its setting.
+    fn carry_state(&mut self, old: &mut dyn Node) {
+        let Some(old) = crate::node::same_kind::<EqNode>(old) else {
+            return;
+        };
+        if old.sr != self.sr || old.bands.len() != self.bands.len() {
+            return;
+        }
+        for (b, o) in self.bands.iter_mut().zip(&old.bands) {
+            let (l, r) = if o.xfading {
+                (&o.ln, &o.rn)
+            } else {
+                (&o.l, &o.r)
+            };
+            b.l.set_history(l.history());
+            b.r.set_history(r.history());
+            b.ln.set_history(l.history());
+            b.rn.set_history(r.history());
+        }
+        self.heard = old.heard;
+    }
+
+    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
+        Some(self)
+    }
 }
 
 #[cfg(test)]

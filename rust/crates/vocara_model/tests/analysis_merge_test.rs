@@ -165,7 +165,7 @@ fn a_gap_between_clips_becomes_nan_inactive_frames() {
 }
 
 #[test]
-fn overlapping_clips_the_later_starting_clip_wins_tails_survive() {
+fn overlapping_clips_the_clip_stacked_above_wins_tails_survive() {
     let a = m(&[1.0, 2.0, 3.0, 4.0, 5.0], &[1, 1, 1, 1, 1]).build();
     let b = m(&[9.0, 9.0], &[0, 0]).build();
     // b overlaps a's frames 1–2; a's tail (frames 3–4) stays visible.
@@ -178,13 +178,16 @@ fn overlapping_clips_the_later_starting_clip_wins_tails_survive() {
 }
 
 #[test]
-fn placement_follows_offsets_not_input_order() {
+fn the_lanes_later_clip_wins_wherever_it_starts() {
+    // As playback hears it: the clip stacked above (the lane's later one) is the one
+    // sounding, even where it starts before the clip it covers.
     let a = m(&[1.0, 2.0, 3.0, 4.0, 5.0], &[1, 1, 1, 1, 1]).build();
     let b = m(&[9.0, 9.0], &[0, 0]).build();
-    let in_order = merge_voice_metrics(&[m_at(0, &a), m_at(100, &b)]).unwrap();
-    let reversed = merge_voice_metrics(&[m_at(100, &b), m_at(0, &a)]).unwrap();
-    assert_eq!(reversed.ring, in_order.ring);
-    assert_eq!(reversed.active, in_order.active);
+    let over = merge_voice_metrics(&[m_at(100, &b), m_at(0, &a)]).unwrap();
+    assert_eq!(over.ring, [1.0, 2.0, 3.0, 4.0, 5.0]);
+    assert_eq!(over.active, [1, 1, 1, 1, 1]);
+    let under = merge_voice_metrics(&[m_at(0, &a), m_at(100, &b)]).unwrap();
+    assert_eq!(under.ring, [1.0, 9.0, 9.0, 4.0, 5.0]);
 }
 
 #[test]
@@ -374,16 +377,16 @@ fn a_gap_between_clips_becomes_floor_columns() {
 }
 
 #[test]
-fn overlapping_spectrograms_the_later_starting_clip_wins() {
+fn overlapping_spectrograms_the_clip_stacked_above_wins() {
     let a = spec(&[1.0, 2.0, 3.0, 4.0], 2, 0.0, 5.0, 2);
     let b = spec(&[9.0, 9.0], 1, 0.0, 9.0, 2);
     // b lands on a's frame 1.
     let s = merge_spectrograms(&[s_at(0, &a), s_at(100, &b)]).unwrap();
     assert_eq!(s.frames, 2);
     assert_eq!(s.db, [1.0, 2.0, 9.0, 9.0]);
-    // And placement follows offsets, not input order.
+    // Stacked under a (earlier in the lane), b is covered where they overlap.
     let r = merge_spectrograms(&[s_at(100, &b), s_at(0, &a)]).unwrap();
-    assert_eq!(r.db, [1.0, 2.0, 9.0, 9.0]);
+    assert_eq!(r.db, [1.0, 2.0, 3.0, 4.0]);
 }
 
 #[test]

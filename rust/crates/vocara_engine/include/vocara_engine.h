@@ -126,7 +126,8 @@ int ve_set_input_channel(VeEngine *e, uint32_t mode);
 uint32_t ve_input_device_channels(const char *uid);
 /* Set the monitor reverb (room / damping / wet, each 0..1). 0 = ok. */
 int ve_set_monitor_reverb(VeEngine *e, float room, float damping, float wet);
-/* Current live-input peak level (0..1) for a meter; 0 when not capturing. */
+/* Live-input peak level (0..1) for a meter: the loudest sample since the previous call, which
+ * clears it; 0 when not capturing. */
 float ve_input_level(VeEngine *e);
 /* Diagnostic + pre-roll clock: total ENGINE-RATE (48 kHz, post-resample) frames the mic
  * callback has emitted (0 = mic delivering nothing). Engine-rate on purpose: callers divide
@@ -231,6 +232,16 @@ int ve_bus_chain(VeEngine *e, int bus, const uint8_t *tags, size_t n);
  * insert chain, fader, pan and sends); per-track setters on `track` then address the leader's
  * chain. Stage after add, before commit. */
 int ve_track_lane(VeEngine *e, int track, int leader);
+/* Play only part of staged `track`'s file: from `src_offset_ms` into it, `len_ms` long (< 0: to
+ * its end), the edges named by `fades` (VE_SPAN_FADE_IN | VE_SPAN_FADE_OUT) faded. A clip below
+ * another on its lane is staged as the stretches of it that are heard. Before commit. */
+#define VE_SPAN_FADE_IN 1u
+#define VE_SPAN_FADE_OUT 2u
+int ve_track_span(VeEngine *e, int track, int64_t src_offset_ms, int64_t len_ms, uint32_t fades);
+/* Name the lane staged `track` plays (or staged bus `bus`) by a key kept from commit to commit:
+ * its nodes keep their ids, and their effect state carries over the rebuild. Before commit. */
+int ve_track_key(VeEngine *e, int track, uint64_t key);
+int ve_bus_key(VeEngine *e, int bus, uint64_t key);
 /* Post-fader aux sends: parallel target-bus-index + level-dB arrays. Stage before commit;
  * change a level live with ve_set_send_level. */
 int ve_track_sends(VeEngine *e, int track, const int32_t *targets, const float *levels_db, size_t n);

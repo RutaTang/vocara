@@ -18,11 +18,16 @@ use std::time::Instant;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
 use crate::capture_layout::{InputChannelMix, INPUT_CHANNEL_AUTO};
+use crate::declick::{Declick, DECLICK_FRAMES};
 use crate::diag::{self, SyncOutcome};
 use crate::input_health::{Change, InputHealth, HEALTH_TICK};
 use crate::live::{RtCell, Shared};
 use crate::ring::{Consumer, Producer};
 use crate::sample::{Smp, CHANNELS, ENGINE_SR};
+use crate::sinc::{
+    build_sinc_table, InputRateConverter, MAX_FRAMES_PER_INPUT, SINC_HALF, SINC_OVERSAMPLE,
+    SINC_TAPS,
+};
 
 /// `ve_poll_device_event` bit: the active output device was lost (stream error / disconnect).
 pub const EVENT_OUTPUT_LOST: u32 = 1;
@@ -427,59 +432,11 @@ struct OutResampler {
     /// for the output clock ([`Shared::count_played`]). Kept across flushes: resetting it
     /// with `pos` lost up to a frame per seek, a bias the drift estimator read as drift.
     played_acc: f64,
-}
-
-/// Kernel width in engine frames. 64 taps at 256x table resolution yields ~70 dB stopband
-/// with a passband flat well past 20 kHz — far beyond the linear kernel — at 64 MACs per
-/// output frame (~2.8 M MAC/s at 44.1 kHz: negligible).
-const SINC_TAPS: usize = 64;
-const SINC_HALF: usize = SINC_TAPS / 2;
-const SINC_OVERSAMPLE: usize = 256;
-
-/// Builds the polyphase table for [step] (engine frames per output frame): row `r` holds
-/// the windowed-sinc weights for sub-phase `r / OVERSAMPLE`, cutoff scaled below the
-/// output Nyquist when downsampling (step > 1), each row normalized to unity DC so the
-/// converter has exactly 0 dB gain at every phase.
-fn build_sinc_table(step: f64) -> Vec<f32> {
-    let fc = if step > 1.0 { 0.92 / step } else { 0.92 };
-    let mut table = vec![0.0f32; (SINC_OVERSAMPLE + 1) * SINC_TAPS];
-    for r in 0..=SINC_OVERSAMPLE {
-        let frac = r as f64 / SINC_OVERSAMPLE as f64;
-        let mut sum = 0.0f64;
-        for k in 0..SINC_TAPS {
-            // Contribution of content index floor(pos) - (HALF-1) + k at offset x from pos.
-            let x = k as f64 - (SINC_HALF as f64 - 1.0) - frac;
-            // At x = 0 the scaled sinc's limit is `fc`, not 1: the centre tap of the phase-0
-            // row stood fc⁻¹ times too tall, and the row's unity-DC normalization then
-            // squashed every other tap under it — that row all but passed its input through
-            // unfiltered, and a downsampling device (a 16-32 kHz call-profile output) heard
-            // the engine's top octave folded down, 8-14 dB under the signal.
-            let sinc = if x.abs() < 1e-12 {
-                fc
-            } else {
-                let px = std::f64::consts::PI * fc * x;
-                px.sin() / px * fc
-            };
-            // Blackman window over the kernel span.
-            let w = {
-                let t = (x + SINC_HALF as f64) / (SINC_TAPS as f64);
-                let t = t.clamp(0.0, 1.0);
-                0.42 - 0.5 * (2.0 * std::f64::consts::PI * t).cos()
-                    + 0.08 * (4.0 * std::f64::consts::PI * t).cos()
-            };
-            let v = sinc * w;
-            table[r * SINC_TAPS + k] = v as f32;
-            sum += v;
-        }
-        // Unity DC per row: without this the gain ripples with the sub-phase.
-        if sum.abs() > 1e-12 {
-            let inv = (1.0 / sum) as f32;
-            for k in 0..SINC_TAPS {
-                table[r * SINC_TAPS + k] *= inv;
-            }
-        }
-    }
-    table
+    /// The crossfade across a flush (see [`crate::declick`]): what the FIFO dropped was the
+    /// continuation of what the device last played, so the render after it starts up to a
+    /// kernel's reach and a quantum ahead, and the output glides there from the frame last
+    /// played instead of stepping.
+    declick: Declick,
 }
 
 /// Where one device frame's kernel reads: the polyphase row pair for its sub-phase (rows
@@ -595,6 +552,7 @@ impl OutResampler {
             max_block,
             flush_gen,
             played_acc: 0.0,
+            declick: Declick::default(),
         };
         r.reset_stream();
         r
@@ -669,6 +627,9 @@ impl OutResampler {
             let unconsumed = (content_end - self.consumed_floor).max(0);
             self.rt.transport().advance_consumed(unconsumed as u64);
             self.reset_stream();
+            if self.rt.transport().declick_enabled() {
+                self.declick.begin(DECLICK_FRAMES);
+            }
         }
         let mut done = 0;
         while done < out_frames {
@@ -703,6 +664,8 @@ impl OutResampler {
                 self.step,
                 &mut out[done * CHANNELS..(done + chunk) * CHANNELS],
             );
+            self.declick
+                .apply(&mut out[done * CHANNELS..(done + chunk) * CHANNELS], chunk);
             // Consumed cursor: the read position's integer progression over CONTENT
             // frames — identical semantics to the linear kernel, so every transport
             // test holds unchanged.
@@ -1237,9 +1200,9 @@ struct InputState {
     /// The device's channels to the ONE mono mic signal (under [`InputCell::channel_mode`]),
     /// carried on both stereo lanes, so the monitor, meter and take hear the chosen input centred.
     mix: InputChannelMix,
-    /// Push-based linear resampler: input-position advance per engine output frame
-    /// (`in_rate / ENGINE_SR`). `1.0` → identity passthrough.
-    step: f64,
+    /// The device rate to `ENGINE_SR`: identity at the engine rate, the windowed-sinc kernel
+    /// for any other (see [`InputRateConverter`]).
+    conv: InputRateConverter,
     /// CLOCK-DRIFT ratio (f64 bits; 1.0 = no correction), published by the
     /// control-side [`DriftEstimator`]: the measured input-clock rate over
     /// the output-clock rate. The effective step is `step * ratio`, so the
@@ -1248,10 +1211,8 @@ struct InputState {
     /// of the backing over a long recording. Exactly 1.0 (the estimator's
     /// deadband) keeps the 48 kHz identity fast path.
     drift_ratio_bits: Arc<AtomicU64>,
-    pos: f64,
-    prev: [Smp; CHANNELS],
-    primed: bool,
-    /// Input peak level (f32 bits) for the meter — read by the FFI thread.
+    /// Input peak (f32 bits) for the meter, held since the FFI thread last took it (see
+    /// [`crate::meter`]).
     level: Arc<AtomicU32>,
     /// Total ENGINE-RATE (48 kHz, post-resample) frames the callback has emitted — both the
     /// "is the mic delivering?" diagnostic and the clock the take pre-roll measurement
@@ -1344,11 +1305,8 @@ impl InputCell {
                 rec_active,
                 in_channels: 1,
                 mix: InputChannelMix::new(ENGINE_SR),
-                step: 1.0,
+                conv: InputRateConverter::new(ENGINE_SR, ENGINE_SR),
                 drift_ratio_bits,
-                pos: 0.0,
-                prev: [0.0, 0.0],
-                primed: false,
                 level,
                 frames_in: Arc::clone(&frames_in),
                 rec_dropped,
@@ -1506,6 +1464,9 @@ impl InputCell {
     /// teardown is denied instead of having its samples decoded under a format it never
     /// delivered (e.g. a 24 kHz unit's frames emitted 1:1 as 48 kHz).
     pub fn reconfigure(&self, in_rate: f64, in_channels: usize) -> u64 {
+        // The converter's kernel table is built before the cell is taken, so no callback
+        // waits on the allocation.
+        let conv = InputRateConverter::new(in_rate, ENGINE_SR);
         // Retire first: once the owner moves, no older generation can enter.
         let epoch = self.claim();
         // A retired callback may still be INSIDE `feed` (it entered before the owner moved).
@@ -1517,15 +1478,15 @@ impl InputCell {
         let st = unsafe { &mut *self.state.get() };
         st.in_channels = in_channels.max(1);
         st.mix = InputChannelMix::new(in_rate);
-        st.step = in_rate / ENGINE_SR;
-        st.pos = 0.0;
-        st.primed = false;
-        st.prev = [0.0, 0.0];
+        // The previous stream's converter (and its table) is freed after the cell is let go.
+        let old_conv = std::mem::replace(&mut st.conv, conv);
         st.nominal_acc = 0.0;
         // The meter holds the previous session's last peak until a callback overwrites it,
         // and the new stream's first callback can be hundreds of ms away (a VPIO open): the
         // next take's live waveform and the mic meter started on that stale peak.
         st.level.store(0, Ordering::Relaxed);
+        drop(_g);
+        drop(old_conv);
         epoch
     }
 
@@ -1585,14 +1546,13 @@ impl InputCell {
         // of the input crystal's nominal rate. Ratio 1.0 (the deadband)
         // preserves the identity fast path bit-for-bit.
         let ratio = f64::from_bits(st.drift_ratio_bits.load(Ordering::Relaxed));
-        let step = st.step * ratio;
-        let identity = (step - 1.0).abs() < 1e-9;
         let mut peak = 0.0f32;
         // Counted in EMITTED (post-resample, ENGINE_SR) frames, not raw device frames:
         // consumers convert this counter to time by dividing by the engine rate (take
         // pre-roll measurement), so a device-rate count would skew every derived duration
         // whenever the input's native rate is not 48 kHz.
         let mut emitted: u64 = 0;
+        let mut conv = [[0.0f32; CHANNELS]; MAX_FRAMES_PER_INPUT];
         for fi in 0..frames {
             let base = fi * ch;
             // Inputs 1 and 2 used to travel as left and right, and the writer keeps the left: a
@@ -1601,62 +1561,30 @@ impl InputCell {
             // Lane 0 the take, lane 1 the monitor. A one-sample frame is the mix's garbage guard
             // alone (it keeps no state for one channel), so the monitor is guarded alike.
             let mon = monitor.map_or(m, |mo| st.mix.mix(mode, &mo[fi..fi + 1]) * gain);
-            let (l, r) = (m, mon);
             peak = peak.max(m.abs());
-            if identity {
-                st.emit([l, r], cap, rec);
-                emitted += 1;
-                // Keep the resampler's state coherent while the fast path owns
-                // the stream. The drift estimator publishes EXACTLY 1.0 inside
-                // its ±2 ppm deadband, so a chain hovering near that edge
-                // crosses back and forth; leaving `prev` behind meant the first
-                // interpolation after a crossing blended the current sample
-                // with one from an arbitrarily older callback — a single-sample
-                // step out of nowhere, i.e. a click.
-                //
-                // The phase left behind is 1.0, not 0.0: positions in the
-                // interpolating branch are measured from `prev`, this sample
-                // has just been emitted in full, and the next output is due one
-                // whole input later — exactly `prev + 1`. Leaving 0.0 would
-                // re-emit the sample identity just sent (a duplicate), and the
-                // stale value left before this fix was worse still.
-                st.prev = [l, r];
-                st.primed = true;
-                st.pos = 1.0;
-            } else {
-                if !st.primed {
-                    st.prev = [l, r];
-                    st.primed = true;
-                    continue;
-                }
-                let cur = [l, r];
-                while st.pos < 1.0 {
-                    let t = st.pos as f32;
-                    let f = [
-                        st.prev[0] + (cur[0] - st.prev[0]) * t,
-                        st.prev[1] + (cur[1] - st.prev[1]) * t,
-                    ];
-                    st.emit(f, cap, rec);
-                    emitted += 1;
-                    st.pos += step;
-                }
-                st.pos -= 1.0;
-                st.prev = cur;
+            // Both lanes through the one converter, at the same positions.
+            let n = st.conv.convert([m, mon], ratio, &mut conv);
+            for &f in &conv[..n] {
+                st.emit(f, cap, rec);
             }
+            emitted += n as u64;
         }
         st.frames_in.fetch_add(emitted, Ordering::Relaxed);
         // The estimator's signal: engine-rate frames at the NOMINAL step,
         // untouched by the published ratio (see nominal_frames_in). Carried
         // fractionally so non-integer steps lose nothing across callbacks.
-        st.nominal_acc += frames as f64 / st.step;
-        self.quantum
-            .fetch_max((frames as f64 / st.step).ceil() as u64, Ordering::Relaxed);
+        let nominal_step = st.conv.step();
+        st.nominal_acc += frames as f64 / nominal_step;
+        self.quantum.fetch_max(
+            (frames as f64 / nominal_step).ceil() as u64,
+            Ordering::Relaxed,
+        );
         let whole = st.nominal_acc as u64;
         if whole > 0 {
             st.nominal_frames_in.fetch_add(whole, Ordering::Relaxed);
             st.nominal_acc -= whole as f64;
         }
-        st.level.store(peak.to_bits(), Ordering::Relaxed);
+        crate::meter::raise_peak(&st.level, peak);
     }
 }
 
@@ -3707,6 +3635,20 @@ fn mic_release_requested(h: Option<&MicHandle>) -> bool {
     h.is_some_and(|v| v.release_requested())
 }
 /// The cpal input stream shares nothing with another engine's.
+/// Measure the record round trip on a mic stream that has just delivered its first frames, and
+/// publish it for the takes' alignment (see `Vpio::measure_latency`): what the open read before
+/// the unit ran is only an estimate. `None` where nothing is measured (the cpal input path
+/// publishes no round trip).
+#[cfg(target_vendor = "apple")]
+fn measure_mic_latency(h: Option<&MicHandle>) -> Option<u32> {
+    h.map(|m| m.measure_latency())
+}
+
+#[cfg(not(target_vendor = "apple"))]
+fn measure_mic_latency(_h: Option<&MicHandle>) -> Option<u32> {
+    None
+}
+
 #[cfg(not(target_vendor = "apple"))]
 fn mic_release_requested(_h: Option<&MicHandle>) -> bool {
     false
@@ -3843,6 +3785,19 @@ fn audio_host_run(
         });
         built
     };
+    // The record round trip measured on a stream that has just delivered (see
+    // `measure_mic_latency`), logged.
+    let note_latency = |gen: u64, frames: Option<u32>| {
+        if let Some(f) = frames {
+            diag::note(
+                tag,
+                &format!(
+                    "input stream gen {gen}: record round trip {f} frames ({:.1} ms), measured on the running unit",
+                    f as f64 * 1000.0 / ENGINE_SR
+                ),
+            );
+        }
+    };
     // A change in the open stream's delivery, logged once (see `input_health`).
     let log_health = |gen: u64, change: Option<Change>, open_for: Option<std::time::Duration>| {
         let line = match change {
@@ -3926,6 +3881,9 @@ fn audio_host_run(
                     let now = Instant::now();
                     let change = health.observe(input_cell.frames_in(), input_cell.is_dead(), now);
                     log_health(gen, change, health.open_for(now));
+                    if change == Some(Change::FirstFrames) {
+                        note_latency(gen, measure_mic_latency(in_stream.as_ref()));
+                    }
                     // Another engine opened the mic and asked for it: VoiceProcessingIO is one
                     // per process, so keeping it would keep that one from delivering. Release it
                     // as a lost input (this engine's owners tear their consumers down); the next
@@ -4051,6 +4009,9 @@ fn audio_host_run(
                     let dead = input_cell.take_dead();
                     let change = health.observe(input_cell.frames_in(), dead, now);
                     log_health(gen, change, health.open_for(now));
+                    if change == Some(Change::FirstFrames) {
+                        note_latency(gen, measure_mic_latency(in_stream.as_ref()));
+                    }
                     // Compared as the state word's consumers read it: 24 bits, like the
                     // generation the applied pair carries.
                     let asked = reopen_gen.is_some_and(|g| g & 0xFF_FFFF == gen & 0xFF_FFFF);
@@ -6820,9 +6781,47 @@ mod out_resampler_tests {
         let g = desc.compile(ENGINE_SR, BLOCK).unwrap();
         let (_mic_prod, mic_cons) = spsc::<[Smp; CHANNELS]>(256);
         let (h, rt) = spawn(g, HashMap::new(), mic_cons, 256);
+        // These tests read the audio right at each transport move, which the declick turns
+        // into a crossfade (it has its own test below).
+        h.set_declick(false);
         let cell = RtCell::new(rt);
         let res = OutResampler::new(44_100.0, BLOCK, Arc::clone(&cell), cell.claim());
         (h, res)
+    }
+
+    /// A seek or a pause drops what the FIFO had rendered ahead of the device, so the render
+    /// after it starts past the frame last played: the output glides there instead of
+    /// stepping.
+    #[test]
+    fn a_flush_glides_from_the_frame_last_played() {
+        let (h, mut res) = ramp_engine();
+        h.set_declick(true);
+        h.play();
+        let mut out = vec![0.0; 441 * CHANNELS];
+        let mut all = Vec::new();
+        for _ in 0..4 {
+            res.process(&mut out, 441);
+            all.extend_from_slice(&out);
+        }
+        h.seek(0); // mid-ramp (~0.19) back to its start
+        for _ in 0..2 {
+            res.process(&mut out, 441);
+            all.extend_from_slice(&out);
+        }
+        h.pause();
+        for _ in 0..2 {
+            res.process(&mut out, 441);
+            all.extend_from_slice(&out);
+        }
+        // Past the opening fade-in, the ramp moves ~1.1e-4 a device frame; the seek's jump
+        // and the pause's drop to silence each stepped by tenths.
+        let worst = all[300 * CHANNELS..]
+            .chunks(CHANNELS)
+            .zip(all[301 * CHANNELS..].chunks(CHANNELS))
+            .map(|(a, b)| (b[0] - a[0]).abs())
+            .fold(0.0f32, f32::max);
+        assert!(worst < 3e-3, "the output stepped by {worst}");
+        assert!(all[all.len() - 1].abs() < 1e-6, "paused: silence");
     }
 
     /// A small device buffer renders about what it plays, never a whole engine block when the
@@ -7981,9 +7980,9 @@ mod cell_exclusion_tests {
             let expect_step = rate / crate::sample::ENGINE_SR;
             assert_eq!(st.in_channels, ch, "channels torn at iteration {i}");
             assert!(
-                (st.step - expect_step).abs() < 1e-12,
+                (st.conv.step() - expect_step).abs() < 1e-12,
                 "step torn at iteration {i}: {} vs {expect_step}",
-                st.step
+                st.conv.step()
             );
             drop(g);
         }

@@ -494,6 +494,26 @@ impl EngineBindings for NativeEngine {
         self.status("ve_track_lane", |e| ffi::ve_track_lane(e, track, leader))
     }
 
+    fn track_span(
+        &self,
+        track: i32,
+        src_offset_ms: i64,
+        len_ms: i64,
+        fades: u32,
+    ) -> Result<(), EngineError> {
+        self.status("ve_track_span", |e| {
+            ffi::ve_track_span(e, track, src_offset_ms, len_ms, fades)
+        })
+    }
+
+    fn track_key(&self, track: i32, key: u64) -> Result<(), EngineError> {
+        self.status("ve_track_key", |e| ffi::ve_track_key(e, track, key))
+    }
+
+    fn bus_key(&self, bus: i32, key: u64) -> Result<(), EngineError> {
+        self.status("ve_bus_key", |e| ffi::ve_bus_key(e, bus, key))
+    }
+
     fn bus_chain(&self, bus: i32, tags: &[u8]) -> Result<(), EngineError> {
         // SAFETY: as for `track_chain`.
         self.status("ve_bus_chain", |e| {

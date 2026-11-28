@@ -157,8 +157,9 @@ pub trait EngineBindings: Send + Sync {
         unexpected("ve_set_monitor_reverb")
     }
 
-    /// The live input's peak level, 0..1, for a meter; 0 when not capturing
-    /// (`ve_input_level`).
+    /// The live input's peak level, 0..1, for a meter: the loudest sample
+    /// since the previous call, which clears it, so a 50 ms poll misses no
+    /// buffer's peak; 0 when not capturing (`ve_input_level`).
     fn input_level(&self) -> f32 {
         unexpected("ve_input_level")
     }
@@ -431,6 +432,39 @@ pub trait EngineBindings: Send + Sync {
     fn track_lane(&self, track: i32, leader: i32) -> Result<(), EngineError> {
         let _ = (track, leader);
         unexpected("ve_track_lane")
+    }
+
+    /// Plays only part of staged `track`'s file (`ve_track_span`): from
+    /// `src_offset_ms` into it, `len_ms` long (a negative `len_ms`: to its
+    /// end), the edges `fades` names faded (bit 0 the start, bit 1 the end).
+    /// Before commit. A fake that does not model it takes it as a no-op.
+    fn track_span(
+        &self,
+        track: i32,
+        src_offset_ms: i64,
+        len_ms: i64,
+        fades: u32,
+    ) -> Result<(), EngineError> {
+        let _ = (track, src_offset_ms, len_ms, fades);
+        Ok(())
+    }
+
+    /// Names the lane staged `track` plays by a key kept from sync to sync
+    /// (`ve_track_key`): the lane's chain keeps its node ids, so its effects
+    /// carry their tails and histories across the rebuild. Before commit. It
+    /// shapes what the commit carries over, not whether it succeeds, so a fake
+    /// that does not model it takes it as a no-op.
+    fn track_key(&self, track: i32, key: u64) -> Result<(), EngineError> {
+        let _ = (track, key);
+        Ok(())
+    }
+
+    /// Names staged FX bus `bus` by a key kept from sync to sync
+    /// (`ve_bus_key`; see [`EngineBindings::track_key`]). A no-op in a fake
+    /// that does not model it.
+    fn bus_key(&self, bus: i32, key: u64) -> Result<(), EngineError> {
+        let _ = (bus, key);
+        Ok(())
     }
 
     /// A staged bus's insert-chain order (`ve_bus_chain`).

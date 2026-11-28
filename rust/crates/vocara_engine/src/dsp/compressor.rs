@@ -134,6 +134,19 @@ impl Node for CompressorNode {
         self.clear_meter();
     }
 
+    /// The gain reduction carries: a fresh envelope released the compressor fully at every
+    /// rebuild, the level jumping up and clamping back down over the attack.
+    fn carry_state(&mut self, old: &mut dyn Node) {
+        if let Some(old) = crate::node::same_kind::<CompressorNode>(old) {
+            self.env_db = old.env_db;
+            self.gr_meter = old.gr_meter;
+        }
+    }
+
+    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
+        Some(self)
+    }
+
     fn process(&mut self, io: &mut ProcessIo) {
         let frames = io.frames;
         let n = frames * CHANNELS;

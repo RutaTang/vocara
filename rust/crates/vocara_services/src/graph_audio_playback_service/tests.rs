@@ -68,6 +68,10 @@ struct FakeState {
     input_channels: Vec<u32>,
     /// Every `track_lane` call as (track, leader), in call order.
     lanes: Vec<(i32, i32)>,
+    /// Every `track_key` call as (track, key), in call order.
+    keys: Vec<(i32, u64)>,
+    /// Every `track_span` call as (track, offset, length, fades), in call order.
+    spans: Vec<(i32, i64, i64, u32)>,
     /// Makes `commit_degraded_mask` panic (something failing after a commit).
     panic_on_degraded_mask: bool,
     live: BTreeMap<i32, (f32, bool)>,
@@ -193,6 +197,22 @@ impl EngineBindings for Fake {
 
     fn track_lane(&self, track: i32, leader: i32) -> Result<(), EngineError> {
         self.s().lanes.push((track, leader));
+        Ok(())
+    }
+
+    fn track_key(&self, track: i32, key: u64) -> Result<(), EngineError> {
+        self.s().keys.push((track, key));
+        Ok(())
+    }
+
+    fn track_span(
+        &self,
+        track: i32,
+        src_offset_ms: i64,
+        len_ms: i64,
+        fades: u32,
+    ) -> Result<(), EngineError> {
+        self.s().spans.push((track, src_offset_ms, len_ms, fades));
         Ok(())
     }
 
@@ -589,6 +609,84 @@ fn a_lanes_later_clips_play_through_its_first_clips_chain() {
     )
     .unwrap();
     assert_eq!(fake.s().lanes, [(2, 0), (3, 0)]);
+}
+
+#[test]
+fn a_clip_cut_by_one_above_it_stages_just_the_part_heard() {
+    // A take 0-60 s with a phrase re-sung over 20-30 s: the take plays as its
+    // two stretches either side, the second from 30 s into its file, each
+    // fading where the phrase cuts in or lets go.
+    let fake = Fake::new();
+    let svc = service(&fake, instant());
+    let before = TrackPlayback {
+        duration_ms: 20_000,
+        fade_out: true,
+        ..in_lane("take", "take.wav", 0, "lane")
+    };
+    let phrase = TrackPlayback {
+        duration_ms: 10_000,
+        ..in_lane("phrase", "phrase.wav", 20_000, "lane")
+    };
+    let after = TrackPlayback {
+        duration_ms: 30_000,
+        src_offset_ms: 30_000,
+        fade_in: true,
+        ..in_lane("take#1", "take.wav", 30_000, "lane")
+    };
+    svc.sync_checked(vec![before.clone(), phrase.clone(), after.clone()], vec![])
+        .unwrap();
+    assert_eq!(fake.s().spans, [(0, 0, 20_000, 2), (2, 30_000, -1, 1)]);
+
+    // The phrase moved later: the take's stretches move with it.
+    let moved = vec![
+        TrackPlayback {
+            duration_ms: 25_000,
+            ..before
+        },
+        TrackPlayback {
+            start_ms: 25_000,
+            ..phrase
+        },
+        TrackPlayback {
+            start_ms: 35_000,
+            duration_ms: 25_000,
+            src_offset_ms: 35_000,
+            ..after
+        },
+    ];
+    svc.sync_checked(moved, vec![]).unwrap();
+    assert_eq!(fake.s().commits.len(), 2);
+    assert_eq!(fake.s().spans[2..], [(0, 0, 25_000, 2), (2, 35_000, -1, 1)]);
+}
+
+#[test]
+fn each_staged_clip_names_its_lane_by_a_key_that_survives_a_renumbering() {
+    // The engine keeps a lane's chain (and the state of its effects) across a
+    // rebuild by this key; the staged index moves whenever an earlier lane
+    // gains or loses a clip.
+    let fake = Fake::new();
+    let svc = service(&fake, instant());
+    let a1 = in_lane("a1", "a1.wav", 0, "lane-a");
+    let b1 = in_lane("b1", "b1.wav", 0, "lane-b");
+    svc.sync_checked(vec![a1.clone(), b1.clone()], vec![])
+        .unwrap();
+    let first = std::mem::take(&mut fake.s().keys);
+    svc.sync_checked(
+        vec![a1, in_lane("a2", "a2.wav", 9000, "lane-a"), b1],
+        vec![],
+    )
+    .unwrap();
+    let second = fake.s().keys.clone();
+    assert_eq!(first.len(), 2);
+    assert_eq!(second.len(), 3);
+    assert_ne!(first[0].1, first[1].1, "two lanes, two keys");
+    assert_eq!((second[0].0, second[0].1), (0, first[0].1));
+    assert_eq!(second[1].1, first[0].1, "a lane's clips share its key");
+    assert_eq!(
+        (second[2].0, second[2].1),
+        (2, first[1].1),
+        "lane B, moved from 1 to 2"
+    );
 }
 
 #[test]

@@ -10,12 +10,14 @@ pub mod aec;
 pub mod build;
 pub mod capture_layout;
 pub mod command;
+pub mod declick;
 // The mic's diagnostics lines, queued for the host app's log (`ve_take_diagnostic`).
 pub mod diag;
 pub mod engine;
 pub mod feed;
 pub mod graph;
 pub mod graph_cell;
+pub mod latency;
 // Whether an open mic stream still delivers (the host's reopen decision).
 pub mod input_health;
 // The device IO buffer sizes a mic open changes, and their restore.
@@ -23,10 +25,12 @@ pub mod io_buffer;
 pub mod live;
 // The pre-decode file screen: no external crates, so it builds and tests without `device`.
 pub mod media_screen;
+pub mod meter;
 pub mod node;
 pub mod ring;
 pub mod ring_sync;
 pub mod sample;
+pub mod sinc;
 pub mod source;
 pub mod wav;
 

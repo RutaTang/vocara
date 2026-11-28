@@ -6,6 +6,7 @@
 //! acyclic.
 
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicPtr, Ordering};
 
 use crate::node::{Node, ProcessIo};
 use crate::sample::{add_into, clear, sum_first, Smp, CHANNELS};
@@ -99,6 +100,13 @@ pub struct Graph {
     max_block: usize,
     /// The command epoch it was published under (see `CommandSender::begin_epoch`).
     epoch: u32,
+    /// The graph this one replaced, whose nodes hand their state over at the first block
+    /// this one renders (see [`Graph::take_carry`]); null once taken, or when there is none.
+    carry_from: AtomicPtr<Graph>,
+    /// Node-id ranges (half-open) whose nodes start fresh even where the replaced graph had
+    /// a node under the same id: ids the build derives from a position that now names
+    /// something else (see [`Graph::start_fresh`]).
+    fresh: Vec<(NodeId, NodeId)>,
 }
 
 impl GraphDesc {
@@ -216,6 +224,8 @@ impl GraphDesc {
             sr,
             max_block,
             epoch: 0,
+            carry_from: AtomicPtr::new(std::ptr::null_mut()),
+            fresh: Vec::new(),
         })
     }
 }
@@ -303,6 +313,37 @@ impl Graph {
         for s in &mut self.schedule {
             s.node.idle();
         }
+    }
+
+    /// Each node takes over the signal state of the node under its id in `old`, the graph this
+    /// one replaces (see [`Node::carry_state`]), but for the ids [`Self::start_fresh`] names.
+    /// Audio thread: a lookup and a swap per node, nothing allocated.
+    pub fn carry_state_from(&mut self, old: &mut Graph) {
+        for s in &mut self.schedule {
+            if self.fresh.iter().any(|&(lo, hi)| (lo..hi).contains(&s.id)) {
+                continue;
+            }
+            if let Some(&j) = old.index.get(&s.id) {
+                s.node.carry_state(old.schedule[j].node.as_mut());
+            }
+        }
+    }
+
+    /// Names ids `lo..hi` as ones whose nodes take nothing over from the graph this one
+    /// replaces. Control thread, before the graph is published.
+    pub fn start_fresh(&mut self, lo: NodeId, hi: NodeId) {
+        self.fresh.push((lo, hi));
+    }
+
+    /// Records `old` as the graph whose state this one takes over (see
+    /// [`Self::carry_state_from`]). Control thread, before the graph is published.
+    pub fn set_carry_from(&mut self, old: *mut Graph) {
+        *self.carry_from.get_mut() = old;
+    }
+
+    /// The graph recorded by [`Self::set_carry_from`], once: null after the first call.
+    pub fn take_carry(&self) -> *mut Graph {
+        self.carry_from.swap(std::ptr::null_mut(), Ordering::AcqRel)
     }
 
     /// Borrow a node mutably by id (tests / metering).

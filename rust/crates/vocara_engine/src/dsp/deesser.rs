@@ -274,6 +274,26 @@ impl Node for DeEsserNode {
         self.fade.settle();
     }
 
+    /// The detector and shelf histories and the sibilance envelope carry, when both sit at
+    /// one corner (a rebuild pushes the setting the old node had; a corner change caught mid
+    /// cross-fade restarts, as before).
+    fn carry_state(&mut self, old: &mut dyn Node) {
+        let Some(old) = crate::node::same_kind::<DeEsserNode>(old) else {
+            return;
+        };
+        if old.sr != self.sr || old.xfading || self.xfading || old.freq != self.freq {
+            return;
+        }
+        self.bank = old.bank;
+        self.env_db = old.env_db;
+        self.red_db = old.red_db;
+        self.heard = old.heard;
+    }
+
+    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
+        Some(self)
+    }
+
     fn process(&mut self, io: &mut ProcessIo) {
         let frames = io.frames;
         let n = frames * CHANNELS;

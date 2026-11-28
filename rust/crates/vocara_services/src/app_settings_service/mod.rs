@@ -114,6 +114,7 @@ const K_INPUT_NAME: &str = "inputDeviceName";
 const K_REVERB_WET: &str = "monitorReverbWet";
 const K_RECORD_GAIN_DB: &str = "recordGainDb";
 const K_MONITOR_GAIN: &str = "monitorGain";
+const K_RECORDING_OFFSET_MS: &str = "recordingOffsetMs";
 const K_INPUT_CHANNELS: &str = "inputChannelByUid";
 const K_HEADPHONE_OUTPUTS: &str = "headphoneOutputUids";
 
@@ -180,6 +181,8 @@ struct State {
     monitor_reverb_wet: f64,
     record_gain_db: f64,
     monitor_gain: f64,
+    /// See [`AppSettingsService::recording_offset_ms`].
+    recording_offset_ms: f64,
     output_devices: Vec<AudioDevice>,
     input_devices: Vec<AudioDevice>,
     engine: Option<Arc<GraphAudioPlaybackService>>,
@@ -257,6 +260,7 @@ impl State {
             monitor_reverb_wet: DEFAULT_MONITOR_REVERB_WET,
             record_gain_db: DEFAULT_RECORD_GAIN_DB,
             monitor_gain: DEFAULT_MONITOR_GAIN,
+            recording_offset_ms: 0.0,
             output_devices: Vec::new(),
             input_devices: Vec::new(),
             engine: None,
@@ -691,6 +695,13 @@ impl State {
                 1.0,
             );
         }
+        if !self.user_chosen.contains(K_RECORDING_OFFSET_MS) {
+            self.recording_offset_ms = clamp_f64(
+                loaded_double(get(K_RECORDING_OFFSET_MS), 0.0),
+                AppSettingsService::RECORDING_OFFSET_MIN_MS,
+                AppSettingsService::RECORDING_OFFSET_MAX_MS,
+            );
+        }
         for (uid, mode) in loaded_channels(get(K_INPUT_CHANNELS)) {
             if !self.input_channels_chosen.contains(&uid) {
                 self.set_channel(&uid, mode);
@@ -732,6 +743,11 @@ impl State {
                     .collect(),
             ),
         );
+        // Not a key Dart wrote: last, after every one it did.
+        doc.insert(
+            K_RECORDING_OFFSET_MS.into(),
+            Value::from(self.recording_offset_ms),
+        );
         doc
     }
 
@@ -748,6 +764,12 @@ impl AppSettingsService {
     /// Record/input gain range (dB) for the mic-input fader.
     pub const RECORD_GAIN_MIN_DB: f64 = 0.0;
     pub const RECORD_GAIN_MAX_DB: f64 = 40.0;
+
+    /// The recording offset's range (ms): wide enough for a Bluetooth
+    /// headset's codec or a speaker across the room, narrow enough that a
+    /// slip of the slider cannot move a take by a beat.
+    pub const RECORDING_OFFSET_MIN_MS: f64 = -250.0;
+    pub const RECORDING_OFFSET_MAX_MS: f64 = 250.0;
 
     /// The settings over `storage`, with the live CoreAudio device queries.
     pub fn new(storage: Arc<dyn SettingsStorage>) -> AppSettingsService {
@@ -935,6 +957,14 @@ impl AppSettingsService {
     /// Monitor (hear-yourself) gain, linear 0..1; 0 = off.
     pub fn monitor_gain(&self) -> f64 {
         self.state().monitor_gain
+    }
+
+    /// The recording offset in ms: how much earlier new takes land on the
+    /// timeline than the measured round trip alone puts them (negative:
+    /// later). For the delay no device reports, which a DAW's recording delay
+    /// corrects.
+    pub fn recording_offset_ms(&self) -> f64 {
+        self.state().recording_offset_ms
     }
 
     /// The engine's fixed processing rate (Hz), shown in the panel.
@@ -1181,6 +1211,7 @@ impl AppSettingsService {
         );
         engine.set_input_gain(db_to_linear(st.record_gain_db));
         engine.set_input_channel(st.input_channel());
+        engine.set_record_offset_ms(st.recording_offset_ms);
         self.refresh_actual_output(st);
         st.apply_output_route();
     }
@@ -1394,6 +1425,7 @@ impl AppSettingsService {
         }
         engine.set_input_channel(self.channel_capturing_now(&st));
         engine.set_input_gain(db_to_linear(st.record_gain_db));
+        engine.set_record_offset_ms(st.recording_offset_ms);
     }
 
     // --- Choices --------------------------------------------------------------
@@ -1489,6 +1521,28 @@ impl AppSettingsService {
                 MONITOR_REVERB_DAMPING,
                 st.monitor_reverb_wet,
             );
+        }
+        st.notify = true;
+        self.settle(st);
+        self.persist();
+    }
+
+    /// Sets the recording offset in ms (see
+    /// [`AppSettingsService::recording_offset_ms`]), clamped to its range, and
+    /// applies it to the next take. Blocking (the persist).
+    pub fn set_recording_offset_ms(&self, ms: f64) {
+        if !ms.is_finite() {
+            return;
+        }
+        let mut st = self.state();
+        st.user_chosen.insert(K_RECORDING_OFFSET_MS);
+        st.recording_offset_ms = clamp_f64(
+            ms,
+            Self::RECORDING_OFFSET_MIN_MS,
+            Self::RECORDING_OFFSET_MAX_MS,
+        );
+        if let Some(e) = &st.engine {
+            e.set_record_offset_ms(st.recording_offset_ms);
         }
         st.notify = true;
         self.settle(st);

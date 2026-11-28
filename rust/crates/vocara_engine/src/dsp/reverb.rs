@@ -453,6 +453,24 @@ impl Node for ReverbNode {
             self.dirty = false;
         }
     }
+
+    /// The tank rings on: its combs and allpasses are swapped in whole (the same lengths at
+    /// the same rate), the settings stay this node's.
+    fn carry_state(&mut self, old: &mut dyn Node) {
+        let Some(old) = crate::node::same_kind::<ReverbNode>(old) else {
+            return;
+        };
+        if old.sr != self.sr {
+            return;
+        }
+        std::mem::swap(&mut self.left, &mut old.left);
+        std::mem::swap(&mut self.right, &mut old.right);
+        std::mem::swap(&mut self.dirty, &mut old.dirty);
+    }
+
+    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
+        Some(self)
+    }
 }
 
 #[cfg(test)]
