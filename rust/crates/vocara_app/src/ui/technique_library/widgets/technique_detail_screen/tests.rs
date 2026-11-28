@@ -363,13 +363,17 @@ fn an_empty_technique_shows_every_field_with_a_placeholder() {
     assert!(h.shows("Delete"));
     assert!(!h.shows("Cancel"));
     assert!(!h.shows("Save"));
-    // Every field stays visible; empty ones read "Empty content". The
-    // Examples label shows too, but with no add/drop zone.
+    // Every field stays visible, with a placeholder a user reads, not
+    // "Empty content". The Examples label shows too, but with no add/drop
+    // zone.
     assert!(h.shows("Examples"));
     assert!(!h.shows(ADD_FIRST));
-    // Aliases, tags, examples, summary, description, cues, exercises, and
-    // the acoustic signature.
-    assert_eq!(h.count(EMPTY_CONTENT), 8);
+    assert_eq!(h.count("Empty content"), 0);
+    // Summary, description, cues, exercises, and the acoustic signature.
+    assert_eq!(h.count("Not written yet"), 5);
+    // Aliases and tags.
+    assert_eq!(h.count("None"), 2);
+    assert_eq!(h.count("No examples yet"), 1);
 }
 
 // technique_detail_layout_test: 'a failed load shows the error state, not

@@ -60,9 +60,10 @@
 //! and the one primary action, Save); the content in a readable column at
 //! most [`CONTENT_WIDTH`] wide, centred. The read view puts the aliases and
 //! tags as neutral tags, then the examples card, then the prose under
-//! sentence-case headings at 13 px on 20 px lines ("Empty content" in
-//! `TEXT_DISABLED` where a field is empty). The edit form labels every
-//! field above it, sentence case, the prose editors included.
+//! sentence-case headings at 13 px on 20 px lines ("Not written yet" in
+//! `TEXT_DISABLED` where a prose field is empty, "None" beside empty
+//! aliases or tags). The edit form labels every field above it, sentence
+//! case, the prose editors included.
 
 /// The page's message for what its snack bars report.
 fn snack_message(event: SnackEvent) -> Message {
@@ -145,8 +146,10 @@ pub const DELETE_FAILED: &str = "Couldn't delete the technique.";
 pub const DROP_ON_EXAMPLES: &str = "Drop audio or video clips on Examples.";
 /// The unsaved-changes dialog's title.
 pub const DISCARD_TITLE: &str = "Discard unsaved changes?";
-/// The read view's placeholder for a field with nothing in it.
-pub const EMPTY_CONTENT: &str = "Empty content";
+/// The read view's placeholder for a prose field with nothing in it.
+pub const EMPTY_CONTENT: &str = "Not written yet";
+/// The read view's placeholder beside aliases or tags when there are none.
+pub const NO_ITEMS: &str = "None";
 
 /// The readable column's widest (`DESIGN.md`: prose at a readable line
 /// length), centred in the page.
@@ -1159,7 +1162,7 @@ impl TechniqueDetailScreen {
     /// The read-only view: the same fields as the edit form, in the same
     /// order, display only, in the readable column. The aliases and tags as
     /// neutral tags, the examples, then the prose under sentence-case
-    /// headings; empty fields read "Empty content".
+    /// headings; empty fields read [`EMPTY_CONTENT`] (or [`NO_ITEMS`]).
     fn viewer<'a>(&'a self, t: &'a Technique) -> Element<'a, Message> {
         let page = column![
             properties(&t.aliases, &t.tags),
@@ -1394,10 +1397,10 @@ pub fn section_heading<'a, M: 'a>(label: &'a str) -> Element<'a, M> {
         .into()
 }
 
-/// "Empty content": what a field with nothing in it reads, at `size` on
+/// `placeholder`: what a field with nothing in it reads, at `size` on
 /// `line` px lines, in `TEXT_DISABLED`.
-fn empty_content<'a>(size: f32, line: f32) -> Element<'a, Message> {
-    studio_text(EMPTY_CONTENT)
+fn empty_content<'a>(placeholder: &'a str, size: f32, line: f32) -> Element<'a, Message> {
+    studio_text(placeholder)
         .size(size)
         .line_height(Pixels(line))
         .color(Studio::TEXT_DISABLED)
@@ -1405,10 +1408,10 @@ fn empty_content<'a>(size: f32, line: f32) -> Element<'a, Message> {
 }
 
 /// A prose field of the read view: its heading, then its text at 13 px on
-/// 20 px lines (or "Empty content").
+/// 20 px lines (or [`EMPTY_CONTENT`]).
 fn prose_section<'a>(label: &'a str, value: &'a str) -> Element<'a, Message> {
     let body: Element<'a, Message> = if dart_string::trim(value).is_empty() {
-        empty_content(PROSE_SIZE, PROSE_LINE)
+        empty_content(EMPTY_CONTENT, PROSE_SIZE, PROSE_LINE)
     } else {
         text(value)
             .size(PROSE_SIZE)
@@ -1423,12 +1426,12 @@ fn prose_section<'a>(label: &'a str, value: &'a str) -> Element<'a, Message> {
 }
 
 /// The aliases and the tags: a row each, its label in a column of its own
-/// (12 px `TEXT_SECONDARY`), then its items as neutral tags (or "Empty
-/// content").
+/// (12 px `TEXT_SECONDARY`), then its items as neutral tags (or
+/// [`NO_ITEMS`]).
 fn properties<'a>(aliases: &'a [String], tags: &'a [String]) -> Element<'a, Message> {
     let property = |label: &'a str, items: &'a [String]| -> Element<'a, Message> {
         let value: Element<'a, Message> = if items.is_empty() {
-            container(empty_content(type_scale::BODY, TAG_HEIGHT)).into()
+            container(empty_content(NO_ITEMS, type_scale::BODY, TAG_HEIGHT)).into()
         } else {
             tag_row(items)
         };

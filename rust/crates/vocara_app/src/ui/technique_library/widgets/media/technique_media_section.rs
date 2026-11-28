@@ -114,7 +114,7 @@ pub const ADD_FIRST: &str = "Drag an audio or video clip here, or click to brows
 /// What the compact zone says once it has some.
 pub const ADD_ANOTHER: &str = "Add another example";
 /// The read view's placeholder when there is no example.
-pub const EMPTY: &str = "Empty content";
+pub const EMPTY: &str = "No examples yet";
 /// The record row's idle button.
 pub const RECORD: &str = "Record an example";
 /// The record row's button while a take records.
