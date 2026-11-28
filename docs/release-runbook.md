@@ -311,6 +311,8 @@ data root's `updates` folder).
   start; on macOS 14 and later that is the container's App Data protection
   holding a build it does not take for the container's owner. On the
   notarized build that is a real failure: do not publish. On CI's manual
-  ad-hoc job it is the signature. "could not download Vocara-0.3.0.dmg":
+  ad-hoc job it is the signature: there, on macOS 14 or later, the check
+  says so in a warning and exits 3, which that job tolerates (every other
+  failure fails it). "could not download Vocara-0.3.0.dmg":
   the last sandboxed release is not published (or `LAST_SANDBOXED_RELEASE` in
   `.github/scripts/launch-check.sh` names the wrong one).

@@ -26,7 +26,22 @@
 # a workflow running both checks removes the fresh install's library in
 # between), and refuses to start otherwise rather than launch a build on a
 # real library.
+#
+# Exit status: 0 when the check passed, 3 (APP_DATA_REFUSED below) for the
+# one failure that says nothing about the build, and 1 for every other
+# failure.
 set -euo pipefail
+
+# The exit status of an --update check in which macOS refused an ad-hoc
+# build its container: on macOS 14 and later the container's App Data
+# protection holds at, or refuses, a build the system does not take for the
+# container's owner, and an ad-hoc signature never is taken for it (the
+# owner, the last sandboxed release, is Developer ID signed). Only then: the
+# APP is signed ad hoc, the Mac runs macOS 14 or later, and the library did
+# not move with the app logging nothing about it. CI's ad-hoc job tolerates
+# this status and only this one; the release workflow, on the notarized
+# build, tolerates none.
+APP_DATA_REFUSED=3
 
 # The last release that ran in the App Sandbox: the one whose container an
 # update carries the library out of. Every later release is unsandboxed
@@ -175,6 +190,13 @@ if [ -n "$UPDATE" ]; then
     STAYED="$(grep -h '\[storage\]' "$CONTAINER_LIBRARY/diagnostics.log" 2> /dev/null | tail -1 || true)"
     if [ -n "$STAYED" ]; then
       fail "the library did not move out of $UPDATE_FROM's container to $LIBRARY. The app said: $STAYED"
+    fi
+    MACOS_MAJOR="$(sw_vers -productVersion 2> /dev/null | cut -d . -f 1 || true)"
+    # codesign says "Signature=adhoc", and lists adhoc among the flags.
+    if grep -qE '^Signature=adhoc|flags=0x[0-9a-f]+\([^)]*adhoc' "$WORK/signature.txt" \
+      && [ "${MACOS_MAJOR:-0}" -ge 14 ] 2> /dev/null; then
+      echo "::warning::the library did not move out of $UPDATE_FROM's container to $LIBRARY, and the app logged nothing about it: on macOS $MACOS_MAJOR the container's App Data protection holds at, or refuses, an ad-hoc build, which it never takes for the container's owner. The notarized build's run of this check is the one that proves the move"
+      exit "$APP_DATA_REFUSED"
     fi
     fail "the library did not move out of $UPDATE_FROM's container to $LIBRARY, and the app logged nothing about it (it may never have got past its start: on macOS 14 and later, a build the system does not take for the container's owner, one signed by another team or ad hoc, is held at, or refused by, the container's App Data protection)"
   fi
