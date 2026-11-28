@@ -50,6 +50,11 @@ jobs:
       - run: cargo test --locked --workspace --no-fail-fast
       - if: ${{ !cancelled() }}
         run: cargo test --locked --workspace --features vocara_app/device --no-fail-fast
+      # The vendored iced_winit is a patched dependency, not a workspace member, so
+      # --workspace never runs its tests: Vocara's patches there (drop pointer, control
+      # click, inserted text, gesture phases) carry their own, several of them macOS only.
+      - if: ${{ !cancelled() }}
+        run: cargo test --locked -p iced_winit --lib
 
   # The Lean 4 proofs of the core algorithms (rust/verification), and the
   # vectors the Rust tests replay: committed vectors that differ from what
