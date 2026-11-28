@@ -101,6 +101,20 @@ impl Node for GateNode {
         self.fade.settle();
     }
 
+    /// The envelope, the held peak and its hold carry: a fresh gate reopened (or shut)
+    /// mid-note at every rebuild.
+    fn carry_state(&mut self, old: &mut dyn Node) {
+        if let Some(old) = crate::node::same_kind::<GateNode>(old) {
+            self.env_db = old.env_db;
+            self.det = old.det;
+            self.hold = old.hold;
+        }
+    }
+
+    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
+        Some(self)
+    }
+
     fn process(&mut self, io: &mut ProcessIo) {
         let frames = io.frames;
         let n = frames * CHANNELS;

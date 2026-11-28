@@ -747,6 +747,16 @@ fn topology_sig(tracks: &[TrackPlayback], buses: &[BusPlayback]) -> String {
     b
 }
 
+/// The key a lane's (or a bus's) engine chain keeps from rebuild to rebuild
+/// (see [`EngineBindings::track_key`]): a hash of its id, the same for the
+/// engine's whole life.
+fn carry_key(id: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    id.hash(&mut h);
+    h.finish()
+}
+
 /// Which model a sync job reconciles to.
 enum SyncModel {
     /// The model handed to `sync`, with the live-edit watermark it carries.
@@ -933,6 +943,7 @@ fn do_sync(shared: &Arc<Shared>, model: SyncModel, retry: bool) -> Result<(), Sy
             .as_ref()
             .map_or(-1, |o| new_bus_index.get(o).copied().unwrap_or(-1));
         let _ = engine.buses_add(b.volume as f32, b.muted, out);
+        let _ = engine.bus_key(slot_index(i), carry_key(&b.id));
         push_chain(engine, slot_index(i), Some(&b.fx), true);
         push_sends(engine, slot_index(i), &b.sends, &new_bus_index, true);
     }
@@ -978,6 +989,7 @@ fn do_sync(shared: &Arc<Shared>, model: SyncModel, retry: bool) -> Result<(), Sy
         if idx >= 0 {
             new_index.insert(t.id.clone(), idx);
             new_owner.insert(t.id.clone(), idx);
+            let _ = engine.track_key(idx, carry_key(t.lane_id.as_deref().unwrap_or(&t.id)));
             push_sends(engine, idx, &t.sends, &new_bus_index, false);
             if let Some(lane) = &t.lane_id {
                 match lane_leader.get(lane) {

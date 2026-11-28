@@ -55,6 +55,22 @@ pub trait Node: Send {
     /// Clear histories / delay lines (used on seek so tails don't bleed across a jump).
     fn reset(&mut self) {}
 
+    /// Take over the signal state of `old`, the node that ran under this one's id in the graph
+    /// a rebuild replaces: a reverb's tank and a delay's line, filter histories, envelopes. A
+    /// rebuilt graph's nodes otherwise started from silence, so every rebuild during playback
+    /// (a clip nudged, a send added) cut the reverb tail dead, clicked every EQ'd track and
+    /// jumped every compressor. The parameters stay this node's own (the rebuild pushed them).
+    /// Called on the audio thread, at the first block the new graph renders: swap or copy
+    /// state, never allocate. `old` may be another kind of node; then nothing is taken. The
+    /// default carries nothing (a node with no signal state, or a source).
+    fn carry_state(&mut self, _old: &mut dyn Node) {}
+
+    /// The node as [`Any`](std::any::Any), so [`carry_state`](Self::carry_state) can tell
+    /// whether `old` is its own kind. `None` for a node that carries nothing.
+    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
+        None
+    }
+
     /// Called once per block while the transport is STOPPED (the node is not processed).
     /// RT-safe. Default: nothing.
     fn idle(&mut self) {}
@@ -68,4 +84,10 @@ pub trait Node: Send {
     fn num_out(&self) -> usize {
         1
     }
+}
+
+/// `old` as a `T`, when it is one: the check every [`Node::carry_state`] starts with.
+#[inline]
+pub fn same_kind<T: 'static>(old: &mut dyn Node) -> Option<&mut T> {
+    old.as_any_mut()?.downcast_mut::<T>()
 }

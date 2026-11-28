@@ -491,6 +491,16 @@ impl RtProcessor {
         // (see `EngineHandle::reap`), so the pointee outlives this block; we never cache the
         // reference.
         let g: &mut Graph = unsafe { &mut *self.cell.load() };
+        // A rebuilt graph's first block: its nodes take over the state of the ones they
+        // replace (reverb tails, delay lines, filter histories, envelopes).
+        let old = g.take_carry();
+        if !old.is_null() {
+            // SAFETY: `old` is the graph this one replaced, retired at the publish with a grace
+            // of two blocks. At most one block was running at the swap (on `old`), so this,
+            // the first block on the new graph, ends before the grace does; and the audio
+            // thread is the only one that touches a published graph's nodes.
+            g.carry_state_from(unsafe { &mut *old });
+        }
 
         // A seek or a pause's rewind applied in this block: the output jumps.
         let mut cut = false;
@@ -1164,6 +1174,9 @@ impl EngineHandle {
 
     fn publish_boxed(&mut self, mut graph: Box<Graph>) {
         debug_assert_eq!(graph.max_block(), self.max_block);
+        // The graph about to retire hands its nodes' state over at the new one's first block.
+        // Only this thread publishes, so the cell holds exactly the graph the swap retires.
+        graph.set_carry_from(self.cell.load());
         // Commands still queued were sent for the graph this replaces; the new one takes
         // only those sent from here on (see CommandSender::begin_epoch).
         graph.set_epoch(self.cmd_tx.begin_epoch());
@@ -1207,6 +1220,9 @@ impl EngineHandle {
         // renderer is running (conservative: fall through to the grace-epoch path).
         let idle = self.renderer_gate.lock().map(|g| !*g).unwrap_or(false);
         if idle {
+            // No block will take the live graph's carry before these are freed: drop it.
+            // SAFETY: the cell's graph is alive while the cell is; the carry is an atomic.
+            let _ = unsafe { &*self.cell.load() }.take_carry();
             for (ptr, _) in self.retired.drain(..) {
                 // SAFETY: the gate read proved no stream callback exists, and any stream the
                 // host starts later loads the CURRENT cell value — this retiree is unreachable.
@@ -2220,5 +2236,126 @@ mod declick_tests {
             stepped > 0.3,
             "without the declick each seam steps ({stepped})"
         );
+    }
+}
+
+#[cfg(test)]
+mod carry_tests {
+    //! A graph rebuilt during playback: the effects it keeps carry their state over, so their
+    //! tails ring on through the swap.
+
+    use super::*;
+    use crate::dsp::delay::{param as dparam, DelayNode};
+    use crate::dsp::master::MasterNode;
+    use crate::graph::{Edge, GraphDesc, NodeEntry};
+    use crate::ring::spsc;
+    use crate::source::BufferSource;
+
+    const BLOCK: usize = 128;
+
+    /// A 10 ms burst at the timeline's start, then silence.
+    fn burst() -> Vec<Smp> {
+        (0..48_000 * CHANNELS)
+            .map(|i| {
+                if i / 2 < 480 {
+                    0.5 * ((i / 2) as f32 * 0.3).sin()
+                } else {
+                    0.0
+                }
+            })
+            .collect()
+    }
+
+    /// Source(1) -> effect(2) -> master(3), the effect as `effect` builds it.
+    fn graph(effect: Box<dyn Node>) -> Graph {
+        GraphDesc {
+            nodes: vec![
+                NodeEntry::new(1, Box::new(BufferSource::new(burst(), 0))),
+                NodeEntry::new(2, effect),
+                NodeEntry::new(3, Box::new(MasterNode::unity())),
+            ],
+            edges: vec![Edge::simple(1, 2), Edge::simple(2, 3)],
+            master: 3,
+        }
+        .compile(ENGINE_SR, BLOCK)
+        .unwrap()
+    }
+
+    fn rms(x: &[Smp]) -> f32 {
+        (x.iter().map(|v| v * v).sum::<f32>() / x.len().max(1) as f32).sqrt()
+    }
+
+    /// Plays the burst through `effect`, rebuilds the graph (a fresh `effect`, its settings
+    /// pushed onto the staged graph as the host does) 50 ms in, and returns what played after.
+    fn rebuilt_mid_tail(
+        effect: impl Fn() -> Box<dyn Node>,
+        settings: &[(u16, f32)],
+        fresh: bool,
+    ) -> Vec<Smp> {
+        let (_mic, mic_cons) = spsc::<[Smp; CHANNELS]>(256);
+        let (mut h, mut rt) = spawn(graph(effect()), HashMap::new(), mic_cons, 256);
+        h.set_declick(false);
+        for &(p, v) in settings {
+            h.set_param(2, p, v);
+        }
+        h.flush();
+        h.play();
+        let mut out = vec![0.0; BLOCK * CHANNELS];
+        for _ in 0..(2_400 / BLOCK) {
+            rt.process(&mut out, BLOCK);
+        }
+        let mut next = graph(effect());
+        if fresh {
+            next.start_fresh(2, 3);
+        }
+        h.stage_graph(next);
+        for &(p, v) in settings {
+            h.set_param(2, p, v);
+        }
+        assert!(h.publish_staged());
+        let mut after = Vec::new();
+        for _ in 0..(12_000 / BLOCK) {
+            rt.process(&mut out, BLOCK);
+            after.extend_from_slice(&out);
+        }
+        after
+    }
+
+    #[test]
+    fn a_delay_kept_by_a_rebuild_still_echoes_what_played_before_it() {
+        // 100 ms echoes of a burst at 0: the rebuild at 50 ms comes between the burst and its
+        // first echo, which only the carried line still holds.
+        let delay = || -> Box<dyn Node> { Box::new(DelayNode::new()) };
+        let settings = [
+            (dparam::BYPASS, 0.0),
+            (dparam::TIME_MS, 100.0),
+            (dparam::FEEDBACK, 0.5),
+            (dparam::MIX, 1.0),
+        ];
+        // The first echo lands at 100 ms: 50 ms after the swap.
+        let echo = |out: &[Smp]| rms(&out[2_400 * CHANNELS..2_880 * CHANNELS]);
+        let carried = rebuilt_mid_tail(delay, &settings, false);
+        assert!(
+            echo(&carried) > 0.1,
+            "the echo is gone ({})",
+            echo(&carried)
+        );
+        let reset = rebuilt_mid_tail(delay, &settings, true);
+        assert!(echo(&reset) < 1e-6, "a fresh delay has nothing to echo");
+    }
+
+    #[test]
+    fn the_shared_reverb_rings_on_through_a_rebuild() {
+        let reverb = || -> Box<dyn Node> { Box::new(ReverbNode::default_bus()) };
+        let carried = rebuilt_mid_tail(reverb, &[], false);
+        let reset = rebuilt_mid_tail(reverb, &[], true);
+        // Right after the swap the tail plays on at the level it had; a fresh tank is silent.
+        let head = |out: &[Smp]| rms(&out[..BLOCK * CHANNELS]);
+        assert!(
+            head(&carried) > 0.01,
+            "the tail is cut ({})",
+            head(&carried)
+        );
+        assert!(head(&reset) < 1e-6);
     }
 }

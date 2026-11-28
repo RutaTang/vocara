@@ -77,6 +77,18 @@ impl Node for LimiterNode {
         self.ceiling.snap(self.ceiling.target());
     }
 
+    /// The gain carries: a fresh limiter let a sustained over through at unity for its
+    /// first sample, then clamped.
+    fn carry_state(&mut self, old: &mut dyn Node) {
+        if let Some(old) = crate::node::same_kind::<LimiterNode>(old) {
+            self.gain = old.gain;
+        }
+    }
+
+    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
+        Some(self)
+    }
+
     fn process(&mut self, io: &mut ProcessIo) {
         let frames = io.frames;
         let n = frames * CHANNELS;

@@ -68,6 +68,8 @@ struct FakeState {
     input_channels: Vec<u32>,
     /// Every `track_lane` call as (track, leader), in call order.
     lanes: Vec<(i32, i32)>,
+    /// Every `track_key` call as (track, key), in call order.
+    keys: Vec<(i32, u64)>,
     /// Makes `commit_degraded_mask` panic (something failing after a commit).
     panic_on_degraded_mask: bool,
     live: BTreeMap<i32, (f32, bool)>,
@@ -193,6 +195,11 @@ impl EngineBindings for Fake {
 
     fn track_lane(&self, track: i32, leader: i32) -> Result<(), EngineError> {
         self.s().lanes.push((track, leader));
+        Ok(())
+    }
+
+    fn track_key(&self, track: i32, key: u64) -> Result<(), EngineError> {
+        self.s().keys.push((track, key));
         Ok(())
     }
 
@@ -589,6 +596,36 @@ fn a_lanes_later_clips_play_through_its_first_clips_chain() {
     )
     .unwrap();
     assert_eq!(fake.s().lanes, [(2, 0), (3, 0)]);
+}
+
+#[test]
+fn each_staged_clip_names_its_lane_by_a_key_that_survives_a_renumbering() {
+    // The engine keeps a lane's chain (and the state of its effects) across a
+    // rebuild by this key; the staged index moves whenever an earlier lane
+    // gains or loses a clip.
+    let fake = Fake::new();
+    let svc = service(&fake, instant());
+    let a1 = in_lane("a1", "a1.wav", 0, "lane-a");
+    let b1 = in_lane("b1", "b1.wav", 0, "lane-b");
+    svc.sync_checked(vec![a1.clone(), b1.clone()], vec![])
+        .unwrap();
+    let first = std::mem::take(&mut fake.s().keys);
+    svc.sync_checked(
+        vec![a1, in_lane("a2", "a2.wav", 9000, "lane-a"), b1],
+        vec![],
+    )
+    .unwrap();
+    let second = fake.s().keys.clone();
+    assert_eq!(first.len(), 2);
+    assert_eq!(second.len(), 3);
+    assert_ne!(first[0].1, first[1].1, "two lanes, two keys");
+    assert_eq!((second[0].0, second[0].1), (0, first[0].1));
+    assert_eq!(second[1].1, first[0].1, "a lane's clips share its key");
+    assert_eq!(
+        (second[2].0, second[2].1),
+        (2, first[1].1),
+        "lane B, moved from 1 to 2"
+    );
 }
 
 #[test]

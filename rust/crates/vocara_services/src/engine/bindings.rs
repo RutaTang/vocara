@@ -414,6 +414,24 @@ pub trait EngineBindings: Send + Sync {
         unexpected("ve_track_lane")
     }
 
+    /// Names the lane staged `track` plays by a key kept from sync to sync
+    /// (`ve_track_key`): the lane's chain keeps its node ids, so its effects
+    /// carry their tails and histories across the rebuild. Before commit. It
+    /// shapes what the commit carries over, not whether it succeeds, so a fake
+    /// that does not model it takes it as a no-op.
+    fn track_key(&self, track: i32, key: u64) -> Result<(), EngineError> {
+        let _ = (track, key);
+        Ok(())
+    }
+
+    /// Names staged FX bus `bus` by a key kept from sync to sync
+    /// (`ve_bus_key`; see [`EngineBindings::track_key`]). A no-op in a fake
+    /// that does not model it.
+    fn bus_key(&self, bus: i32, key: u64) -> Result<(), EngineError> {
+        let _ = (bus, key);
+        Ok(())
+    }
+
     /// A staged bus's insert-chain order (`ve_bus_chain`).
     fn bus_chain(&self, bus: i32, tags: &[u8]) -> Result<(), EngineError> {
         let _ = (bus, tags);
