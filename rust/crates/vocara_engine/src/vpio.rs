@@ -51,7 +51,7 @@ use crate::capture_layout::{
 };
 use crate::device::{InputCell, Transport};
 use crate::diag::{self, ElementFormat};
-use crate::dsp::capture_cleanup::HighPass;
+use crate::dsp::capture_cleanup::VoicePath;
 use crate::io_buffer::IoBufferRestore;
 use crate::live::RtCell;
 use crate::ring::{spsc, Consumer, Producer};
@@ -214,9 +214,12 @@ struct InCtx {
     render_buf: Vec<f32>,
     /// The clean mono voice handed to `InputCell` (`MAX_FRAMES*MAX_CH`).
     scratch: Vec<f32>,
-    /// Custom acoustic echo canceller: removes the backing-track echo (loudspeaker→mic) from the raw
-    /// mic while preserving the singing voice. VPIO's own AEC is bypassed (it ducked the sung voice).
-    aec: Aec,
+    /// The mic's two signals: the TAKE, through the custom acoustic echo canceller (removes the
+    /// backing-track echo, loudspeaker→mic, while preserving the singing voice; VPIO's own AEC
+    /// is bypassed, it ducked the sung voice), and the MONITOR, the mic ahead of it (no block of
+    /// canceller latency in the hear-yourself path). Each high-passed (DC/rumble removal) before
+    /// the record gain. See [`VoicePath`].
+    voice: VoicePath,
     /// The engine's render cell, read here only for its transport atomics: whether playback is
     /// echo-free (headphones), handed to the canceller every cycle.
     rt: Arc<RtCell>,
@@ -234,13 +237,11 @@ struct InCtx {
     /// The mic's channels to the ONE mono signal the AEC and everything after it hear, under the
     /// input cell's channel mode (`ve_set_input_channel`). Built for the negotiated rate.
     mix: InputChannelMix,
-    /// Mono AEC scratch (mic-in / far-end / clean-out), `MAX_FRAMES` each.
+    /// Mono scratch (mic-in / far-end / canceller-out / monitor-out), `MAX_FRAMES` each.
     mic_mono: Vec<f32>,
     far_mono: Vec<f32>,
     clean_mono: Vec<f32>,
-    /// Post-AEC 40 Hz high-pass (DC/rumble removal), applied before the record gain. The only
-    /// processing between the AEC and the fan-out besides the gain — static on purpose.
-    hp: HighPass,
+    monitor_mono: Vec<f32>,
     layout: Layout,
     /// Shared device-event flags (polled by the host via `ve_poll_device_event`). We raise
     /// EVENT_INPUT_LOST on a sustained render-failure streak so a mid-session mic disconnect is
@@ -711,7 +712,7 @@ impl Vpio {
                 },
                 render_buf: vec![0.0; MAX_FRAMES * MAX_CH],
                 scratch: vec![0.0; MAX_FRAMES * MAX_CH],
-                aec,
+                voice: VoicePath::new(aec),
                 rt: Arc::clone(&rt),
                 ref_cons,
                 ref_sync: RefRingSync::new(baseline_cap(io_round_trip, MAX_FRAMES)),
@@ -720,7 +721,7 @@ impl Vpio {
                 mic_mono: vec![0.0; MAX_FRAMES],
                 far_mono: vec![0.0; MAX_FRAMES],
                 clean_mono: vec![0.0; MAX_FRAMES],
-                hp: HighPass::new(),
+                monitor_mono: vec![0.0; MAX_FRAMES],
                 layout: placeholder,
                 event,
                 dead: DeadCaptureStreak::new(INPUT_LOST_STREAK, input_warmup_frames(VPIO_RATE)),
@@ -1186,7 +1187,13 @@ unsafe extern "C-unwind" fn input_cb(
         if ctx.aec_bypass {
             // AEC bypassed (mismatched element rates): no far-end pairing exists, the ref
             // ring is unpumped. The raw mic takes the same high-pass + gain path below.
-            ctx.clean_mono[..n].copy_from_slice(&ctx.mic_mono[..n]);
+            ctx.voice.process(
+                &ctx.mic_mono[..n],
+                None,
+                &mut ctx.clean_mono[..n],
+                &mut ctx.scratch[..n],
+                &mut ctx.monitor_mono[..n],
+            );
         } else {
             // Overflow guard ONLY: dropping reference samples warps the far-end stream and
             // wrecks the adaptive filter (the previous per-block drain caused continuous
@@ -1214,26 +1221,29 @@ unsafe extern "C-unwind" fn input_cb(
             for _ in 0..ctx.ref_sync.on_success(depth) {
                 let _ = ctx.ref_cons.pop();
             }
-            // Cancel the loudspeaker echo from the mic, preserving the singing voice — or, on an
-            // echo-free route, pass it through untouched with the same one-block latency.
-            ctx.aec.set_echo_free(ctx.rt.transport().echo_free());
-            ctx.aec.process(
+            // Cancel the loudspeaker echo from the mic for the take, preserving the singing voice
+            // — or, on an echo-free route, pass it through untouched with the same one-block
+            // latency. The monitor lane is the mic ahead of the canceller.
+            ctx.voice
+                .aec_mut()
+                .set_echo_free(ctx.rt.transport().echo_free());
+            ctx.voice.process(
                 &ctx.mic_mono[..n],
-                &ctx.far_mono[..n],
+                Some(&ctx.far_mono[..n]),
                 &mut ctx.clean_mono[..n],
+                &mut ctx.scratch[..n],
+                &mut ctx.monitor_mono[..n],
             );
         }
-        // High-pass (DC/rumble) the clean mono voice and feed it as the cell's one channel, which
-        // applies the (user-adjustable) record gain after its mix — a pure linear scale (the
-        // float take stores over-0 dBFS losslessly; the master limiter guards playback).
-        for i in 0..n {
-            ctx.scratch[i] = ctx.hp.process(ctx.clean_mono[i]);
-        }
+        // Feed the high-passed take (scratch) and monitor as the cell's one channel and its
+        // monitor lane; the cell applies the (user-adjustable) record gain after its mix — a pure
+        // linear scale (the float take stores over-0 dBFS losslessly; the master limiter guards
+        // playback).
         let gain = f32::from_bits(INPUT_GAIN.load(Ordering::Relaxed));
         // A denied feed drops the block rather than racing a second producer into rings that
         // have exactly one producer by construction.
         ctx.input
-            .try_feed_gained(ctx.epoch, &ctx.scratch[..n], gain);
+            .try_feed_split(ctx.epoch, &ctx.scratch[..n], &ctx.monitor_mono[..n], gain);
         0
     }));
     res.unwrap_or(-1)

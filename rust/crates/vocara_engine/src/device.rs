@@ -1289,8 +1289,11 @@ impl InputState {
     /// but a drop on the RECORDING ring is counted: monitor/capture drops only cost a live
     /// view a frame, a recording drop is a permanent hole in the take on disk.
     #[inline]
-    fn emit(&mut self, f: [Smp; CHANNELS], cap: bool, rec: bool) {
-        self.mic.push(f);
+    fn emit(&mut self, lanes: [Smp; CHANNELS], cap: bool, rec: bool) {
+        // Lane 0 is the take, lane 1 the monitor (see `InputCell::feed`); each ring carries its
+        // lane on both channels.
+        self.mic.push([lanes[1], lanes[1]]);
+        let f = [lanes[0], lanes[0]];
         if cap {
             self.cap.push(f);
         }
@@ -1462,7 +1465,23 @@ impl InputCell {
             return false;
         };
         // SAFETY: the guard is the cell's single-accessor proof for this call.
-        unsafe { self.feed(data, gain) };
+        unsafe { self.feed(data, None, gain) };
+        true
+    }
+
+    /// [`try_feed_gained`](Self::try_feed_gained) for a mono cell with a separate MONITOR
+    /// signal: `take` feeds the capture and recording rings and the meter, `monitor` (the same
+    /// samples' time, as long as `take`) feeds the hear-yourself ring. The VoiceProcessingIO
+    /// callback hands the echo-cancelled voice as the take and the mic before the canceller as
+    /// the monitor, which spares the monitor the canceller's block of latency (see
+    /// `dsp::capture_cleanup::VoicePath`). Both are scaled by `gain` and resampled in lockstep.
+    #[inline]
+    pub fn try_feed_split(&self, epoch: u64, take: &[f32], monitor: &[f32], gain: f32) -> bool {
+        let Some(_g) = self.try_enter(epoch) else {
+            return false;
+        };
+        // SAFETY: the guard is the cell's single-accessor proof for this call.
+        unsafe { self.feed(take, Some(monitor), gain) };
         true
     }
 
@@ -1525,18 +1544,38 @@ impl InputCell {
         );
     }
 
+    /// Test-only [`try_feed_split`](Self::try_feed_split), admitted as [`feed_test`](Self::feed_test) is.
+    #[cfg(test)]
+    pub(crate) fn feed_split_test(&self, take: &[f32], monitor: &[f32]) {
+        let mut epoch = self.owner.load(Ordering::Acquire);
+        if epoch == 0 {
+            epoch = self.claim();
+        }
+        assert!(
+            self.try_feed_split(epoch, take, monitor, 1.0),
+            "the cell must admit its only accessor"
+        );
+    }
+
     /// Feed one input callback's interleaved samples: mix the device's channels down to the mono
-    /// mic signal (carried as L = R) and scale it by `gain`, resample to `ENGINE_SR`, fan out to
-    /// the mic / capture / recording rings, and update the peak meter.
+    /// mic signal and scale it by `gain`, resample to `ENGINE_SR`, fan out to the mic / capture /
+    /// recording rings, and update the peak meter.
+    ///
+    /// The resampler runs two lanes, as a stereo frame: the take (fanned out to the capture and
+    /// recording rings, and metered) and the monitor (the mic ring). Without a `monitor` signal
+    /// both lanes carry the mixed mic; with one (a mono cell only, as long as `data`), the
+    /// monitor lane carries it instead. Each ring still receives L = R.
     ///
     /// # Safety
     /// Only the single active input callback may call this.
-    unsafe fn feed(&self, data: &[f32], gain: f32) {
+    unsafe fn feed(&self, data: &[f32], monitor: Option<&[f32]>, gain: f32) {
         let st = &mut *self.state.get();
         let ch = st.in_channels;
         if ch == 0 {
             return;
         }
+        // A separate monitor lane only for what it can describe: one sample per mono frame.
+        let monitor = monitor.filter(|m| ch == 1 && m.len() == data.len());
         let cap = st.cap_active.load(Ordering::Relaxed);
         let rec = st.rec_active.load(Ordering::Relaxed);
         let mode = self.channel_mode();
@@ -1559,7 +1598,10 @@ impl InputCell {
             // Inputs 1 and 2 used to travel as left and right, and the writer keeps the left: a
             // mic on input 2 recorded silence, monitored hard right.
             let m = st.mix.mix(mode, &data[base..base + ch]) * gain;
-            let (l, r) = (m, m);
+            // Lane 0 the take, lane 1 the monitor. A one-sample frame is the mix's garbage guard
+            // alone (it keeps no state for one channel), so the monitor is guarded alike.
+            let mon = monitor.map_or(m, |mo| st.mix.mix(mode, &mo[fi..fi + 1]) * gain);
+            let (l, r) = (m, mon);
             peak = peak.max(m.abs());
             if identity {
                 st.emit([l, r], cap, rec);
@@ -3048,6 +3090,78 @@ mod drift_tests {
             (peak - 25.0).abs() < 0.1,
             "the meter reads {peak}, not the gained peak"
         );
+    }
+
+    /// The VoiceProcessingIO callback hands the cell two signals: the echo-cancelled take and the
+    /// mic ahead of the canceller for the monitor. Each ring must carry its own lane — the
+    /// monitor ring the monitor, the capture and recording rings the take — through the identity
+    /// path and through the resampler alike; the meter reads the take. The impulse that the
+    /// canceller would have held back a block reaches the monitor ring at once.
+    #[test]
+    fn the_monitor_ring_carries_the_monitor_lane_and_the_take_rings_the_take() {
+        use crate::ring::spsc;
+        use crate::sample::{Smp, CHANNELS};
+        use std::sync::atomic::{AtomicBool, AtomicU32};
+        for rate in [crate::sample::ENGINE_SR, 44_100.0] {
+            let (mic_prod, mut mic_cons) = spsc::<[Smp; CHANNELS]>(1 << 14);
+            let (cap_prod, mut cap_cons) = spsc::<[Smp; CHANNELS]>(1 << 14);
+            let (rec_prod, mut rec_cons) = spsc::<[Smp; CHANNELS]>(1 << 14);
+            let level = Arc::new(AtomicU32::new(0));
+            let cell = super::InputCell::new(
+                mic_prod,
+                cap_prod,
+                rec_prod,
+                Arc::new(AtomicBool::new(true)),
+                Arc::new(AtomicBool::new(true)),
+                Arc::clone(&level),
+                Arc::new(AtomicU64::new(0)),
+                Arc::new(AtomicU64::new(0)),
+                Arc::new(AtomicU64::new(0)),
+                Arc::new(AtomicU64::new(1.0f64.to_bits())),
+                Arc::new(AtomicU64::new(0)),
+                Arc::new(AtomicU32::new(0)),
+            );
+            let _ = cell.reconfigure(rate, 1);
+            // The monitor: an impulse at frame 10. The take: the same impulse a canceller
+            // block (256 frames) later, at half the level.
+            let mut monitor = vec![0.0f32; 1024];
+            monitor[10] = 0.8;
+            let mut take = vec![0.0f32; 1024];
+            take[266] = 0.4;
+            cell.feed_split_test(&take, &monitor);
+            let drain = |c: &mut crate::ring::Consumer<[Smp; CHANNELS]>| {
+                std::iter::from_fn(|| c.pop()).collect::<Vec<_>>()
+            };
+            let (mon, cap, rec) = (
+                drain(&mut mic_cons),
+                drain(&mut cap_cons),
+                drain(&mut rec_cons),
+            );
+            assert_eq!(mon.len(), cap.len());
+            assert_eq!(cap.len(), rec.len());
+            let peak = |f: &[[Smp; CHANNELS]]| {
+                (0..f.len())
+                    .max_by(|&a, &b| f[a][0].abs().total_cmp(&f[b][0].abs()))
+                    .unwrap()
+            };
+            assert!(mon.iter().all(|f| f[0] == f[1]) && cap.iter().all(|f| f[0] == f[1]));
+            assert_eq!(cap, rec, "the capture and the take carry the same signal");
+            let lag = peak(&cap) as f64 - peak(&mon) as f64;
+            let block = 256.0 * crate::sample::ENGINE_SR / rate;
+            assert!(
+                (lag - block).abs() <= 1.0,
+                "at {rate} Hz the monitor leads the take by {lag} frames, not {block}"
+            );
+            assert!(
+                mon[peak(&mon)][0] > 0.3,
+                "the monitor ring hears the monitor"
+            );
+            let metered = f32::from_bits(level.load(Ordering::Relaxed));
+            assert!(
+                (metered - 0.4).abs() < 1e-6,
+                "the meter reads the take: {metered}"
+            );
+        }
     }
 
     #[test]
