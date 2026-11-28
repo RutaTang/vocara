@@ -253,6 +253,33 @@ impl Node for DoublerNode {
         }
     }
 
+    /// The doubled copy carries on: the lines and the LFO's phase are swapped in, the delay,
+    /// depth and mix stay this node's. A bypassed node sweeps what it took (see DelayNode).
+    fn carry_state(&mut self, old: &mut dyn Node) {
+        let Some(old) = crate::node::same_kind::<DoublerNode>(old) else {
+            return;
+        };
+        if old.sr != self.sr || old.buf_l.len() != self.buf_l.len() {
+            return;
+        }
+        std::mem::swap(&mut self.buf_l, &mut old.buf_l);
+        std::mem::swap(&mut self.buf_r, &mut old.buf_r);
+        self.pos = old.pos;
+        self.dirty = old.dirty;
+        self.stale = if self.fade.bypassed() {
+            self.buf_l.len()
+        } else {
+            old.stale
+        };
+        self.phase_l = old.phase_l;
+        self.phase_r = old.phase_r;
+        self.heard = old.heard;
+    }
+
+    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
+        Some(self)
+    }
+
     fn reset(&mut self) {
         // Seek clears the modulated delay lines and resets the LFO phase so the
         // doubler doesn't smear pre-jump audio across the discontinuity. Lines known to be

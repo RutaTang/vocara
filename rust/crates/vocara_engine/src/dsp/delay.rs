@@ -223,6 +223,31 @@ impl Node for DelayNode {
                                   // the cleared line with no sweep left to clear it (a ghost echo on re-enabling).
         self.fade.settle();
     }
+
+    /// The echoes ring on: the line and its bookkeeping are swapped in whole; the tap, the
+    /// feedback and the mix stay this node's. A bypassed node sweeps what it took, as it
+    /// sweeps its own line on entering bypass (or the audio would echo on re-enabling).
+    fn carry_state(&mut self, old: &mut dyn Node) {
+        let Some(old) = crate::node::same_kind::<DelayNode>(old) else {
+            return;
+        };
+        if old.sr != self.sr || old.buf_l.len() != self.buf_l.len() {
+            return;
+        }
+        std::mem::swap(&mut self.buf_l, &mut old.buf_l);
+        std::mem::swap(&mut self.buf_r, &mut old.buf_r);
+        self.pos = old.pos;
+        self.fresh = old.fresh;
+        self.stale = if self.fade.bypassed() {
+            self.buf_l.len()
+        } else {
+            old.stale
+        };
+    }
+
+    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
+        Some(self)
+    }
 }
 
 #[cfg(test)]

@@ -388,6 +388,7 @@ fn the_page_lays_out_its_sections_under_the_header() {
     for label in [
         "Audio output",
         "Audio input",
+        "Recording",
         "Monitoring",
         "Maintenance",
         "About",
@@ -671,6 +672,27 @@ fn settings_that_did_not_reach_the_disk_say_so() {
     ));
     // In effect all the same.
     assert!(page.shows("50%"));
+}
+
+// ------------------------------------------------------- the recording offset
+
+#[test]
+fn the_take_offset_row_shows_and_sets_the_recording_offset() {
+    // What no device reports, the singer sets here: the row starts at no
+    // offset, and a drag's last value is what the settings keep.
+    let mut page = Setup::new().mount();
+    assert!(page.shows("Recording"));
+    assert!(page.ui().find(OFFSET_SLIDER).is_ok());
+    assert!(page.shows("Take offset"));
+    assert!(page.shows("0 ms"));
+    assert!(page.shows(OFFSET_FOOTNOTE));
+    page.send(Message::Choose(Choice::RecordingOffset(12.0)));
+    page.send(Message::Choose(Choice::RecordingOffset(25.0)));
+    page.send(Message::OffsetReleased);
+    assert_eq!(page.settings().recording_offset_ms(), 25.0);
+    assert!(page.shows("+25 ms"));
+    page.send(Message::Choose(Choice::RecordingOffset(-15.0)));
+    assert!(page.shows("-15 ms"));
 }
 
 // ------------------------------------------------------- the monitoring

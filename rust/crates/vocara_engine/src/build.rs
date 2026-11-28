@@ -5,9 +5,12 @@
 //! Backing/reference: Source → Gain → Pan → Master   (no EQ/Comp/Send — clean A/B)
 //!
 //! The send taps **post-gain / pre-pan**, so the wet signal reaches the one shared reverb
-//! centered and gets its stereo image from the reverb's width. Node ids are stable and
-//! derived from the track id, so the control plane can address any node and a future graph
-//! rebuild can migrate state by id.
+//! centered and gets its stereo image from the reverb's width. Node ids are derived from the
+//! track id, so the control plane can address any node, and a rebuilt graph's nodes take over
+//! the state of the ones under the same ids (`Graph::carry_state_from`): the commit keeps a
+//! lane's track id for as long as the host's key for the lane stays ([`assign_track_ids`]).
+
+use std::collections::{HashMap, HashSet};
 
 use crate::dsp::biquad::EqNode;
 use crate::dsp::compressor::CompressorNode;
@@ -179,6 +182,45 @@ pub fn bus_reverb_id(bus: NodeId) -> NodeId {
 /// Aux send node `i` for a bus — a post-fader gain into another bus.
 pub fn bus_aux_send_id(bus: NodeId, i: usize) -> NodeId {
     bus_sum_id(bus) + SEND_OFFSET + i as NodeId
+}
+
+/// The node ids (half-open) of FX bus `bus`'s slot band.
+pub fn bus_band(bus: NodeId) -> (NodeId, NodeId) {
+    let lo = bus_sum_id(bus);
+    (lo, lo + BUS_STRIDE)
+}
+
+/// The track id each staged track is built under. A rebuilt graph's nodes take over the
+/// state of the ones under the same ids in the graph it replaces (see
+/// `Graph::carry_state_from`), so the ids must name the same thing in both: a chain keyed by
+/// the host (`keys[i]`, the lane it plays) keeps the id it had under that key (`prev`), and
+/// every other track takes an id the replaced graph did not use (`prev_ids`), so no node
+/// takes over another track's state. Ids derived from the staging order did both wrong: a
+/// clip added to an earlier lane renumbered every later lane onto its neighbour's nodes.
+/// Ids start at 1 (track 0's band is left unused) and stay as small as these rules allow.
+pub fn assign_track_ids(
+    keys: &[Option<u64>],
+    prev: &HashMap<u64, NodeId>,
+    prev_ids: &HashSet<NodeId>,
+) -> Vec<NodeId> {
+    let mut ids = vec![0; keys.len()];
+    let mut used: HashSet<NodeId> = HashSet::with_capacity(keys.len());
+    for (id, key) in ids.iter_mut().zip(keys) {
+        if let Some(&kept) = key.and_then(|k| prev.get(&k)) {
+            if used.insert(kept) {
+                *id = kept;
+            }
+        }
+    }
+    let mut next: NodeId = 1;
+    for id in ids.iter_mut().filter(|id| **id == 0) {
+        while used.contains(&next) || prev_ids.contains(&next) {
+            next += 1;
+        }
+        *id = next;
+        used.insert(next);
+    }
+    ids
 }
 
 /// Builds the node id + boxed DSP node for a bus insert `tag` (FxKind index).
@@ -453,5 +495,33 @@ pub fn build(spec: ProjectSpec) -> GraphDesc {
         nodes,
         edges,
         master: MASTER_ID,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_lane_keeps_its_ids_and_a_new_track_takes_none_the_old_graph_used() {
+        // Lanes A (key 10) and B (key 20) staged as tracks 1 and 2.
+        let first = assign_track_ids(&[Some(10), Some(20)], &HashMap::new(), &HashSet::new());
+        assert_eq!(first, [1, 2]);
+        let prev: HashMap<u64, NodeId> = [(10, 1), (20, 2)].into();
+        let prev_ids: HashSet<NodeId> = [1, 2].into();
+        // A clip added to lane A stages ahead of lane B (a follower, no key of its own), and
+        // a new lane C comes last: A and B keep their chains, the rest take ids nothing used.
+        let next = assign_track_ids(&[Some(10), None, Some(20), Some(30)], &prev, &prev_ids);
+        assert_eq!(next, [1, 3, 2, 4]);
+        // Lane A removed: B keeps its id, and nothing new takes A's.
+        let after = assign_track_ids(&[Some(20), Some(30)], &prev, &prev_ids);
+        assert_eq!(after, [2, 3]);
+    }
+
+    #[test]
+    fn two_tracks_under_one_key_never_share_an_id() {
+        let prev: HashMap<u64, NodeId> = [(7, 1)].into();
+        let ids = assign_track_ids(&[Some(7), Some(7)], &prev, &[1].into());
+        assert_eq!(ids, [1, 2]);
     }
 }

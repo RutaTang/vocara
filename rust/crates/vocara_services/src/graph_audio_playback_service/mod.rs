@@ -60,7 +60,7 @@ mod sync_chain;
 mod tests;
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -148,6 +148,9 @@ struct Shared {
     input_pull: Mutex<Vec<f32>>,
     /// See [`GraphAudioPlaybackService::input_failed`].
     input_failed: AtomicBool,
+    /// The user's recording offset in ms (f64 bits; see
+    /// [`GraphAudioPlaybackService::set_record_offset_ms`]).
+    record_offset_ms: AtomicU64,
 }
 
 /// What the Dart object owned (see the module doc).
@@ -724,6 +727,10 @@ fn topology_sig(tracks: &[TrackPlayback], buses: &[BusPlayback]) -> String {
         // force a graph rebuild.
         b.push('@');
         b.push_str(&t.start_ms.to_string());
+        // So is the part of the file a clip cut by another plays.
+        if let Some((from, len, fades)) = span_of(t) {
+            b.push_str(&format!("[{from}+{len}/{fades}]"));
+        }
         b.push('>');
         b.push_str(t.bus_id.as_deref().unwrap_or(""));
         b.push(':');
@@ -747,6 +754,25 @@ fn topology_sig(tracks: &[TrackPlayback], buses: &[BusPlayback]) -> String {
         b.push('|');
     }
     b
+}
+
+/// The part of its file `t` plays, as `track_span` takes it (offset, length,
+/// fade bits), or `None` for the whole file: only an end that is a cut stops
+/// short of the file's end.
+fn span_of(t: &TrackPlayback) -> Option<(i64, i64, u32)> {
+    let fades = u32::from(t.fade_in) | (u32::from(t.fade_out) << 1);
+    let len = if t.fade_out { t.duration_ms } else { -1 };
+    (t.src_offset_ms != 0 || fades != 0).then_some((t.src_offset_ms, len, fades))
+}
+
+/// The key a lane's (or a bus's) engine chain keeps from rebuild to rebuild
+/// (see [`EngineBindings::track_key`]): a hash of its id, the same for the
+/// engine's whole life.
+fn carry_key(id: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    id.hash(&mut h);
+    h.finish()
 }
 
 /// Which model a sync job reconciles to.
@@ -935,6 +961,7 @@ fn do_sync(shared: &Arc<Shared>, model: SyncModel, retry: bool) -> Result<(), Sy
             .as_ref()
             .map_or(-1, |o| new_bus_index.get(o).copied().unwrap_or(-1));
         let _ = engine.buses_add(b.volume as f32, b.muted, out);
+        let _ = engine.bus_key(slot_index(i), carry_key(&b.id));
         push_chain(engine, slot_index(i), Some(&b.fx), true);
         push_sends(engine, slot_index(i), &b.sends, &new_bus_index, true);
     }
@@ -980,6 +1007,7 @@ fn do_sync(shared: &Arc<Shared>, model: SyncModel, retry: bool) -> Result<(), Sy
         if idx >= 0 {
             new_index.insert(t.id.clone(), idx);
             new_owner.insert(t.id.clone(), idx);
+            let _ = engine.track_key(idx, carry_key(t.lane_id.as_deref().unwrap_or(&t.id)));
             push_sends(engine, idx, &t.sends, &new_bus_index, false);
             if let Some(lane) = &t.lane_id {
                 match lane_leader.get(lane) {
@@ -1086,8 +1114,14 @@ fn stage_track<'a>(
     bus_idx: i32,
 ) -> (MutexGuard<'a, State>, Result<i32, MediaError>) {
     let volume = t.volume as f32;
+    let span = |idx: i32| {
+        if let Some((from, len, fades)) = span_of(t) {
+            let _ = engine.track_span(idx, from, len, fades);
+        }
+    };
     if let Ok(idx) = engine.tracks_add(&t.path, t.start_ms, volume, t.muted, t.is_vocal, bus_idx) {
         if idx >= 0 {
+            span(idx);
             push_chain(engine, idx, t.fx.as_ref(), false);
             return (st, Ok(idx));
         }
@@ -1118,6 +1152,7 @@ fn stage_track<'a>(
         )
         .unwrap_or(-1);
     if idx >= 0 {
+        span(idx);
         push_chain(engine, idx, t.fx.as_ref(), false);
     }
     // The engine copied the samples; the decoded buffer is freed here.
@@ -1194,6 +1229,7 @@ impl GraphAudioPlaybackService {
                 playing: Broadcast::new(),
                 input_pull: Mutex::new(Vec::new()),
                 input_failed: AtomicBool::new(false),
+                record_offset_ms: AtomicU64::new(0.0f64.to_bits()),
             }),
         }
     }
@@ -1394,7 +1430,8 @@ impl GraphAudioPlaybackService {
         }
     }
 
-    /// The current live-input peak level (0..1) for a meter; 0 when not
+    /// The live-input peak level (0..1) for a meter: the loudest sample since
+    /// the previous read (see [`EngineBindings::input_level`]); 0 when not
     /// capturing.
     pub fn input_level(&self) -> f64 {
         self.live().map_or(0.0, |e| f64::from(e.input_level()))
@@ -1486,6 +1523,27 @@ impl GraphAudioPlaybackService {
         self.live().map_or(0.0, |e| {
             f64::from(e.record_latency_frames()) / 48_000.0 * 1000.0
         })
+    }
+
+    /// Sets the user's recording offset (ms; Settings): added to the measured
+    /// round trip wherever a take is aligned, for what no device reports (a
+    /// Bluetooth headset's codec, a speaker across the room), as a DAW's
+    /// recording delay is. Positive moves new takes earlier. A non-finite
+    /// value is dropped.
+    pub fn set_record_offset_ms(&self, ms: f64) {
+        if ms.is_finite() {
+            self.shared
+                .record_offset_ms
+                .store(ms.to_bits(), Ordering::Relaxed);
+        }
+    }
+
+    /// How far a new take is shifted earlier on the timeline, in ms: the
+    /// measured round trip ([`GraphAudioPlaybackService::record_latency_ms`])
+    /// plus the user's offset.
+    pub fn take_alignment_ms(&self) -> f64 {
+        let offset = f64::from_bits(self.shared.record_offset_ms.load(Ordering::Relaxed));
+        self.record_latency_ms() + offset
     }
 
     // --- Capture, recording ---------------------------------------------------

@@ -122,6 +122,9 @@ pub const HEADPHONES_SWITCH: iced::widget::Id = iced::widget::Id::new("settings-
 /// The monitor reverb slider.
 pub const REVERB_SLIDER: iced::widget::Id = iced::widget::Id::new("settings-reverb-slider");
 
+/// The recording offset slider.
+pub const OFFSET_SLIDER: iced::widget::Id = iced::widget::Id::new("settings-offset-slider");
+
 /// The toasts.
 pub const REPAIR_FAILED: &str = "The repair did not finish. It is safe to try again later.";
 pub const SAVE_PANEL_FAILED: &str = "Could not open the save dialog.";
@@ -372,6 +375,8 @@ pub enum Choice {
     InputChannel(u32),
     /// The monitor reverb amount (0..1).
     MonitorReverb(f64),
+    /// The recording offset, in whole ms.
+    RecordingOffset(f64),
     /// The headphones mark of output `uid` (the one the card showed).
     Headphones { uid: String, on: bool },
 }
@@ -384,6 +389,7 @@ impl Choice {
             Choice::InputDevice(uid) => settings.set_input_device(uid.as_deref()),
             Choice::InputChannel(mode) => settings.set_input_channel(mode),
             Choice::MonitorReverb(wet) => settings.set_monitor_reverb(wet),
+            Choice::RecordingOffset(ms) => settings.set_recording_offset_ms(ms),
             Choice::Headphones { uid, on } => settings.set_output_is_headphones(&uid, on),
         }
     }
@@ -393,6 +399,20 @@ impl Choice {
             Choice::MonitorReverb(wet) => Some(*wet),
             _ => None,
         }
+    }
+
+    fn offset(&self) -> Option<f64> {
+        match self {
+            Choice::RecordingOffset(ms) => Some(*ms),
+            _ => None,
+        }
+    }
+
+    /// Whether this and `other` are ticks of one slider's drag (the later
+    /// replaces the earlier while both wait).
+    fn same_slider(&self, other: &Choice) -> bool {
+        (self.reverb().is_some() && other.reverb().is_some())
+            || (self.offset().is_some() && other.offset().is_some())
     }
 }
 
@@ -426,6 +446,8 @@ pub enum Message {
     /// The reverb slider was let go: nothing more to do (each move already
     /// chose).
     ReverbReleased,
+    /// The recording offset slider was let go (as the reverb's).
+    OffsetReleased,
     /// The choice in flight was applied.
     Chosen,
     /// "Check for updates".
@@ -638,6 +660,16 @@ impl SettingsScreen {
             .unwrap_or_else(|| self.settings.monitor_reverb_wet())
     }
 
+    /// The recording offset the slider shows (as [`Self::reverb_shown`]).
+    fn offset_shown(&self) -> f64 {
+        self.queued
+            .iter()
+            .rev()
+            .chain(self.applying.iter())
+            .find_map(Choice::offset)
+            .unwrap_or_else(|| self.settings.recording_offset_ms())
+    }
+
     /// Re-reads the device lists off the UI thread; one asked for while one
     /// runs follows it.
     fn refresh(&mut self) -> Task<Message> {
@@ -653,11 +685,11 @@ impl SettingsScreen {
         )
     }
 
-    /// Queues `choice` behind the one being applied; a reverb drag tick
+    /// Queues `choice` behind the one being applied; a slider's drag tick
     /// replaces the one still waiting (its value would be overwritten
     /// before anyone heard it).
     fn choose(&mut self, choice: Choice) -> Task<Message> {
-        if choice.reverb().is_some() && self.queued.back().is_some_and(|c| c.reverb().is_some()) {
+        if self.queued.back().is_some_and(|c| c.same_slider(&choice)) {
             self.queued.pop_back();
         }
         self.queued.push_back(choice);
@@ -977,7 +1009,8 @@ impl Screen for SettingsScreen {
             Message::SettingsChanged
             | Message::UpdateWatch
             | Message::DownloadDialogClosed
-            | Message::ReverbReleased => Update::none(),
+            | Message::ReverbReleased
+            | Message::OffsetReleased => Update::none(),
             Message::Choose(choice) => self.choose(choice).into(),
             Message::Chosen => {
                 self.applying = None;
@@ -1272,6 +1305,13 @@ impl SettingsScreen {
                 .push(Space::new().height(GROUP_INNER_GAP))
                 .push(notice(BLUETOOTH_CONFLICT));
         }
+
+        // Recording.
+        content = content
+            .push(Space::new().height(GROUP_GAP))
+            .push(group_title("Recording"))
+            .push(group(vec![offset_row(self.offset_shown())]))
+            .push(footnote(OFFSET_FOOTNOTE.to_string()));
 
         // Monitoring.
         content = content
@@ -1653,6 +1693,67 @@ fn reverb_row<'a>(wet: f64) -> Element<'a, Message> {
     .width(Length::Fill)
     .padding(ROW_PADDING)
     .into()
+}
+
+/// What the recording offset is for, under its row.
+pub const OFFSET_FOOTNOTE: &str = "Takes are lined up with the backing by the delay the app \
+     measures. If yours still land late, move this right; if early, left.";
+
+/// The recording offset row: "Take offset", the thin slider over
+/// [`AppSettingsService::RECORDING_OFFSET_MIN_MS`] to `MAX_MS` in whole ms,
+/// and its signed value, as the reverb row lays its percentage out.
+fn offset_row<'a>(ms: f64) -> Element<'a, Message> {
+    let (lo, hi) = (
+        AppSettingsService::RECORDING_OFFSET_MIN_MS,
+        AppSettingsService::RECORDING_OFFSET_MAX_MS,
+    );
+    let ms = ms.clamp(lo, hi);
+    let slider = container(thin_slider(
+        ((ms - lo) / (hi - lo)) as f32,
+        move |v| {
+            Message::Choose(Choice::RecordingOffset(
+                (lo + f64::from(v) * (hi - lo)).round(),
+            ))
+        },
+        Message::OffsetReleased,
+    ))
+    .id(OFFSET_SLIDER)
+    .width(Length::Fill);
+    container(
+        row![
+            container(
+                studio_text("Take offset")
+                    .size(type_scale::TITLE)
+                    .line_height(Pixels(18.0))
+                    .color(Studio::TEXT_PRIMARY),
+            )
+            .width(LABEL_WIDTH),
+            slider,
+            studio_text(offset_label(ms))
+                .size(type_scale::BODY)
+                .line_height(Pixels(18.0))
+                .tabular()
+                .color(Studio::TEXT_SECONDARY)
+                .width(VALUE_WIDTH + 12.0)
+                .align_x(Horizontal::Right),
+        ]
+        .spacing(12)
+        .align_y(Vertical::Center),
+    )
+    .width(Length::Fill)
+    .padding(ROW_PADDING)
+    .into()
+}
+
+/// The recording offset as the row shows it: whole ms, signed ("+20 ms",
+/// "0 ms", "-15 ms").
+pub fn offset_label(ms: f64) -> String {
+    let ms = ms.round() as i64;
+    if ms > 0 {
+        format!("+{ms} ms")
+    } else {
+        format!("{ms} ms")
+    }
 }
 
 /// Whether only headphones play from the current output — wired ones on an

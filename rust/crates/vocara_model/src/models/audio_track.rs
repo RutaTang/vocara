@@ -73,6 +73,71 @@ pub struct AudioClip {
     pub waveform_peaks: Vec<f64>,
 }
 
+/// The order a lane's clips are stacked in, bottom first: the lane's own order, each clip
+/// laid over the ones before it. A recording or a drop is appended to its lane, so the newest
+/// clip is on top, as the lane draws them. Where clips overlap only the topmost is heard and
+/// analyzed, as Logic, Cubase and Pro Tools play overlapping regions: playback
+/// ([`lane_visible_spans`]) and the lane's merged analyses (`merge_voice_metrics`,
+/// `merge_spectrograms`) all lay clips down in this order, so what the singer hears is what the
+/// pitch and spectrogram lanes show. Playback used to sum every clip whole, so re-singing a
+/// phrase over a take played both performances at once.
+pub fn lane_stack_order(clips: usize) -> std::ops::Range<usize> {
+    0..clips
+}
+
+/// One stretch of the timeline where one of a lane's clips is heard (see
+/// [`lane_visible_spans`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VisibleSpan {
+    /// The clip: an index into the spans [`lane_visible_spans`] was given.
+    pub clip: usize,
+    pub start_ms: i64,
+    pub end_ms: i64,
+}
+
+/// What of each clip a lane plays: `spans` holds each clip's `(start_ms, end_ms)` in the lane's
+/// order, and each clip comes back as the stretches of it no clip stacked above it covers
+/// ([`lane_stack_order`]): clips in the lane's order, each one's stretches in timeline order.
+/// A clip wholly covered has none; an empty span plays nothing.
+pub fn lane_visible_spans(spans: &[(i64, i64)]) -> Vec<VisibleSpan> {
+    let order: Vec<usize> = lane_stack_order(spans.len()).collect();
+    let mut out = Vec::new();
+    for (pos, &clip) in order.iter().enumerate() {
+        let (start, end) = spans[clip];
+        if end <= start {
+            continue;
+        }
+        let mut above: Vec<(i64, i64)> = order[pos + 1..]
+            .iter()
+            .map(|&j| spans[j])
+            .filter(|&(s, e)| e > s && e > start && s < end)
+            .collect();
+        above.sort_unstable();
+        let mut at = start;
+        for (s, e) in above {
+            if s > at {
+                out.push(VisibleSpan {
+                    clip,
+                    start_ms: at,
+                    end_ms: s.min(end),
+                });
+            }
+            at = at.max(e);
+            if at >= end {
+                break;
+            }
+        }
+        if at < end {
+            out.push(VisibleSpan {
+                clip,
+                start_ms: at,
+                end_ms: end,
+            });
+        }
+    }
+    out
+}
+
 impl AudioClip {
     /// `AudioClip(id:, audioFilePath:, durationMs:)` at start 0, no peaks.
     pub fn new(
@@ -358,5 +423,62 @@ impl AudioTrack {
             "busId": nullable(self.bus_id.clone()),
             "sends": self.sends.iter().map(TrackSend::to_json).collect::<Vec<_>>(),
         })
+    }
+}
+
+#[cfg(test)]
+mod lane_tests {
+    use super::*;
+
+    fn span(clip: usize, start_ms: i64, end_ms: i64) -> VisibleSpan {
+        VisibleSpan {
+            clip,
+            start_ms,
+            end_ms,
+        }
+    }
+
+    #[test]
+    fn a_phrase_sung_again_over_a_take_hides_that_stretch_of_it() {
+        // The take 0-60 s, the phrase re-sung 20-30 s on top.
+        let got = lane_visible_spans(&[(0, 60_000), (20_000, 30_000)]);
+        assert_eq!(
+            got,
+            [
+                span(0, 0, 20_000),
+                span(0, 30_000, 60_000),
+                span(1, 20_000, 30_000)
+            ]
+        );
+    }
+
+    #[test]
+    fn the_newest_clip_is_on_top_wherever_it_starts() {
+        // A take from 10 s, then one recorded over it from 0 s.
+        let got = lane_visible_spans(&[(10_000, 60_000), (0, 30_000)]);
+        assert_eq!(got, [span(0, 30_000, 60_000), span(1, 0, 30_000)]);
+    }
+
+    #[test]
+    fn a_clip_covered_whole_plays_nothing_and_gaps_stay_gaps() {
+        let got = lane_visible_spans(&[(1_000, 2_000), (0, 5_000), (8_000, 9_000), (7, 7)]);
+        assert_eq!(got, [span(1, 0, 5_000), span(2, 8_000, 9_000)]);
+    }
+
+    #[test]
+    fn several_clips_above_leave_the_stretches_between_them() {
+        let got =
+            lane_visible_spans(&[(0, 10_000), (2_000, 3_000), (2_500, 4_000), (6_000, 7_000)]);
+        assert_eq!(
+            got,
+            [
+                span(0, 0, 2_000),
+                span(0, 4_000, 6_000),
+                span(0, 7_000, 10_000),
+                span(1, 2_000, 2_500),
+                span(2, 2_500, 4_000),
+                span(3, 6_000, 7_000)
+            ]
+        );
     }
 }

@@ -194,7 +194,7 @@ fn rust_analysis_summaries_match_dart_bit_for_bit() {
                 check_ltas(&compute_ltas(&s, None), &j["outUngated"]);
             }
             "mergeMetrics" => {
-                let parts: Vec<VoiceMetricsPart> = j["parts"]
+                let mut parts: Vec<VoiceMetricsPart> = j["parts"]
                     .as_array()
                     .unwrap()
                     .iter()
@@ -203,6 +203,10 @@ fn rust_analysis_summaries_match_dart_bit_for_bit() {
                         metrics: Arc::new(metrics(&p["metrics"])),
                     })
                     .collect();
+                // Dart laid overlapping parts down by start; the merge lays them down in
+                // the lane's stacking order (audio_track::lane_stack_order), so they are
+                // handed over in the order Dart's sort put them in.
+                parts.sort_by_key(|p| p.offset_ms);
                 let r = merge_voice_metrics(&parts).unwrap();
                 assert_eq!(r.frames as u64, out["frames"].as_u64().unwrap());
                 for (curve, key) in [

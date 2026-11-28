@@ -60,7 +60,13 @@ struct PendingTrack {
     /// `pcm` stays empty. False: the decoded-Arc fallback (foreign files).
     stream: bool,
     pcm: Arc<[Smp]>,
+    start_ms: i64,
     start_frame: i64,
+    /// The part of the file the track plays, and its cut edges (see [`ve_track_span`]): the
+    /// whole file from its first frame by default.
+    src_offset: i64,
+    len: Option<i64>,
+    cut: crate::source::Cut,
     gain: f32,
     muted: bool,
     /// Vocal tracks get the full EQ -> Comp insert chain + a reverb send; backing is dry.
@@ -74,6 +80,8 @@ struct PendingTrack {
     /// The staged track whose chain this one plays through (see [`ve_track_lane`]), or -1
     /// for its own.
     lane: i32,
+    /// The host's key for the lane this track plays (see [`ve_track_key`]).
+    key: Option<u64>,
 }
 
 /// An FX bus staged for the next [`ve_tracks_commit`].
@@ -86,6 +94,8 @@ struct PendingBus {
     chain: Vec<u8>,
     /// Post-fader aux sends: (target bus index, level dB).
     sends: Vec<(i32, f32)>,
+    /// The host's key for this bus (see [`ve_bus_key`]).
+    key: Option<u64>,
 }
 
 /// A staged commit's feeders and their stream control blocks.
@@ -121,7 +131,8 @@ pub struct VeEngine {
     /// turned "follow the default" into an explicit pick of whatever device happened to be default,
     /// so losing that device left the engine permanently "rerouted" (monitor hard-muted).
     output_binding: Arc<std::sync::Mutex<device::OutputBinding>>,
-    /// Live-input peak level (f32 bits), written by the input callback; read by `ve_input_level`.
+    /// Live-input peak (f32 bits): raised by the input callback, taken by `ve_input_level` (see
+    /// [`crate::meter`]).
     input_level: Arc<AtomicU32>,
     /// Total input frames received (diagnostic for whether the mic is actually delivering data).
     input_frames_in: Arc<AtomicU64>,
@@ -181,6 +192,12 @@ pub struct VeEngine {
     /// Per committed track, the track id of the chain it plays through: its own, or its lane
     /// leader's (see [`ve_track_lane`]). Every per-track setter addresses nodes through it.
     track_chains: Vec<u32>,
+    /// The live graph's track ids: each keyed lane's chain id by its key (see
+    /// [`ve_track_key`]), and every id it uses (see `build::assign_track_ids`).
+    chain_keys: std::collections::HashMap<u64, u32>,
+    track_ids: std::collections::HashSet<u32>,
+    /// The live graph's bus keys, by bus index (see [`ve_bus_key`]).
+    bus_keys: Vec<Option<u64>>,
     // Per committed track: the vocal compressor's gain-reduction meter (None for backing).
     gr_meters: Vec<Option<Arc<AtomicU32>>>,
     // Per committed FX bus: the bus compressor's gain-reduction meter.
@@ -371,15 +388,17 @@ fn sweep_dead(feeders: &std::sync::Mutex<Vec<Arc<std::sync::Mutex<FeederSlot>>>>
     }
 }
 
-/// [`VeEngine::chain_of`] over `chains`. An index the id math cannot address — negative, or
-/// past [`build::MAX_INDEX`] — names no track: it gets track 0's id band, which no node uses
-/// (track ids start at 1). Cast as it was, -2 became `u32::MAX`, whose ids wrap around onto the
-/// master's and the reverb's, and an index past 2^27 wrapped onto a low track's.
+/// [`VeEngine::chain_of`] over `chains`. An index past the committed set names no track: it
+/// gets track 0's id band, which no node uses (track ids start at 1). Track ids are not the
+/// staged index plus one (see `build::assign_track_ids`), so that plain id could name a live
+/// chain. Cast as it was, -2 became `u32::MAX`, whose ids wrap around onto the master's and
+/// the reverb's.
 fn chain_for(chains: &[u32], track: c_int) -> u32 {
-    match u32::try_from(track) {
-        Ok(t) if t < build::MAX_INDEX => chains.get(t as usize).copied().unwrap_or(t + 1),
-        _ => 0,
-    }
+    usize::try_from(track)
+        .ok()
+        .and_then(|t| chains.get(t))
+        .copied()
+        .unwrap_or(0)
 }
 
 /// A host bus index as the node-id math takes it, or None for one it cannot address: cast as
@@ -399,8 +418,8 @@ fn eq_band_fits(band: c_int) -> bool {
 
 impl VeEngine {
     /// The track id whose nodes a per-track setter on committed track `track` addresses: the
-    /// chain it plays through (see [`ve_track_lane`]). An index past the committed set keeps
-    /// the plain `track + 1`, which names no node of the live graph.
+    /// chain it plays through (see [`ve_track_lane`]); 0, which names no node, past the
+    /// committed set.
     fn chain_of(&self, track: c_int) -> u32 {
         chain_for(&self.track_chains, track)
     }
@@ -663,6 +682,9 @@ pub extern "C" fn ve_create() -> *mut VeEngine {
             pending_buses: Vec::new(),
             track_gain_nodes: Vec::new(),
             track_chains: Vec::new(),
+            chain_keys: std::collections::HashMap::new(),
+            track_ids: std::collections::HashSet::new(),
+            bus_keys: Vec::new(),
             gr_meters: Vec::new(),
             bus_gr_meters: Vec::new(),
             feeders: Arc::new(std::sync::Mutex::new(Vec::new())),
@@ -1400,12 +1422,12 @@ pub extern "C" fn ve_set_monitor_reverb(
     })
 }
 
-/// The current live-input peak level (0..1, linear) for a meter. 0 when not capturing.
+/// The live-input peak level (linear) for a meter: the loudest sample since the previous call,
+/// so a meter polled every 50 ms misses no buffer's peak (see [`crate::meter`]). 0 when not
+/// capturing. One reader at a time: each call clears what it returns.
 #[no_mangle]
 pub extern "C" fn ve_input_level(e: *mut VeEngine) -> c_float {
-    with_engine(e, 0.0, |eng| {
-        f32::from_bits(eng.input_level.load(Ordering::Relaxed))
-    })
+    with_engine(e, 0.0, |eng| crate::meter::take_peak(&eng.input_level))
 }
 
 /// Diagnostic + pre-roll clock: total ENGINE-RATE (48 kHz, post-resample) frames the mic
@@ -1573,6 +1595,7 @@ pub extern "C" fn ve_buses_add(e: *mut VeEngine, gain: f32, muted: c_int, output
             output,
             chain: Vec::new(),
             sends: Vec::new(),
+            key: None,
         });
         idx
     })
@@ -1640,6 +1663,73 @@ pub extern "C" fn ve_track_lane(e: *mut VeEngine, track: c_int, leader: c_int) -
             }
             _ => -1,
         }
+    })
+}
+
+/// `ve_track_span` fade bits: the span's start, its end is a cut (see [`crate::source::Cut`]).
+pub const VE_SPAN_FADE_IN: u32 = 1;
+pub const VE_SPAN_FADE_OUT: u32 = 2;
+
+/// Plays only part of staged `track`'s file: from `src_offset_ms` into it, `len_ms` long (or
+/// to its end, for a negative `len_ms`), still placed at the track's start, the edges named by
+/// `fades` ([`VE_SPAN_FADE_IN`], [`VE_SPAN_FADE_OUT`]) faded. Where clips overlap on a lane
+/// only the one stacked above plays, and the host stages each clip as the spans of it that
+/// are heard; the edges where a clip above cuts in are the ones that fade. The frames are
+/// derived from the timeline positions, so spans the host cut at one position meet at one
+/// frame. Call before [`ve_tracks_commit`]; returns 0 / -1.
+#[no_mangle]
+pub extern "C" fn ve_track_span(
+    e: *mut VeEngine,
+    track: c_int,
+    src_offset_ms: i64,
+    len_ms: i64,
+    fades: u32,
+) -> c_int {
+    with_engine(e, -1, |eng| {
+        let rate = eng.handle.sample_rate();
+        let frames = |ms: i64| (ms as f64 * rate / 1000.0) as i64;
+        match eng.pending.get_mut(track as usize) {
+            Some(pt) => {
+                pt.src_offset = pt.start_frame - frames(pt.start_ms - src_offset_ms.max(0));
+                pt.len = (len_ms >= 0).then(|| frames(pt.start_ms + len_ms) - pt.start_frame);
+                pt.cut = crate::source::Cut {
+                    fade_in: fades & VE_SPAN_FADE_IN != 0,
+                    fade_out: fades & VE_SPAN_FADE_OUT != 0,
+                };
+                0
+            }
+            None => -1,
+        }
+    })
+}
+
+/// Names the lane staged `track` plays, by a key the host keeps for it from commit to commit
+/// (a hash of the lane's id). A lane's chain keeps its node ids for as long as its key does,
+/// so its effects carry their tails and histories over the rebuild (see
+/// `build::assign_track_ids`); a track with no key starts fresh. A follower's key is unused
+/// (it plays through its leader's chain). Call before [`ve_tracks_commit`]; returns 0 / -1.
+#[no_mangle]
+pub extern "C" fn ve_track_key(e: *mut VeEngine, track: c_int, key: u64) -> c_int {
+    with_engine(e, -1, |eng| match eng.pending.get_mut(track as usize) {
+        Some(pt) => {
+            pt.key = Some(key);
+            0
+        }
+        None => -1,
+    })
+}
+
+/// Names staged FX bus `bus` by a key the host keeps for it (see [`ve_track_key`]). A bus's
+/// node ids follow its index, so its effects carry over a rebuild only while the same bus
+/// (the same key) sits at that index. Call before [`ve_tracks_commit`]; returns 0 / -1.
+#[no_mangle]
+pub extern "C" fn ve_bus_key(e: *mut VeEngine, bus: c_int, key: u64) -> c_int {
+    with_engine(e, -1, |eng| match eng.pending_buses.get_mut(bus as usize) {
+        Some(pb) => {
+            pb.key = Some(key);
+            0
+        }
+        None => -1,
     })
 }
 
@@ -1807,7 +1897,11 @@ pub extern "C" fn ve_tracks_add(
                 path: path.to_string(),
                 stream: true,
                 pcm: Arc::from(Vec::new()),
+                start_ms,
                 start_frame,
+                src_offset: 0,
+                len: None,
+                cut: crate::source::Cut::default(),
                 gain,
                 muted: muted != 0,
                 vocal: is_vocal != 0,
@@ -1815,6 +1909,7 @@ pub extern "C" fn ve_tracks_add(
                 chain: Vec::new(),
                 sends: Vec::new(),
                 lane: -1,
+                key: None,
             });
             return idx;
         }
@@ -1833,7 +1928,11 @@ pub extern "C" fn ve_tracks_add(
             path: path.to_string(),
             stream: false,
             pcm,
+            start_ms,
             start_frame,
+            src_offset: 0,
+            len: None,
+            cut: crate::source::Cut::default(),
             gain,
             muted: muted != 0,
             vocal: is_vocal != 0,
@@ -1841,6 +1940,7 @@ pub extern "C" fn ve_tracks_add(
             chain: Vec::new(),
             sends: Vec::new(),
             lane: -1,
+            key: None,
         });
         idx
     }))
@@ -1994,6 +2094,16 @@ pub extern "C" fn ve_tracks_commit_staged(e: *mut VeEngine) -> c_int {
         // Per staged track: the track id of the chain it plays through (its own, or its lane
         // leader's — see ve_track_lane), and where its own spec sits in `specs` (leaders only).
         let leaders = lane_leaders(eng.pending.iter().map(|p| p.lane));
+        // Each staged track's id: a keyed lane's chain keeps the one it had, the rest take ids
+        // the live graph does not use, so the new graph's nodes take over only their own
+        // state (see build::assign_track_ids).
+        let keys: Vec<Option<u64>> = eng
+            .pending
+            .iter()
+            .zip(&leaders)
+            .map(|(pt, leader)| pt.key.filter(|_| leader.is_none()))
+            .collect();
+        let track_ids = build::assign_track_ids(&keys, &eng.chain_keys, &eng.track_ids);
         let mut chain_ids: Vec<u32> = Vec::with_capacity(eng.pending.len());
         let mut spec_at: Vec<Option<usize>> = Vec::with_capacity(eng.pending.len());
         for (i, pt) in eng.pending.iter().enumerate() {
@@ -2035,14 +2145,16 @@ pub extern "C" fn ve_tracks_commit_staged(e: *mut VeEngine) -> c_int {
                     Ok(reader) => {
                         let ctrl = crate::feed::StreamCtrl::new();
                         let (prod, cons) = crate::ring::spsc::<[Smp; CHANNELS]>(16384);
-                        let len = reader.frames;
                         new_ctrls.push(Arc::clone(&ctrl));
-                        new_feeders.push(crate::feed::TrackFeeder::new(
+                        let feeder = crate::feed::TrackFeeder::new(
                             Arc::clone(&ctrl),
                             prod,
                             reader,
                             pt.start_frame,
-                        ));
+                        )
+                        .with_span(pt.src_offset, pt.len, pt.cut);
+                        let len = feeder.len_frames();
+                        new_feeders.push(feeder);
                         Box::new(crate::source::StreamingSource::new(
                             ctrl,
                             cons,
@@ -2064,20 +2176,26 @@ pub extern "C" fn ve_tracks_commit_staged(e: *mut VeEngine) -> c_int {
                     }
                 }
             } else {
-                Box::new(BufferSource::from_arc(pt.pcm.clone(), pt.start_frame))
+                Box::new(
+                    BufferSource::from_arc(pt.pcm.clone(), pt.start_frame).with_span(
+                        pt.src_offset,
+                        pt.len,
+                        pt.cut,
+                    ),
+                )
             };
             if let Some(l) = leader {
                 // Plays through the leader's chain: its source sums in at the chain's entry.
                 let at = spec_at[l].expect("a leader has a spec");
-                specs[at].lane_sources.push(((i + 1) as u32, source));
+                specs[at].lane_sources.push((track_ids[i], source));
                 chain_ids.push(chain_ids[l]);
                 spec_at.push(None);
                 continue;
             }
-            chain_ids.push((i + 1) as u32);
+            chain_ids.push(track_ids[i]);
             spec_at.push(Some(specs.len()));
             specs.push(TrackSpec {
-                id: (i + 1) as u32,
+                id: track_ids[i],
                 source,
                 vocal: pt.vocal,
                 gain: staged_gain(pt.muted, pt.gain),
@@ -2093,10 +2211,26 @@ pub extern "C" fn ve_tracks_commit_staged(e: *mut VeEngine) -> c_int {
         let mut project = ProjectSpec::new(specs);
         project.buses = bus_specs;
         let desc = build(project);
-        let graph = match desc.compile(rate, MAX_BLOCK) {
+        let mut graph = match desc.compile(rate, MAX_BLOCK) {
             Ok(g) => g,
             Err(_) => return -1,
         };
+        // A bus's ids follow its index: its nodes take over the live graph's only where the
+        // same bus sat at that index.
+        let bus_keys: Vec<Option<u64>> = eng.pending_buses.iter().map(|b| b.key).collect();
+        for (b, key) in bus_keys.iter().enumerate() {
+            if key.is_none() || eng.bus_keys.get(b) != Some(key) {
+                let (lo, hi) = build::bus_band(b as u32);
+                graph.start_fresh(lo, hi);
+            }
+        }
+        eng.chain_keys = keys
+            .iter()
+            .zip(&track_ids)
+            .filter_map(|(k, &id)| k.map(|k| (k, id)))
+            .collect();
+        eng.track_ids = track_ids.iter().copied().collect();
+        eng.bus_keys = bus_keys;
         // Prime every new stream ring BEFORE the graph goes live, so the
         // first rendered block finds audio, not a cold ring. Paused, only one
         // device callback's worth each: filling every ring here read each
@@ -2630,7 +2764,11 @@ pub extern "C" fn ve_tracks_add_pcm(
             path: path.to_string(),
             stream: false,
             pcm: arc,
+            start_ms,
             start_frame,
+            src_offset: 0,
+            len: None,
+            cut: crate::source::Cut::default(),
             gain,
             muted: muted != 0,
             vocal: is_vocal != 0,
@@ -2638,6 +2776,7 @@ pub extern "C" fn ve_tracks_add_pcm(
             chain: Vec::new(),
             sends: Vec::new(),
             lane: -1,
+            key: None,
         });
         idx
     }))
@@ -3930,7 +4069,7 @@ mod index_guard_tests {
             "a committed track plays through its chain"
         );
         assert_eq!(chain_for(&chains, 2), 3);
-        assert_eq!(chain_for(&chains, 5), 6, "past the committed set: no node");
+        assert_eq!(chain_for(&chains, 5), 0, "past the committed set: no node");
         assert_eq!(chain_for(&chains, build::MAX_INDEX as i32), 0);
         assert_eq!(chain_for(&chains, i32::MAX), 0);
     }

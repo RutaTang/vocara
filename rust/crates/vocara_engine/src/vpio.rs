@@ -30,13 +30,13 @@ use objc2_audio_toolbox::{
     kAUVoiceIOProperty_BypassVoiceProcessing, kAUVoiceIOProperty_VoiceProcessingEnableAGC,
     kAudioOutputUnitProperty_CurrentDevice, kAudioOutputUnitProperty_EnableIO,
     kAudioOutputUnitProperty_SetInputCallback, kAudioUnitManufacturer_Apple,
-    kAudioUnitProperty_MaximumFramesPerSlice, kAudioUnitProperty_SetRenderCallback,
-    kAudioUnitProperty_StreamFormat, kAudioUnitScope_Global, kAudioUnitScope_Input,
-    kAudioUnitScope_Output, kAudioUnitSubType_VoiceProcessingIO, kAudioUnitType_Output,
-    AURenderCallbackStruct, AudioComponentDescription, AudioComponentFindNext,
-    AudioComponentInstanceDispose, AudioComponentInstanceNew, AudioUnit, AudioUnitGetProperty,
-    AudioUnitInitialize, AudioUnitRender, AudioUnitRenderActionFlags, AudioUnitSetProperty,
-    AudioUnitUninitialize,
+    kAudioUnitProperty_Latency, kAudioUnitProperty_MaximumFramesPerSlice,
+    kAudioUnitProperty_SetRenderCallback, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Global,
+    kAudioUnitScope_Input, kAudioUnitScope_Output, kAudioUnitSubType_VoiceProcessingIO,
+    kAudioUnitType_Output, AURenderCallbackStruct, AudioComponentDescription,
+    AudioComponentFindNext, AudioComponentInstanceDispose, AudioComponentInstanceNew, AudioUnit,
+    AudioUnitGetProperty, AudioUnitInitialize, AudioUnitRender, AudioUnitRenderActionFlags,
+    AudioUnitSetProperty, AudioUnitUninitialize,
 };
 use objc2_audio_toolbox::{AudioOutputUnitStart, AudioOutputUnitStop};
 use objc2_core_audio_types::{
@@ -53,10 +53,11 @@ use crate::device::{InputCell, Transport};
 use crate::diag::{self, ElementFormat};
 use crate::dsp::capture_cleanup::VoicePath;
 use crate::io_buffer::IoBufferRestore;
+use crate::latency::{round_trip_frames, Extras, Leg};
 use crate::live::RtCell;
 use crate::ring::{spsc, Consumer, Producer};
 use crate::ring_sync::{baseline_cap, classify_duplex_rates, DuplexRateCheck, RefRingSync};
-use crate::sample::{frames_at_engine_rate, CHANNELS, ENGINE_SR};
+use crate::sample::{CHANNELS, ENGINE_SR};
 
 const VPIO_RATE: f64 = ENGINE_SR; // 48_000.0 — requested rate; verified against the effective ASBD.
 const REQ_CH: u32 = CHANNELS as u32; // 2 — what we request; VPIO may negotiate fewer (e.g. mono).
@@ -96,7 +97,8 @@ const RELEASE_WAIT: Duration = Duration::from_millis(2000);
 /// Estimated record round-trip latency (frames @ ENGINE_SR): output IO (buffer + safety + device
 /// latency) + acoustic flight + input IO + the AEC block. The captured vocal lands this far behind
 /// the engine playhead, so recorded takes are shifted earlier by it to sit on the beat the singer
-/// heard. Written when the mic opens; read by the FFI. 0 until the mic has opened once.
+/// heard. Estimated when the mic opens, measured again once its input delivers (see
+/// [`Vpio::measure_latency`]); read by the FFI. 0 until the mic has opened once.
 pub(crate) static RECORD_LATENCY_FRAMES: AtomicU32 = AtomicU32::new(0);
 
 /// Diagnostic: whether the current duplex session runs with the AEC BYPASSED because the input
@@ -295,6 +297,11 @@ pub struct Vpio {
     /// The device IO buffer sizes this open changed, put back when it closes. A field, so it
     /// drops after [`Drop::drop`] has stopped the unit.
     _io: IoRestore,
+    /// What [`Vpio::measure_latency`] reads: the devices the legs run on, the rate the mic
+    /// element delivers at, and whether the take passes through the echo canceller.
+    legs: UnitLegs,
+    in_rate: f64,
+    aec_in_take: bool,
 }
 
 // SAFETY: constructed, started, stopped and dropped only on the single AudioHost thread.
@@ -585,7 +592,7 @@ impl Vpio {
         // enshrined ring depth past it would make the echo non-causal (AEC dead for the
         // session), so the baseline cap is derived from it, not from a buffer-size constant.
         // What it changed is put back when this unit closes, or now if it fails to start.
-        let (io_round_trip, io_restore) = tune_io_and_round_trip(device_uid);
+        let (io_round_trip, io_restore, legs) = tune_io_and_round_trip(device_uid);
         let io_restore = IoRestore(io_restore);
         RECORD_LATENCY_FRAMES.store(io_round_trip + AEC_BLOCK_FRAMES, Ordering::Relaxed);
         AEC_BYPASSED.store(false, Ordering::Relaxed);
@@ -876,6 +883,7 @@ impl Vpio {
             }
 
             let (id, release) = register_live(owner);
+            let aec_in_take = !in_ctx.aec_bypass;
             Ok(Vpio {
                 unit,
                 _in: Some(in_ctx),
@@ -885,8 +893,44 @@ impl Vpio {
                 owner,
                 release,
                 _io: io_restore,
+                legs,
+                in_rate: in_layout.rate,
+                aec_in_take,
             })
         }
+    }
+
+    /// Measure the record round trip on the running unit and publish it for the takes'
+    /// alignment ([`RECORD_LATENCY_FRAMES`]); returns it. The open's figure was read before the
+    /// unit started: a Bluetooth headset still in its playback profile (no input stream, another
+    /// rate and latency than the call profile it records in), an IO buffer the unit may not run
+    /// at, no stream latency (a USB interface's converters) and none of the unit's own. The host
+    /// calls this once the unit's input has delivered (see `input_health`). Host thread.
+    pub fn measure_latency(&self) -> u32 {
+        // SAFETY: plain HAL and unit property reads on the host thread that owns the unit.
+        let (read, unit_seconds) = unsafe {
+            let read: Vec<Leg> = self
+                .legs
+                .iter()
+                .filter_map(|&(dev, scope)| dev.map(|d| read_leg(d, scope)))
+                .collect();
+            (read, unit_latency_seconds(self.unit).unwrap_or(0.0))
+        };
+        let frames = round_trip_frames(
+            &read,
+            Extras {
+                acoustic: ACOUSTIC_FRAMES,
+                aec_block: if self.aec_in_take {
+                    AEC_BLOCK_FRAMES
+                } else {
+                    0
+                },
+                unit_seconds,
+                input_rate: self.in_rate,
+            },
+        );
+        RECORD_LATENCY_FRAMES.store(frames, Ordering::Relaxed);
+        frames
     }
 
     /// Whether another engine's open asked this unit to release the mic (see [`make_room`]):
@@ -1477,8 +1521,10 @@ pub(crate) fn device_serves_output(uid: &str) -> bool {
 /// Request a small IO buffer on the device(s) the VPIO unit binds (cuts monitor/record latency and
 /// keeps the speaker→mic echo inside the AEC's filter), and return the estimated record round-trip
 /// in frames @ `ENGINE_SR`: ACOUSTIC flight + each leg's (buffer + safety offset + hardware
-/// latency), the per-device counts scaled from the device's nominal rate to engine-rate frames.
-/// The AEC's own block latency is added by the caller. Used to time-align recorded takes.
+/// latency + stream latency), the per-device counts scaled from the device's nominal rate to
+/// engine-rate frames, and the legs it measured. The AEC's own block latency is added by the
+/// caller. An estimate, read before the unit runs: [`Vpio::measure_latency`] reads the legs
+/// again once it delivers, with the unit's own latency, and that is what aligns the takes.
 ///
 /// `device_uid` is the mic the caller is about to bind (via `kAudioOutputUnitProperty_CurrentDevice`
 /// below). Decision logic per leg:
@@ -1493,24 +1539,67 @@ pub(crate) fn device_serves_output(uid: &str) -> bool {
 ///   of frames on MacBook speakers — because those queries fail and fall back to 0.
 /// - UID does NOT resolve: VPIO falls back to the system default INPUT for capture and default
 ///   OUTPUT for playback (two distinct devices), so each leg is measured on its own default.
-fn tune_io_and_round_trip(device_uid: Option<&str>) -> (u32, IoBufferRestore) {
+fn tune_io_and_round_trip(device_uid: Option<&str>) -> (u32, IoBufferRestore, UnitLegs) {
+    use objc2_core_audio::{kAudioDevicePropertyBufferFrameSize, kAudioObjectPropertyScopeGlobal};
+    let legs = unit_legs(device_uid);
+    let mut restore = IoBufferRestore::new();
+    let mut read = Vec::with_capacity(2);
+    unsafe {
+        for (dev, lscope) in legs {
+            let Some(dev) = dev else {
+                continue;
+            };
+            // What the device ran at before this open asked for less: put back when the unit
+            // closes (see `IoBufferRestore`), or playback kept the small buffer for the rest of
+            // the process after its first mic session.
+            let original = dev_get_u32(
+                dev,
+                kAudioDevicePropertyBufferFrameSize,
+                kAudioObjectPropertyScopeGlobal,
+            );
+            let _ = dev_set_u32(
+                dev,
+                kAudioDevicePropertyBufferFrameSize,
+                kAudioObjectPropertyScopeGlobal,
+                WANT_IO_FRAMES,
+            );
+            let set = dev_get_u32(
+                dev,
+                kAudioDevicePropertyBufferFrameSize,
+                kAudioObjectPropertyScopeGlobal,
+            );
+            if let (Some(original), Some(set)) = (original, set) {
+                restore.record(dev, original, set);
+            }
+            read.push(read_leg(dev, lscope));
+        }
+    }
+    let extras = Extras {
+        acoustic: ACOUSTIC_FRAMES,
+        ..Extras::default()
+    };
+    (round_trip_frames(&read, extras), restore, legs)
+}
+
+/// The IO buffer a mic open asks each device it binds for.
+const WANT_IO_FRAMES: u32 = 256;
+/// Speaker→mic acoustic flight on a laptop (~0.3 m ≈ 1.3 ms).
+const ACOUSTIC_FRAMES: u32 = 64;
+
+/// The devices the unit's two legs run on (`None`: no such device), each with the scope its
+/// figures are read in: input, then output (see [`tune_io_and_round_trip`]).
+type UnitLegs = [(Option<u32>, u32); 2];
+
+/// The devices the VPIO unit bound to `device_uid` runs its legs on, per the rules in
+/// [`tune_io_and_round_trip`]'s doc.
+fn unit_legs(device_uid: Option<&str>) -> UnitLegs {
     use objc2_core_audio::{
-        kAudioDevicePropertyBufferFrameSize, kAudioDevicePropertyLatency,
-        kAudioDevicePropertyNominalSampleRate, kAudioDevicePropertySafetyOffset,
         kAudioHardwarePropertyDefaultInputDevice, kAudioHardwarePropertyDefaultOutputDevice,
         kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyScopeInput,
         kAudioObjectPropertyScopeOutput, kAudioObjectSystemObject,
     };
-    const WANT_FRAMES: u32 = 256;
-    /// Speaker→mic acoustic flight on a laptop (~0.3 m ≈ 1.3 ms).
-    const ACOUSTIC_FRAMES: u32 = 64;
-    let mut round_trip = ACOUSTIC_FRAMES;
-    let mut restore = IoBufferRestore::new();
+    // SAFETY: plain HAL property reads.
     unsafe {
-        // Resolve the device the VPIO unit will actually bind, then assign each leg per the doc
-        // comment above: a duplex bound device serves BOTH legs; an input-only bound mic serves
-        // only the input leg (VPIO plays through the default OUTPUT device, which must still be
-        // tuned and measured); unbound falls back to the system defaults for both legs.
         let default_dev = |sel: u32| {
             dev_get_u32(
                 kAudioObjectSystemObject as u32,
@@ -1518,8 +1607,7 @@ fn tune_io_and_round_trip(device_uid: Option<&str>) -> (u32, IoBufferRestore) {
                 kAudioObjectPropertyScopeGlobal,
             )
         };
-        let bound = device_uid.and_then(device_id_for_uid);
-        let legs: [(Option<u32>, u32); 2] = match bound {
+        match device_uid.and_then(device_id_for_uid) {
             Some(dev) if has_output_streams(dev) => [
                 (Some(dev), kAudioObjectPropertyScopeInput),
                 (Some(dev), kAudioObjectPropertyScopeOutput),
@@ -1541,50 +1629,101 @@ fn tune_io_and_round_trip(device_uid: Option<&str>) -> (u32, IoBufferRestore) {
                     kAudioObjectPropertyScopeOutput,
                 ),
             ],
-        };
-        for (dev, lscope) in legs {
-            let Some(dev) = dev else {
-                continue;
-            };
-            // What the device ran at before this open asked for less: put back when the unit
-            // closes (see `IoBufferRestore`), or playback kept the small buffer for the rest of
-            // the process after its first mic session.
-            let original = dev_get_u32(
-                dev,
-                kAudioDevicePropertyBufferFrameSize,
-                kAudioObjectPropertyScopeGlobal,
-            );
-            let _ = dev_set_u32(
-                dev,
-                kAudioDevicePropertyBufferFrameSize,
-                kAudioObjectPropertyScopeGlobal,
-                WANT_FRAMES,
-            );
-            let set = dev_get_u32(
-                dev,
-                kAudioDevicePropertyBufferFrameSize,
-                kAudioObjectPropertyScopeGlobal,
-            );
-            if let (Some(original), Some(set)) = (original, set) {
-                restore.record(dev, original, set);
-            }
-            let buf = set.unwrap_or(WANT_FRAMES);
-            let latency = dev_get_u32(dev, kAudioDevicePropertyLatency, lscope).unwrap_or(0);
-            let safety = dev_get_u32(dev, kAudioDevicePropertySafetyOffset, lscope).unwrap_or(0);
-            // BufferFrameSize/Latency/SafetyOffset are reported in frames at the DEVICE's
-            // nominal rate, but RECORD_LATENCY_FRAMES is published (and consumed by Dart) as
-            // frames @ ENGINE_SR — scale each leg before summing, or a 44.1/96 kHz device
-            // skews the take alignment by its rate ratio.
-            let dev_rate = dev_get_f64(
-                dev,
-                kAudioDevicePropertyNominalSampleRate,
-                kAudioObjectPropertyScopeGlobal,
-            )
-            .unwrap_or(ENGINE_SR);
-            round_trip += frames_at_engine_rate(buf + latency + safety, dev_rate);
         }
     }
-    (round_trip, restore)
+}
+
+/// One leg's figures as the HAL reports them now (see [`crate::latency::Leg`]): the device's
+/// IO buffer, its safety offset and hardware latency in the leg's scope, the latency of its first
+/// stream in that scope, and its nominal rate. An unreadable figure reads 0 (the rate: the
+/// engine's).
+unsafe fn read_leg(dev: u32, scope: u32) -> Leg {
+    use objc2_core_audio::{
+        kAudioDevicePropertyBufferFrameSize, kAudioDevicePropertyLatency,
+        kAudioDevicePropertyNominalSampleRate, kAudioDevicePropertySafetyOffset,
+        kAudioObjectPropertyScopeGlobal, kAudioStreamPropertyLatency,
+    };
+    let stream = first_stream(dev, scope)
+        .and_then(|s| {
+            dev_get_u32(
+                s,
+                kAudioStreamPropertyLatency,
+                kAudioObjectPropertyScopeGlobal,
+            )
+        })
+        .unwrap_or(0);
+    Leg {
+        buffer: dev_get_u32(
+            dev,
+            kAudioDevicePropertyBufferFrameSize,
+            kAudioObjectPropertyScopeGlobal,
+        )
+        .unwrap_or(WANT_IO_FRAMES),
+        safety: dev_get_u32(dev, kAudioDevicePropertySafetyOffset, scope).unwrap_or(0),
+        device: dev_get_u32(dev, kAudioDevicePropertyLatency, scope).unwrap_or(0),
+        stream,
+        // BufferFrameSize/Latency/SafetyOffset are reported in frames at the DEVICE's nominal
+        // rate, but RECORD_LATENCY_FRAMES is published (and consumed) as frames @ ENGINE_SR:
+        // each leg is scaled before summing, or a 44.1/96 kHz device skews the take alignment
+        // by its rate ratio.
+        rate: dev_get_f64(
+            dev,
+            kAudioDevicePropertyNominalSampleRate,
+            kAudioObjectPropertyScopeGlobal,
+        )
+        .unwrap_or(ENGINE_SR),
+    }
+}
+
+/// The first of `dev`'s streams in `scope`. Not RT.
+unsafe fn first_stream(dev: u32, scope: u32) -> Option<u32> {
+    use objc2_core_audio::{
+        kAudioDevicePropertyStreams, kAudioObjectPropertyElementMain, AudioObjectGetPropertyData,
+        AudioObjectGetPropertyDataSize, AudioObjectPropertyAddress,
+    };
+    let addr = AudioObjectPropertyAddress {
+        mSelector: kAudioDevicePropertyStreams,
+        mScope: scope,
+        mElement: kAudioObjectPropertyElementMain,
+    };
+    let mut size: u32 = 0;
+    let st = AudioObjectGetPropertyDataSize(
+        dev,
+        NonNull::from(&addr),
+        0,
+        std::ptr::null(),
+        NonNull::from(&mut size),
+    );
+    let count = size as usize / std::mem::size_of::<u32>();
+    if st != 0 || count == 0 {
+        return None;
+    }
+    let mut ids = vec![0u32; count];
+    let mut size = (count * std::mem::size_of::<u32>()) as u32;
+    let st = AudioObjectGetPropertyData(
+        dev,
+        NonNull::from(&addr),
+        0,
+        std::ptr::null(),
+        NonNull::from(&mut size),
+        NonNull::new(ids.as_mut_ptr() as *mut c_void)?,
+    );
+    (st == 0 && size as usize >= std::mem::size_of::<u32>()).then(|| ids[0])
+}
+
+/// The voice unit's own processing latency (`kAudioUnitProperty_Latency`), in seconds.
+unsafe fn unit_latency_seconds(unit: AudioUnit) -> Option<f64> {
+    let mut v: f64 = 0.0;
+    let mut size = std::mem::size_of::<f64>() as u32;
+    let st = AudioUnitGetProperty(
+        unit,
+        kAudioUnitProperty_Latency,
+        kAudioUnitScope_Global,
+        0,
+        NonNull::new(&mut v as *mut f64 as *mut c_void)?,
+        NonNull::from(&mut size),
+    );
+    (st == 0).then_some(v)
 }
 
 // ---- UID → AudioDeviceID via the HAL ----------------------------------------------------------

@@ -19,12 +19,24 @@ use vocara_model::models::audio_fx::{ReverbSettings, TrackFx, TrackSend};
 
 /// Playback spec for one track, derived from the domain model. `start_ms` is
 /// the track's offset on the shared timeline; `duration_ms` its audio length.
+/// A clip partly covered by one stacked above it on its lane plays as one
+/// track per stretch of it that is heard (see
+/// `vocara_model::models::audio_track::lane_visible_spans`): each starts
+/// `src_offset_ms` into the file and lasts `duration_ms`, and fades in or out
+/// where it is cut.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TrackPlayback {
     pub id: String,
     pub path: String,
     pub start_ms: i64,
     pub duration_ms: i64,
+    /// Where in the file the track starts playing (0: its first frame).
+    pub src_offset_ms: i64,
+    /// Whether the track's start and end are cuts, where a clip stacked
+    /// above takes over or lets go, and fade; a clip's own ends play as
+    /// recorded, and an end that is not a cut plays to the file's end.
+    pub fade_in: bool,
+    pub fade_out: bool,
     pub volume: f64,
     pub muted: bool,
     /// Stereo pan in [-1, 1] (0 = center).
@@ -47,15 +59,18 @@ pub struct TrackPlayback {
 }
 
 impl TrackPlayback {
-    /// `TrackPlayback(id:, path:)` with Dart's defaults: at 0, no length, unity
-    /// volume, unmuted, centered, backing (dry), no FX, to the master, no
-    /// sends, a chain of its own.
+    /// `TrackPlayback(id:, path:)` with Dart's defaults: at 0, no length, the
+    /// whole file, unity volume, unmuted, centered, backing (dry), no FX, to the
+    /// master, no sends, a chain of its own.
     pub fn new(id: impl Into<String>, path: impl Into<String>) -> TrackPlayback {
         TrackPlayback {
             id: id.into(),
             path: path.into(),
             start_ms: 0,
             duration_ms: 0,
+            src_offset_ms: 0,
+            fade_in: false,
+            fade_out: false,
             volume: 1.0,
             muted: false,
             pan: 0.0,

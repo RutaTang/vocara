@@ -62,6 +62,8 @@ fn engine_with(node: Box<dyn vocara_engine::node::Node + Send>) -> (EngineHandle
     let g = source_graph(node);
     let (_mic_prod, mic_cons) = spsc::<[Smp; CHANNELS]>(256);
     let (h, rt) = spawn(g, HashMap::new(), mic_cons, 256);
+    // The stream is checked frame for frame across every transport move.
+    h.set_declick(false);
     (h, RtCell::new(rt))
 }
 
@@ -394,6 +396,7 @@ fn a_streamed_track_through_the_full_project_graph_equals_the_arc_build() {
         let g = desc.compile(ENGINE_SR, BLOCK).unwrap();
         let (_p, mic) = spsc::<[Smp; CHANNELS]>(256);
         let (h, rt) = spawn(g, HashMap::new(), mic, 256);
+        h.set_declick(false);
         (h, RtCell::new(rt))
     };
     let (h1, rt1) = mk(Box::new(streamed_node));

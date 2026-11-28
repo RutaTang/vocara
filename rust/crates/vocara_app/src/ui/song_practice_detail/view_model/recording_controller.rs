@@ -1786,7 +1786,7 @@ impl RecordingController {
                 let start_ms = round_to_i64(
                     self.recording_start_ms as f64
                         - self.recording_pre_roll_ms
-                        - engine.record_latency_ms(),
+                        - engine.take_alignment_ms(),
                 );
                 let files = Arc::clone(&self.audio_files);
                 self.effects.push(RecordingEffect::Run(RecordingJob {
@@ -1929,7 +1929,9 @@ impl RecordingController {
         //    content begins that far INTO the file;
         //  * record latency — the first sample sung against the backing is
         //    the response to audio the singer heard ~round-trip ago (output
-        //    IO + acoustic + input IO + AEC).
+        //    IO + acoustic + input IO + AEC, measured on the running unit),
+        //    plus the recording offset the singer set in Settings for what no
+        //    device reports.
         // Both shift the take EARLIER on the timeline. When the shift would
         // land before timeline zero (recording from the top — the common
         // case), the compensation is applied by CUTTING that much off the
@@ -1938,7 +1940,7 @@ impl RecordingController {
         let latency_ms = self
             .graph_engine
             .as_ref()
-            .map_or(0.0, |e| e.record_latency_ms());
+            .map_or(0.0, |e| e.take_alignment_ms());
         let raw_start_ms =
             round_to_i64(self.recording_start_ms as f64 - self.recording_pre_roll_ms - latency_ms);
         let path = stopped.path.clone();

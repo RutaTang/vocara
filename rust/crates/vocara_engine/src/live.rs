@@ -9,6 +9,7 @@ use std::sync::atomic::{fence, AtomicBool, AtomicI64, AtomicU32, AtomicU64, Orde
 use std::sync::{Arc, Mutex};
 
 use crate::command::{command_channel, CommandReceiver, CommandSender};
+use crate::declick::{fade_shape, Declick, DECLICK_FRAMES, LOOP_FADE_FRAMES};
 use crate::dsp::denormals::FlushGuard;
 use crate::dsp::reverb::{param as rparam, ReverbNode};
 use crate::dsp::smooth::Smoothed;
@@ -140,6 +141,9 @@ pub struct Shared {
     /// Bumped by seek/pause: the resampler's FIFO still holds pre-seek/pre-pause audio, which
     /// must be dropped (not played out) for the transport to respond within one callback.
     out_flush: AtomicU32,
+    /// The transport cuts are declicked (see [`crate::declick`]); on unless a test turns it off
+    /// (see [`EngineHandle::set_declick`]).
+    declick: AtomicBool,
 }
 
 impl Shared {
@@ -172,6 +176,7 @@ impl Shared {
                 tl_end: AtomicI64::new(0),
             }),
             out_flush: AtomicU32::new(0),
+            declick: AtomicBool::new(true),
         }
     }
 
@@ -308,6 +313,12 @@ impl Shared {
         self.out_flush.load(Ordering::Acquire)
     }
 
+    /// Whether transport cuts are declicked (see [`EngineHandle::set_declick`]). RT-safe.
+    #[inline]
+    pub fn declick_enabled(&self) -> bool {
+        self.declick.load(Ordering::Relaxed)
+    }
+
     /// The audible playhead (see [`EngineHandle::frame`], which delegates
     /// here): a pending seek reports its target; paused holds the fold;
     /// playing maps the consumed cursor. Also the position source for the
@@ -418,6 +429,24 @@ pub struct RtProcessor {
     /// [`Self::add_monitor`]).
     mon_stream: u64,
     mon_shed: bool,
+    /// The playback output's crossfade across transport cuts (see [`crate::declick`]), and
+    /// whether the last block played: a change is a cut.
+    declick: Declick,
+    was_playing: bool,
+}
+
+/// Fade the frames of a pass that lie within [`LOOP_FADE_FRAMES`] of the loop's end `le` out
+/// into the seam (`chunk` frames from timeline `frame`, which never cross `le`). The next pass
+/// fades back in from there (see `RtProcessor::render_block`).
+#[inline]
+fn fade_to_seam(out: &mut [Smp], frame: i64, chunk: usize, le: i64) {
+    let from = (le - LOOP_FADE_FRAMES as i64 - frame).max(0) as usize;
+    for i in from..chunk {
+        let left = (le - frame - i as i64) as f32;
+        let g = fade_shape(left / LOOP_FADE_FRAMES as f32);
+        out[CHANNELS * i] *= g;
+        out[CHANNELS * i + 1] *= g;
+    }
 }
 
 /// A monitor gain this small (-120 dB) is silence: once the target is 0 and the ramp has fallen
@@ -442,6 +471,12 @@ impl RtProcessor {
     /// Shared render body. RT-safe: flush-to-zero, drain a bounded number of commands, load the
     /// graph once, advance the sample clock, handle a pending seek and gapless loop wrap. No alloc,
     /// no lock, no syscall. `monitor` adds the live-input monitor on top of the playback mix.
+    ///
+    /// Every transport cut is declicked, sample-accurately, from the frame it lands on: play,
+    /// pause, a seek and a pause's rewind crossfade over [`DECLICK_FRAMES`] from the frame last
+    /// put out (so pause and stop glide to silence and play glides in from it), and a loop's
+    /// pass fades out over its last [`LOOP_FADE_FRAMES`] into the seam, the next pass fading
+    /// back in. Without them each of these stepped the output, and every loop pass clicked.
     fn render_block(&mut self, out: &mut [Smp], frames: usize, monitor: bool) {
         let _fz = FlushGuard::new();
         let total = frames * CHANNELS;
@@ -456,7 +491,19 @@ impl RtProcessor {
         // (see `EngineHandle::reap`), so the pointee outlives this block; we never cache the
         // reference.
         let g: &mut Graph = unsafe { &mut *self.cell.load() };
+        // A rebuilt graph's first block: its nodes take over the state of the ones they
+        // replace (reverb tails, delay lines, filter histories, envelopes).
+        let old = g.take_carry();
+        if !old.is_null() {
+            // SAFETY: `old` is the graph this one replaced, retired at the publish with a grace
+            // of two blocks. At most one block was running at the swap (on `old`), so this,
+            // the first block on the new graph, ends before the grace does; and the audio
+            // thread is the only one that touches a published graph's nodes.
+            g.carry_state_from(unsafe { &mut *old });
+        }
 
+        // A seek or a pause's rewind applied in this block: the output jumps.
+        let mut cut = false;
         let seek = self.shared.seek_req.load(Ordering::Acquire);
         if seek >= 0 {
             // The new clock is published BEFORE the request retires: a feeder reading
@@ -477,12 +524,20 @@ impl RtProcessor {
                 Ordering::Acquire,
             );
             g.reset();
+            cut = true;
         }
         if self.shared.reset_req.swap(false, Ordering::AcqRel) {
             g.reset();
+            cut = true;
         }
+        let playing = self.shared.playing.load(Ordering::Acquire);
+        let declick = self.shared.declick_enabled();
+        if declick && (cut || playing != self.was_playing) {
+            self.declick.begin(DECLICK_FRAMES);
+        }
+        self.was_playing = playing;
 
-        if self.shared.playing.load(Ordering::Acquire) {
+        if playing {
             let loop_en = self.shared.loop_enabled.load(Ordering::Acquire);
             let (ls, le) = self.shared.loop_bounds();
             let block_start = self.shared.frame.load(Ordering::Relaxed);
@@ -495,6 +550,15 @@ impl RtProcessor {
             let mut done = 0;
             while done < frames {
                 if loop_en && le > ls && frame >= le {
+                    // A pass that ran to the seam has faded out into it; one that jumps from
+                    // past it (the loop moved behind the playhead) has not.
+                    if declick {
+                        self.declick.begin(if frame == le {
+                            LOOP_FADE_FRAMES
+                        } else {
+                            DECLICK_FRAMES
+                        });
+                    }
                     frame = ls;
                 }
                 let mut chunk = (frames - done).min(self.max_block);
@@ -504,6 +568,8 @@ impl RtProcessor {
                         for s in &mut out[done * CHANNELS..total] {
                             *s = 0.0;
                         }
+                        self.declick
+                            .apply(&mut out[done * CHANNELS..total], frames - done);
                         // Trailing silence still reaches the device: count it
                         // (a GAP in segment space) so the consumed cursor and
                         // the render counter share one coordinate system.
@@ -515,6 +581,10 @@ impl RtProcessor {
                 let s = done * CHANNELS;
                 let e = (done + chunk) * CHANNELS;
                 g.render(chunk, frame, &mut out[s..e]);
+                if loop_en && declick {
+                    fade_to_seam(&mut out[s..e], frame, chunk, le);
+                }
+                self.declick.apply(&mut out[s..e], chunk);
                 frame += chunk as i64;
                 // One PLAYING span per contiguous sub-chunk: loop wraps split
                 // chunks here, so every segment is wrap-free and the consumed
@@ -540,10 +610,12 @@ impl RtProcessor {
                 .rendered_total
                 .store(rendered, Ordering::Release);
         } else {
-            // Stopped transport: silence the playback bed, but still let the monitor through.
+            // Stopped transport: silence the playback bed (gliding into it from a pause), but
+            // still let the monitor through.
             for s in &mut out[..total] {
                 *s = 0.0;
             }
+            self.declick.apply(&mut out[..total], frames);
             g.idle();
             // Silence frames delivered while stopped are rendered frames too
             // — a gap between segments, so a consumed cursor that reaches
@@ -953,6 +1025,13 @@ impl EngineHandle {
     pub fn is_playing(&self) -> bool {
         self.shared.playing.load(Ordering::Acquire)
     }
+
+    /// Turn the transport declick (see [`crate::declick`]) off or back on; it is on from the
+    /// start. Off, every cut steps the output as the audio beneath it does: for tests that
+    /// check that audio sample for sample (the streaming protocol's), not for playback.
+    pub fn set_declick(&self, on: bool) {
+        self.shared.declick.store(on, Ordering::Relaxed);
+    }
     /// Request a seek; the audio thread applies it at the next block (resets node tails).
     pub fn seek(&self, frame: i64) {
         self.shared.seek_req.store(frame.max(0), Ordering::Release);
@@ -1095,6 +1174,9 @@ impl EngineHandle {
 
     fn publish_boxed(&mut self, mut graph: Box<Graph>) {
         debug_assert_eq!(graph.max_block(), self.max_block);
+        // The graph about to retire hands its nodes' state over at the new one's first block.
+        // Only this thread publishes, so the cell holds exactly the graph the swap retires.
+        graph.set_carry_from(self.cell.load());
         // Commands still queued were sent for the graph this replaces; the new one takes
         // only those sent from here on (see CommandSender::begin_epoch).
         graph.set_epoch(self.cmd_tx.begin_epoch());
@@ -1138,6 +1220,9 @@ impl EngineHandle {
         // renderer is running (conservative: fall through to the grace-epoch path).
         let idle = self.renderer_gate.lock().map(|g| !*g).unwrap_or(false);
         if idle {
+            // No block will take the live graph's carry before these are freed: drop it.
+            // SAFETY: the cell's graph is alive while the cell is; the carry is an atomic.
+            let _ = unsafe { &*self.cell.load() }.take_carry();
             for (ptr, _) in self.retired.drain(..) {
                 // SAFETY: the gate read proved no stream callback exists, and any stream the
                 // host starts later loads the CURRENT cell value — this retiree is unreachable.
@@ -1216,6 +1301,8 @@ pub fn spawn(
         mon_idle: true,
         mon_stream: 0,
         mon_shed: false,
+        declick: Declick::default(),
+        was_playing: false,
     };
     (handle, rt)
 }
@@ -1979,5 +2066,296 @@ mod monitor_and_loop_tests {
         // Bounds past what 32 bits hold (~24.8 h) are held at the top, not wrapped.
         h.set_loop(true, 0, i64::MAX);
         assert_eq!(h.shared_arc().loop_bounds(), (0, u32::MAX as i64));
+    }
+}
+
+#[cfg(test)]
+mod declick_tests {
+    //! Every transport cut, rendered through the graph: the output around it is continuous with
+    //! the declick, and steps without it (so each scenario does cut).
+
+    use super::*;
+    use crate::dsp::master::MasterNode;
+    use crate::graph::{Edge, GraphDesc, NodeEntry};
+    use crate::ring::spsc;
+    use crate::source::BufferSource;
+
+    const BLOCK: usize = 128;
+
+    /// A loud 220 Hz tone, its largest natural step between two frames ~0.026.
+    fn tone(frames: usize) -> Vec<Smp> {
+        (0..frames * CHANNELS)
+            .map(|i| 0.9 * ((i / 2) as f32 * std::f32::consts::TAU * 220.0 / 48_000.0).sin())
+            .collect()
+    }
+
+    fn engine(pcm: Vec<Smp>, declick: bool) -> (EngineHandle, RtProcessor) {
+        let desc = GraphDesc {
+            nodes: vec![
+                NodeEntry::new(1, Box::new(BufferSource::new(pcm, 0))),
+                NodeEntry::new(2, Box::new(MasterNode::unity())),
+            ],
+            edges: vec![Edge::simple(1, 2)],
+            master: 2,
+        };
+        let g = desc.compile(ENGINE_SR, BLOCK).unwrap();
+        let (_mic, mic_cons) = spsc::<[Smp; CHANNELS]>(256);
+        let (h, rt) = spawn(g, HashMap::new(), mic_cons, 256);
+        h.set_declick(declick);
+        (h, rt)
+    }
+
+    fn render(rt: &mut RtProcessor, blocks: usize, into: &mut Vec<Smp>) {
+        let mut out = vec![0.0; BLOCK * CHANNELS];
+        for _ in 0..blocks {
+            rt.process(&mut out, BLOCK);
+            into.extend_from_slice(&out);
+        }
+    }
+
+    /// The largest step between two consecutive frames (left channel), from silence before
+    /// the first.
+    fn worst_step(out: &[Smp]) -> f32 {
+        let mut prev = 0.0f32;
+        let mut worst = 0.0f32;
+        for f in out.chunks(CHANNELS) {
+            worst = worst.max((f[0] - prev).abs());
+            prev = f[0];
+        }
+        worst
+    }
+
+    /// Play from mid-song, then pause mid-phrase and play again.
+    fn play_pause_play(declick: bool) -> Vec<Smp> {
+        let (h, mut rt) = engine(tone(96_000), declick);
+        h.seek(10_000 + 27); // off a zero crossing
+        h.play();
+        let mut out = Vec::new();
+        render(&mut rt, 20, &mut out);
+        h.pause();
+        render(&mut rt, 10, &mut out);
+        h.play();
+        render(&mut rt, 10, &mut out);
+        out
+    }
+
+    #[test]
+    fn play_glides_in_and_pause_glides_out() {
+        let out = play_pause_play(true);
+        assert!(out[0].abs() < 0.01, "play starts at {}", out[0]);
+        assert!(worst_step(&out) < 0.04, "a step of {}", worst_step(&out));
+        // Past the fade the tone plays untouched, and paused past its fade is silence.
+        let src = tone(96_000);
+        let at = DECLICK_FRAMES + 10;
+        assert_eq!(out[at * CHANNELS], src[(10_027 + at) * CHANNELS]);
+        let paused = 20 * BLOCK;
+        assert!((out[paused * CHANNELS] - out[(paused - 1) * CHANNELS]).abs() < 0.04);
+        assert!(
+            out[(paused + DECLICK_FRAMES) * CHANNELS..(paused + 10 * BLOCK) * CHANNELS]
+                .iter()
+                .all(|&x| x == 0.0)
+        );
+
+        let stepped = worst_step(&play_pause_play(false));
+        assert!(
+            stepped > 0.3,
+            "without the declick play and pause step ({stepped})"
+        );
+    }
+
+    /// A seek while playing, between two stretches of the tone far apart in phase.
+    fn seek_while_playing(declick: bool) -> Vec<Smp> {
+        let (h, mut rt) = engine(tone(96_000), declick);
+        h.seek(1_000);
+        h.play();
+        let mut out = Vec::new();
+        render(&mut rt, 10, &mut out);
+        h.seek(40_000 + 55);
+        render(&mut rt, 10, &mut out);
+        out
+    }
+
+    #[test]
+    fn a_seek_crossfades_from_the_old_audio_to_the_new() {
+        let out = seek_while_playing(true);
+        // From the frame before the seek on (the opening fade-in is the test above's).
+        let cut = 10 * BLOCK;
+        let around = &out[(cut - 1) * CHANNELS..];
+        let worst = around
+            .chunks(CHANNELS)
+            .zip(around[CHANNELS..].chunks(CHANNELS))
+            .map(|(a, b)| (b[0] - a[0]).abs())
+            .fold(0.0f32, f32::max);
+        assert!(worst < 0.04, "the seek stepped by {worst}");
+        let src = tone(96_000);
+        let at = cut + DECLICK_FRAMES + 3;
+        assert_eq!(out[at * CHANNELS], src[(40_055 + at - cut) * CHANNELS]);
+
+        let off = seek_while_playing(false);
+        assert!((off[cut * CHANNELS] - off[(cut - 1) * CHANNELS]).abs() > 0.3);
+    }
+
+    /// Three passes of a loop whose ends meet the tone far apart in phase.
+    fn three_passes(declick: bool) -> Vec<Smp> {
+        let (h, mut rt) = engine(tone(96_000), declick);
+        h.set_loop(true, 2_000, 6_013);
+        h.seek(2_000);
+        h.play();
+        let mut out = Vec::new();
+        render(&mut rt, 100, &mut out);
+        out
+    }
+
+    #[test]
+    fn every_loop_pass_fades_through_the_seam() {
+        let out = three_passes(true);
+        assert!(
+            worst_step(&out) < 0.04,
+            "a seam stepped by {}",
+            worst_step(&out)
+        );
+        // Each seam dips to silence and the pass between plays untouched.
+        let len = 4_013;
+        let src = tone(96_000);
+        for pass in 1..3 {
+            let seam = pass * len;
+            assert!(
+                out[(seam - 1) * CHANNELS].abs() < 1e-3,
+                "pass {pass} ends at a dip"
+            );
+            assert!(
+                out[seam * CHANNELS].abs() < 0.03,
+                "pass {pass} starts at a dip"
+            );
+            let mid = seam + len / 2;
+            assert_eq!(out[mid * CHANNELS], src[(2_000 + len / 2) * CHANNELS]);
+        }
+
+        let stepped = worst_step(&three_passes(false));
+        assert!(
+            stepped > 0.3,
+            "without the declick each seam steps ({stepped})"
+        );
+    }
+}
+
+#[cfg(test)]
+mod carry_tests {
+    //! A graph rebuilt during playback: the effects it keeps carry their state over, so their
+    //! tails ring on through the swap.
+
+    use super::*;
+    use crate::dsp::delay::{param as dparam, DelayNode};
+    use crate::dsp::master::MasterNode;
+    use crate::graph::{Edge, GraphDesc, NodeEntry};
+    use crate::ring::spsc;
+    use crate::source::BufferSource;
+
+    const BLOCK: usize = 128;
+
+    /// A 10 ms burst at the timeline's start, then silence.
+    fn burst() -> Vec<Smp> {
+        (0..48_000 * CHANNELS)
+            .map(|i| {
+                if i / 2 < 480 {
+                    0.5 * ((i / 2) as f32 * 0.3).sin()
+                } else {
+                    0.0
+                }
+            })
+            .collect()
+    }
+
+    /// Source(1) -> effect(2) -> master(3), the effect as `effect` builds it.
+    fn graph(effect: Box<dyn Node>) -> Graph {
+        GraphDesc {
+            nodes: vec![
+                NodeEntry::new(1, Box::new(BufferSource::new(burst(), 0))),
+                NodeEntry::new(2, effect),
+                NodeEntry::new(3, Box::new(MasterNode::unity())),
+            ],
+            edges: vec![Edge::simple(1, 2), Edge::simple(2, 3)],
+            master: 3,
+        }
+        .compile(ENGINE_SR, BLOCK)
+        .unwrap()
+    }
+
+    fn rms(x: &[Smp]) -> f32 {
+        (x.iter().map(|v| v * v).sum::<f32>() / x.len().max(1) as f32).sqrt()
+    }
+
+    /// Plays the burst through `effect`, rebuilds the graph (a fresh `effect`, its settings
+    /// pushed onto the staged graph as the host does) 50 ms in, and returns what played after.
+    fn rebuilt_mid_tail(
+        effect: impl Fn() -> Box<dyn Node>,
+        settings: &[(u16, f32)],
+        fresh: bool,
+    ) -> Vec<Smp> {
+        let (_mic, mic_cons) = spsc::<[Smp; CHANNELS]>(256);
+        let (mut h, mut rt) = spawn(graph(effect()), HashMap::new(), mic_cons, 256);
+        h.set_declick(false);
+        for &(p, v) in settings {
+            h.set_param(2, p, v);
+        }
+        h.flush();
+        h.play();
+        let mut out = vec![0.0; BLOCK * CHANNELS];
+        for _ in 0..(2_400 / BLOCK) {
+            rt.process(&mut out, BLOCK);
+        }
+        let mut next = graph(effect());
+        if fresh {
+            next.start_fresh(2, 3);
+        }
+        h.stage_graph(next);
+        for &(p, v) in settings {
+            h.set_param(2, p, v);
+        }
+        assert!(h.publish_staged());
+        let mut after = Vec::new();
+        for _ in 0..(12_000 / BLOCK) {
+            rt.process(&mut out, BLOCK);
+            after.extend_from_slice(&out);
+        }
+        after
+    }
+
+    #[test]
+    fn a_delay_kept_by_a_rebuild_still_echoes_what_played_before_it() {
+        // 100 ms echoes of a burst at 0: the rebuild at 50 ms comes between the burst and its
+        // first echo, which only the carried line still holds.
+        let delay = || -> Box<dyn Node> { Box::new(DelayNode::new()) };
+        let settings = [
+            (dparam::BYPASS, 0.0),
+            (dparam::TIME_MS, 100.0),
+            (dparam::FEEDBACK, 0.5),
+            (dparam::MIX, 1.0),
+        ];
+        // The first echo lands at 100 ms: 50 ms after the swap.
+        let echo = |out: &[Smp]| rms(&out[2_400 * CHANNELS..2_880 * CHANNELS]);
+        let carried = rebuilt_mid_tail(delay, &settings, false);
+        assert!(
+            echo(&carried) > 0.1,
+            "the echo is gone ({})",
+            echo(&carried)
+        );
+        let reset = rebuilt_mid_tail(delay, &settings, true);
+        assert!(echo(&reset) < 1e-6, "a fresh delay has nothing to echo");
+    }
+
+    #[test]
+    fn the_shared_reverb_rings_on_through_a_rebuild() {
+        let reverb = || -> Box<dyn Node> { Box::new(ReverbNode::default_bus()) };
+        let carried = rebuilt_mid_tail(reverb, &[], false);
+        let reset = rebuilt_mid_tail(reverb, &[], true);
+        // Right after the swap the tail plays on at the level it had; a fresh tank is silent.
+        let head = |out: &[Smp]| rms(&out[..BLOCK * CHANNELS]);
+        assert!(
+            head(&carried) > 0.01,
+            "the tail is cut ({})",
+            head(&carried)
+        );
+        assert!(head(&reset) < 1e-6);
     }
 }

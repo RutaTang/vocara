@@ -335,6 +335,10 @@ pub struct TrackFeeder {
     /// BufferSource).
     start_frame: i64,
     len_frames: i64,
+    /// The file frame the span's first frame is, and its cut edges (see
+    /// [`TrackFeeder::with_span`]).
+    src_offset: i64,
+    cut: crate::source::Cut,
     /// Feeder-local generation (mirrors ctrl.gen).
     generation: u32,
     /// Next timeline position to push, and the exclusive end of the current
@@ -371,6 +375,8 @@ impl TrackFeeder {
             reader,
             start_frame,
             len_frames,
+            src_offset: 0,
+            cut: crate::source::Cut::default(),
             generation: 0,
             next_tl: 0,
             run_end: 0,
@@ -382,6 +388,21 @@ impl TrackFeeder {
             frames_read: 0,
             scratch: vec![[0.0; CHANNELS]; 1024],
         }
+    }
+
+    /// Streams only the part of the file a lane hears (see
+    /// [`crate::source::BufferSource::with_span`]): from file frame `src_offset`, `len` frames
+    /// (or to the end), its cut edges faded as the frames are read, off the audio thread.
+    pub fn with_span(mut self, src_offset: i64, len: Option<i64>, cut: crate::source::Cut) -> Self {
+        (self.src_offset, self.len_frames) =
+            crate::source::span_window(self.reader.frames, src_offset, len);
+        self.cut = cut;
+        self
+    }
+
+    /// The span's length in frames: what its node is placed for.
+    pub fn len_frames(&self) -> i64 {
+        self.len_frames
     }
 
     /// Audio frames this feeder has read from its file so far: what its plans
@@ -766,8 +787,17 @@ impl TrackFeeder {
                 return Ok(()); // ring full, budget spent (or boundary reached)
             }
             let local = self.next_tl - self.start_frame;
-            let got = self.reader.read_at(local, &mut self.scratch[..want])?;
+            let got = self
+                .reader
+                .read_at(local + self.src_offset, &mut self.scratch[..want])?;
             self.frames_read += got as u64;
+            if self.cut.any() {
+                for (i, f) in self.scratch[..got].iter_mut().enumerate() {
+                    let g = self.cut.gain(local + i as i64, self.len_frames);
+                    f[0] *= g;
+                    f[1] *= g;
+                }
+            }
             for i in 0..got {
                 if !self.producer.push(self.scratch[i]) {
                     // Raced full: rewind next_tl to the unpushed frame.
