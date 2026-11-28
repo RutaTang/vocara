@@ -48,9 +48,16 @@ either works; this repo standardizes on the former).
    together, so a stale one fails the release's Validate phase after the tag
    is pushed) and `UpdateCheckService::APP_BUILD_NUMBER` (the bundle's
    `CFBundleVersion`), both in
-   `rust/crates/vocara_services/src/update_check_service.rs`; commit to master.
-2. `git tag -a v<version> -m "Vocara <version>" -m "<what changed>" && git push origin v<version>`
-   — the tag's message becomes the public release notes and the notes the
+   `rust/crates/vocara_services/src/update_check_service.rs`. Build once
+   (`cargo build` in `rust/`) so `rust/Cargo.lock` takes the new version of
+   every workspace crate, commit it with the bump (the workflow builds and
+   tests `--locked`, which refuses a lock file that is out of date), and
+   push master: `git push origin master`.
+2. Only then, once master is pushed:
+   `git tag -a v<version> -m "Vocara <version>" -m "<what changed>" && git push origin v<version>`.
+   The Guard compares the tag with `origin/master`'s HEAD, so a tag pushed
+   before its commit reached master fails there. The tag's message becomes
+   the public release notes and the notes the
    app's update dialog shows (a lightweight `git tag` publishes none). The
    `Release` workflow runs the full pipeline:
    - **Guard**: the tag must sit on master HEAD and match the workspace
@@ -284,8 +291,11 @@ step goes, or if the pinned identifier stops being the prod bundle id.
 
 ### Checking an update by hand
 
-After publishing, on a Mac with the previous release installed in
-/Applications (as an admin user): Settings → About → Check for updates →
+From the release after 0.4.0 on (0.4.0 is the first with "Update now";
+0.3.0 and earlier only offer the release page, so for 0.4.0 itself there is
+nothing to check this way): after publishing, on a Mac with the previous
+release installed in /Applications (as an admin user): Settings → About →
+Check for updates →
 "Update now"; Vocara should download, quit, and come back as the new
 version (`/Applications/vocara.app/Contents/Info.plist`). If it comes back as
 the old version with "Update failed: …", the reason is also in
