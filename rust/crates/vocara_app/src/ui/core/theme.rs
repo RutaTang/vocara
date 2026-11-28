@@ -149,15 +149,15 @@ impl Studio {
         Self::TRACK_COLORS[index % Self::TRACK_COLORS.len()]
     }
 
-    /// The colour of the track `id` that has no tint of its own: the
-    /// palette's at a hash of its id (FNV-1a, the same across runs and
-    /// builds), so it stays the track's however the tracks around it are
-    /// added, removed, duplicated or reordered.
+    /// The colour of the track `id` that has no tint of its own (a take
+    /// from before new takes were given one): the palette's at a hash of
+    /// its id (`audio_track::default_take_color_index`), so it stays the
+    /// track's however the tracks around it are added, removed, duplicated
+    /// or reordered.
     pub fn default_track_color(id: &str) -> Color {
-        let hash = id.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| {
-            (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
-        });
-        Self::track_color((hash % Self::TRACK_COLORS.len() as u64) as usize)
+        Self::track_color(vocara_model::models::audio_track::default_take_color_index(
+            id,
+        ))
     }
 }
 

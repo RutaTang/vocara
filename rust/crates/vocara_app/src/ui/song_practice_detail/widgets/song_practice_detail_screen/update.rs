@@ -722,6 +722,15 @@ impl SongPracticeDetailScreen {
         use mixer_strip::Message as X;
         let fx = match m {
             X::SelectTrack { id } => self.vm.select_track(&id),
+            X::SelectTrackForMenu { id } => {
+                // A clip selected on the take stays so, as on its lane.
+                if self.vm.selected_track_id() == Some(id.as_str())
+                    && self.vm.selected_bus_id().is_none()
+                {
+                    return;
+                }
+                self.vm.select_track(&id)
+            }
             X::SelectBus { id } => {
                 self.vm.select_bus(Some(&id));
                 return;

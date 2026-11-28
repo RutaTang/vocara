@@ -278,6 +278,33 @@ fn a_mouse_drag_still_moves_and_commits_the_clip() {
     assert_eq!(lane.commits, 1);
 }
 
+#[test]
+fn a_dragged_clip_is_selected_before_it_moves() {
+    // The selection stayed on the clip selected before, and Delete then
+    // asked about that one, not the clip just moved.
+    let mut lane = ClipLane::new(&[("a", 4000), ("b", 8000)]);
+    let at = clip_center(4000, 1000);
+    lane.ui.point_at(at);
+    lane.run([press(), lane.by(at, 30.0), lane.by(at, 80.0), release()]);
+    let selects: Vec<&Message> = lane
+        .messages
+        .iter()
+        .filter(|m| matches!(m, Message::SelectClip(_)))
+        .collect();
+    assert_eq!(selects, [&Message::SelectClip("a".into())]);
+    let first_move = lane
+        .messages
+        .iter()
+        .position(|m| matches!(m, Message::ClipMoveLive { .. }))
+        .expect("a live move");
+    assert!(
+        matches!(&lane.messages[0], Message::SelectClip(id) if id == "a") && first_move > 0,
+        "{:?}",
+        lane.messages
+    );
+    assert_eq!(lane.commits, 1);
+}
+
 /// The row at the top of a lane list, with 30 lanes' worth below it.
 fn lane_list<'a>(row: TrackRow<'a, Message>) -> Element<'a, Message> {
     let mut list = column![row].width(Length::Fill);
@@ -840,6 +867,45 @@ fn a_note_marker_opens_its_note() {
     assert_eq!(
         ui.into_messages().collect::<Vec<_>>(),
         vec![Message::EditNote("n1".into())]
+    );
+}
+
+// A note at 0:00 was centred on the lane's left edge: half its diamond
+// showed, under the playhead.
+#[test]
+fn a_note_at_either_end_of_the_lane_shows_its_whole_diamond() {
+    let note = |id: &str, position_ms: i64| PracticeNote {
+        id: id.into(),
+        position_ms,
+        end_ms: None,
+        content: id.into(),
+        created_at: created(),
+        updated_at: created(),
+    };
+    let track = leaked(AudioTrack {
+        notes: vec![note("start", 0), note("end", VIEWPORT_MS)],
+        ..take("t1", VIEWPORT_MS, Vec::new())
+    });
+    let mut ui = LiveUi::new(WINDOW);
+    let frame = ui.snapshot(row_of(track));
+    // The diamond's middle row; its centre is NOTE_REACH (3.5 px) in from
+    // each end, so 5.5 px in is still inside it.
+    let y = (TRACK_ROW_HEIGHT - 1.0 - CLIP_INSET - 3.0 - NOTE_DIAMOND / 2.0) as usize;
+    let white = |p: [u8; 4]| {
+        let c = Studio::TEXT_PRIMARY.into_rgba8();
+        (0..3).all(|i| (i32::from(p[i]) - i32::from(c[i])).abs() <= 8)
+    };
+    let left = frame.pixel(TRACK_HEADER_W as usize + 5, y);
+    assert!(white(left), "{left:?}");
+    let right = frame.pixel((TRACK_HEADER_W + LANE_W) as usize - 6, y);
+    assert!(white(right), "{right:?}");
+    // And a tap on what shows opens it.
+    let mut ui = sim(row_of(track));
+    ui.point_at(Point::new(TRACK_HEADER_W + 6.0, y as f32));
+    let _ = ui.simulate(iced_test::simulator::click());
+    assert_eq!(
+        ui.into_messages().collect::<Vec<_>>(),
+        vec![Message::EditNote("start".into())]
     );
 }
 

@@ -90,6 +90,7 @@ use crate::ui::core::widgets::studio_controls::{fader_db, studio_pan_knob};
 use crate::ui::core::widgets::studio_hint::spinner;
 use crate::ui::core::widgets::studio_text::studio_text;
 use crate::ui::song_practice_detail::view_model::analysis_cache::DockTab;
+use crate::ui::song_practice_detail::view_model::mixer_controller::bus_route_would_cycle;
 use crate::util::to_string_as_fixed;
 
 #[cfg(test)]
@@ -1013,13 +1014,14 @@ fn bus_body<'a, M: Clone + 'a>(
 ) -> Element<'a, M> {
     responsive(move |size| {
         let identity = identity_block(bus_color(bus), &bus.name, "FX bus".to_string(), false);
-        // A bus never routes or sends into itself: the feedback loop is not
-        // even offered.
+        // A bus never routes or sends into itself, nor into a bus that
+        // already reaches it: the feedback loop is not even offered (it was,
+        // and then refused with a toast).
         let others: Vec<&'a FxBus> = insp
             .fx_buses
             .iter()
             .map(Arc::as_ref)
-            .filter(|b| b.id != bus.id)
+            .filter(|b| !bus_route_would_cycle(insp.fx_buses, &bus.id, &b.id))
             .collect();
         let strip = Strip {
             channel: Channel::Bus(bus.id.clone()),
@@ -1170,11 +1172,15 @@ fn channel_footer<'a, M: Clone + 'a>(strip: &Strip<'a>, on: fn(Message) -> M) ->
         )
         .size(24.0)
         .show_label(false),
-        container(thin_slider(
-            strip.volume as f32,
-            move |v| on(volume_channel.volume_live(f64::from(v))),
-            on(channel.mix_commit()),
-        ))
+        // A double click puts it back at 0 dB (1.0), as the mixer's faders.
+        container(
+            thin_slider(
+                strip.volume as f32,
+                move |v| on(volume_channel.volume_live(f64::from(v))),
+                on(channel.mix_commit()),
+            )
+            .reset_to(1.0),
+        )
         .width(Length::Fill),
         container(
             studio_text(footer_db(strip.volume))

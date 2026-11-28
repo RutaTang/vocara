@@ -13,7 +13,7 @@ use std::sync::Arc;
 use serde_json::{json, Value};
 
 use super::audio_fx::ReverbSettings;
-use super::audio_track::AudioTrack;
+use super::audio_track::{default_take_color_index, AudioTrack, TAKE_COLORS};
 use super::fx_bus::FxBus;
 use super::json::{as_map, double, field, list_of, nullable, opt_int, opt_num, opt_str, req_str};
 use super::lyric_line::LyricLine;
@@ -172,6 +172,34 @@ impl SongPractice {
             .versions
             .iter()
             .any(|v| Some(v.id.as_str()) == t.version_id.as_deref())
+    }
+
+    /// The colour a new take is given (ARGB, for its `color_value`), as a DAW
+    /// gives each new track the next colour: the palette's ([`TAKE_COLORS`])
+    /// after the colour of the most recently created take, so a take never
+    /// shares the colour of the one made before it. The palette's first when
+    /// there is no take yet, or that take wears a colour off the palette.
+    /// (A colour hashed from each take's id gave neighbouring takes the same
+    /// one, one take in five.) THE one implementation: the detail view
+    /// model's new, recorded, imported, duplicated and split takes and boot
+    /// recovery's all take it.
+    pub fn next_take_color(&self) -> i64 {
+        let latest = self
+            .vocal_tracks
+            .iter()
+            .max_by(|a, b| a.created_at.compare_to(&b.created_at));
+        let shown = latest.map(|t| {
+            t.color_value
+                .unwrap_or(TAKE_COLORS[default_take_color_index(&t.id)])
+        });
+        let next = shown
+            .and_then(|c| {
+                TAKE_COLORS
+                    .iter()
+                    .position(|p| p & 0xFFFF_FFFF == c & 0xFFFF_FFFF)
+            })
+            .map_or(0, |i| (i + 1) % TAKE_COLORS.len());
+        TAKE_COLORS[next]
     }
 
     /// One past the highest existing "Take N" / "Take N (recovered)" label among

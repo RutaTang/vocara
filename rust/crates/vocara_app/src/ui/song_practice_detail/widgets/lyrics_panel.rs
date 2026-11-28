@@ -1253,35 +1253,62 @@ fn ltrb(left: f32, top: f32, right: f32, bottom: f32) -> Padding {
     }
 }
 
+/// The height the empty state takes whole: its 20 px padding, the title's
+/// line, the line under it (two lines, wrapped in a narrow panel), the
+/// 28 px buttons and the drop hint's line, with their gaps.
+const EMPTY_STATE_HEIGHT: f32 = 2.0 * 20.0
+    + type_scale::TITLE * 1.3
+    + 6.0
+    + 2.0 * type_scale::LINE
+    + 16.0
+    + 28.0
+    + 12.0
+    + type_scale::LABEL * 1.3;
+
 /// `_EmptyState`: no lyrics yet — paste, import, or drop. Centred whenever
-/// there is room; on a panel shorter than the content (tiny window with the
-/// dock open) it scrolls instead of overflowing.
+/// there is room. A panel shorter than all of it (the dock at its tallest)
+/// shows the title and the two buttons alone, closer together: whole, it
+/// was cut through the buttons there. Shorter still (a tiny window with the
+/// dock open), it scrolls instead of overflowing.
 fn empty_state<'a>() -> Element<'a, Message> {
-    let content = column![
-        text("No lyrics yet")
+    responsive(|size| {
+        let title = text("No lyrics yet")
             .size(type_scale::TITLE)
             .font(font::SEMIBOLD)
-            .color(Studio::TEXT_PRIMARY),
-        Space::new().height(6),
-        text("Paste them, or import a .lrc or .txt file.")
-            .size(type_scale::BODY)
-            .line_height(iced::Pixels(type_scale::LINE))
-            .align_x(Alignment::Center)
-            .color(Studio::TEXT_FAINT),
-        Space::new().height(16),
-        row![
+            .color(Studio::TEXT_PRIMARY);
+        let buttons = row![
             secondary_button("Import lyrics file", Some(Message::BrowseImport)),
             primary_button("Paste lyrics", Some(Message::PasteLyrics)),
         ]
-        .spacing(8),
-        Space::new().height(12),
-        text("or drop a .lrc or .txt file here")
-            .size(type_scale::LABEL)
-            .align_x(Alignment::Center)
-            .color(Studio::TEXT_DISABLED),
-    ]
-    .align_x(Horizontal::Center);
-    center(scrollable(container(content).padding(20)).fading()).into()
+        .spacing(8);
+        let content = if size.height >= EMPTY_STATE_HEIGHT {
+            container(
+                column![
+                    title,
+                    Space::new().height(6),
+                    text("Paste them, or import a .lrc or .txt file.")
+                        .size(type_scale::BODY)
+                        .line_height(iced::Pixels(type_scale::LINE))
+                        .align_x(Alignment::Center)
+                        .color(Studio::TEXT_FAINT),
+                    Space::new().height(16),
+                    buttons,
+                    Space::new().height(12),
+                    text("or drop a .lrc or .txt file here")
+                        .size(type_scale::LABEL)
+                        .align_x(Alignment::Center)
+                        .color(Studio::TEXT_DISABLED),
+                ]
+                .align_x(Horizontal::Center),
+            )
+            .padding(20)
+        } else {
+            container(column![title, Space::new().height(8), buttons].align_x(Horizontal::Center))
+                .padding([10, 20])
+        };
+        center(scrollable(content).fading()).into()
+    })
+    .into()
 }
 
 // -------------------------------------------------------------- the reader

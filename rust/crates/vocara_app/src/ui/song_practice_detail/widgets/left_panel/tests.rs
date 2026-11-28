@@ -332,6 +332,29 @@ fn another_take_selected_under_a_held_fader_gets_its_own() {
 }
 
 #[test]
+fn the_footer_volume_holds_its_knob_and_a_double_click_resets_it_to_0_db() {
+    // A click a little off the knob's centre moved the level, and a double
+    // click did nothing; the mixer's faders did both right.
+    let vm = Vm::new().track(vocal("t1"));
+    let mut ui = ui();
+    // At 0 dB (1.0) the 10 px knob sits at the slider's right end.
+    let readout = bounds(&mut ui, &vm, "0.0 dB");
+    let right = readout.x + readout.width - FOOTER_DB_WIDTH - 10.0;
+    ui.point_at(Point::new(right - 7.0, readout.center_y()));
+    assert!(ui.run(vm.view(), [press(), release()]).is_empty());
+    assert_eq!(
+        ui.run(vm.view(), [press(), release()]),
+        [
+            Message::SetTrackVolumeLive {
+                track_id: "t1".into(),
+                volume: 1.0
+            },
+            Message::CommitTrackVolume
+        ]
+    );
+}
+
+#[test]
 fn a_selected_take_renders_its_channel_strip() {
     let vm = Vm::new().track(vocal("t1")).buses(vec![bus("a", "Reverb")]);
     let mut ui = ui();
@@ -739,6 +762,30 @@ fn a_buss_own_output_never_offers_itself() {
     );
 }
 
+// Bus 2's Output on Bus 1: Bus 1's Output and Send menus offered Bus 2,
+// and choosing it showed "Can't route there — it would create a feedback
+// loop."
+#[test]
+fn a_buss_routing_menus_leave_out_the_buses_that_would_loop_back_to_it() {
+    let a = bus("a", "Reverb");
+    let b = Arc::new(FxBus {
+        output_bus_id: Some("a".into()),
+        ..(*bus("b", "Delay")).clone()
+    });
+    let c = bus("c", "Room");
+    let buses = vec![a.clone(), b, c];
+    for menu in [
+        InspectorMenu::Output(Channel::Bus("a".into())),
+        InspectorMenu::AddSend(Channel::Bus("a".into())),
+    ] {
+        let mut vm = Vm::new().bus(a.clone()).buses(buses.clone());
+        vm.open_menu = Some(menu.clone());
+        let mut ui = ui();
+        assert_eq!(count(&mut ui, &vm, "Room"), 1, "{menu:?}");
+        assert_eq!(count(&mut ui, &vm, "Delay"), 0, "{menu:?}");
+    }
+}
+
 // Regression guard: the inspector built its FxPanel without a key, so
 // selecting another take (or bus) reused the panel's element tree and the
 // EQ's live state — the analyzer's smoothed spectrum, adaptive ceiling and
@@ -775,7 +822,8 @@ fn fresh_fx_state(before: &Vm, after: &Vm) {
         .find(|(c, _, _)| c == "FX")
         .expect("the FX slot is filled")
         .1;
-    let at = Point::new(caption.x + 100.0, caption.y + caption.height + 8.0);
+    // Off the knob (at 100), so the press itself sets a level.
+    let at = Point::new(caption.x + 60.0, caption.y + caption.height + 8.0);
     ui.point_at(at);
     let pressed = ui.run(fx_view(before), [press()]);
     assert_eq!(pressed.len(), 1, "the press reaches the FX panel");

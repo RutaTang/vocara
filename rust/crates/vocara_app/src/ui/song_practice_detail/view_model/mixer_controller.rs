@@ -164,6 +164,28 @@ fn reachable_buses<'a>(
     result
 }
 
+/// What a channel's output moved onto the bus `bus_name` says of the send
+/// into it the move removed (see [`without_sends_to`]): the send's row and
+/// level went without a word.
+pub fn send_removed_by_output(bus_name: &str) -> String {
+    format!("Removed the send to \"{bus_name}\": the output feeds it now.")
+}
+
+/// The name of the bus `bus_id`, when `sends` hold a send into it that an
+/// output moving onto it removes.
+fn removed_send(
+    practice: &SongPractice,
+    sends: &[TrackSend],
+    bus_id: Option<&str>,
+) -> Option<String> {
+    let bus_id = bus_id?;
+    sends
+        .iter()
+        .any(|s| s.bus_id == bus_id)
+        .then(|| practice.bus_by_id(Some(bus_id)).map(|b| b.name.clone()))
+        .flatten()
+}
+
 /// `sends` less those into `bus_id` (all of them kept for the master, which
 /// no send targets): what a channel keeps when its output moves to that bus.
 fn without_sends_to(sends: &[TrackSend], bus_id: Option<&str>) -> Vec<TrackSend> {
@@ -172,6 +194,43 @@ fn without_sends_to(sends: &[TrackSend], bus_id: Option<&str>) -> Vec<TrackSend>
         .filter(|s| Some(s.bus_id.as_str()) != bus_id)
         .cloned()
         .collect()
+}
+
+/// Whether routing the bus `from_bus_id` into `to_bus_id` (as its output
+/// or an aux send) would close a feedback loop: it is the bus itself, or it
+/// can already reach it through bus outputs and aux sends. The engine
+/// REJECTS a cyclic graph and silently keeps the old one, so the routing
+/// edits refuse such a route, and the routing menus (the inspector's and the
+/// mixer strip's) leave it out: they offered it, then refused it.
+pub fn bus_route_would_cycle<B: Borrow<FxBus>>(
+    buses: &[B],
+    from_bus_id: &str,
+    to_bus_id: &str,
+) -> bool {
+    if to_bus_id == from_bus_id {
+        return true;
+    }
+    let by_id = buses_by_id(buses);
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut queue: Vec<&str> = vec![to_bus_id];
+    while let Some(id) = queue.pop() {
+        if id == from_bus_id {
+            return true;
+        }
+        if !seen.insert(id) {
+            continue;
+        }
+        let Some(b) = by_id.get(id) else {
+            continue;
+        };
+        if let Some(out) = &b.output_bus_id {
+            queue.push(out);
+        }
+        for s in &b.sends {
+            queue.push(&s.bus_id);
+        }
+    }
+    false
 }
 
 /// `{for (final b in buses) b.id: b}`: a later bus wins a duplicate id.
@@ -1368,28 +1427,33 @@ impl MixerController {
     }
 
     /// Routes a vocal take's output to `bus_id` (`None` = master). A send the
-    /// take had into that bus goes: the output feeds the bus now, and the
-    /// send beside it fed it the take a second time. Triggers a rebuild.
+    /// take had into that bus goes, and a toast says so: the output feeds
+    /// the bus now, and the send beside it fed it the take a second time.
+    /// Triggers a rebuild.
     pub fn set_track_bus(
         &mut self,
         host: &mut dyn MixerHost,
         track_id: &str,
         bus_id: Option<&str>,
     ) -> SaveRequest {
+        let removed = host.practice().and_then(|p| {
+            let take = host.track_by_id(track_id)?;
+            removed_send(p, &take.sends, bus_id)
+        });
         host.update_track(track_id, &|t| AudioTrack {
             bus_id: bus_id.map(str::to_string),
             sends: without_sends_to(&t.sends, bus_id),
             ..t.clone()
         });
+        if let Some(name) = removed {
+            host.toast(&send_removed_by_output(&name));
+        }
         self.notify();
         SaveRequest
     }
 
-    /// Whether routing `from_bus_id` into `to_bus_id` (as its output or an
-    /// aux send) would close a feedback loop — i.e. `to_bus_id` can already
-    /// reach `from_bus_id` through bus outputs and aux sends. The engine
-    /// REJECTS a cyclic graph and silently keeps the old one, so the routing
-    /// UI must refuse the edit instead.
+    /// [`bus_route_would_cycle`] in the practice as it is (`None` = the
+    /// master, which closes no loop).
     fn bus_route_would_cycle(
         &self,
         host: &dyn MixerHost,
@@ -1399,36 +1463,13 @@ impl MixerController {
         let (Some(to_bus_id), Some(practice)) = (to_bus_id, host.practice()) else {
             return false;
         };
-        if to_bus_id == from_bus_id {
-            return true;
-        }
-        let by_id = buses_by_id(&practice.fx_buses);
-        let mut seen: HashSet<&str> = HashSet::new();
-        let mut queue: Vec<&str> = vec![to_bus_id];
-        while let Some(id) = queue.pop() {
-            if id == from_bus_id {
-                return true;
-            }
-            if !seen.insert(id) {
-                continue;
-            }
-            let Some(b) = by_id.get(id) else {
-                continue;
-            };
-            if let Some(out) = &b.output_bus_id {
-                queue.push(out);
-            }
-            for s in &b.sends {
-                queue.push(&s.bus_id);
-            }
-        }
-        false
+        bus_route_would_cycle(&practice.fx_buses, from_bus_id, to_bus_id)
     }
 
     /// Routes a bus's output to another bus, or to the master
     /// (`output_bus_id` `None`). Self-routing and feedback loops are refused;
-    /// a send into the new output's bus goes, as [`Self::set_track_bus`]'s
-    /// does. Rebuilds.
+    /// a send into the new output's bus goes, with a toast, as
+    /// [`Self::set_track_bus`]'s does. Rebuilds.
     #[must_use = "the view model saves the edited model when it is Some"]
     pub fn set_bus_output(
         &mut self,
@@ -1444,6 +1485,9 @@ impl MixerController {
             host.toast("Can't route there — it would create a feedback loop.");
             return None;
         }
+        let removed = practice
+            .bus_by_id(Some(bus_id))
+            .and_then(|b| removed_send(practice, &b.sends, output_bus_id));
         let next = SongPractice {
             fx_buses: with_bus(&practice.fx_buses, bus_id, |b| FxBus {
                 output_bus_id: output_bus_id.map(str::to_string),
@@ -1453,6 +1497,9 @@ impl MixerController {
             ..practice.clone()
         };
         host.set_practice(next);
+        if let Some(name) = removed {
+            host.toast(&send_removed_by_output(&name));
+        }
         self.notify();
         Some(SaveRequest)
     }

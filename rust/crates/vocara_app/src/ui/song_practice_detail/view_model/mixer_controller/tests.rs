@@ -949,9 +949,14 @@ fn routing_the_output_to_a_bus_takes_the_send_into_it_away() {
     h.edit(|m, s| Some(m.set_track_bus(s, "t1", Some("a"))));
     assert_eq!(h.track("t1").bus_id.as_deref(), Some("a"));
     assert_eq!(h.sends("t1"), ["b"]);
+    // Said, not done silently: the send's row and level just went.
+    assert_eq!(h.s.toasts, [send_removed_by_output("a")]);
     // Back to the master: the remaining send stays.
     h.edit(|m, s| Some(m.set_track_bus(s, "t1", None)));
     assert_eq!(h.sends("t1"), ["b"]);
+    // An output onto a bus no send feeds removes nothing, and says nothing.
+    h.edit(|m, s| Some(m.set_track_bus(s, "t1", Some("a"))));
+    assert_eq!(h.s.toasts.len(), 1);
 
     let mut h = host(
         vec![],
@@ -966,6 +971,11 @@ fn routing_the_output_to_a_bus_takes_the_send_into_it_away() {
     assert_eq!(a.output_bus_id.as_deref(), Some("c"));
     let targets: Vec<String> = a.sends.iter().map(|s| s.bus_id.clone()).collect();
     assert_eq!(targets, ["b"]);
+    assert_eq!(h.s.toasts, [send_removed_by_output("c")]);
+    assert_eq!(
+        send_removed_by_output("Bus 1"),
+        "Removed the send to \"Bus 1\": the output feeds it now."
+    );
 }
 
 // --- delete_bus ------------------------------------------------------------------

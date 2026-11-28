@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use vocara_model::models::audio_track::{AudioClip, AudioTrack, AudioTrackKind};
+use vocara_model::models::audio_track::{AudioClip, AudioTrack, AudioTrackKind, TAKE_COLORS};
 use vocara_model::models::song_practice::SongPractice;
 use vocara_model::models::take_version::TakeVersion;
 use vocara_model::util::dart_date_time::DateTime;
@@ -360,6 +360,34 @@ fn a_crashed_take_over_a_take_with_audio_comes_back_as_a_lane_of_its_own() {
     assert_eq!(take.display_name, "Take 2 (recovered)");
     assert_eq!(take.version_id, first.version_id);
     assert_eq!(take.primary_clip().unwrap().start_ms, 3000);
+}
+
+#[test]
+fn a_recovered_take_is_given_the_colour_after_the_newest_takes() {
+    // As the editor gives a new take: it had no colour of its own.
+    let m = Memory::new();
+    let practice = create_practice(&m);
+    let existing = m.root.join("existing.wav");
+    write(&existing, &mono_wav_gain(1200, 0.3));
+    let existing = text(&existing);
+    let [_, ochre, sage, ..] = TAKE_COLORS;
+    let active = practice.active_version_id.clone();
+    let practice = m
+        .song_repo()
+        .save_practice(&with_takes(
+            &practice,
+            vec![AudioTrack {
+                color_value: Some(ochre),
+                ..take_over(&existing, "Take 1", active.as_deref())
+            }],
+        ))
+        .unwrap();
+    stage_orphan(&m.root, &practice.id, &mono_wav(4800), None);
+    assert_eq!(recover(&m, &fake_analyze()), 1);
+    let after = reload(&m, &practice.id);
+    let recovered = after.vocal_tracks.last().unwrap();
+    assert_eq!(recovered.display_name, "Take 2 (recovered)");
+    assert_eq!(recovered.color_value, Some(sage));
 }
 
 #[test]

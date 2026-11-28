@@ -849,7 +849,8 @@ impl SongPracticeDetailScreen {
     /// `_BusRow`: an FX bus lane — its header (the stripe, name and ⋯; mute,
     /// solo, the level and its dB; a tap selects the bus for the inspector,
     /// a right-click or ⋯ opens its menu), and its timeline area: the
-    /// composite of every take routed into it.
+    /// composite of every take routed into it, which a click selects the
+    /// bus from and a right-click opens its menu on.
     fn bus_row<'a>(
         &'a self,
         bus: &'a FxBus,
@@ -919,7 +920,11 @@ impl SongPracticeDetailScreen {
             .map(Message::BusMenu)
         });
         let peaks = vm.with_mixer(|m, h| m.bus_waveform_peaks(h, &bus.id));
-        let lane = envelope_lane(
+        // Its lane takes clicks as a take's empty lane does: a click selects
+        // the bus, a right click opens its menu there (the host wraps the
+        // whole row, so the menu opens at either press). Only the header
+        // answered; the lane ignored both.
+        let lane = mouse_area(envelope_lane(
             peaks,
             practice.timeline_duration_ms,
             view_start,
@@ -927,8 +932,15 @@ impl SongPracticeDetailScreen {
             accent,
             ms(vm.position()),
             4.0,
-        );
-        timeline_row(menu_host(header, menu, Message::DismissMenu).into(), lane)
+        ))
+        .on_press(Message::SelectBus(id.clone()))
+        .on_right_press(Message::OpenBusMenu(id.clone()));
+        menu_host(
+            timeline_row(header.into(), lane.into()),
+            menu,
+            Message::DismissMenu,
+        )
+        .into()
     }
 
     /// `_MasterRow`: the master bus lane — its header carries the overall
