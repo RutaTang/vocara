@@ -952,11 +952,19 @@ impl SongPracticeDetailScreen {
                     let data = panel_data(vm, &self.shown, &as_text, false);
                     self.lyrics.save_ticket(&data)
                 };
-                if let Some(ticket) = ticket {
-                    let started = self.vm.apply_edited_lyrics(ticket.text());
-                    self.await_call(started, Awaited::LyricsSave(ticket), step);
+                let Some(ticket) = ticket else {
+                    return;
+                };
+                // Saved empty, the editor deleted every line and its time at
+                // once, with nothing to go back to: asked first, as Clear is.
+                if ticket.text().trim().is_empty() && self.vm.lyrics().iter().any(|l| !l.is_blank())
+                {
+                    let dialog = ConfirmDialog::new("Delete the lyrics?")
+                        .body("The editor is empty: saving it deletes every line and its time.")
+                        .confirm_label("Delete lyrics");
+                    return self.ask(dialog, Asked::SaveEmptyLyrics(ticket), step);
                 }
-                return;
+                return self.save_lyrics(ticket, step);
             }
             P::StampNextLyric => self.vm.stamp_next_lyric(),
             P::StampLyricAt(index) => self.vm.stamp_lyric_at(index),
@@ -1496,6 +1504,12 @@ impl SongPracticeDetailScreen {
         self.import_lyrics_now(path, step);
     }
 
+    /// The editor's Save: its text applied, the editor told when it lands.
+    fn save_lyrics(&mut self, ticket: lyrics_panel::SaveTicket, step: &mut Step) {
+        let started = self.vm.apply_edited_lyrics(ticket.text());
+        self.await_call(started, Awaited::LyricsSave(ticket), step);
+    }
+
     fn import_lyrics_now(&mut self, path: PathBuf, step: &mut Step) {
         let ticket = {
             let vm = &*self.vm;
@@ -1549,6 +1563,7 @@ impl SongPracticeDetailScreen {
             }
             Asked::ClearLyricTimes if confirmed => self.vm.clear_lyric_times(),
             Asked::ImportLyrics(path) if confirmed => return self.import_lyrics_now(path, step),
+            Asked::SaveEmptyLyrics(ticket) if confirmed => return self.save_lyrics(ticket, step),
             _ => return,
         };
         self.absorb(fx, step);

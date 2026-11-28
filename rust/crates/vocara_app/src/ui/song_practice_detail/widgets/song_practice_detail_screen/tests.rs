@@ -2473,6 +2473,50 @@ fn importing_a_lyrics_file_over_lyrics_asks_first() {
     assert_eq!(h.vm().lyrics().len(), 2);
 }
 
+// Saving the lyrics editor empty deleted every line and its time with no
+// word: it asks first, as Clear does.
+#[test]
+fn saving_the_lyrics_editor_empty_asks_before_deleting_the_lyrics() {
+    use crate::ui::song_practice_detail::view_model::song_practice_detail_view_model::LyricsMode;
+    use iced::widget::text_editor::{Action, Edit};
+    use vocara_model::models::lyric_line::LyricLine;
+    let mut p = practice(vec![take("t1", "Take 1")]);
+    p.lyrics = vec![
+        LyricLine::new("First line", Some(1200)),
+        LyricLine::new("Second line", Some(4800)),
+    ];
+    let mut h = Harness::open(Setup {
+        practice: p,
+        ..Setup::default()
+    });
+    let panel = Message::Lyrics;
+    h.send(panel(lyrics_panel::Message::SetLyricsMode(
+        lyrics_panel::LyricsMode::Edit,
+    )));
+    h.send(panel(lyrics_panel::Message::EditorAction(
+        Action::SelectAll,
+    )));
+    h.send(panel(lyrics_panel::Message::EditorAction(Action::Edit(
+        Edit::Backspace,
+    ))));
+    assert_eq!(h.screen.lyrics.editor_text().as_deref(), Some(""));
+    h.send(panel(lyrics_panel::Message::ApplyEditedLyrics));
+    let Dialog::Confirm(confirm) = h.dialog() else {
+        panic!("a confirmation");
+    };
+    assert_eq!(confirm.title, "Delete the lyrics?");
+    h.answer(DialogResult::Confirmed(false));
+    h.settle();
+    assert_eq!(h.repo.stored().lyrics.len(), 2, "cancelled");
+    assert_eq!(h.vm().lyrics_mode(), LyricsMode::Edit, "still editing");
+
+    h.send(panel(lyrics_panel::Message::ApplyEditedLyrics));
+    h.answer(DialogResult::Confirmed(true));
+    h.settle();
+    assert!(h.vm().lyrics().iter().all(|l| l.is_blank()));
+    assert_eq!(h.vm().lyrics_mode(), LyricsMode::Read, "saved, it closes");
+}
+
 // playhead_repaint_test: 'deleting the backing's clip asks to delete the
 // backing' — a backing lane is its one clip.
 #[test]

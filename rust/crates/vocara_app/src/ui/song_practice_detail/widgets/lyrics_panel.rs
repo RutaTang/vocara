@@ -1108,7 +1108,10 @@ fn lyrics_tab<'a>(state: &'a LyricsPanelState, data: RightPanelData<'a>) -> Elem
 fn lyrics_body<'a>(state: &'a LyricsPanelState, data: RightPanelData<'a>) -> Element<'a, Message> {
     match data.lyrics_mode {
         LyricsMode::Edit => match &state.editor {
-            Some(editor) => lyrics_editor(state, editor),
+            Some(editor) => {
+                let can_save = can_save_lyrics(&editor.content.text(), data.lyrics);
+                lyrics_editor(state, editor, can_save)
+            }
             // Not made yet (the next sync makes it).
             None => Space::new().width(Length::Fill).height(Length::Fill).into(),
         },
@@ -1417,8 +1420,20 @@ fn panel_reader<'a>(
 
 // -------------------------------------------------------------- the editor
 
-/// `_LyricsEditor`: the lyrics as text, with Cancel and Save.
-fn lyrics_editor<'a>(state: &'a LyricsPanelState, editor: &'a Editor) -> Element<'a, Message> {
+/// Whether the editor's Save has anything to do with `text` over `lyrics`:
+/// an empty editor over no lyrics saves nothing (over lyrics, it deletes
+/// them, which the screen asks about first).
+pub fn can_save_lyrics(text: &str, lyrics: &[LyricLine]) -> bool {
+    !text.trim().is_empty() || lyrics.iter().any(|l| !l.is_blank())
+}
+
+/// `_LyricsEditor`: the lyrics as text, with Cancel and Save (dead while
+/// it has nothing to save: [`can_save_lyrics`]).
+fn lyrics_editor<'a>(
+    state: &'a LyricsPanelState,
+    editor: &'a Editor,
+    can_save: bool,
+) -> Element<'a, Message> {
     let id = state.editor_id();
     responsive(move |size| {
         let compact = size.height < EDITOR_COMPACT_BELOW;
@@ -1453,7 +1468,7 @@ fn lyrics_editor<'a>(state: &'a LyricsPanelState, editor: &'a Editor) -> Element
                     row![
                         Space::new().width(Length::Fill),
                         secondary_button("Cancel", Some(Message::SetLyricsMode(LyricsMode::Read))),
-                        primary_button("Save", Some(Message::ApplyEditedLyrics)),
+                        primary_button("Save", can_save.then_some(Message::ApplyEditedLyrics)),
                     ]
                     .spacing(8),
                 ]

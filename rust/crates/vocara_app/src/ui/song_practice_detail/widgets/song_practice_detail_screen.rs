@@ -261,6 +261,7 @@ pub enum Asked {
     DeleteInterpretation(String),
     ClearLyricTimes,
     ImportLyrics(PathBuf),
+    SaveEmptyLyrics(lyrics_panel::SaveTicket),
 }
 
 /// A result that is cloneable (the screen's messages are) but landed once:

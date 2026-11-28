@@ -1007,6 +1007,27 @@ fn at_the_floor_the_actions_still_take_their_taps() {
     );
 }
 
+#[test]
+fn an_empty_editor_over_no_lyrics_has_nothing_to_save() {
+    // Save stayed live on an empty editor, which saved nothing at all.
+    let mut vm = Vm::reading(Vec::new());
+    vm.text = String::new();
+    vm.set_lyrics_mode(LyricsMode::Edit);
+    let mut state = LyricsPanelState::new();
+    let mut ui = PanelUi::new(PANEL);
+    sync(&mut ui, &mut state, &vm);
+    assert_eq!(editor_text(&state), "");
+    assert!(tap_label(&mut ui, &state, &vm, "Save").is_empty());
+    enter_text(&mut state, &mut vm, "first words");
+    assert_eq!(
+        tap_label(&mut ui, &state, &vm, "Save"),
+        vec![Message::ApplyEditedLyrics]
+    );
+    // Over lyrics, an empty Save deletes them: live, the screen asks first.
+    assert!(can_save_lyrics(" \n", &[LyricLine::new("a line", None)]));
+    assert!(!can_save_lyrics(" \n", &[LyricLine::new("", None)]));
+}
+
 /// An icon button's label: its tooltip.
 fn tip(label: &str) -> String {
     label.to_string()
