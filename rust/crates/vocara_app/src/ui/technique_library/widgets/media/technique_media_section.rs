@@ -1087,9 +1087,9 @@ impl RenameExampleDialog {
     }
 
     /// The task that puts the keyboard in the field when the dialog opens
-    /// (`autofocus: true`).
+    /// (`autofocus: true`), the caption selected so typing replaces it.
     pub fn focus<T: Send + 'static>(&self) -> Task<T> {
-        iced::widget::operation::focus(self.input.clone())
+        confirm_dialog::focus_selecting_all(self.input.clone())
     }
 
     /// Handles `message`; `Some` when the dialog closes.
