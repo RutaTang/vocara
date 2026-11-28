@@ -184,3 +184,126 @@ fn escape_and_the_barrier_cancel_it() {
     assert_eq!(messages, vec![Message::Cancel, Message::Cancel]);
     assert_eq!(picker.update(Message::Cancel), Some(None));
 }
+
+// ----------------------------------------------------- the keyboard
+
+/// The keys a view reports, fed back into `picker` in turn: what the picker
+/// closed with, if it did.
+fn keys(picker: &mut TechniquePicker, keys: &[Named]) -> Option<Option<Technique>> {
+    let messages: Vec<Message> = {
+        let mut ui = iced_test::simulator(picker.view());
+        ui.click(picker.search_id()).expect("the search field");
+        for key in keys {
+            let _ = ui.tap_key(keyboard::Key::Named(*key));
+        }
+        ui.into_messages().collect()
+    };
+    let mut closed = None;
+    for message in messages {
+        if let Some(outcome) = picker.update(message) {
+            closed = Some(outcome);
+        }
+    }
+    closed
+}
+
+/// Return picks the highlighted row: the first match while the search
+/// changes ("edge" matches Twang's alias), so a search with one match is
+/// picked with Return alone.
+#[test]
+fn return_picks_the_first_match() {
+    let mut picker = loaded(Some(library()));
+    picker.update(Message::Query("edge".into()));
+    assert_eq!(
+        keys(&mut picker, &[Named::Enter]),
+        Some(Some(library()[0].clone()))
+    );
+    // With no match, Return picks nothing and the picker stays.
+    let mut picker = loaded(Some(library()));
+    picker.update(Message::Query("zzz".into()));
+    assert_eq!(keys(&mut picker, &[Named::Enter]), None);
+}
+
+/// Down and Up move the highlight a row (not past the ends); the search
+/// field's caret stays where the typing is; a new search highlights its
+/// first match again.
+#[test]
+fn up_and_down_move_the_highlight_and_return_picks_it() {
+    let mut picker = loaded(Some(library()));
+    assert_eq!(picker.highlighted().map(|t| t.id.as_str()), Some("t1"));
+    assert_eq!(
+        keys(
+            &mut picker,
+            &[
+                Named::ArrowDown,
+                Named::ArrowDown,
+                Named::ArrowDown,
+                Named::Enter
+            ]
+        ),
+        Some(Some(library()[2].clone())),
+        "held at the last row"
+    );
+    let mut picker = loaded(Some(library()));
+    assert_eq!(
+        keys(
+            &mut picker,
+            &[
+                Named::ArrowDown,
+                Named::ArrowDown,
+                Named::ArrowUp,
+                Named::Enter
+            ]
+        ),
+        Some(Some(library()[1].clone()))
+    );
+    let mut picker = loaded(Some(library()));
+    picker.update(Message::Next);
+    picker.update(Message::Query("v".into()));
+    assert_eq!(picker.highlighted().map(|t| t.id.as_str()), Some("t2"));
+    // The arrows are the list's, not the field's: they send no edit, and
+    // the caret stays at the end of the search, where typing goes on.
+    let messages: Vec<Message> = {
+        let mut ui = iced_test::simulator(picker.view());
+        ui.click(picker.search_id()).expect("the search field");
+        let _ = ui.tap_key(keyboard::Key::Named(Named::End));
+        let _ = ui.tap_key(keyboard::Key::Named(Named::ArrowUp));
+        let _ = ui.typewrite("o");
+        ui.into_messages().collect()
+    };
+    assert_eq!(
+        messages,
+        vec![Message::Previous, Message::Query("vo".into())]
+    );
+}
+
+/// The card keeps its place while the list filters: the search field stays
+/// where it was as the list shrinks, rather than the card re-centring.
+#[test]
+fn the_card_keeps_its_place_as_the_list_filters() {
+    let field_at = |picker: &TechniquePicker| {
+        let mut ui = iced_test::simulator(picker.view());
+        ui.find(picker.search_id())
+            .expect("the search field")
+            .bounds()
+    };
+    let mut picker = loaded(Some(library()));
+    let all = field_at(&picker);
+    picker.update(Message::Query("fry".into()));
+    assert_eq!(field_at(&picker), all, "one match");
+    picker.update(Message::Query("zzz".into()));
+    assert_eq!(field_at(&picker), all, "no match");
+    // A full list's card sits where a centred card would.
+    let many: Vec<Technique> = (0..30)
+        .map(|i| technique(&format!("t{i}"), &format!("Technique {i}"), &[], &[]))
+        .collect();
+    let full = loaded(Some(many));
+    let field = field_at(&full);
+    assert_eq!(field.y, all.y);
+    let card_top = field.y - 18.0 - 12.0 - 20.0;
+    let card_bottom = card_top + CARD_MAX_HEIGHT;
+    assert!(
+        ((card_top + card_bottom) / 2.0 - 768.0 / 2.0).abs() < 1.0,
+        "{card_top} {card_bottom}"
+    );
+}
