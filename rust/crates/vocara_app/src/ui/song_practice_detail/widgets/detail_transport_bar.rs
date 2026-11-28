@@ -221,14 +221,22 @@ pub fn controls(bar: &TransportBar<'_>) -> Controls {
     }
 }
 
-/// "1 take · 3 notes", "2 takes · 0 notes".
+/// "1 take · 3 notes", "2 takes · 1 note": each count singular at one.
 pub fn counts_label(takes: usize, notes: usize) -> String {
-    let takes = if takes == 1 {
-        "1 take".to_string()
+    format!(
+        "{} · {}",
+        count_of(takes, "take", "takes"),
+        count_of(notes, "note", "notes")
+    )
+}
+
+/// `n` of a thing, the noun singular at one: "1 note", "0 notes".
+fn count_of(n: usize, one: &str, many: &str) -> String {
+    if n == 1 {
+        format!("1 {one}")
     } else {
-        format!("{takes} takes")
-    };
-    format!("{takes} · {notes} notes")
+        format!("{n} {many}")
+    }
 }
 
 /// A time on the display: "mm:ss.t", the minutes growing past 99, the
