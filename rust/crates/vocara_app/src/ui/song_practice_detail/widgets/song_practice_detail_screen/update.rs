@@ -162,6 +162,23 @@ impl SongPracticeDetailScreen {
             Message::BusMenu(action) => self.bus_action(action, &mut step),
             Message::InterpretationMenu(action) => self.interpretation_action(action, &mut step),
             Message::DismissMenu => self.menu = None,
+            Message::DeleteSelectedClip => {
+                let selected = (self.vm.selected_track_id(), self.vm.selected_clip_id());
+                if let (Some(track), Some(clip)) = selected {
+                    let (track, clip) = (track.to_string(), clip.to_string());
+                    self.ask_delete_clip(track, clip, &mut step);
+                }
+            }
+            Message::DeselectClip => {
+                // Selecting the clip's take lets go of the clip.
+                if let (Some(track), Some(_)) =
+                    (self.vm.selected_track_id(), self.vm.selected_clip_id())
+                {
+                    let track = track.to_string();
+                    let fx = self.vm.select_track(&track);
+                    self.absorb(fx, &mut step);
+                }
+            }
             Message::Inspector(m) => self.inspector(m, Source::Inspector, &mut step),
             Message::Fx(m) => self.fx(m, &mut step),
             Message::Lyrics(m) => self.lyrics_message(m, &mut step),
@@ -1592,23 +1609,31 @@ impl SongPracticeDetailScreen {
         self.absorb(fx, step);
     }
 
-    /// A row of the clip menu. A backing lane is its one clip: deleting it
-    /// deletes the lane, so it asks as Delete does (the clip's dialog spoke
-    /// of the clip alone).
+    /// A row of the clip menu.
     fn clip_action(&mut self, action: ClipAction, step: &mut Step) {
         let Some(OpenMenu::Clip { track_id, clip_id }) = self.menu.take() else {
             return;
         };
-        let Some(track) = self.vm.track_by_id(&track_id) else {
-            return;
-        };
         match action {
-            ClipAction::Delete if track.is_backing() => self.delete_track(&track_id, step),
-            ClipAction::Delete => self.delete_clip(track_id, clip_id, step),
+            ClipAction::Delete => self.ask_delete_clip(track_id, clip_id, step),
             ClipAction::Export => {
                 let fx = self.vm.export_clip_audio(&track_id, &clip_id);
                 self.absorb(fx, step);
             }
+        }
+    }
+
+    /// The clip menu's Delete, and the Delete key's on the selected clip. A
+    /// backing lane is its one clip: deleting it deletes the lane, so it
+    /// asks as Delete does (the clip's dialog spoke of the clip alone).
+    fn ask_delete_clip(&mut self, track_id: String, clip_id: String, step: &mut Step) {
+        let Some(track) = self.vm.track_by_id(&track_id) else {
+            return;
+        };
+        if track.is_backing() {
+            self.delete_track(&track_id, step);
+        } else {
+            self.delete_clip(track_id, clip_id, step);
         }
     }
 

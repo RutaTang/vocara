@@ -109,6 +109,7 @@ use crate::ui::song_practice_detail::widgets::track_row::TRACK_ROW_HEIGHT;
 use crate::ui::DialogRequest;
 
 mod arrange;
+mod keys;
 
 fn guard<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())

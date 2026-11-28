@@ -55,8 +55,9 @@ use crate::ui::song_practice_detail::view_model::song_practice_detail_view_model
 };
 use crate::ui::song_practice_detail::widgets::analysis_lanes::{analysis_lanes, LaneImage};
 use crate::ui::song_practice_detail::widgets::bottom_dock::{self, bottom_dock, BottomDock};
+use super::shortcuts::{page_shortcuts, Shortcut};
 use crate::ui::song_practice_detail::widgets::detail_transport_bar::{
-    detail_transport_bar, TransportBar,
+    controls, detail_transport_bar, TransportBar,
 };
 use crate::ui::song_practice_detail::widgets::fx_panel::{EqInput, FxPanel, FxTarget};
 use crate::ui::song_practice_detail::widgets::left_panel::{left_panel, Inspector};
@@ -295,6 +296,18 @@ impl SongPracticeDetailScreen {
             slot(editor),
             slot(picker),
         ];
+        // The keys nothing on the page took (`shortcuts`): Space is the
+        // play button's (nothing while it is dead), Delete and Escape act on
+        // the selected clip.
+        let play = controls(&self.transport_bar(practice))
+            .play
+            .map(Message::Transport);
+        let clip_selected = vm.selected_clip_id().is_some();
+        let layers = page_shortcuts(layers, move |key| match key {
+            Shortcut::PlayPause => play.clone(),
+            Shortcut::DeleteClip => clip_selected.then_some(Message::DeleteSelectedClip),
+            Shortcut::Deselect => clip_selected.then_some(Message::DeselectClip),
+        });
         // A drop beside every zone (the transport, the inspector, the
         // dock): said where audio goes, not let go without a word.
         unclaimed_drop(layers, |_| Message::RefusedDrop(DROP_ON_A_LANE))

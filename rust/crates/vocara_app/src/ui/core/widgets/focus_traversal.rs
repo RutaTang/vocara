@@ -222,6 +222,23 @@ impl Operation for EnsureVisible {
     }
 }
 
+/// Whether a text field in `content` (laid out as `layout`) has the focus:
+/// it holds the keyboard, and a screen's shortcuts leave every key to it.
+/// Asked before the field has the key: a multi-line field lets Escape go
+/// by uncaptured as it gives up the focus.
+pub fn holds_focus<M>(
+    content: &mut Element<'_, M>,
+    tree: &mut Tree,
+    layout: Layout<'_>,
+    renderer: &Renderer,
+) -> bool {
+    let mut survey = Survey::default();
+    content
+        .as_widget_mut()
+        .operate(tree, layout, renderer, &mut survey);
+    survey.fields.iter().any(|&(_, focused, _)| focused)
+}
+
 /// Tab (`forward`) or Shift+Tab in the scope over `content`.
 fn traverse<M>(
     content: &mut Element<'_, M>,
