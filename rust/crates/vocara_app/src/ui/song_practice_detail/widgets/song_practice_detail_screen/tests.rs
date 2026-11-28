@@ -2306,6 +2306,48 @@ fn the_note_editor_keeps_the_keyboard_as_a_snack_bar_comes_and_goes() {
     assert_eq!(typed_in_note(&messages), "c", "the snack bar went");
 }
 
+// A tap on the barrier keeps a note with unsaved text open, but the press
+// took the keyboard out of the field: what was typed next went nowhere.
+#[test]
+fn the_note_editor_keeps_the_keyboard_after_a_tap_on_its_barrier() {
+    use iced_test::simulator::typewrite;
+    let mut h = Harness::open(Setup::default());
+    h.send(Message::Row {
+        track_id: "t1".into(),
+        message: track_row::Message::AddNote,
+    });
+    let title = h.find("Note at 0:00").expect("the editor").bounds();
+    let mut ui = LiveUi::new(h.size);
+    let mut events = vec![
+        live_ui::move_to(title.x + 60.0, title.y + 50.0),
+        live_ui::press(),
+        live_ui::release(),
+    ];
+    events.extend(typewrite("a"));
+    let messages = ui.run(h.screen.view(), events);
+    assert_eq!(typed_in_note(&messages), "a");
+    h.feed(messages);
+    // A tap on the barrier, far from the card.
+    let messages = ui.run(
+        h.screen.view(),
+        [
+            live_ui::move_to(300.0, 760.0),
+            live_ui::press(),
+            live_ui::release(),
+        ],
+    );
+
+    for message in messages {
+        let mut step = h.screen.handle(message);
+        let task = std::mem::replace(&mut step.update.task, Task::none());
+        h.absorb(step);
+        ui.perform(h.screen.view(), task);
+    }
+    assert!(h.screen.note_editor().is_some(), "kept open");
+    let messages = ui.run(h.screen.view(), typewrite("b"));
+    assert_eq!(typed_in_note(&messages), "b", "typing goes on");
+}
+
 // The picker's search, likewise.
 #[test]
 fn the_technique_picker_keeps_the_keyboard_as_a_snack_bar_goes() {

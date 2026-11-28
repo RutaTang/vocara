@@ -96,6 +96,36 @@ impl LiveUi {
         messages
     }
 
+    /// Performs the widget operations `task` asks for (a focus) on `view`,
+    /// on the widget state the last view left, as the runtime does after
+    /// the update that asked; the rest of the task is dropped.
+    pub fn perform<'a, M: Send + 'static>(
+        &mut self,
+        view: impl Into<Element<'a, M>>,
+        task: iced::Task<M>,
+    ) {
+        use iced::futures::StreamExt;
+        let operations: Vec<Box<dyn widget::Operation>> =
+            match iced_test::runtime::task::into_stream(task) {
+                Some(stream) => iced::futures::executor::block_on(
+                    stream
+                        .filter_map(|action| async move {
+                            match action {
+                                iced_test::runtime::Action::Widget(op) => Some(op),
+                                _ => None,
+                            }
+                        })
+                        .collect(),
+                ),
+                None => Vec::new(),
+            };
+        let mut ui = self.build(view);
+        for mut operation in operations {
+            ui.operate(&self.renderer, operation.as_mut());
+        }
+        self.cache = Some(ui.into_cache());
+    }
+
     /// The first target of `selector` in `view`.
     pub fn find<'a, M, S>(
         &mut self,

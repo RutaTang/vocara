@@ -1267,7 +1267,14 @@ impl SongPracticeDetailScreen {
         let Some((editor, _)) = self.note_editor.as_mut() else {
             return;
         };
+        let dismissed = matches!(m, note_editor::Message::Dismiss);
         let note_editor::Step::Closed(result) = editor.update(m) else {
+            // A tap on the barrier keeps a note with unsaved text open, but
+            // the press took the keyboard out of the field (any press
+            // outside a field does): what was typed next went nowhere.
+            if dismissed {
+                step.task(editor.focus());
+            }
             return;
         };
         let Some((editor, target)) = self.note_editor.take() else {
