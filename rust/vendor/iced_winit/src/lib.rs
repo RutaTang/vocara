@@ -32,6 +32,8 @@ pub mod conversion;
 pub mod gesture;
 // vocara: the pointer during a drag in from another app (see the module).
 mod drop_pointer;
+// vocara: a control-click is a secondary click on macOS (see the module).
+mod secondary_click;
 
 mod error;
 mod proxy;
@@ -535,6 +537,9 @@ async fn run_instance<P>(
         FxHashMap::default();
     // vocara: each window's drag in from another app (`drop_pointer`).
     let mut drags: FxHashMap<window::Id, drop_pointer::Drag> =
+        FxHashMap::default();
+    // vocara: each window's control-clicks (`secondary_click`).
+    let mut clicks: FxHashMap<window::Id, secondary_click::ControlClick> =
         FxHashMap::default();
     let mut messages = Vec::new();
     let mut actions = 0;
@@ -1171,6 +1176,28 @@ async fn run_instance<P>(
                                 &mut system_theme,
                             );
                         } else {
+                            // vocara: a control-click is the right button's
+                            // on macOS, its release too (`secondary_click`).
+                            let window_event = match window_event {
+                                winit::event::WindowEvent::MouseInput {
+                                    device_id,
+                                    state,
+                                    button,
+                                } if secondary_click::ON => {
+                                    let control =
+                                        window.state.modifiers().control_key();
+                                    winit::event::WindowEvent::MouseInput {
+                                        device_id,
+                                        state,
+                                        button: clicks
+                                            .entry(id)
+                                            .or_default()
+                                            .button(button, state, control),
+                                    }
+                                }
+                                window_event => window_event,
+                            };
+
                             // vocara: a file hovering or dropped is judged
                             // where the pointer is, which winit does not
                             // report during a drag in from another app (see

@@ -155,6 +155,9 @@ SkParagraph does), and keep the version iced's renderers use.
   times a second while a file hovers (`drop_pointer::Drag`, the loop woken
   for each read), and lets it leave (`CursorLeft`) after
   `HoveredFileCancelled`. `src/window/state.rs` adds `cursor_position`.
+  On macOS a control-click is a secondary click, as AppKit takes it:
+  `src/secondary_click.rs` (new) and `src/lib.rs` report a left press with
+  Control held, and its release, as the right button's.
 The effects' layers are compositing iced has no primitive for, which
 Flutter did:
 
