@@ -934,6 +934,7 @@ impl SongPracticeDetailScreen {
                 self.vm.set_lyrics_focus(on);
                 return;
             }
+            P::TogglePlay => return self.transport(transport::Message::TogglePlay, step),
             P::PasteLyrics => {
                 let read = iced::clipboard::read();
                 step.task(read.map(|text| Message::Lyrics(P::PastedLyrics(text))));

@@ -2391,6 +2391,30 @@ fn escape_leaves_the_lyrics_focus_view_on_the_page() {
     assert!(!h.vm().lyrics_focus());
 }
 
+// The Focus view has no transport and holds the keyboard: Space plays and
+// pauses there, as the transport's button does.
+#[test]
+fn space_plays_and_pauses_in_the_lyrics_focus_view() {
+    let mut h = Harness::open(Setup::default());
+    h.send(Message::Lyrics(lyrics_panel::Message::SetLyricsFocus(true)));
+    let mut space = || {
+        let key = iced_test::simulator::press_key(
+            iced::keyboard::Key::Named(iced::keyboard::key::Named::Space),
+            Some(" ".into()),
+        );
+        let messages: Vec<Message> = {
+            let mut ui = h.ui();
+            let _ = ui.simulate([key]);
+            ui.into_messages().collect()
+        };
+        h.feed(messages);
+        h.vm().playback().is_playing()
+    };
+    assert!(space(), "plays");
+    assert!(!space(), "pauses");
+    assert!(h.vm().lyrics_focus(), "still in focus");
+}
+
 // Sync's Clear asks first, as Delete clip does: one click took a whole
 // song's tap timing at once, saved, with nothing to go back to.
 #[test]

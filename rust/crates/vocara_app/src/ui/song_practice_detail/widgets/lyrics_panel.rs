@@ -306,6 +306,8 @@ pub enum Message {
     SetLyricsMode(LyricsMode),
     /// `vm.setLyricsFocus(on)` (the toolbar's Focus, the Focus view's exit).
     SetLyricsFocus(bool),
+    /// Space in the Focus view: play or pause, as the transport's button.
+    TogglePlay,
     /// Paste lyrics (the empty tab's): read the clipboard, then answer
     /// [`Message::PastedLyrics`] with its text.
     PasteLyrics,
@@ -1971,7 +1973,8 @@ fn tap_area<'a>(content: Element<'a, Message>, messages: Vec<Message>) -> Elemen
 /// [`visible_drop_target`]), so the overlay takes it: a lyrics file dropped
 /// on the lyrics in focus did nothing at all. Nor the keyboard
 /// ([`holds_keyboard`]), but for Escape, which leaves the view, as it leaves
-/// a video's fullscreen: the corner's 28 px button was the only way out.
+/// a video's fullscreen (the corner's 28 px button was the only way out),
+/// and Space, which plays or pauses ([`Message::TogglePlay`]).
 pub fn lyrics_focus_overlay<'a>(
     state: &'a LyricsPanelState,
     data: RightPanelData<'a>,
@@ -2015,17 +2018,24 @@ pub fn lyrics_focus_overlay<'a>(
     let leaves_on_escape = Wrap::<Message, ()>::new(
         crate::ui::core::widgets::toolbar::window_backdrop(target),
         Box::new(|_, event, _, _, shell| {
-            let escape = matches!(
-                event,
-                Event::Keyboard(keyboard::Event::KeyPressed {
-                    key: keyboard::Key::Named(keyboard::key::Named::Escape),
-                    ..
-                })
-            );
-            if escape && !shell.is_event_captured() {
-                shell.publish(Message::SetLyricsFocus(false));
-                shell.capture_event();
+            if shell.is_event_captured() {
+                return;
             }
+            let Event::Keyboard(keyboard::Event::KeyPressed { key, repeat, .. }) = event else {
+                return;
+            };
+            let message = match key {
+                keyboard::Key::Named(keyboard::key::Named::Escape) => {
+                    Message::SetLyricsFocus(false)
+                }
+                // The view has no transport of its own, and it holds the
+                // keyboard: singing along, there was no way to start or
+                // pause the song without leaving it.
+                keyboard::Key::Named(keyboard::key::Named::Space) if !repeat => Message::TogglePlay,
+                _ => return,
+            };
+            shell.publish(message);
+            shell.capture_event();
         }),
     );
     holds_keyboard(leaves_on_escape)

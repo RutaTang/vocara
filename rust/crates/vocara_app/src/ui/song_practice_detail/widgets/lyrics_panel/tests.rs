@@ -777,10 +777,12 @@ fn five_lines() -> Vec<LyricLine> {
         .collect()
 }
 
-/// Escape leaves the Focus view, as it leaves a video's fullscreen; no
-/// other key does, and none reaches the panel beneath.
+/// Escape leaves the Focus view, as it leaves a video's fullscreen, and
+/// Space plays or pauses (the view has no transport, and Space did
+/// nothing); no other key does anything, and none reaches the panel
+/// beneath.
 #[test]
-fn escape_leaves_the_focus_view() {
+fn escape_leaves_the_focus_view_and_space_plays_or_pauses() {
     let mut vm = Vm::reading(five_lines());
     vm.set_lyrics_mode(LyricsMode::Sync);
     vm.focus = true;
@@ -788,10 +790,11 @@ fn escape_leaves_the_focus_view() {
     let mut ui = PanelUi::new(Size::new(1200.0, 800.0));
     sync_under_focus(&mut ui, &mut state, &vm);
     let escape = press_key(keyboard::Key::Named(keyboard::key::Named::Escape), None);
+    let letter = press_key(keyboard::Key::Character("a".into()), Some("a".into()));
     let sent = with_data!(vm, data, {
-        ui.run(under_focus(&state, data), vec![space(), escape])
+        ui.run(under_focus(&state, data), vec![space(), letter, escape])
     });
-    assert_eq!(sent, [Message::SetLyricsFocus(false)]);
+    assert_eq!(sent, [Message::TogglePlay, Message::SetLyricsFocus(false)]);
 }
 
 #[test]
