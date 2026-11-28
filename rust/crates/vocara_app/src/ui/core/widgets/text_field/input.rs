@@ -72,6 +72,7 @@ pub struct TextInput<'a, Message> {
     line_height: text::LineHeight,
     on_input: Option<Box<dyn Fn(String) -> Message + 'a>>,
     on_submit: Option<Message>,
+    on_escape: Option<Message>,
     caret_color: Color,
     style: StyleFn<'a, Theme>,
     last_status: Option<Status>,
@@ -94,6 +95,7 @@ impl<'a, Message: Clone> TextInput<'a, Message> {
             line_height: text::LineHeight::default(),
             on_input: None,
             on_submit: None,
+            on_escape: None,
             caret_color: DEFAULT_CARET,
             style: Box::new(default),
             last_status: None,
@@ -115,6 +117,14 @@ impl<'a, Message: Clone> TextInput<'a, Message> {
     /// The message Return sends.
     pub fn on_submit(mut self, message: Message) -> Self {
         self.on_submit = Some(message);
+        self
+    }
+
+    /// The message Escape sends while the field holds some text (a search
+    /// field's clear, as an `NSSearchField`'s Escape): the field keeps the
+    /// focus. Empty, or without one, Escape takes the focus away.
+    pub fn on_escape(mut self, message: Message) -> Self {
+        self.on_escape = Some(message);
         self
     }
 
@@ -1286,6 +1296,15 @@ impl<'a, Message: Clone + 'a> Widget<Message, Theme, Renderer> for TextInput<'a,
                             let x = extent_x(state, &self.value);
                             bring_into_view(state, &geometry, x);
 
+                            shell.capture_event();
+                        }
+                        keyboard::Key::Named(key::Named::Escape)
+                            if self.on_escape.is_some() && !self.value.is_empty() =>
+                        {
+                            if let Some(on_escape) = self.on_escape.clone() {
+                                shell.publish(on_escape);
+                            }
+                            state.toolbar = None;
                             shell.capture_event();
                         }
                         keyboard::Key::Named(key::Named::Escape) => {
