@@ -642,6 +642,59 @@ fn the_panel_fits_the_dock() {
 // ------------------------------------------------------------ readouts
 
 #[test]
+fn a_marker_at_a_track_end_shows_whole_and_leaves_its_label_clear() {
+    // At an end the knob was cut in half by the track's edge and covered
+    // the end's label ("Back", "Closed").
+    let (w, h) = (160.0, readouts::ROW - 1.0);
+    for position in [0.0, 1.0] {
+        let (knob, label_y) = readouts::track_marks(w, h, position);
+        assert!(knob.x - readouts::KNOB_RADIUS >= 0.0, "{knob:?}");
+        assert!(knob.x + readouts::KNOB_RADIUS <= w, "{knob:?}");
+        assert!(
+            label_y + readouts::END_SIZE / 2.0 <= knob.y - readouts::KNOB_RADIUS,
+            "the label ({label_y}) runs into the knob at {knob:?}"
+        );
+        assert!(label_y - readouts::END_SIZE / 2.0 >= 0.0, "{label_y}");
+    }
+    // The ends still read as the ends.
+    let (lo, _) = readouts::track_marks(w, h, 0.0);
+    let (hi, _) = readouts::track_marks(w, h, 1.0);
+    assert_eq!(
+        (lo.x, hi.x),
+        (readouts::KNOB_RADIUS, w - readouts::KNOB_RADIUS)
+    );
+}
+
+#[test]
+fn the_voice_reading_stays_on_one_line_inside_its_card() {
+    // "A4 · breathy" wrapped to two lines and spilled below the card.
+    let mut settings = crate::app::settings();
+    settings.fonts = crate::ui::core::theme::font::FACES
+        .iter()
+        .copied()
+        .map(std::borrow::Cow::Borrowed)
+        .collect();
+    let st = fed(1.0, 2.2);
+    let mut r = st.readouts();
+    r.rows[6].value = "A\u{266f}4 \u{b7} pressed".to_string();
+    let mut ui = iced_test::Simulator::with_size(
+        settings,
+        Size::new(readouts::WIDTH, 360.0),
+        readouts::panel(&r, 360.0),
+    );
+    let value = ui
+        .find("A\u{266f}4 \u{b7} pressed")
+        .expect("the reading")
+        .bounds();
+    // One 16 px line (two read 32).
+    assert!(value.height < 24.0, "{value:?}");
+    assert!(
+        value.x + value.width <= readouts::WIDTH - 14.0 + 0.5,
+        "{value:?}"
+    );
+}
+
+#[test]
 fn the_readouts_read_the_mockups_ah() {
     let values = readouts::values(&ah().components);
     assert_eq!(
