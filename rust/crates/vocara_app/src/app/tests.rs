@@ -269,6 +269,26 @@ fn open_dialog(app: &mut App) {
     );
 }
 
+/// The app menu's Preferences… (⌘,) opens Settings, as Home's gear does:
+/// not under a dialog, and once.
+#[test]
+fn preferences_opens_settings_unless_a_dialog_is_up() {
+    let mut app = boot(None);
+    open_dialog(&mut app);
+    let _ = app.update(Message::PreferencesRequested);
+    assert_eq!(app.routes(), vec![Some(Route::Home)], "not under a dialog");
+    let _ = app.update(Message::Dialog(confirm_dialog::Message::Cancel));
+    assert_eq!(app.dialogs(), 0);
+    let _ = app.update(Message::PreferencesRequested);
+    assert_eq!(app.routes(), vec![Some(Route::Home), Some(Route::Settings)]);
+    let _ = app.update(Message::PreferencesRequested);
+    assert_eq!(
+        app.routes(),
+        vec![Some(Route::Home), Some(Route::Settings)],
+        "not a second Settings"
+    );
+}
+
 #[test]
 fn a_dialog_covers_the_window_and_its_result_reaches_its_page() {
     let mut app = boot(None);

@@ -7,9 +7,12 @@
 //! main thread; the app calls it when its window has opened, which is after
 //! winit's.
 //!
-//! Every item but six is nil-targeted, as in the xib: its action goes to
+//! Every item but seven is nil-targeted, as in the xib: its action goes to
 //! the first responder chain, and AppKit enables the item only while
-//! something there implements it. The Quit item sends `terminate:`, so it
+//! something there implements it. Preferences… (⌘,), which the xib left
+//! without an action, asks the app to show Settings: it targets an object
+//! of ours, the app target, which hands the ask to the app the way a quit
+//! reaches it ([`PreferencesRequests`]). The Quit item sends `terminate:`, so it
 //! goes through the quit guard ([`crate::quit_request`]). The app-menu titles
 //! carry the app's name where the xib had `APP_NAME`, which
 //! `FlutterAppDelegate` replaced with `CFBundleDisplayName`, else
@@ -53,6 +56,9 @@
 //! [`crate::restorable_state`].
 
 use std::ffi::CStr;
+use std::sync::{Mutex, OnceLock};
+
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
 /// A key equivalent. Every one in the menu includes ⌘; an uppercase key
 /// implies ⇧, as in the xib.
@@ -90,14 +96,52 @@ pub enum Target {
     /// The edit target: the responder chain, else the keystroke to the key
     /// window (see the module doc). Only the items of [`EDIT_KEYS`].
     EditTarget,
+    /// The app target, which asks the app (Preferences…).
+    App,
+}
+
+/// The action of Preferences…, which the app target answers.
+pub const SHOW_PREFERENCES: &CStr = c"showPreferences:";
+
+/// The app's asks to show Settings (Preferences…, ⌘,), and who listens for
+/// them; the app listens on [`PreferencesRequests::global`], which the app
+/// target feeds. An ask nobody hears is dropped.
+#[derive(Debug, Default)]
+pub struct PreferencesRequests {
+    listeners: Mutex<Vec<UnboundedSender<()>>>,
+}
+
+impl PreferencesRequests {
+    /// The process-wide asks.
+    pub fn global() -> &'static PreferencesRequests {
+        static GLOBAL: OnceLock<PreferencesRequests> = OnceLock::new();
+        GLOBAL.get_or_init(PreferencesRequests::default)
+    }
+
+    /// Preferences… was chosen: every listener hears it.
+    pub fn ask(&self) {
+        self.listeners
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|listener| listener.send(()).is_ok());
+    }
+
+    /// A listener for the asks from now on.
+    pub fn subscribe(&self) -> UnboundedReceiver<()> {
+        let (sender, receiver) = unbounded_channel();
+        self.listeners
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(sender);
+        receiver
+    }
 }
 
 /// One menu item.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Item {
     Separator,
-    /// An item sending `action` to `target` (no action: always disabled, as
-    /// the xib's Preferences… was).
+    /// An item sending `action` to `target` (no action: always disabled).
     Action {
         title: String,
         action: Option<&'static CStr>,
@@ -254,13 +298,13 @@ pub fn main_menu(app_name: &str) -> Menu {
                 None,
             ),
             Separator,
-            // No action in the xib either: always disabled.
+            // Settings (the xib's had no action: always disabled).
             Item::Action {
                 title: "Preferences…".into(),
-                action: None,
+                action: Some(SHOW_PREFERENCES),
                 shortcut: cmd(","),
                 tag: 0,
-                target: Target::FirstResponder,
+                target: Target::App,
             },
             Separator,
             submenu("Services", "Services", Some(Role::Services), Vec::new()),
@@ -423,7 +467,10 @@ mod macos {
     };
     use objc2_foundation::{ns_string, NSBundle, NSPoint, NSProcessInfo, NSString};
 
-    use super::{EditKey, Item, Menu, Role, Target, COPY, CUT, PASTE, REDO, SELECT_ALL, UNDO};
+    use super::{
+        EditKey, Item, Menu, PreferencesRequests, Role, Target, COPY, CUT, PASTE, REDO, SELECT_ALL,
+        UNDO,
+    };
 
     static INSTALLED: AtomicBool = AtomicBool::new(false);
 
@@ -485,6 +532,50 @@ mod macos {
             }
         }
     );
+
+    define_class!(
+        /// The target of Preferences…: the module doc's app target. Main
+        /// thread only, as AppKit's menus are.
+        // SAFETY: NSObject has no subclassing requirements, and `AppTarget`
+        // does not implement `Drop`.
+        #[unsafe(super(NSObject))]
+        #[thread_kind = MainThreadOnly]
+        struct AppTarget;
+
+        // SAFETY: an action method, `-(void)showPreferences:(id)sender`.
+        impl AppTarget {
+            #[unsafe(method(showPreferences:))]
+            fn show_preferences(&self, _sender: Option<&AnyObject>) {
+                PreferencesRequests::global().ask();
+            }
+        }
+
+        unsafe impl NSObjectProtocol for AppTarget {}
+
+        // SAFETY: `-(BOOL)validateMenuItem:(NSMenuItem *)item`.
+        unsafe impl NSMenuItemValidation for AppTarget {
+            /// Always enabled: the app decides what an ask does.
+            #[unsafe(method(validateMenuItem:))]
+            fn validate_menu_item(&self, _item: &NSMenuItem) -> bool {
+                true
+            }
+        }
+    );
+
+    impl AppTarget {
+        fn new(mtm: MainThreadMarker) -> Retained<Self> {
+            let this = Self::alloc(mtm).set_ivars(());
+            // SAFETY: `init` is NSObject's designated initializer, and the
+            // ivars are set.
+            unsafe { msg_send![super(this), init] }
+        }
+    }
+
+    /// The objects of ours the menu's items target.
+    struct Targets<'a> {
+        edit: &'a EditTarget,
+        app: &'a AppTarget,
+    }
 
     impl EditTarget {
         fn new(mtm: MainThreadMarker) -> Retained<Self> {
@@ -627,11 +718,15 @@ mod macos {
         }
         let app = NSApplication::sharedApplication(mtm);
         let edit_target = EditTarget::new(mtm);
+        let app_target = AppTarget::new(mtm);
         let mut roles = Vec::new();
         let bar = build(
             mtm,
             &super::main_menu(&app_name()),
-            &edit_target,
+            &Targets {
+                edit: &edit_target,
+                app: &app_target,
+            },
             &mut roles,
         );
         app.setMainMenu(Some(&bar));
@@ -642,9 +737,10 @@ mod macos {
                 Role::Help => app.setHelpMenu(Some(&menu)),
             }
         }
-        // A menu item holds its target weakly: the edit target, made once,
-        // lives as long as the app.
+        // A menu item holds its target weakly: the targets, made once, live
+        // as long as the app.
         std::mem::forget(edit_target);
+        std::mem::forget(app_target);
     }
 
     /// `CFBundleDisplayName`, else `CFBundleName`, else the process name.
@@ -669,7 +765,7 @@ mod macos {
     fn build(
         mtm: MainThreadMarker,
         menu: &Menu,
-        edit_target: &EditTarget,
+        targets: &Targets<'_>,
         roles: &mut Vec<(Role, Retained<NSMenu>)>,
     ) -> Retained<NSMenu> {
         let ns_menu = NSMenu::initWithTitle(mtm.alloc(), &NSString::from_str(&menu.title));
@@ -711,20 +807,24 @@ mod macos {
                     if *tag != 0 {
                         ns_item.setTag(*tag);
                     }
-                    if *target == Target::EditTarget {
-                        let edit_target: &AnyObject = edit_target;
-                        // SAFETY: the edit target is an object, which
-                        // implements the four actions it is given and
-                        // `validateMenuItem:`, and lives as long as the app
-                        // (the item holds it weakly).
-                        unsafe { ns_item.setTarget(Some(edit_target)) };
+                    let ours: Option<&AnyObject> = match target {
+                        Target::FirstResponder => None,
+                        Target::EditTarget => Some(targets.edit),
+                        Target::App => Some(targets.app),
+                    };
+                    if let Some(ours) = ours {
+                        // SAFETY: each target is an object, which implements
+                        // the actions it is given and `validateMenuItem:`,
+                        // and lives as long as the app (the item holds it
+                        // weakly).
+                        unsafe { ns_item.setTarget(Some(ours)) };
                     }
                     ns_item
                 }
                 Item::Submenu { title, menu } => {
                     let ns_item = NSMenuItem::new(mtm);
                     ns_item.setTitle(&NSString::from_str(title));
-                    let submenu = build(mtm, menu, edit_target, roles);
+                    let submenu = build(mtm, menu, targets, roles);
                     ns_item.setSubmenu(Some(&submenu));
                     ns_item
                 }
@@ -751,7 +851,7 @@ mod tests {
 Vocara > Vocara
   About Vocara | - | orderFrontStandardAboutPanel:
   ---
-  Preferences… | ⌘, | -
+  Preferences… | ⌘, | showPreferences: | app
   ---
   Services > Services [Services]
   ---
@@ -836,8 +936,10 @@ Help > Help [Help]
                     if *tag != 0 {
                         out.push_str(&format!(" | tag {tag}"));
                     }
-                    if *target == Target::EditTarget {
-                        out.push_str(" | edit target");
+                    match target {
+                        Target::EditTarget => out.push_str(" | edit target"),
+                        Target::App => out.push_str(" | app"),
+                        Target::FirstResponder => {}
                     }
                     out.push('\n');
                 }
@@ -858,6 +960,20 @@ Help > Help [Help]
         let mut described = String::new();
         describe(&main_menu("Vocara"), 0, &mut described);
         assert_eq!(described, XIB);
+    }
+
+    /// Preferences… asks every listener, as a quit reaches the app.
+    #[test]
+    fn preferences_reaches_every_listener() {
+        let requests = PreferencesRequests::default();
+        let mut first = requests.subscribe();
+        let mut second = requests.subscribe();
+        requests.ask();
+        assert_eq!(first.try_recv(), Ok(()));
+        assert_eq!(second.try_recv(), Ok(()));
+        drop(second);
+        requests.ask();
+        assert_eq!(first.try_recv(), Ok(()), "a listener gone is forgotten");
     }
 
     #[test]
