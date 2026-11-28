@@ -407,14 +407,10 @@ pub(super) fn word_at(value: &Value, index: usize, upstream: bool) -> (usize, us
         .grapheme_indices(true)
         .nth(character)
         .map_or(content.len(), |(byte, _)| byte);
-    let (start, word) = content
-        .split_word_bound_indices()
-        .take_while(|(start, _)| *start <= byte)
-        .last()
-        .unwrap_or((0, ""));
+    let word = super::word_around(&content, byte);
     let graphemes = |s: &str| s.graphemes(true).count();
-    let first = graphemes(&content[..start]);
-    (first, first + graphemes(word))
+    let first = graphemes(&content[..word.start]);
+    (first, first + graphemes(&content[word]))
 }
 
 /// The word a double click at `index` selects: the word holding the

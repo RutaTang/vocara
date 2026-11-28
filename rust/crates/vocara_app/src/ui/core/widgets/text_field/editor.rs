@@ -7,7 +7,7 @@
 //! As iced's, it publishes what the user does as [`Action`]s, which the
 //! owner performs on its [`Content`]. Two things it changes on the content
 //! itself, as the cursor moves iced's own field does not report: the word a
-//! right-click selects, and the focus.
+//! right-click or a double click selects, and the focus.
 //!
 //! Besides the caret and the menu, it differs from iced's editor where
 //! Flutter's `TextField` did:
@@ -384,6 +384,25 @@ impl<'a, Message> TextEditor<'a, Message> {
         }
     }
 
+    /// Selects the word of the text at `text_position` (a point in the
+    /// text's box) on the content itself ([`word_at`]): whether there was
+    /// one, not past the end of the text.
+    fn select_word(&self, text_position: Point) -> bool {
+        let mut internal = self.content.0.borrow_mut();
+        let hit = internal
+            .editor
+            .buffer()
+            .hit(text_position.x, text_position.y);
+        let Some((start, end)) = hit.and_then(|hit| word_at_hit(&internal.editor, hit)) else {
+            return false;
+        };
+        internal.editor.move_to(Cursor {
+            position: end,
+            selection: Some(start),
+        });
+        true
+    }
+
     /// A right-click came up at `position`, pressed there:
     /// `TextSelectionGestureDetectorBuilder.onSecondaryTap` on macOS.
     fn secondary_tap(
@@ -422,21 +441,7 @@ impl<'a, Message> TextEditor<'a, Message> {
                 Selection::Caret(_) => false,
             };
             if !on_selection || state.focus.is_none() {
-                let lines: Vec<String> = (0..internal.editor.line_count())
-                    .map(|i| {
-                        internal
-                            .editor
-                            .line(i)
-                            .map(|l| l.text.into_owned())
-                            .unwrap_or_default()
-                    })
-                    .collect();
-                match word_at(
-                    &lines,
-                    hit.line,
-                    hit.index,
-                    hit.affinity == Affinity::Before,
-                ) {
+                match word_at_hit(&internal.editor, hit) {
                     // Past the end of the text: the caret at the end, no
                     // selection left.
                     None => internal.editor.perform(Action::Move(Motion::DocumentEnd)),
@@ -456,6 +461,25 @@ impl<'a, Message> TextEditor<'a, Message> {
             !self.read_only && toolbar::clipboard_has_text(clipboard),
         ));
     }
+}
+
+/// The word of `editor` a press on its text at `hit` takes ([`word_at`]):
+/// `None` past the end of the text.
+fn word_at_hit(editor: &RendererEditor, hit: cosmic_text::Cursor) -> Option<(Position, Position)> {
+    let lines: Vec<String> = (0..editor.line_count())
+        .map(|i| {
+            editor
+                .line(i)
+                .map(|l| l.text.into_owned())
+                .unwrap_or_default()
+        })
+        .collect();
+    word_at(
+        &lines,
+        hit.line,
+        hit.index,
+        hit.affinity == Affinity::Before,
+    )
 }
 
 /// `RenderEditable.getWordAtOffset` on macOS over `lines`, for the text
@@ -495,12 +519,8 @@ pub(super) fn word_at(
         // A line break: one word of its own.
         None => (at(line, text.len()), at(line + 1, 0)),
         Some(byte) => {
-            let (start, word) = text
-                .split_word_bound_indices()
-                .take_while(|(start, _)| *start <= byte)
-                .last()
-                .unwrap_or((0, ""));
-            (at(line, start), at(line, start + word.len()))
+            let word = super::word_around(text, byte);
+            (at(line, word.start), at(line, word.end))
         }
     })
 }
@@ -1189,16 +1209,26 @@ impl<Message> Widget<Message, Theme, Renderer> for TextEditor<'_, Message> {
             match update {
                 Update::Click(click) => {
                     let action = match click.kind() {
-                        mouse::click::Kind::Single => Action::Click(click.position()),
-                        mouse::click::Kind::Double => Action::SelectWord,
-                        mouse::click::Kind::Triple => Action::SelectLine,
+                        mouse::click::Kind::Single => Some(Action::Click(click.position())),
+                        // The word a right-click selects, so a double click
+                        // at a word's start selects that word alone (as the
+                        // single-line field's does): iced's `SelectWord`
+                        // took the word before it as well. Past the end of
+                        // the text, the last word, as before.
+                        mouse::click::Kind::Double => {
+                            (!self.select_word(click.position())).then_some(Action::SelectWord)
+                        }
+                        mouse::click::Kind::Triple => Some(Action::SelectLine),
                     };
 
                     state.focus = Some(Focus::now());
                     state.last_click = Some(click);
                     state.drag_click = Some(click.kind());
 
-                    sink.act(action, shell);
+                    match action {
+                        Some(action) => sink.act(action, shell),
+                        None => shell.request_redraw(),
+                    }
                     shell.capture_event();
                 }
                 Update::Drag(position) => {

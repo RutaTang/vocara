@@ -92,5 +92,18 @@ pub use input::{text_input, TextInput};
 /// text fields; the Flutter app's fell back to the zinc primary).
 pub const DEFAULT_CARET: iced::Color = crate::ui::core::theme::Studio::ACCENT;
 
+/// The bytes of the word of `text` (UAX #29, as ICU's word boundaries)
+/// holding the byte `byte`: the one both fields' right-click and double
+/// click select (`input::word_at`, `editor::word_at`).
+fn word_around(text: &str, byte: usize) -> std::ops::Range<usize> {
+    use unicode_segmentation::UnicodeSegmentation;
+    let (start, word) = text
+        .split_word_bound_indices()
+        .take_while(|(start, _)| *start <= byte)
+        .last()
+        .unwrap_or((0, ""));
+    start..start + word.len()
+}
+
 #[cfg(test)]
 mod tests;
