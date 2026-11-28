@@ -1170,11 +1170,15 @@ fn channel_footer<'a, M: Clone + 'a>(strip: &Strip<'a>, on: fn(Message) -> M) ->
         )
         .size(24.0)
         .show_label(false),
-        container(thin_slider(
-            strip.volume as f32,
-            move |v| on(volume_channel.volume_live(f64::from(v))),
-            on(channel.mix_commit()),
-        ))
+        // A double click puts it back at 0 dB (1.0), as the mixer's faders.
+        container(
+            thin_slider(
+                strip.volume as f32,
+                move |v| on(volume_channel.volume_live(f64::from(v))),
+                on(channel.mix_commit()),
+            )
+            .reset_to(1.0),
+        )
         .width(Length::Fill),
         container(
             studio_text(footer_db(strip.volume))

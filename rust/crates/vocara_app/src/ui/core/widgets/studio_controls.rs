@@ -302,12 +302,14 @@ pub fn fader_value_at(dx: f32, width: f32) -> f64 {
 /// header's 8 px knob (`controls::draw_thin_slider`: a 2 px track, the
 /// neutral fill, the knob and its shadow).
 ///
-/// It takes its pointer on contact: a click jumps the level and commits it,
-/// and a press held still before it slides stays the fader's (as a tap racing
-/// a drag, a half-second hold on a take's fader lost both to the lane's
-/// long-press reorder — the level had already jumped on the press, and was
-/// never saved). Every move while held sets the level from the pointer's x;
-/// the release commits.
+/// It takes its pointer on contact, and a press held still before it slides
+/// stays the fader's (as a tap racing a drag, a half-second hold on a take's
+/// fader lost both to the lane's long-press reorder — the level had already
+/// jumped on the press, and was never saved). A press on the knob holds it
+/// where it was grabbed and moves nothing; a click elsewhere jumps the level
+/// there (`controls::SliderGrip`). Every move while held sets the level from
+/// there; the release commits, if the press changed the level. A double
+/// click resets the level to 0 dB (1.0), as the mixer's faders do.
 pub fn studio_fader<'a, M: Clone + 'a>(
     value: f64,
     on_changed: impl Fn(f64) -> M + 'a,
@@ -329,43 +331,58 @@ struct Fader<'a, M> {
     on_change_end: M,
 }
 
-/// Whether a fader drag is in flight: it has moved the level and owes its
-/// change-end.
-#[derive(Debug, Default)]
-pub struct FaderState {
-    active: bool,
+/// The level a studio fader's double click resets to: 0 dB.
+pub const FADER_UNITY: f64 = 1.0;
+
+/// Where a studio fader `width` wide draws its knob's centre for `value`:
+/// at the level's place (`fader_value_at`'s inverse), held inside the ends.
+pub fn fader_knob_x(value: f64, width: f32) -> f32 {
+    let knob = super::controls::KNOB_SMALL;
+    (value as f32 * width).clamp(knob / 2.0, (width - knob / 2.0).max(knob / 2.0))
 }
 
 impl<M: Clone> canvas::Program<M> for Fader<'_, M> {
-    type State = FaderState;
+    type State = super::controls::SliderGrip;
 
     fn update(
         &self,
-        state: &mut FaderState,
+        state: &mut super::controls::SliderGrip,
         event: &canvas::Event,
         bounds: Rectangle,
         cursor: mouse::Cursor,
     ) -> Option<canvas::Action<M>> {
+        let width = bounds.width;
+        let set = |x: f32| (self.on_changed)(fader_value_at(x, width));
         match event {
             canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
-                let p = cursor.position_in(bounds)?;
-                state.active = true;
-                Some(
-                    canvas::Action::publish((self.on_changed)(fader_value_at(p.x, bounds.width)))
-                        .and_capture(),
-                )
+                let p = cursor.position_over(bounds)?;
+                // Held from the level's own place, which the knob is drawn
+                // short of at the ends: the first move goes on from it.
+                let pressed = state.press(
+                    p,
+                    p.x - bounds.x,
+                    fader_knob_x(self.value, width),
+                    self.value as f32 * width,
+                    super::controls::KNOB_SMALL / 2.0 + super::controls::KNOB_GRAB_SLACK,
+                    Some(FADER_UNITY as f32 * width),
+                );
+                Some(match pressed {
+                    Some(x) => canvas::Action::publish(set(x)).and_capture(),
+                    None => canvas::Action::capture(),
+                })
             }
-            canvas::Event::Mouse(mouse::Event::CursorMoved { position }) if state.active => {
-                Some(canvas::Action::publish((self.on_changed)(fader_value_at(
-                    position.x - bounds.x,
-                    bounds.width,
-                ))))
+            canvas::Event::Mouse(mouse::Event::CursorMoved { position }) if state.is_held() => {
+                state
+                    .moved(*position, position.x - bounds.x)
+                    .map(|x| canvas::Action::publish(set(x)))
             }
-            canvas::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left))
-                if state.active =>
-            {
-                state.active = false;
-                Some(canvas::Action::publish(self.on_change_end.clone()))
+            canvas::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
+                let changed = state.release()?;
+                Some(if changed {
+                    canvas::Action::publish(self.on_change_end.clone())
+                } else {
+                    canvas::Action::capture()
+                })
             }
             _ => None,
         }
@@ -373,7 +390,7 @@ impl<M: Clone> canvas::Program<M> for Fader<'_, M> {
 
     fn draw(
         &self,
-        _: &FaderState,
+        _: &super::controls::SliderGrip,
         renderer: &Renderer,
         _: &Theme,
         bounds: Rectangle,
@@ -383,7 +400,7 @@ impl<M: Clone> canvas::Program<M> for Fader<'_, M> {
         // The level reads at the pointer's x across the whole width
         // (`fader_value_at`); the knob is drawn there, held inside the ends.
         let knob = super::controls::KNOB_SMALL;
-        let x = (self.value as f32 * bounds.width).clamp(knob / 2.0, bounds.width - knob / 2.0);
+        let x = fader_knob_x(self.value, bounds.width);
         let shown = super::controls::thin_slider_value(x, bounds.width, knob);
         super::controls::draw_thin_slider(
             &mut frame,
@@ -397,7 +414,7 @@ impl<M: Clone> canvas::Program<M> for Fader<'_, M> {
 
     fn mouse_interaction(
         &self,
-        _: &FaderState,
+        _: &super::controls::SliderGrip,
         bounds: Rectangle,
         cursor: mouse::Cursor,
     ) -> mouse::Interaction {
@@ -1052,6 +1069,39 @@ mod tests {
         assert_eq!(messages.len(), 2);
         assert!(matches!(messages[0], Msg::Level(v) if (v - 0.25).abs() < 0.01));
         assert_eq!(messages[1], Msg::End);
+    }
+
+    // A press a little off the knob's centre jumped the level by the
+    // difference, and a double click did nothing.
+    #[test]
+    fn a_press_on_the_knob_holds_it_where_it_was_grabbed() {
+        // The knob of the 200 px fader at 0.5 is at x 100; pressed 3 px
+        // right of its centre, then moved 20 px right.
+        let mut ui = simulator(fader());
+        ui.point_at(Point::new(103.0, 8.0));
+        let _ = ui.simulate([press(), move_to(123.0, 8.0), release()]);
+        let messages: Vec<_> = ui.into_messages().collect();
+        assert_eq!(messages.len(), 2, "{messages:?}");
+        assert!(matches!(messages[0], Msg::Level(v) if (v - 0.6).abs() < 1e-6));
+        assert_eq!(messages[1], Msg::End);
+        // A click on it, unmoved, neither changes nor saves the level.
+        let mut ui = simulator(fader());
+        ui.point_at(Point::new(97.0, 8.0));
+        let _ = ui.simulate([press(), release()]);
+        assert!(ui.into_messages().next().is_none());
+    }
+
+    #[test]
+    fn a_double_click_resets_the_fader_to_0_db() {
+        let mut ui = simulator(fader());
+        ui.point_at(Point::new(100.0, 8.0));
+        let _ = ui.simulate([press(), release()]);
+        let _ = ui.simulate([press(), release()]);
+        assert_eq!(
+            ui.into_messages().collect::<Vec<_>>(),
+            vec![Msg::Level(FADER_UNITY), Msg::End]
+        );
+        assert_eq!(fader_db(FADER_UNITY), "0.0");
     }
 
     #[test]
