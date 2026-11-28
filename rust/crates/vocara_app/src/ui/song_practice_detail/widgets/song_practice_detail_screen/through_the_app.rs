@@ -243,10 +243,14 @@ fn a_deep_linked_practice_boots_with_its_takes_and_its_chevron_goes_home() {
 fn the_bottom_analysis_dock_opens() {
     let (library, id, _dir) = seeded(2);
     let mut app = boot(library, Some(&crate::router::song_practice(&id)));
+    use crate::ui::song_practice_detail::view_model::song_practice_detail_view_model::DockTab;
     use crate::ui::song_practice_detail::widgets::bottom_dock::toggle_label;
-    assert!(shows(&app, toggle_label(false)), "starts closed");
-    click(&mut app, toggle_label(false));
-    assert!(shows(&app, toggle_label(true)));
+    assert!(
+        shows(&app, toggle_label(false, DockTab::AnalysisSummary)),
+        "starts closed"
+    );
+    click(&mut app, toggle_label(false, DockTab::AnalysisSummary));
+    assert!(shows(&app, toggle_label(true, DockTab::AnalysisSummary)));
 }
 
 // detail_arrange_journey: 'the interpretation switcher opens its menu'.

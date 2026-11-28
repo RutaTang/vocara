@@ -185,6 +185,25 @@ pub fn handle_at(x: f64, w: f64, start_x: f64, end_x: f64) -> Option<Edge> {
     }
 }
 
+/// How far either side of the playhead its marker's head takes a press: the
+/// 11 px triangle and a pixel to spare.
+pub const MARKER_HIT_HALF_WIDTH: f64 = 6.5;
+
+/// How far down the ruler the marker's head takes a press: the 8 px
+/// triangle and a little under its tip.
+pub const MARKER_HIT_HEIGHT: f32 = 10.0;
+
+/// Whether a press at `p` on the ticks lands on the playhead marker's head
+/// (the playhead at `playhead_x`, if it is in view). There it scrubs, over a
+/// loop handle too: with Loop on the playhead snaps to the loop's start, and
+/// a drag on its marker moved the loop's start instead (the handle stays
+/// reachable down the rest of its edge).
+pub fn on_marker(p: Point, playhead_x: Option<f64>) -> bool {
+    playhead_x.is_some_and(|x| {
+        (f64::from(p.x) - x).abs() <= MARKER_HIT_HALF_WIDTH && p.y < MARKER_HIT_HEIGHT
+    })
+}
+
 /// Where a handle drag puts its edge: where the edge was when the drag
 /// began, plus the whole distance the pointer has moved since. Adding each
 /// tick's own rounded delta lost the fraction every time, so at full zoom
@@ -390,14 +409,21 @@ impl Handles {
         )
     }
 
-    /// The handle under `x` on ticks `w` wide: none while the loop is off,
-    /// when its handles are not drawn (see the module docs).
-    fn handle_at(&self, x: f64, w: f64) -> Option<Edge> {
+    /// The handle under `p` on ticks `w` wide: none while the loop is off,
+    /// when its handles are not drawn (see the module docs), nor on the
+    /// playhead marker's head ([`on_marker`]).
+    fn handle_at(&self, p: Point, w: f64) -> Option<Edge> {
         if !self.ruler.loop_enabled {
             return None;
         }
+        let r = self.ruler;
+        let position = i64::try_from(r.position.as_millis()).unwrap_or(i64::MAX);
+        let playhead = playhead_x(position, r.view_start_ms, r.timeline_duration_ms, w);
+        if on_marker(p, playhead) {
+            return None;
+        }
         let (start_x, end_x) = self.xs(w);
-        handle_at(x, w, start_x, end_x)
+        handle_at(f64::from(p.x), w, start_x, end_x)
     }
 
     fn seek_at(&self, dx: f64, w: f64) -> Message {
@@ -445,7 +471,7 @@ impl canvas::Program<Message> for Handles {
                 }
                 let p = cursor.position_in(bounds)?;
                 state.press = Some(Press {
-                    handle: self.handle_at(f64::from(p.x), w),
+                    handle: self.handle_at(p, w),
                     down: p,
                     last: Point::new(p.x + bounds.x, p.y + bounds.y),
                     pending: 0.0,
@@ -554,7 +580,7 @@ impl canvas::Program<Message> for Handles {
         let over_handle = live(self.ruler.timeline_duration_ms, w)
             && cursor
                 .position_in(bounds)
-                .is_some_and(|p| self.handle_at(f64::from(p.x), w).is_some());
+                .is_some_and(|p| self.handle_at(p, w).is_some());
         if dragging_handle || over_handle {
             mouse::Interaction::ResizingHorizontally
         } else {

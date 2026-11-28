@@ -730,7 +730,8 @@ impl MixerController {
     /// not shown anywhere, so a solo left lit on it (solo the original,
     /// switch back to the accompaniment) must not count toward "anything
     /// soloed" — that silenced every visible lane with no lit S in sight.
-    fn resolve_solo(&self, host: &dyn MixerHost) -> SoloResolution {
+    /// (The arrange dims the lanes a solo silences by it.)
+    pub fn resolve_solo(&self, host: &dyn MixerHost) -> SoloResolution {
         let tracks: Vec<Arc<AudioTrack>> = host
             .all_tracks()
             .into_iter()

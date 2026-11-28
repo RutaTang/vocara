@@ -337,8 +337,10 @@ impl PlaybackController {
     }
 
     /// Stops playback and returns the playhead to the start of the play
-    /// range. A no-op while a take is in flight (pausing and rewinding the
-    /// backing under a still-rolling mic would misalign the take); the
+    /// range: the loop's start while it loops, else the song's. (The region
+    /// stays set with Loop off, and Stop went back to its start there too,
+    /// mid-song.) A no-op while a take is in flight (pausing and rewinding
+    /// the backing under a still-rolling mic would misalign the take); the
     /// transport bar routes its Stop to the recording instead.
     pub fn stop(&mut self, host: &dyn PlaybackHost) {
         if Self::take_holds_transport(host) {
@@ -346,7 +348,12 @@ impl PlaybackController {
         }
         self.transport_moves += 1;
         self.engine.pause();
-        self.engine.seek(millis(self.loop_start_ms));
+        let start = if self.loop_enabled {
+            self.loop_start_ms
+        } else {
+            0
+        };
+        self.engine.seek(millis(start));
     }
 
     // --- Loop / cycle region ------------------------------------------------

@@ -64,6 +64,10 @@ pub struct PracticePreview {
     /// The track the waveform is of; none when no take or backing has
     /// audio with cached peaks.
     pub source: Option<PreviewSource>,
+    /// That track's id and its tint, if it has one: the card draws the
+    /// waveform in the track's colour on the practice page.
+    pub track_id: String,
+    pub color_value: Option<i64>,
     /// The waveform: [`PracticePreview::BUCKETS`] peak levels (0 to 1)
     /// evenly across `length_ms`; empty with no source.
     pub peaks: Vec<f32>,
@@ -126,7 +130,18 @@ impl PracticePreview {
             id: id.into(),
             length_ms: length,
             source,
+            track_id: String::new(),
+            color_value: None,
             peaks,
+        }
+    }
+
+    /// The preview, its waveform of track `id`, tinted `color_value`.
+    pub fn of_track(self, id: impl Into<String>, color_value: Option<i64>) -> PracticePreview {
+        PracticePreview {
+            track_id: id.into(),
+            color_value,
+            ..self
         }
     }
 }

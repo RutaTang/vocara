@@ -23,6 +23,7 @@ use vocara_model::models::fx_bus::FxBus;
 use vocara_model::models::song_practice::SongPractice;
 use vocara_model::util::dart_num::round_to_i64;
 
+use super::shortcuts::{page_shortcuts, Shortcut};
 use super::{
     ms, selected_track_ref, DropZone, InterpretationAction, Message, OpenMenu, Shown,
     SongPracticeDetailScreen, DROP_ON_A_LANE, FINISHING_SAVE, MIN_TIMELINE_HEIGHT, NOT_LOADED,
@@ -56,7 +57,7 @@ use crate::ui::song_practice_detail::view_model::song_practice_detail_view_model
 use crate::ui::song_practice_detail::widgets::analysis_lanes::{analysis_lanes, LaneImage};
 use crate::ui::song_practice_detail::widgets::bottom_dock::{self, bottom_dock, BottomDock};
 use crate::ui::song_practice_detail::widgets::detail_transport_bar::{
-    detail_transport_bar, TransportBar,
+    controls, detail_transport_bar, TransportBar,
 };
 use crate::ui::song_practice_detail::widgets::fx_panel::{EqInput, FxPanel, FxTarget};
 use crate::ui::song_practice_detail::widgets::left_panel::{left_panel, Inspector};
@@ -71,12 +72,12 @@ use crate::ui::song_practice_detail::widgets::timeline::{
 };
 use crate::ui::song_practice_detail::widgets::track_context_menu::{
     bus_context_menu, clip_context_menu, menu_host, studio_menu, track_context_menu, BusMenu,
-    StudioMenuItem, TrackMenu,
+    MenuAnchor, StudioMenuItem, TrackMenu, MENU_ANCHOR_BELOW_DY,
 };
-use crate::ui::song_practice_detail::widgets::track_row::{bus_color, channel_color};
+use crate::ui::song_practice_detail::widgets::track_row::bus_color;
 use crate::ui::song_practice_detail::widgets::track_row::{
-    header_frame, header_name, take_color, track_menu_button, track_row, TIMELINE_H_MARGIN,
-    TRACK_HEADER_W,
+    header_frame, header_name, lane_color, take_color, track_menu_button, track_row,
+    TIMELINE_H_MARGIN, TRACK_HEADER_W, TRACK_ROW_HEIGHT,
 };
 use crate::ui::song_practice_detail::widgets::vocal_tract_engine;
 use crate::ui::song_practice_detail::widgets::vocal_tract_view::{self, VocalTract};
@@ -295,6 +296,18 @@ impl SongPracticeDetailScreen {
             slot(editor),
             slot(picker),
         ];
+        // The keys nothing on the page took (`shortcuts`): Space is the
+        // play button's (nothing while it is dead), Delete and Escape act on
+        // the selected clip.
+        let play = controls(&self.transport_bar(practice))
+            .play
+            .map(Message::Transport);
+        let clip_selected = vm.selected_clip_id().is_some();
+        let layers = page_shortcuts(layers, move |key| match key {
+            Shortcut::PlayPause => play.clone(),
+            Shortcut::DeleteClip => clip_selected.then_some(Message::DeleteSelectedClip),
+            Shortcut::Deselect => clip_selected.then_some(Message::DeselectClip),
+        });
         // A drop beside every zone (the transport, the inspector, the
         // dock): said where audio goes, not let go without a word.
         unclaimed_drop(layers, |_| Message::RefusedDrop(DROP_ON_A_LANE))
@@ -331,7 +344,6 @@ impl SongPracticeDetailScreen {
             selected_bus,
             fx_buses: &practice.fx_buses,
             supports_effects: vm.mixer().supports_effects(),
-            vocal_takes: &self.shown.vocal_takes,
             active_interpretation: practice.active_version().map(|v| v.name.as_str()),
             open_menu: match &self.menu {
                 Some(OpenMenu::Inspector(menu)) => Some(menu),
@@ -383,7 +395,6 @@ impl SongPracticeDetailScreen {
             let settings = vm.app_settings();
             let mixer = MixerStrip {
                 tracks: &self.shown.mixer_tracks,
-                vocal_takes: &self.shown.vocal_takes,
                 buses: &practice.fx_buses,
                 supports_effects: vm.mixer().supports_effects(),
                 selected_track_id: vm.selected_track_id(),
@@ -406,10 +417,7 @@ impl SongPracticeDetailScreen {
                 source: match selected {
                     _ if a.live_monitor() => vocal_tract_view::Source::Live,
                     Some(t) if vocal_tract_engine::readable_take(t) => {
-                        vocal_tract_view::Source::Take(
-                            &t.display_name,
-                            channel_color(t, &self.shown.vocal_takes),
-                        )
+                        vocal_tract_view::Source::Take(&t.display_name, take_color(t))
                     }
                     _ => vocal_tract_view::Source::NoTake,
                 },
@@ -517,7 +525,7 @@ impl SongPracticeDetailScreen {
         let backing_lane = match backing {
             Some(track) => self.lane(
                 track,
-                take_color(track, 0),
+                take_color(track),
                 DropZone::Backing,
                 dur,
                 view_start,
@@ -552,12 +560,12 @@ impl SongPracticeDetailScreen {
             // lane adds it as a new clip on THAT take (only that lane
             // highlights). The live recording draws on the armed lane itself
             // (Logic / Cubase), so there's no separate REC lane.
-            for (i, t) in self.shown.vocal_takes.iter().enumerate() {
+            for t in &self.shown.vocal_takes {
                 list = list.push(
                     LaneKey::Take(id_key(&t.id)),
                     self.lane(
                         t,
-                        take_color(t, i),
+                        take_color(t),
                         DropZone::Take(t.id.clone()),
                         dur,
                         view_start,
@@ -646,6 +654,8 @@ impl SongPracticeDetailScreen {
         let target = vm.record_target_id();
         let is_target = target.as_deref() == Some(track.id.as_str());
         let expanded = vm.analysis().is_track_expanded(&track.id);
+        // Another lane soloed silences this one: it dims as a muted take.
+        let silenced = !vm.with_mixer(|m, h| m.resolve_solo(h).track_in_solo(&track.id));
         let mut row = track_row(
             track,
             track.display_name.clone(),
@@ -660,6 +670,7 @@ impl SongPracticeDetailScreen {
         .color(color)
         .selected(selected)
         .armed(!track.is_backing() && is_target)
+        .silenced(silenced)
         .selected_clip_id(if selected {
             vm.selected_clip_id()
         } else {
@@ -689,7 +700,7 @@ impl SongPracticeDetailScreen {
     }
 
     /// `_showTrackMenu`'s flags, for the take as the practice holds it now.
-    fn track_menu(&self, track: &AudioTrack, practice: &SongPractice) -> TrackMenu {
+    pub(super) fn track_menu(&self, track: &AudioTrack, practice: &SongPractice) -> TrackMenu {
         let vm = &*self.vm;
         let vocals = practice.active_vocal_tracks();
         let idx = vocals.iter().position(|t| t.id == track.id);
@@ -707,13 +718,7 @@ impl SongPracticeDetailScreen {
             current_color_value: track.color_value,
             // The lane's colour with its tint cleared, through the one rule
             // every surface draws a channel's colour by.
-            default_color: channel_color(
-                &AudioTrack {
-                    color_value: None,
-                    ..track.clone()
-                },
-                &self.shown.vocal_takes,
-            ),
+            default_color: lane_color(&track.id, None, track.is_backing()),
         }
     }
 
@@ -766,12 +771,18 @@ impl SongPracticeDetailScreen {
             .style(bare_button)
             .width(Length::Fill)
             .on_press(Message::Browse(zone.clone()));
-        let padded = container(tap).padding(Padding {
-            top: 4.0,
-            right: 10.0,
-            bottom: 8.0,
-            left: 14.0,
-        });
+        // As tall as the lane it stands in for: 4 px taller, the switch
+        // between an empty Original and a set Accompaniment (or a first
+        // take landing) moved every row below it.
+        let inset = (TRACK_ROW_HEIGHT - DROP_HINT_HEIGHT) / 2.0;
+        let padded = container(tap)
+            .padding(Padding {
+                top: inset,
+                right: 10.0,
+                bottom: inset,
+                left: 14.0,
+            })
+            .height(TRACK_ROW_HEIGHT);
         // The playhead goes on across the box, as across the rows.
         drop_zone(with_playhead(padded.into(), playhead), zone)
     }
@@ -792,7 +803,10 @@ impl SongPracticeDetailScreen {
             .max_width(INTERPRETATION_MAX_WIDTH);
         let menu = (self.menu == Some(OpenMenu::Interpretations))
             .then(|| self.interpretations_menu(practice));
-        let dropdown = menu_host(dropdown, menu, Message::DismissMenu);
+        // Under its button, as the inspector's pop-ups open: at the press it
+        // covered the button and ran off toward the right panel.
+        let dropdown = menu_host(dropdown, menu, Message::DismissMenu)
+            .anchor(MenuAnchor::Below(MENU_ANCHOR_BELOW_DY));
         let new_take = ghost_button("New take", Some(glyphs::PLUS), Some(Message::NewTake));
         section_row(
             section_label("Vocal takes"),

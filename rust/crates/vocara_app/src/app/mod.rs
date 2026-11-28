@@ -56,7 +56,7 @@ use std::time::{Duration, Instant};
 
 use iced::futures::SinkExt;
 use iced::widget::{container, stack, Space};
-use iced::{window, Element, Length, Size, Subscription, Task, Theme};
+use iced::{window, Element, Length, Point, Size, Subscription, Task, Theme};
 use vocara_model::diagnostics::DiagnosticsLog;
 use vocara_services::app_menu::PreferencesRequests;
 use vocara_services::quit_request::QuitRequests;
@@ -210,6 +210,9 @@ pub enum Message {
     WindowOpened(window::Id),
     /// The window's scale factor, asked for when it opened.
     ScaleFactor(f32),
+    /// The size of the monitor the window opened on, asked for when it
+    /// opened (none when it cannot be told).
+    MonitorSize(window::Id, Option<Size>),
     /// The user asked to close the window.
     CloseRequested(window::Id),
     /// macOS asked the app to quit (Cmd+Q, the app-menu Quit, a Dock quit,
@@ -288,19 +291,25 @@ impl Running {
                 .is_some_and(|r| r.controller.is_animating(now))
     }
 
-    /// The pages as drawn at the last frame: under the page on top, the
-    /// page on top, and over it (see [`RouteTransition`]). The page on top
-    /// always takes the middle slot, so its widgets keep their state, and
-    /// is a focus scope (`focus_traversal`: Tab moves among its fields).
-    fn pages_view<'a>(&'a self) -> [Element<'a, Message>; 3] {
+    /// The pages as drawn at the last frame (see [`RouteTransition`]), each
+    /// in a slot of its own for as long as it is on the stack: slot `i + 1`
+    /// for the page at place `i`, the one on top last; slot 0 holds the
+    /// pages a go replaced, under the page coming in. iced matches a stack's
+    /// layers by position, so a page moved to another slot is built anew:
+    /// the page a push covered moved down a slot as the new one slid in,
+    /// and Home's list jumped back to its top under the practice it opened.
+    /// Only the page on top and the one a transition moves are drawn, the
+    /// slots of the others left empty, and each is a focus scope
+    /// (`focus_traversal`: Tab moves among its fields).
+    fn pages_view<'a>(&'a self) -> Vec<Element<'a, Message>> {
         let (top, page) = self.router.top();
         let empty = || Element::from(Space::new().width(Length::Fill).height(Length::Fill));
+        // The top page's slot is the last of the stack's.
+        let depth = self.router.len();
+        let mut slots: Vec<Element<'a, Message>> = (0..=depth).map(|_| empty()).collect();
         let Some(route) = &self.route else {
-            return [
-                empty(),
-                slide(focus_scope(page.view(top)), 0.0).into(),
-                empty(),
-            ];
+            slots[depth] = slide(focus_scope(page.view(top)), 0.0).into();
+            return slots;
         };
         let (primary, secondary, shadow) = route.progress(self.now);
         let gone_view = |id: PageId, held: &'a Option<Box<Page>>| -> Option<Element<'a, Message>> {
@@ -314,34 +323,47 @@ impl Running {
         };
         match &route.kind {
             RouteKind::Push { below } => {
-                let under = self
+                // Where it was while it was on top, as it was built there.
+                if let Some((place, (id, covered))) = self
                     .router
                     .pages()
-                    .find(|(id, _)| id == below)
-                    .map_or_else(empty, |(id, page)| {
-                        slide(page.view(id), secondary).inert().into()
-                    });
-                let over = slide(focus_scope(page.view(top)), primary).shadow(shadow);
-                [under, over.into(), empty()]
+                    .enumerate()
+                    .find(|(_, (id, _))| id == below)
+                {
+                    slots[place + 1] = slide(focus_scope(covered.view(id)), secondary)
+                        .inert()
+                        .into();
+                }
+                slots[depth] = slide(focus_scope(page.view(top)), primary)
+                    .shadow(shadow)
+                    .into();
             }
             RouteKind::Pop { gone, held } => {
-                let revealed = slide(focus_scope(page.view(top)), secondary);
-                let over = gone_view(*gone, held).map_or_else(empty, |view| {
-                    slide(view, primary).shadow(shadow).inert().into()
-                });
-                [empty(), revealed.into(), over]
+                slots[depth] = slide(focus_scope(page.view(top)), secondary).into();
+                // Where it was: over the page it reveals.
+                if let Some(view) = gone_view(*gone, held) {
+                    slots.push(
+                        slide(focus_scope(view), primary)
+                            .shadow(shadow)
+                            .inert()
+                            .into(),
+                    );
+                }
             }
             RouteKind::Go { gone } => {
-                let under = gone
+                slots[0] = gone
                     .iter()
                     .filter_map(|(id, held)| gone_view(*id, held))
                     .fold(stack![], |layers, view| {
                         layers.push(slide(view, 0.0).inert())
-                    });
-                let over = slide(focus_scope(page.view(top)), primary).shadow(shadow);
-                [under.into(), over.into(), empty()]
+                    })
+                    .into();
+                slots[depth] = slide(focus_scope(page.view(top)), primary)
+                    .shadow(shadow)
+                    .into();
             }
         }
+        slots
     }
 }
 
@@ -520,22 +542,32 @@ impl App {
                 // (`devicePixelRatio`); they follow a change of it
                 // themselves.
                 let scale_factor = window::scale_factor(id).map(Message::ScaleFactor);
+                // Fitted to the monitor it opened on (`fitted_size`).
+                let monitor =
+                    window::monitor_size(id).map(move |size| Message::MonitorSize(id, size));
                 // Dev-only preview hook: a PNG of the rendered app a while
                 // after its first frame, then exit. Avoids needing OS
                 // screen-recording access.
                 if self.boot.screenshot.is_some() {
                     return Task::batch([
                         scale_factor,
+                        monitor,
                         Task::perform(tokio::time::sleep(SCREENSHOT_DELAY), |_| {
                             Message::ScreenshotDue
                         }),
                     ]);
                 }
-                scale_factor
+                Task::batch([scale_factor, monitor])
             }
             Message::ScaleFactor(scale_factor) => {
                 crate::ui::core::scale_factor::set_scale_factor(scale_factor);
                 Task::none()
+            }
+            Message::MonitorSize(id, monitor) => {
+                match monitor.map(|monitor| fitted_size(WINDOW_SIZE, monitor, MIN_WINDOW_SIZE)) {
+                    Some(fitted) if fitted != WINDOW_SIZE => window::resize(id, fitted),
+                    _ => Task::none(),
+                }
             }
             Message::CloseRequested(id) => {
                 self.window.get_or_insert(id);
@@ -823,10 +855,12 @@ impl App {
                 // The snack bar the app shows sits over the page, where the
                 // page draws its own. The page keeps its place in the stack
                 // whether one shows or not, or whether it slides, so its
-                // widgets keep their state.
-                let mut content = stack(running.pages_view())
+                // widgets keep their state; and the snack bar keeps its own
+                // however many slots the pages take.
+                let pages = stack(running.pages_view())
                     .width(Length::Fill)
                     .height(Length::Fill);
+                let mut content = stack![pages].width(Length::Fill).height(Length::Fill);
                 if let Some(snack_bar) = running.messenger.view() {
                     content = content.push(snack_bar);
                 }
@@ -1207,16 +1241,46 @@ fn write_png(shot: &window::Screenshot, path: &std::path::Path) -> Result<(), St
     writer.finish().map_err(|e| e.to_string())
 }
 
+/// The window's size when it opens, where the monitor has room for it.
+pub const WINDOW_SIZE: Size = Size::new(1440.0, 900.0);
+
+/// The least the window can be made.
+pub const MIN_WINDOW_SIZE: Size = Size::new(960.0, 600.0);
+
+/// Where a `window` opens on a `monitor` (sizes, the monitor's from its
+/// top-left): centred, as `Position::Centered` put it, but never above or
+/// left of the monitor. Centred on a smaller monitor, a 1440 × 900 window
+/// opened at (−170, −90) on 1100 × 720, its toolbar (and with it the way to
+/// move it) off the top of the screen.
+pub fn opening_position(window: Size, monitor: Size) -> Point {
+    Point::new(
+        ((monitor.width - window.width) / 2.0).max(0.0),
+        ((monitor.height - window.height) / 2.0).max(0.0),
+    )
+}
+
+/// The window's size on a `monitor`: `window`, less what of it the monitor
+/// has no room for, but never under `min`. The window opens at
+/// [`opening_position`], so at this size it is all on the monitor.
+pub fn fitted_size(window: Size, monitor: Size, min: Size) -> Size {
+    Size::new(
+        window.width.min(monitor.width).max(min.width),
+        window.height.min(monitor.height).max(min.height),
+    )
+}
+
 /// The window: 1440 × 900 (at least 960 × 600), centred, closed through the
-/// quit guard; on macOS the title bar is hidden and transparent over a
-/// full-size content view, and once the window is open it takes an empty
-/// unified toolbar (`vocara_services::window_toolbar`), which centres the
-/// traffic lights in the 52 px toolbar every page draws.
+/// quit guard; on a monitor too small for it, on the monitor and shrunk to
+/// fit once open ([`opening_position`], [`fitted_size`]). On macOS the
+/// title bar is hidden and transparent over a full-size content view, and
+/// once the window is open it takes an empty unified toolbar
+/// (`vocara_services::window_toolbar`), which centres the traffic lights in
+/// the 52 px toolbar every page draws.
 pub fn window_settings() -> window::Settings {
     window::Settings {
-        size: Size::new(1440.0, 900.0),
-        min_size: Some(Size::new(960.0, 600.0)),
-        position: window::Position::Centered,
+        size: WINDOW_SIZE,
+        min_size: Some(MIN_WINDOW_SIZE),
+        position: window::Position::SpecificWith(opening_position),
         // Intercept the OS close so an in-flight recording is finalized
         // (saved) before the process is torn down.
         exit_on_close_request: false,

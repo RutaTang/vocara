@@ -68,7 +68,6 @@ struct Vm {
     track: Option<AudioTrack>,
     bus: Option<Arc<FxBus>>,
     buses: Vec<Arc<FxBus>>,
-    takes: Vec<Arc<AudioTrack>>,
     open_menu: Option<InspectorMenu>,
     /// The panel's height: the window's when `None`.
     height: Option<f32>,
@@ -80,14 +79,12 @@ impl Vm {
             track: None,
             bus: None,
             buses: Vec::new(),
-            takes: Vec::new(),
             open_menu: None,
             height: None,
         }
     }
 
     fn track(mut self, t: AudioTrack) -> Self {
-        self.takes = vec![Arc::new(t.clone())];
         self.track = Some(t);
         self
     }
@@ -114,7 +111,6 @@ impl Vm {
             selected_bus: self.bus.as_deref(),
             fx_buses: &self.buses,
             supports_effects: true,
-            vocal_takes: &self.takes,
             active_interpretation: Some("Interpretation 1"),
             open_menu: self.open_menu.as_ref(),
         }
@@ -1136,32 +1132,29 @@ fn a_clipped_or_noisy_take_is_flagged_above_the_summary() {
 
 // ----------------------------------------------------------------- the pure
 
+// The subtitle numbered a take by its place: reordered, "Take 2" read
+// "Take 3 · Interpretation 1" under its name.
 #[test]
-fn a_take_is_numbered_among_the_interpretations_takes() {
-    let takes = vec![Arc::new(vocal("t0")), Arc::new(vocal("t1"))];
-    assert_eq!(take_label("t1", &takes, Some("Tender")), "Take 2 · Tender");
-    assert_eq!(take_label("t1", &takes, None), "Take 2");
-    assert_eq!(take_label("tx", &takes, None), "Take");
+fn a_takes_subtitle_is_its_interpretation_length_and_date_with_no_number() {
     let mut original = vocal("r");
     original.kind = AudioTrackKind::Reference;
     assert_eq!(
-        take_subtitle(&original, &takes, Some("Tender")),
+        take_subtitle(&original, Some("Tender")),
         "Original · 0:05 · Jan 1"
     );
     original.kind = AudioTrackKind::Accompaniment;
-    assert!(take_subtitle(&original, &takes, None).starts_with("Accompaniment · "));
-    // A take named for its number leaves the number out; a renamed one
-    // keeps it.
+    assert!(take_subtitle(&original, None).starts_with("Accompaniment · "));
+    let mut take = vocal("t1");
+    take.display_name = "Take 2".into();
     assert_eq!(
-        take_subtitle(&takes[0], &takes, Some("Tender")),
+        take_subtitle(&take, Some("Tender")),
         "Tender · 0:05 · Jan 1"
     );
-    assert_eq!(take_subtitle(&takes[0], &takes, None), "0:05 · Jan 1");
-    let mut renamed = (*takes[1]).clone();
-    renamed.display_name = "Chorus only".into();
+    assert_eq!(take_subtitle(&take, None), "0:05 · Jan 1");
+    take.display_name = "Chorus only".into();
     assert_eq!(
-        take_subtitle(&renamed, &takes, Some("Tender")),
-        "Take 2 · Tender · 0:05 · Jan 1"
+        take_subtitle(&take, Some("Tender")),
+        "Tender · 0:05 · Jan 1"
     );
     assert_eq!(short_clock(754_000), "12:34");
     assert_eq!(fmt_date(&DateTime::utc_ymd(2026, 11, 23)), "Nov 23");
@@ -1169,19 +1162,15 @@ fn a_take_is_numbered_among_the_interpretations_takes() {
 
 #[test]
 fn a_take_dot_is_its_tint_else_the_lane_default() {
-    use crate::ui::song_practice_detail::widgets::track_row::channel_color;
-    let takes = vec![Arc::new(vocal("t0")), Arc::new(vocal("t1"))];
+    use crate::ui::song_practice_detail::widgets::track_row::take_color;
     let mut t = vocal("t1");
-    assert_eq!(take_dot_color(&t, &takes), channel_color(&t, &takes));
-    assert_eq!(take_dot_color(&t, &takes), Studio::track_color(1));
+    assert_eq!(take_dot_color(&t), take_color(&t));
+    assert_eq!(take_dot_color(&t), Studio::default_track_color("t1"));
     t.color_value = Some(0xFF5B8DEF);
-    assert_eq!(
-        take_dot_color(&t, &takes),
-        Color::from_rgb8(0x5B, 0x8D, 0xEF)
-    );
+    assert_eq!(take_dot_color(&t), Color::from_rgb8(0x5B, 0x8D, 0xEF));
     let mut b = vocal("b");
     b.kind = AudioTrackKind::Accompaniment;
-    assert_eq!(take_dot_color(&b, &takes), Studio::TRACK_BACKING);
+    assert_eq!(take_dot_color(&b), Studio::TRACK_BACKING);
 }
 
 #[test]

@@ -95,7 +95,11 @@ impl SongPracticeDetailScreen {
                 self.absorb(fx, &mut step);
             }
             Message::SelectBus(id) => self.vm.select_bus(Some(&id)),
-            Message::OpenBusMenu(id) => self.menu = Some(OpenMenu::Bus(id)),
+            // Selected first, as a take's lane is (`row_message`).
+            Message::OpenBusMenu(id) => {
+                self.vm.select_bus(Some(&id));
+                self.menu = Some(OpenMenu::Bus(id));
+            }
             Message::ToggleBusMute(id) => {
                 let fx = self.vm.mixer_do(|m, h| m.toggle_bus_mute(h, &id));
                 self.absorb(fx, &mut step);
@@ -161,6 +165,23 @@ impl SongPracticeDetailScreen {
             Message::BusMenu(action) => self.bus_action(action, &mut step),
             Message::InterpretationMenu(action) => self.interpretation_action(action, &mut step),
             Message::DismissMenu => self.menu = None,
+            Message::DeleteSelectedClip => {
+                let selected = (self.vm.selected_track_id(), self.vm.selected_clip_id());
+                if let (Some(track), Some(clip)) = selected {
+                    let (track, clip) = (track.to_string(), clip.to_string());
+                    self.ask_delete_clip(track, clip, &mut step);
+                }
+            }
+            Message::DeselectClip => {
+                // Selecting the clip's take lets go of the clip.
+                if let (Some(track), Some(_)) =
+                    (self.vm.selected_track_id(), self.vm.selected_clip_id())
+                {
+                    let track = track.to_string();
+                    let fx = self.vm.select_track(&track);
+                    self.absorb(fx, &mut step);
+                }
+            }
             Message::Inspector(m) => self.inspector(m, Source::Inspector, &mut step),
             Message::Fx(m) => self.fx(m, &mut step),
             Message::Lyrics(m) => self.lyrics_message(m, &mut step),
@@ -430,11 +451,21 @@ impl SongPracticeDetailScreen {
                 self.moving = None;
                 self.vm.commit_track_move()
             }
+            // A right press selects what it lands on before its menu opens,
+            // as in a DAW: the menu stood over a clip or take while another
+            // stayed selected.
             track_row::Message::ClipContextMenu(clip_id) => {
+                let fx = self.vm.select_clip(id, &clip_id);
+                self.absorb(fx, step);
                 self.menu = Some(OpenMenu::Clip { track_id, clip_id });
                 return;
             }
             track_row::Message::ContextMenu => {
+                // A clip selected on the take stays so.
+                if self.vm.selected_track_id() != Some(id) || self.vm.selected_bus_id().is_some() {
+                    let fx = self.vm.select_track(id);
+                    self.absorb(fx, step);
+                }
                 self.menu = Some(OpenMenu::Track(track_id));
                 return;
             }
@@ -1428,8 +1459,13 @@ impl SongPracticeDetailScreen {
         let Some(track) = self.vm.track_by_id(track_id) else {
             return;
         };
-        let dialog = ConfirmDialog::new(format!("Delete \"{}\"?", track.display_name))
-            .body("This removes the track, its audio file and its notes.");
+        // A take is a take everywhere else on the page.
+        let body = if track.is_backing() {
+            "This removes the track, its audio file and its notes."
+        } else {
+            "This removes the take, its audio and its notes."
+        };
+        let dialog = ConfirmDialog::new(format!("Delete \"{}\"?", track.display_name)).body(body);
         self.ask(dialog, Asked::DeleteTrack(track.id.clone()), step);
     }
 
@@ -1440,8 +1476,20 @@ impl SongPracticeDetailScreen {
         if self.refused(step) {
             return;
         }
-        let dialog = ConfirmDialog::new("Delete this clip?")
-            .body("This removes the clip, its audio file and the notes inside it.");
+        // Named by its take and start: over overlapping clips "Delete this
+        // clip?" did not say which.
+        let clip = self.vm.track_by_id(&track_id).and_then(|t| {
+            let start = t.clip_by_id(&clip_id)?.start_ms;
+            Some(format!(
+                "the clip at {} on \"{}\"",
+                lyrics_panel::lyric_time(start),
+                t.display_name
+            ))
+        });
+        let dialog = ConfirmDialog::new("Delete this clip?").body(format!(
+            "This removes {}, its audio file and the notes inside it.",
+            clip.as_deref().unwrap_or("the clip")
+        ));
         self.ask(dialog, Asked::DeleteClip { track_id, clip_id }, step);
     }
 
@@ -1450,11 +1498,12 @@ impl SongPracticeDetailScreen {
         let Some(track) = self.vm.track_by_id(track_id) else {
             return;
         };
-        self.ask(
-            rename_dialog(&track.display_name),
-            Asked::RenameTrack(track.id.clone()),
-            step,
-        );
+        let mut prompt = rename_dialog(&track.display_name);
+        if !track.is_backing() {
+            prompt.title = "Rename take".to_string();
+            prompt.hint = "Take name".to_string();
+        }
+        self.ask(prompt, Asked::RenameTrack(track.id.clone()), step);
     }
 
     /// `_separateBacking`.
@@ -1642,23 +1691,31 @@ impl SongPracticeDetailScreen {
         self.absorb(fx, step);
     }
 
-    /// A row of the clip menu. A backing lane is its one clip: deleting it
-    /// deletes the lane, so it asks as Delete does (the clip's dialog spoke
-    /// of the clip alone).
+    /// A row of the clip menu.
     fn clip_action(&mut self, action: ClipAction, step: &mut Step) {
         let Some(OpenMenu::Clip { track_id, clip_id }) = self.menu.take() else {
             return;
         };
-        let Some(track) = self.vm.track_by_id(&track_id) else {
-            return;
-        };
         match action {
-            ClipAction::Delete if track.is_backing() => self.delete_track(&track_id, step),
-            ClipAction::Delete => self.delete_clip(track_id, clip_id, step),
+            ClipAction::Delete => self.ask_delete_clip(track_id, clip_id, step),
             ClipAction::Export => {
                 let fx = self.vm.export_clip_audio(&track_id, &clip_id);
                 self.absorb(fx, step);
             }
+        }
+    }
+
+    /// The clip menu's Delete, and the Delete key's on the selected clip. A
+    /// backing lane is its one clip: deleting it deletes the lane, so it
+    /// asks as Delete does (the clip's dialog spoke of the clip alone).
+    fn ask_delete_clip(&mut self, track_id: String, clip_id: String, step: &mut Step) {
+        let Some(track) = self.vm.track_by_id(&track_id) else {
+            return;
+        };
+        if track.is_backing() {
+            self.delete_track(&track_id, step);
+        } else {
+            self.delete_clip(track_id, clip_id, step);
         }
     }
 
@@ -1783,7 +1840,6 @@ impl SongPracticeDetailScreen {
             selected_bus: None,
             fx_buses: &[],
             supports_effects: false,
-            vocal_takes: &[],
             active_interpretation: None,
             open_menu: None,
         }

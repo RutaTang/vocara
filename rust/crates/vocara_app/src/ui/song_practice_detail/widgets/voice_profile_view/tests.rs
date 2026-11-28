@@ -402,6 +402,13 @@ fn profile(low: Option<i64>, high: Option<i64>) -> VoiceProfile {
 }
 
 #[test]
+fn a_range_reads_its_width_in_semitones_singular_at_one() {
+    assert_eq!(semitones_label(19), "19 semitones");
+    assert_eq!(semitones_label(1), "1 semitone");
+    assert_eq!(semitones_label(0), "0 semitones");
+}
+
+#[test]
 fn the_range_bar_spans_whole_octaves_around_the_range() {
     // A3 (57) .. E5 (76): two semitones each side reach 55 and 78, so the
     // axis runs C3 (48) .. C6 (84), 36 semitones over 360 px.

@@ -108,6 +108,9 @@ use crate::ui::song_practice_detail::widgets::mixer_strip;
 use crate::ui::song_practice_detail::widgets::track_row::TRACK_ROW_HEIGHT;
 use crate::ui::DialogRequest;
 
+mod arrange;
+mod keys;
+
 fn guard<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
@@ -1471,17 +1474,26 @@ fn the_transport_toggles_play_and_pause_and_stop_resets_it() {
 #[test]
 fn the_bottom_dock_opens_and_closes() {
     let mut h = Harness::open(Setup::default());
-    assert!(h.shows(bottom_dock::toggle_label(false)), "starts closed");
-    h.click(bottom_dock::toggle_label(false));
+    assert!(
+        h.shows(bottom_dock::toggle_label(false, DockTab::AnalysisSummary)),
+        "starts closed"
+    );
+    h.click(bottom_dock::toggle_label(false, DockTab::AnalysisSummary));
     assert!(h.vm().analysis().dock_open());
-    assert!(h.shows(bottom_dock::toggle_label(true)));
+    assert!(h.shows(bottom_dock::toggle_label(true, DockTab::AnalysisSummary)));
     // A tab opens the dock on it.
-    h.click(bottom_dock::toggle_label(true));
+    h.click(bottom_dock::toggle_label(true, DockTab::AnalysisSummary));
     assert!(!h.vm().analysis().dock_open());
     h.click("Mixer");
     assert!(h.vm().analysis().dock_open());
     assert_eq!(h.vm().analysis().dock_tab(), DockTab::Mixer);
     assert!(h.shows("Stereo Out"), "the mixer desk's master strip");
+    // Over the mixer the chevron hides the mixer, not an analysis panel.
+    assert!(h.shows("Hide mixer"));
+    assert!(!h.shows("Hide analysis panel"));
+    h.click("Hide mixer");
+    assert!(!h.vm().analysis().dock_open());
+    assert!(h.shows("Show mixer"));
 }
 
 // The Vocal tract tab: its strip tab opens it on the take, which its header

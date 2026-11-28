@@ -393,9 +393,11 @@ fn the_zoom_slider_maps_its_width_onto_zero_to_one() {
 // ---------------------------------------------------------------- the pure
 
 #[test]
-fn the_counts_label_is_singular_at_one_take() {
+fn the_counts_label_is_singular_at_one_take_or_one_note() {
     assert_eq!(counts_label(1, 3), "1 take · 3 notes");
-    assert_eq!(counts_label(0, 1), "0 takes · 1 notes");
+    // The header read "2 takes · 1 notes" once a first note was added.
+    assert_eq!(counts_label(0, 1), "0 takes · 1 note");
+    assert_eq!(counts_label(2, 1), "2 takes · 1 note");
     assert_eq!(counts_label(12, 0), "12 takes · 0 notes");
 }
 

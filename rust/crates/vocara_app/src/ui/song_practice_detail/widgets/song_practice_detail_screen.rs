@@ -40,7 +40,9 @@
 //! for them), the library's remote-applied events and the snack bar's time.
 //! The dialogs — every
 //! confirmation and name prompt — go through the app's dialog stack
-//! ([`Update::dialog`]).
+//! ([`Update::dialog`]). Its keyboard shortcuts (Space, Delete and
+//! Backspace, Escape) are a widget around the page (`shortcuts`), which
+//! hears only the keys nothing on the page took.
 //!
 //! # Leaving
 //!
@@ -75,6 +77,7 @@
 //!   file in flight (Dart's loop went on calling the disposed view model).
 
 mod feeds;
+mod shortcuts;
 mod update;
 mod view;
 
@@ -374,6 +377,12 @@ pub enum Message {
     InterpretationMenu(InterpretationAction),
     /// A tap outside the open menu, or Escape.
     DismissMenu,
+    /// Delete or Backspace: delete the selected clip, asked first as the
+    /// clip menu's Delete is.
+    DeleteSelectedClip,
+    /// Escape with no menu open: let go of the selected clip (its take
+    /// stays selected: the inspector always shows a lane).
+    DeselectClip,
     /// The inspector (left panel).
     Inspector(left_panel::Message),
     /// The inspector's FX panel.

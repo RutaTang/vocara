@@ -730,10 +730,13 @@ impl<M> Widget<M, Theme, Renderer> for AnimatedContainer<'_, M> {
             cursor,
             viewport,
         );
-        if let Some(d) = decoration.filter(|_| self.border_above) {
-            // A layer of its own: the child may have drawn in layers above
-            // this one (a `hover`'s top face does).
-            renderer.with_layer(bounds, |renderer| {
+        // A layer of its own: the child may have drawn in layers above this
+        // one (a `hover`'s top face does). Clipped to what is in view: a
+        // layer is not clipped by the one it is drawn in, and the outlines
+        // of Home's cards scrolled under its toolbar were drawn over it.
+        let clip = bounds.intersection(viewport);
+        if let (Some(d), Some(clip)) = (decoration.filter(|_| self.border_above), clip) {
+            renderer.with_layer(clip, |renderer| {
                 quad(renderer, Color::TRANSPARENT, border(d), Shadow::default());
             });
         }

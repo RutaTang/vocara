@@ -550,7 +550,7 @@ fn delete_asks_first_then_removes_the_card() {
     assert_eq!(confirm.title, "Delete \"Doomed practice\"?");
     assert_eq!(
         confirm.body.as_deref(),
-        Some("This removes the practice and all of its notes. This cannot be undone.")
+        Some("This removes the practice with its takes, recordings and notes. This cannot be undone.")
     );
     assert_eq!(confirm.confirm_label, "Delete");
     assert!(confirm.destructive);

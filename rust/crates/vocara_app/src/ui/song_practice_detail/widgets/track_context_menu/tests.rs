@@ -413,19 +413,21 @@ fn argb_reads_dart_color_ints() {
     assert_eq!(hex(argb(0x80FF0000)), 0x80FF0000);
 }
 
+// A take's default tint is the one the lanes draw by: the palette's colour
+// at a hash of its id (FNV-1a of its bytes, `Studio::default_track_color`),
+// so the menu's Auto swatch, the lane, the strip, the inspector and Home's
+// card agree.
 #[test]
-fn a_take_keeps_its_default_tint_by_the_sum_of_its_code_units() {
-    // The sum of the UTF-16 code units, as Dart's `codeUnits.fold(0, +)`,
-    // modulo the five colours (Dart's sixteen gave 5, 13, 6, 0 and 11).
+fn a_take_keeps_its_default_tint_by_a_hash_of_its_id() {
     for (id, index) in [
-        ("t1", 0),
-        ("take-01HZX", 3),
-        ("abc", 4),
-        ("", 0),
+        ("t1", 2),
+        ("take-01HZX", 0),
+        ("abc", 1),
+        ("", 2),
         ("é漢", 3),
     ] {
         assert_eq!(
-            default_take_color(id),
+            Studio::default_track_color(id),
             argb(TRACK_COLOR_PALETTE[index]),
             "{id}"
         );

@@ -12,7 +12,7 @@ use vocara_model::models::audio_track::{AudioTrack, AudioTrackKind};
 use vocara_model::models::fx_bus::FxBus;
 
 use crate::ui::song_practice_detail::widgets::track_context_menu::argb;
-use crate::ui::song_practice_detail::widgets::track_row::channel_color;
+use crate::ui::song_practice_detail::widgets::track_row::take_color;
 use vocara_model::util::dart_date_time::DateTime;
 
 use super::*;
@@ -1055,12 +1055,9 @@ fn the_record_gain_maps_onto_the_rec_fader() {
 
 #[test]
 fn a_take_without_a_tint_keeps_a_stable_color_from_its_id() {
-    // "t1": 't' (116) + '1' (49) = 165; 165 % 5 = 0 → coral.
-    assert_eq!(default_take_color("t1"), argb(0xFFD9_8C7E));
-    assert_eq!(default_take_color("t1"), default_take_color("t1"));
     let mut tinted = (*take(1)).clone();
     tinted.color_value = Some(0xFF22_CC44);
-    assert_eq!(track_accent(&tinted, &[]), argb(0xFF22_CC44));
+    assert_eq!(track_accent(&tinted), argb(0xFF22_CC44));
     let backing = AudioTrack::new(
         "acc",
         AudioTrackKind::Reference,
@@ -1068,14 +1065,12 @@ fn a_take_without_a_tint_keeps_a_stable_color_from_its_id() {
         DateTime::local_ymd(2026, 1, 1),
     );
     // The strip's cap is its lane's colour: the backing's neutral, a take's
-    // by its place among the shown vocal takes.
-    assert_eq!(track_accent(&backing, &[]), Studio::TRACK_BACKING);
-    let takes = vec![take(1), take(2)];
-    assert_eq!(track_accent(&take(1), &takes), Studio::track_color(0));
-    assert_eq!(track_accent(&take(2), &takes), Studio::track_color(1));
+    // its own, by its id.
+    assert_eq!(track_accent(&backing), Studio::TRACK_BACKING);
+    assert_eq!(track_accent(&take(2)), take_color(&take(2)));
     assert_eq!(
-        track_accent(&take(2), &takes),
-        channel_color(&take(2), &takes)
+        track_accent(&take(2)),
+        Studio::default_track_color(&take(2).id)
     );
     // A bus's cap is its lane's: periwinkle untinted.
     assert_eq!(bus_accent(&fx_bus("a", "Verb")), Studio::TRACK_PERIWINKLE);

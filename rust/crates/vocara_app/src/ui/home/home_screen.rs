@@ -146,6 +146,11 @@ const LIBRARY_PADDING: Padding = Padding {
 };
 
 /// The toasts.
+/// What deleting a practice takes with it: its takes and their audio
+/// first (it said "all of its notes", as if the recordings stayed).
+pub const DELETE_PRACTICE_BODY: &str =
+    "This removes the practice with its takes, recordings and notes. This cannot be undone.";
+
 const CREATE_FAILED: &str = "Could not create the practice. Please try again.";
 const DELETE_FAILED: &str = "Could not delete the practice. Please try again.";
 
@@ -640,8 +645,7 @@ impl Screen for HomeScreen {
                 _ => Update::none(),
             },
             Message::Delete { id, title } => Update::dialog(
-                ConfirmDialog::new(format!("Delete \"{title}\"?"))
-                    .body("This removes the practice and all of its notes. This cannot be undone."),
+                ConfirmDialog::new(format!("Delete \"{title}\"?")).body(DELETE_PRACTICE_BODY),
                 move |r| Message::DeleteConfirmed {
                     id,
                     confirmed: r.confirmed(),

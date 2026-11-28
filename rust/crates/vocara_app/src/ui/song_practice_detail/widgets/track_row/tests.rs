@@ -666,14 +666,89 @@ fn a_selected_lane_highlights_its_selected_clip_or_all_of_them() {
 #[test]
 fn a_lane_takes_its_tint_its_backing_neutral_or_its_take_color() {
     let mut track = take("t1", 1000, Vec::new());
-    // The takes in order: coral, ochre, sage, periwinkle, lilac, coral...
-    assert_eq!(take_color(&track, 0), Studio::TRACK_CORAL);
-    assert_eq!(take_color(&track, 1), Studio::TRACK_OCHRE);
-    assert_eq!(take_color(&track, 5), Studio::TRACK_CORAL);
+    assert_eq!(take_color(&track), Studio::default_track_color("t1"));
+    assert!(Studio::TRACK_COLORS.contains(&take_color(&track)));
     track.color_value = Some(0xFF5B8DEF);
-    assert_eq!(take_color(&track, 1), argb(0xFF5B8DEF));
+    assert_eq!(take_color(&track), argb(0xFF5B8DEF));
     let backing = AudioTrack::new("acc", AudioTrackKind::Accompaniment, "Backing", created());
-    assert_eq!(take_color(&backing, 0), Studio::TRACK_BACKING);
+    assert_eq!(take_color(&backing), Studio::TRACK_BACKING);
+    assert_eq!(lane_color("acc", None, true), Studio::TRACK_BACKING);
+    assert_eq!(lane_color("t1", Some(0xFF5B8DEF), false), argb(0xFF5B8DEF));
+}
+
+// A take's colour was its place among the takes: duplicating Take 1 turned
+// Take 2 from ochre to sage, and a reorder recoloured them the same way.
+#[test]
+fn a_takes_default_colour_is_its_own_wherever_it_is_listed() {
+    let ids: Vec<String> = (0..12).map(|i| format!("take-{i}")).collect();
+    let colours: Vec<Color> = ids
+        .iter()
+        .map(|id| take_color(&take(id, 1000, Vec::new())))
+        .collect();
+    // The same id, the same colour: nothing else goes into it.
+    for (id, colour) in ids.iter().zip(&colours) {
+        assert_eq!(take_color(&take(id, 1000, Vec::new())), *colour);
+    }
+    // And the ids spread over the palette.
+    let distinct: std::collections::HashSet<[u8; 4]> =
+        colours.iter().map(|c| c.into_rgba8()).collect();
+    assert!(distinct.len() >= 3, "{distinct:?}");
+}
+
+/// A take with clip "a" over 1–5 s and clip "b" over 4–8 s, on top of it.
+fn overlapping() -> &'static AudioTrack {
+    leaked(AudioTrack {
+        clips: vec![
+            AudioClip {
+                start_ms: 1000,
+                ..AudioClip::new("a", "/a.wav", 4000)
+            },
+            AudioClip {
+                start_ms: 4000,
+                ..AudioClip::new("b", "/b.wav", 4000)
+            },
+        ],
+        ..AudioTrack::new("t1", AudioTrackKind::Vocal, "Take 1", created())
+    })
+}
+
+/// The window's x at `ms` of the 10 s viewport.
+fn lane_x(ms: f32) -> f32 {
+    TRACK_HEADER_W + ms / VIEWPORT_MS as f32 * LANE_W
+}
+
+/// Low in the clips' bodies: under their "Analyzing…", inside their
+/// outlines.
+const BODY_Y: f32 = TRACK_ROW_HEIGHT - CLIP_INSET - 6.0;
+
+// Overlapping clips were translucent: where "b" lay over "a" the two showed
+// through each other, reading as a third clip.
+#[test]
+fn the_top_clip_hides_the_one_under_it() {
+    let track = overlapping();
+    let mut ui = LiveUi::new(WINDOW);
+    let frame = ui.snapshot(row_of(track));
+    let over_a = frame.pixel(lane_x(4500.0) as usize, BODY_Y as usize);
+    let b_alone = frame.pixel(lane_x(7500.0) as usize, BODY_Y as usize);
+    let a_alone = frame.pixel(lane_x(1500.0) as usize, BODY_Y as usize);
+    assert_eq!(over_a, b_alone, "b, opaque, over a");
+    assert_eq!(a_alone, b_alone, "the same fill either way");
+}
+
+// Selected, the lower clip's outline was hidden where the upper one lay
+// over it.
+#[test]
+fn the_selected_clips_outline_shows_over_the_clip_on_top() {
+    let track = overlapping();
+    let mut ui = LiveUi::new(WINDOW);
+    let frame = ui.snapshot(row_of(track).selected(true).selected_clip_id(Some("a")));
+    let near = |p: [u8; 4], c: Color| {
+        let c = c.into_rgba8();
+        (0..3).all(|i| (i32::from(p[i]) - i32::from(c[i])).abs() <= 2)
+    };
+    // "a"'s right edge, inside "b".
+    let edge = frame.pixel(lane_x(5000.0) as usize - 1, BODY_Y as usize);
+    assert!(near(edge, Studio::CLIP_SELECTED_OUTLINE), "{edge:?}");
 }
 
 #[test]

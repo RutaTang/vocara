@@ -307,33 +307,26 @@ pub fn clip_selected(lane_selected: bool, selected_clip_id: Option<&str>, clip_i
     lane_selected && selected_clip_id.is_none_or(|id| id == clip_id)
 }
 
-/// A lane's colour (`DESIGN.md`, Track colours): a custom tint if set; the
-/// backing's neutral; else the `index`th vocal track's colour
-/// ([`Studio::track_color`], in the order the takes are listed), so takes
-/// read as distinct. The colour never changes with selection (Logic style) —
-/// selection is shown by the header background and the selected clip's
-/// outline only.
-pub fn take_color(track: &AudioTrack, index: usize) -> Color {
-    if let Some(value) = track.color_value {
-        argb(value)
-    } else if track.is_backing() {
-        Studio::TRACK_BACKING
-    } else {
-        Studio::track_color(index)
-    }
+/// A lane's colour (`DESIGN.md`, Track colours) wherever it is drawn: its
+/// lane in the arrange, its mixer strip's cap, the inspector's colour square
+/// and Home's card. A custom tint if set; the backing's neutral; else the
+/// take's own colour, by its id ([`Studio::default_track_color`]). It was
+/// the take's place in the list: duplicating, adding, deleting or
+/// reordering a take recoloured the takes after it. The colour never
+/// changes with selection (Logic style) — selection is shown by the header
+/// background and the selected clip's outline only.
+pub fn take_color(track: &AudioTrack) -> Color {
+    lane_color(&track.id, track.color_value, track.is_backing())
 }
 
-/// A channel's colour wherever it is drawn: its lane in the arrange, its
-/// mixer strip's cap and the inspector's colour square. [`take_color`] at
-/// the take's place among the shown interpretation's vocal takes, which is
-/// the order the arrange lists them in (0 for a track not among them, as
-/// the backing is), so a channel reads as one colour across the window.
-pub fn channel_color(track: &AudioTrack, vocal_takes: &[Arc<AudioTrack>]) -> Color {
-    let index = vocal_takes
-        .iter()
-        .position(|t| t.id == track.id)
-        .unwrap_or(0);
-    take_color(track, index)
+/// [`take_color`] of the track `id`, tinted `color_value`, a `backing` or
+/// a take (for a view that has the track's row, not the track: Home's card).
+pub fn lane_color(id: &str, color_value: Option<i64>, backing: bool) -> Color {
+    match color_value {
+        Some(value) => argb(value),
+        None if backing => Studio::TRACK_BACKING,
+        None => Studio::default_track_color(id),
+    }
 }
 
 /// A bus's colour wherever it is drawn (its lane, its strip, the
@@ -462,6 +455,7 @@ pub struct TrackRow<'a, M> {
     position_ms: i64,
     selected: bool,
     armed: bool,
+    silenced: bool,
     reorderable: bool,
     selected_clip_id: Option<String>,
     recording: Option<(&'a [f64], i64)>,
@@ -489,12 +483,13 @@ pub fn track_row<'a, M>(
     TrackRow {
         track,
         label: label.into(),
-        color: take_color(track, 0),
+        color: take_color(track),
         timeline_duration_ms,
         view_start_ms: 0,
         position_ms,
         selected: false,
         armed: false,
+        silenced: false,
         reorderable: false,
         selected_clip_id: None,
         recording: None,
@@ -509,7 +504,7 @@ pub fn track_row<'a, M>(
 }
 
 impl<'a, M> TrackRow<'a, M> {
-    /// The lane's colour ([`take_color`]; the first take's until set).
+    /// The lane's colour ([`take_color`] until set).
     pub fn color(mut self, color: Color) -> Self {
         self.color = color;
         self
@@ -531,6 +526,13 @@ impl<'a, M> TrackRow<'a, M> {
     /// shown as a small red arm dot in the lane header.
     pub fn armed(mut self, armed: bool) -> Self {
         self.armed = armed;
+        self
+    }
+
+    /// Whether a solo elsewhere silences this lane: its clips draw as a
+    /// muted take's (the lane looked as live as the soloed one).
+    pub fn silenced(mut self, silenced: bool) -> Self {
+        self.silenced = silenced;
         self
     }
 
@@ -1096,7 +1098,8 @@ impl LaneState {
 fn body<'a, M>(r: &TrackRow<'a, M>, accent: Color) -> Element<'a, Message> {
     let track = r.track;
     let label = r.label.clone();
-    let muted = track.muted;
+    // Silenced by a solo, it is as unheard as a muted take.
+    let muted = track.muted || r.silenced;
     let dur = r.timeline_duration_ms; // the visible span
     let view_start = r.view_start_ms;
     let position_ms = r.position_ms;
@@ -1133,6 +1136,19 @@ fn body<'a, M>(r: &TrackRow<'a, M>, accent: Color) -> Element<'a, Message> {
                 block_height,
             );
             layers.push(pin(region).x(v.left as f32).y(CLIP_INSET).into());
+        }
+        // The selected clip's outline again, over the clips after it: one
+        // overlapping it hid all but its own part of the selection.
+        let selected = selected_clip_id
+            .as_deref()
+            .filter(|_| lane_selected)
+            .and_then(|id| track.clips.iter().find(|c| c.id == id))
+            .and_then(|clip| clip_box(clip, false, dur, view_start, width));
+        if let Some(v) = selected {
+            let outline = container(border_overlay(Studio::CLIP_SELECTED_OUTLINE))
+                .width(v.width as f32)
+                .height(block_height);
+            layers.push(pin(outline).x(v.left as f32).y(CLIP_INSET).into());
         }
         // The forming clip while this lane is the armed recording target.
         if let Some((peaks, start_ms)) = recording {
@@ -1252,7 +1268,8 @@ pub const CLIP_NAME: Color = Color::from_rgb8(0xD4, 0xD4, 0xDC);
 /// the track's `color` at 10 % (16 % selected), outlined at 32 %
 /// (`CLIP_SELECTED_OUTLINE` selected), a 13 px header band at 22 % (34 %
 /// selected) with the take's `name`, and the waveform under it (or
-/// "Analyzing…" until its peaks are in); a muted take's at 60 %.
+/// "Analyzing…" until its peaks are in); a muted take's at 60 %. All of it
+/// over the arrange's background, so the clip is opaque.
 fn clip_region<'a>(
     clip: &AudioClip,
     name: &str,
@@ -1313,11 +1330,17 @@ fn clip_region<'a>(
         .id(clip_widget_id(&clip.id))
         .width(v.width as f32)
         .height(height);
-    if muted {
+    let region: Element<'a, Message> = if muted {
         opacity_layer(clip::MUTED_OPACITY, region).into()
     } else {
         region.into()
-    }
+    };
+    // On the arrange's background, opaque: a later clip over an earlier one
+    // (the one heard there) hides it, where the two showed through each
+    // other as a third clip.
+    container(region)
+        .style(|_| boxed(Some(Studio::BACKGROUND), 4.0, None))
+        .into()
 }
 
 /// `_FormingClip`: the clip forming while recording, in `RECORD`. Draws its

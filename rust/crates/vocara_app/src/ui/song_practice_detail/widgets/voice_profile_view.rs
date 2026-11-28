@@ -51,6 +51,15 @@ pub const RANGE_LIVE_HINT: &str = "Range is computed from a recorded take, not t
 /// The Range tab with no range to show.
 pub const RANGE_EMPTY_HINT: &str = "Sing a passage to map your range.";
 
+/// A range's width under its notes: "12 semitones", "1 semitone".
+pub fn semitones_label(span: i64) -> String {
+    if span == 1 {
+        "1 semitone".to_string()
+    } else {
+        format!("{span} semitones")
+    }
+}
+
 /// The Dynamics tab with no dynamics to show.
 pub const DYNAMICS_EMPTY_HINT: &str = "Sing a passage to see your dynamics.";
 
@@ -108,7 +117,7 @@ fn range_body<'a, M: 'a>(p: &Arc<VoiceProfile>, low: i64, high: i64) -> Element<
         )
         .whole()
         .swatch(Swatch::Block(RANGE_BAND))
-        .sub(format!("{} semitones", high - low)),
+        .sub(semitones_label(high - low)),
     )]
     .spacing(READOUT_GAP);
     if let (Some(lo), Some(hi)) = (p.tess_lo_midi, p.tess_hi_midi) {

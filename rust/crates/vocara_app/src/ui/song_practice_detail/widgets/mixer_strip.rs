@@ -82,7 +82,7 @@ use vocara_services::app_settings_service::AppSettingsService;
 
 use super::left_panel::MASTER;
 use super::mixer_shared::{keyed_row, tap, MenuItem, Opens, PopupMenu};
-use super::track_row::{bus_color, channel_color};
+use super::track_row::{bus_color, take_color};
 use crate::ui::core::theme::{self, alpha, font, radius, type_scale, Studio};
 use crate::ui::core::widgets::animated::{animated_container, Decoration};
 use crate::ui::core::widgets::controls::{
@@ -104,9 +104,6 @@ use crate::ui::core::widgets::studio_text::studio_text;
 pub struct MixerStrip<'a> {
     /// One strip each, left to right.
     pub tracks: &'a [Arc<AudioTrack>],
-    /// The shown interpretation's vocal takes, in the arrange's order: a
-    /// strip's colour is its lane's ([`channel_color`]).
-    pub vocal_takes: &'a [Arc<AudioTrack>],
     /// `vm.mixer.fxBuses`.
     pub buses: &'a [Arc<FxBus>],
     /// `vm.mixer.supportsEffects`: the mic-input strip, the bus section and
@@ -296,7 +293,6 @@ impl<'a> MixerStrip<'a> {
     pub fn new(tracks: &'a [Arc<AudioTrack>], buses: &'a [Arc<FxBus>]) -> Self {
         Self {
             tracks,
-            vocal_takes: tracks,
             buses,
             supports_effects: false,
             selected_track_id: None,
@@ -339,12 +335,7 @@ impl<'a> MixerStrip<'a> {
             let routes: &[Arc<FxBus>] = if t.is_backing() { &[] } else { buses };
             desk = desk.push(
                 StripKey::Track(id_key(&t.id)),
-                gap_after(track_channel(
-                    t,
-                    track_accent(t, self.vocal_takes),
-                    selected,
-                    routes,
-                )),
+                gap_after(track_channel(t, track_accent(t), selected, routes)),
             );
         }
         // FX buses (DAW groups). Only meaningful on the native effects
@@ -412,16 +403,11 @@ fn divider<'a>() -> Element<'a, Message> {
     .into()
 }
 
-// The preset lane tints and the default take tint are the context menu's
-// (`kTrackColorPalette` and `defaultTakeColor` lived in
-// `track_context_menu.dart`).
-pub use super::track_context_menu::{default_take_color, TRACK_COLOR_PALETTE};
-
 /// A take strip's colour cap: its lane's colour in the arrange
-/// (`track_row::channel_color`: its tint, else its place among the shown
-/// vocal takes), so the strip and the lane read as one channel.
-pub fn track_accent(track: &AudioTrack, vocal_takes: &[Arc<AudioTrack>]) -> Color {
-    channel_color(track, vocal_takes)
+/// (`track_row::take_color`), so the strip and the lane read as one
+/// channel.
+pub fn track_accent(track: &AudioTrack) -> Color {
+    take_color(track)
 }
 
 /// A bus strip's colour cap: its lane's (`track_row::bus_color`).
