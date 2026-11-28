@@ -271,7 +271,18 @@ impl VocalTractState {
         }
         self.no_source = estimate.is_none();
         self.why_none = None;
-        let pose = estimate.unwrap_or_else(|| demo::articulate(&demo::AH, false, Fit::Uncertain));
+        let mut pose =
+            estimate.unwrap_or_else(|| demo::articulate(&demo::AH, false, Fit::Uncertain));
+        // A formant the analysis did not find this frame (0: unknown) keeps
+        // the last one known: gliding it to 0 would read "F2 0 Hz" and put
+        // the vowel map's dot on a vowel nobody sang.
+        if let Some(known) = self.pose.formants() {
+            for (f, k) in pose.formants.iter_mut().zip(known) {
+                if !(*f > 0.0) {
+                    *f = k;
+                }
+            }
+        }
         // The bands and the trail look back from this clock (a seek back
         // forgets what came after it).
         while self
@@ -289,12 +300,18 @@ impl VocalTractState {
             self.history.pop_front();
         }
         if pose.voiced {
-            self.history.push_back(Sample {
+            let sample = Sample {
                 clock,
                 positions: readouts::positions(&pose.components),
                 f1: pose.formants[0],
                 f2: pose.formants[1],
-            });
+            };
+            // The same moment again (a parked playhead, fed on every
+            // refresh) replaces its sample rather than piling up.
+            match self.history.back_mut() {
+                Some(last) if last.clock == clock => *last = sample,
+                _ => self.history.push_back(sample),
+            }
         }
         self.pose.push(pose, now);
     }
@@ -343,6 +360,7 @@ impl VocalTractState {
         self.history
             .iter()
             .filter(|s| s.clock >= last.clock - TRAIL_WINDOW)
+            .filter(|s| s.f1 > 0.0 && s.f2 > 0.0)
             .map(|s| (s.f1, s.f2))
             .collect()
     }
@@ -389,7 +407,8 @@ impl VocalTractState {
         };
         Readouts {
             rows,
-            vowel: (!self.no_source).then_some((pose.formants[0], pose.formants[1])),
+            vowel: (!self.no_source && pose.formants[0] > 0.0 && pose.formants[1] > 0.0)
+                .then_some((pose.formants[0], pose.formants[1])),
             trail: if resting { Vec::new() } else { self.trail() },
             status,
             rest: if self.no_source { 1.0 } else { self.rest() },

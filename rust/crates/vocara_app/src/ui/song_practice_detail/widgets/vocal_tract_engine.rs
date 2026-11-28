@@ -23,6 +23,7 @@
 //! analysis measured them, the formants heard, and a fit from how well the
 //! fitted shape's formants match them.
 
+use vocara_model::models::audio_track::AudioTrack;
 use vocara_services::vocal_tract::VocalTractState;
 use vocara_tract::components::{TractComponents, VocalFolds};
 use vocara_tract::inversion::TractEstimate;
@@ -78,6 +79,14 @@ pub fn pose_of(state: &VocalTractState) -> TractPose {
     k.lip_aperture_mm = finite_or(c.lip_aperture_mm as f32, k.lip_aperture_mm).max(0.0);
     k.larynx_mm = finite_or(c.larynx_mm as f32, k.larynx_mm);
     pose
+}
+
+/// Whether [track] is a take the tab can read: a vocal take with audio. The
+/// backing track and a lane with no clips have no voice to estimate from
+/// (the analysis has no subject for them), so the tab says there is no take
+/// rather than waiting on one that will never come.
+pub fn readable_take(track: &AudioTrack) -> bool {
+    !track.is_backing() && !track.clips.is_empty()
 }
 
 /// The pose of the engine's neutral posture with no voice: what the tab

@@ -222,6 +222,53 @@ fn the_pitch_reads_the_sung_note_at_once_not_a_glide_from_silence() {
     assert_eq!(shown.components.f0_hz, ah().components.f0_hz);
 }
 
+#[test]
+fn a_parked_playhead_fed_again_and_again_keeps_one_sample() {
+    let mut st = VocalTractState::new();
+    let t0 = Instant::now();
+    for i in 0..1000u32 {
+        st.feed(Some(ah()), 4.0, t0 + MS * i);
+    }
+    assert_eq!(st.history.len(), 1);
+    assert_eq!(st.trail().len(), 1);
+}
+
+#[test]
+fn a_formant_missing_from_a_voiced_frame_keeps_the_last_one_known() {
+    let mut st = VocalTractState::new();
+    let t0 = Instant::now();
+    st.feed(Some(ah()), 1.0, t0);
+    let known = ah().formants;
+    let mut lost = ah();
+    lost.formants = [known[0], 0.0, 0.0];
+    st.feed(Some(lost), 1.1, t0 + MS * 100);
+    for step in 1..=20 {
+        st.update(
+            Message::Frame(t0 + MS * (100 + 50 * step)),
+            t0 + MS * (100 + 50 * step),
+        );
+    }
+    assert_eq!(st.shown().formants, known);
+    assert!(st.trail().iter().all(|&(f1, f2)| f1 > 0.0 && f2 > 0.0));
+    let r = st.readouts();
+    assert_eq!(r.vowel, Some((known[0], known[1])));
+}
+
+#[test]
+fn a_formant_never_found_reads_as_a_dash_and_puts_no_dot_on_the_map() {
+    let mut st = VocalTractState::new();
+    let mut first = ah();
+    first.formants = [640.0, 0.0, 0.0];
+    st.feed(Some(first), 1.0, Instant::now());
+    let r = st.readouts();
+    assert_eq!(r.vowel, None);
+    assert!(st.trail().is_empty());
+    assert_eq!(
+        readouts::formants_line([640.0, 0.0, 0.0]),
+        "F1 640 \u{b7} F2 \u{2014} \u{b7} F3 \u{2014} Hz"
+    );
+}
+
 // --------------------------------------------------------- projection
 
 #[test]

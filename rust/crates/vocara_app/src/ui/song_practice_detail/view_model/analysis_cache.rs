@@ -353,11 +353,18 @@ struct Derived {
 }
 
 impl Derived {
-    /// Dart's `_dropDerived`.
+    /// Dart's `_dropDerived`. Not the vocal-tract track: it is computed
+    /// from the metrics alone, so it goes with them ([`Derived::drop_tract`])
+    /// and outlives the spectrogram's eviction (the Vocal tract tab reads
+    /// no spectrogram, so its subject's ages first under the byte budget).
     fn drop_derived(&mut self, key: &str) {
         self.profile.remove(key);
         self.ltas.remove(key);
         self.register.remove(key);
+    }
+
+    /// The vocal-tract track computed from the metrics under [key].
+    fn drop_tract(&mut self, key: &str) {
         self.tract.remove(key);
     }
 
@@ -779,7 +786,11 @@ impl AnalysisCache {
         }
         {
             let d = Arc::clone(&derived);
-            metrics_cache.set_on_evict(Some(move |key: &str| lock(&d).drop_derived(key)));
+            metrics_cache.set_on_evict(Some(move |key: &str| {
+                let mut d = lock(&d);
+                d.drop_derived(key);
+                d.drop_tract(key);
+            }));
         }
         // A clip's two halves are one analysis: neither insert evicts the
         // other. Not the EQ display: it follows the clip under the playhead,
@@ -1568,12 +1579,18 @@ impl AnalysisCache {
 
     /// The vocal tract at the playhead: the subject's track at the
     /// playhead's time within the subject's span. `None` until the track is
-    /// computed.
+    /// computed, and with the playhead outside the span: no one sings there
+    /// (the track's own reading clamps to its ends, which would show the
+    /// take's first or last shape as if sung).
     pub fn vocal_tract_at_playhead(&self, host: &dyn AnalysisHost) -> Option<VocalTractState> {
         let track = self.selected_vocal_tract(host)?;
+        let s = self.analysis_subject(host)?;
         let position_ms = i64::try_from(host.position().as_millis()).unwrap_or(i64::MAX);
-        let seconds = (position_ms - self.analysis_start_ms(host)) as f64 / 1000.0;
-        track.state_at(seconds)
+        let into = position_ms.saturating_sub(s.start_ms);
+        if into < 0 || into > s.duration_ms {
+            return None;
+        }
+        track.state_at(into as f64 / 1000.0)
     }
 
     /// Starts (or stops) estimating the live vocal tract, the monitor's, for

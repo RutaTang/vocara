@@ -76,6 +76,7 @@ use crate::ui::song_practice_detail::widgets::track_row::{
     header_frame, header_name, take_color, track_menu_button, track_row, TIMELINE_H_MARGIN,
     TRACK_HEADER_W,
 };
+use crate::ui::song_practice_detail::widgets::vocal_tract_engine;
 use crate::ui::song_practice_detail::widgets::vocal_tract_view::{self, VocalTract};
 
 /// What `vm.lyricsAsText()` gives a view (only the update side reads it).
@@ -394,11 +395,13 @@ impl SongPracticeDetailScreen {
                 live: a.live_monitor(),
                 source: match selected {
                     _ if a.live_monitor() => vocal_tract_view::Source::Live,
-                    Some(t) => vocal_tract_view::Source::Take(
-                        &t.display_name,
-                        channel_color(t, &self.shown.vocal_takes),
-                    ),
-                    None => vocal_tract_view::Source::NoTake,
+                    Some(t) if vocal_tract_engine::readable_take(t) => {
+                        vocal_tract_view::Source::Take(
+                            &t.display_name,
+                            channel_color(t, &self.shown.vocal_takes),
+                        )
+                    }
+                    _ => vocal_tract_view::Source::NoTake,
                 },
             };
             bottom_dock::dock_content(

@@ -828,7 +828,11 @@ impl SongPracticeDetailScreen {
             }
             return;
         }
-        if self.vm.selected_track().is_none() {
+        let readable = self
+            .vm
+            .selected_track()
+            .is_some_and(|t| vocal_tract_engine::readable_take(&t));
+        if !readable {
             self.vocal_tract.feed(None, clock, now);
             return;
         }

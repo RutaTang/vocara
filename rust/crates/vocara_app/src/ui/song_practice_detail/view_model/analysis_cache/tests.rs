@@ -2329,10 +2329,15 @@ fn the_vocal_tract_track_follows_the_subjects_metrics() {
         "not asked again"
     );
     // the playhead, into the take
-    host.position = Duration::from_millis(2500);
+    host.position = Duration::from_millis(500);
     let at = cache.vocal_tract_at_playhead(&host).expect("a state");
     assert!(at.estimate.fitted && at.folds.voiced());
     assert!(at.estimate.residual < 0.05, "{}", at.estimate.residual);
+    // past the take's end (its clip is 1 s): no one sings there, so no
+    // state, not the take's last shape held
+    host.position = Duration::from_millis(2500);
+    assert!(cache.vocal_tract_at_playhead(&host).is_none());
+    host.position = Duration::from_millis(500);
     // a body from the take's F3 (2.6 kHz: between the adults)
     let suggested = cache.suggested_vocal_tract_body(&host).expect("voiced");
     assert!(
@@ -2359,6 +2364,11 @@ fn the_vocal_tract_track_follows_the_subjects_metrics() {
     );
     assert!(cache.follow_suggested_vocal_tract_body(&host).is_empty());
     assert_eq!(cache.vocal_tract_body(), BodyMix::MALE);
+
+    // the spectrogram aged out under the budget: the track, computed from
+    // the metrics alone, stays
+    cache.spectrogram_cache.remove("c1.wav");
+    assert!(cache.selected_vocal_tract(&host).is_some());
 
     // the source goes, the track with it
     cache.evict_analysis("c1.wav", false);

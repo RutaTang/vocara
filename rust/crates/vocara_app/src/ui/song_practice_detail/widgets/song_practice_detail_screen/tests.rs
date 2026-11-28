@@ -1522,6 +1522,33 @@ fn the_vocal_tract_tab_shows_the_selected_take_and_its_shape() {
     assert!(h.shows("Drag to turn \u{b7} scroll to zoom"));
 }
 
+/// The backing selected with the tab on Take: there is no take to read, so
+/// the tab says so (it waited on "Reading this take" forever once: the
+/// analysis has no subject for a backing).
+#[test]
+fn the_vocal_tract_tab_reads_no_take_from_the_backing() {
+    let mut p = practice(vec![take("t1", "Take 1")]);
+    p.accompaniment = Some(Arc::new(backing()));
+    let mut h = Harness::open(Setup {
+        practice: p,
+        ..Setup::default()
+    });
+    h.send(Message::Row {
+        track_id: "acc".into(),
+        message: track_row::Message::Select,
+    });
+    h.click("Vocal tract");
+    h.settle();
+    h.send(Message::Dock(bottom_dock::Message::VocalTract(
+        vocal_tract_view::Message::SetView(vocal_tract_view::TractView::TwoD),
+    )));
+    assert_eq!(
+        h.screen.vocal_tract.readouts().status,
+        vocal_tract_view::readouts::Status::NoTake
+    );
+    assert!(h.shows("Select a recorded take, or switch to Live."));
+}
+
 // playhead_repaint_test: 'a dock taller than the window leaves the timeline
 // whole'. The dragged height is clamped to a fixed range, not to the window:
 // on a short window a tall dock collapsed the timeline.

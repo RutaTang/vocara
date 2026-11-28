@@ -183,6 +183,12 @@ impl PoseSpring {
         Some(pose)
     }
 
+    /// The formants of the estimate the figure moves to (the last voiced
+    /// one, or the first), if any came.
+    pub fn formants(&self) -> Option<[f32; 3]> {
+        self.template.as_ref().map(|t| t.formants)
+    }
+
     /// How far the figure has dimmed into rest: 0 voiced, 1 resting.
     pub fn rest(&self) -> f32 {
         self.rest.map_or(1.0, |r| r.value.clamp(0.0, 1.0))

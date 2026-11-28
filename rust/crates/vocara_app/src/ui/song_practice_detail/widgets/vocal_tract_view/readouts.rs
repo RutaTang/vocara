@@ -585,11 +585,19 @@ pub fn fit_label(fit: Fit) -> (&'static str, Color, Color) {
 
 /// "F1 640 · F2 1190 · F3 2620 Hz".
 pub fn formants_line(f: [f32; 3]) -> String {
+    // A formant never found reads as a dash, not "0".
+    let hz = |x: f32| {
+        if x > 0.0 {
+            (x.round() as i32).to_string()
+        } else {
+            "\u{2014}".to_string()
+        }
+    };
     format!(
         "F1 {} \u{b7} F2 {} \u{b7} F3 {} Hz",
-        f[0].round() as i32,
-        f[1].round() as i32,
-        f[2].round() as i32
+        hz(f[0]),
+        hz(f[1]),
+        hz(f[2])
     )
 }
 
