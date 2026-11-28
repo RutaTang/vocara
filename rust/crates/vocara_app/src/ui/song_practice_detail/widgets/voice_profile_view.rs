@@ -19,7 +19,7 @@ use crate::ui::core::text;
 use iced::alignment::Vertical;
 use iced::widget::canvas::{self, gradient, Frame, Geometry, LineCap, Path, Stroke, Style};
 use iced::widget::text::Alignment;
-use iced::widget::{canvas as canvas_widget, column, container, row, stack, Space};
+use iced::widget::{canvas as canvas_widget, center, column, container, row, stack, Space};
 use iced::{mouse, Color, Element, Length, Pixels, Point, Rectangle, Renderer, Size, Theme};
 use vocara_model::models::audio_track::AudioTrack;
 use vocara_model::models::voice_metrics::{note_name_for_midi, VoiceMetrics, VoiceProfile};
@@ -269,7 +269,20 @@ fn live_dynamics_panel<'a, M: 'a>(monitor: &MonitorService) -> Element<'a, M> {
         (m.live_dynamics(), m.loudness_history().to_vec())
     };
     if d.range_db.is_nan() {
-        return studio_hint(LIVE_DYNAMICS_HINT).into();
+        // Titled and marked Live as it will be, the hint in its well, as
+        // the other live tabs wait (a bare hint read as another state).
+        return column![
+            header_row("Loudness (live)", Some(live_badge()), 0.0),
+            plot_well(center(
+                text(LIVE_DYNAMICS_HINT)
+                    .size(type_scale::BODY)
+                    .color(Studio::TEXT_FAINT),
+            )),
+        ]
+        .padding(TAB_PADDING)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into();
     }
     scrolls_when_short(move || {
         column![

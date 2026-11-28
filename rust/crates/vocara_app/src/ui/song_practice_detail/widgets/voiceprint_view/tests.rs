@@ -580,6 +580,36 @@ fn live_renders_a_monitor_started_but_never_fed() {
 }
 
 #[test]
+fn every_live_tab_waits_titled_with_its_badge_and_a_word() {
+    // Power waited on an empty plot with no word and no Live badge; LTAS
+    // and Register on a bare hint with no title. Pitch, Timbre and Vowel
+    // show their title and badge.
+    let monitor = MonitorService::default();
+    monitor.start();
+    let src = Source {
+        monitor: Some(Arc::new(monitor)),
+        ..Source::default()
+    };
+    let state = VoiceprintState::new();
+    for (tab, title, hint) in [
+        (power as Tab, "Power spectrum", Some(POWER_LIVE_HINT)),
+        (ltas as Tab, "LTAS · running average", Some(LTAS_LIVE_HINT)),
+        (register as Tab, "Register", Some(REGISTER_LIVE_HINT)),
+        (pitch as Tab, "Tuner", None),
+        (timbre as Tab, "Timbre", None),
+        (vowel as Tab, "Vowel space · F1 × F2", None),
+    ] {
+        let shown = texts(&mut simulator(tab, &src, &state, DOCK));
+        for label in [Some(title), Some("Live"), hint].into_iter().flatten() {
+            assert!(
+                shown.iter().any(|t| t == label),
+                "{title}: {label} in {shown:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn a_held_live_note_tunes_and_maps_its_register() {
     let src = live(&sine(48000, 220.0, SR as f64));
     let state = VoiceprintState::new();

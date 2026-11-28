@@ -429,11 +429,18 @@ pub fn power_tab<'a>(src: &'a dyn AnalysisSource) -> Element<'a, Message> {
                 min_ceil_db: Some(48.0),
             }
         };
+        // Live, as the other tabs mark it, and with a word until the mic
+        // has given a spectrum (an empty plot said nothing).
+        let trailing = row![live_dot(), spectrum_legend(&strip.formants)]
+            .spacing(14)
+            .align_y(Vertical::Center);
+        let body = if strip.column.is_empty() {
+            well_hint(POWER_LIVE_HINT)
+        } else {
+            spectrum_strip(strip)
+        };
         return padded(
-            column![
-                tab_header("Power spectrum", Some(spectrum_legend(&strip.formants))),
-                spectrum_strip(strip),
-            ],
+            column![tab_header("Power spectrum", Some(trailing.into())), body],
             TAB_PADDING,
         );
     }
@@ -548,11 +555,7 @@ pub fn timbre_tab<'a>(src: &'a dyn AnalysisSource) -> Element<'a, Message> {
                 plain_header("Timbre", Some(live_dot())),
                 bar,
                 Space::new().height(12),
-                plot_well(center(
-                    text("Timbre curves are available for recorded takes.")
-                        .size(type_scale::BODY)
-                        .color(Studio::TEXT_FAINT),
-                )),
+                well_hint("Timbre curves are available for recorded takes."),
             ],
             TAB_PADDING,
         );
@@ -594,7 +597,23 @@ pub fn ltas_tab<'a>(src: &'a dyn AnalysisSource) -> Element<'a, Message> {
         let ltas = src.monitor().read().live_ltas();
         return match ltas {
             Some(ltas) if ltas.has_data() => ltas_body(&ltas, true),
-            _ => studio_hint("Sing into the mic to build your live average spectrum.").into(),
+            // Titled and marked Live as it will be, the hint in its well (a
+            // bare hint, untitled, read as another state).
+            _ => padded(
+                column![
+                    tab_header(
+                        LTAS_LIVE_TITLE,
+                        Some(
+                            row![live_dot(), spectrum_legend(&[])]
+                                .spacing(14)
+                                .align_y(Vertical::Center)
+                                .into()
+                        ),
+                    ),
+                    well_hint(LTAS_LIVE_HINT),
+                ],
+                TAB_PADDING,
+            ),
         };
     }
     with_spectrogram(src, |_, _| {
@@ -650,7 +669,7 @@ fn ltas_body<'a>(ltas: &Ltas, live: bool) -> Element<'a, Message> {
     column![
         tab_header(
             if live {
-                "LTAS · running average"
+                LTAS_LIVE_TITLE
             } else {
                 "LTAS · average spectrum"
             },
@@ -1216,7 +1235,14 @@ fn live_register_panel<'a>(m: &MonitorState) -> Element<'a, Message> {
         "Head"
     };
     if total == 0 && !has_now {
-        return studio_hint("Sing into the mic to map your registers live.").into();
+        // Titled and marked Live as it will be, the hint in its well.
+        return padded(
+            column![
+                plain_header("Register", Some(live_dot())),
+                well_hint(REGISTER_LIVE_HINT),
+            ],
+            TAB_PADDING,
+        );
     }
     let pct = |n: usize| round_to_i64(n as f64 * inv);
     let swatches = row![
@@ -1563,6 +1589,23 @@ pub(crate) fn plot_well<'a, M: 'a>(content: impl Into<Element<'a, M>>) -> Elemen
         .style(well_style)
         .into()
 }
+
+/// A live tab's word before the mic has given it anything, centred in its
+/// plot well under the tab's title and Live badge (as Timbre's and the
+/// tuner's).
+fn well_hint<'a>(hint: &'static str) -> Element<'a, Message> {
+    plot_well(center(
+        text(hint).size(type_scale::BODY).color(Studio::TEXT_FAINT),
+    ))
+}
+
+/// The live tabs' words while the mic has given them nothing yet.
+pub const POWER_LIVE_HINT: &str = "Sing into the mic to see your power spectrum.";
+pub const LTAS_LIVE_HINT: &str = "Sing into the mic to build your live average spectrum.";
+pub const REGISTER_LIVE_HINT: &str = "Sing into the mic to map your registers live.";
+
+/// The LTAS tab's title on Live.
+const LTAS_LIVE_TITLE: &str = "LTAS · running average";
 
 /// The least height the Vowel, Range and Dynamics tabs lay out in, their
 /// padding included: their readouts and a usable chart.

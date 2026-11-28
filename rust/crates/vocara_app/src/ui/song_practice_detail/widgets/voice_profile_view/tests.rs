@@ -377,7 +377,12 @@ fn a_nan_inside_a_sustained_note_renders() {
 fn both_views_render_a_monitor_started_but_never_fed() {
     let src = live(&[]);
     pump_views(&src);
-    assert!(simulator(dynamics, &src).find(LIVE_DYNAMICS_HINT).is_ok());
+    // Waiting as the other live tabs do: titled, marked Live, the word in
+    // its well (a bare hint, untitled, read as another state).
+    let shown = texts(&mut simulator(dynamics, &src));
+    for label in [LIVE_DYNAMICS_HINT, "Loudness (live)", "Live"] {
+        assert!(shown.iter().any(|t| t == label), "{label} in {shown:?}");
+    }
 }
 
 // ----------------------------------------------------------- the pieces
