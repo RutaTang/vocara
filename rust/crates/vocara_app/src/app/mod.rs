@@ -842,8 +842,9 @@ impl App {
                 // What the page on top shows over the whole window (a route
                 // on the root navigator: a video's fullscreen), over the
                 // toolbar and the snack bars, under the dialogs. Its slot
-                // stays when empty, so the dialogs keep theirs.
-                // Its part of the title-bar band stays the window's.
+                // stays when empty, so the dialogs keep theirs. It takes
+                // every press over it; one in the title-bar band that
+                // nothing in it took is the window's.
                 let (top, page) = running.router.top();
                 layers = layers.push(page.overlay(top).map_or_else(
                     || Space::new().width(Length::Fill).height(Length::Fill).into(),

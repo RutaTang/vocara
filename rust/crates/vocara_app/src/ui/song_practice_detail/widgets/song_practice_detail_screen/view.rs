@@ -242,9 +242,9 @@ impl SongPracticeDetailScreen {
         // mid-word. (Dart's editors were dialogs of their own.)
         let focus = vm.lyrics_focus().then(|| {
             let data = panel_data(vm, &self.shown, &NO_TEXT, self.under_dialog());
-            // Over the page's toolbar: its part of the title-bar band stays
-            // the window's.
-            window_backdrop(lyrics_focus_overlay(&self.lyrics, data).map(Message::Lyrics))
+            // Over the page's toolbar, whose part of the title-bar band
+            // stays the window's (the view's own backdrop).
+            lyrics_focus_overlay(&self.lyrics, data).map(Message::Lyrics)
         });
         let separation = vm
             .is_separating()
