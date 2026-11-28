@@ -644,21 +644,33 @@ fn the_panel_fits_the_dock() {
 #[test]
 fn a_marker_at_a_track_end_shows_whole_and_leaves_its_label_clear() {
     // At an end the knob was cut in half by the track's edge and covered
-    // the end's label ("Back", "Closed").
-    let (w, h) = (160.0, readouts::ROW - 1.0);
-    for position in [0.0, 1.0] {
-        let (knob, label_y) = readouts::track_marks(w, h, position);
-        assert!(knob.x - readouts::KNOB_RADIUS >= 0.0, "{knob:?}");
-        assert!(knob.x + readouts::KNOB_RADIUS <= w, "{knob:?}");
-        assert!(
-            label_y + readouts::END_SIZE / 2.0 <= knob.y - readouts::KNOB_RADIUS,
-            "the label ({label_y}) runs into the knob at {knob:?}"
-        );
-        assert!(label_y - readouts::END_SIZE / 2.0 >= 0.0, "{label_y}");
+    // the end's label ("Back", "Closed"); then, in the tighter rows, the
+    // knob and its glow still lay over the label's lower half.
+    let w = 160.0;
+    for row in [readouts::ROW, readouts::ROW_TIGHT, readouts::ROW_MIN] {
+        let h = row - 1.0;
+        for position in [0.0, 1.0] {
+            let (knob, label_y, glow) = readouts::track_marks(w, h, position);
+            assert!(knob.x - readouts::KNOB_RADIUS >= 0.0, "{knob:?}");
+            assert!(knob.x + readouts::KNOB_RADIUS <= w, "{knob:?}");
+            // The label's line, its descenders included, above the glow.
+            assert!(
+                label_y + readouts::END_LINE / 2.0 <= knob.y - glow,
+                "row {row}: the label ({label_y}) runs into the glow ({glow}) at {knob:?}"
+            );
+            assert!(label_y - readouts::END_LINE / 2.0 >= 0.0, "{label_y}");
+            // The knob and its glow inside the track.
+            assert!(glow >= readouts::KNOB_RADIUS);
+            assert!(knob.y + glow <= h + 1e-3, "row {row}: {knob:?} {glow}");
+        }
     }
+    // The mockup's glow where the row has room for it.
+    let (_, _, glow) = readouts::track_marks(w, 40.0, 0.5);
+    assert_eq!(glow, readouts::GLOW_RADIUS);
     // The ends still read as the ends.
-    let (lo, _) = readouts::track_marks(w, h, 0.0);
-    let (hi, _) = readouts::track_marks(w, h, 1.0);
+    let h = readouts::ROW - 1.0;
+    let (lo, _, _) = readouts::track_marks(w, h, 0.0);
+    let (hi, _, _) = readouts::track_marks(w, h, 1.0);
     assert_eq!(
         (lo.x, hi.x),
         (readouts::KNOB_RADIUS, w - readouts::KNOB_RADIUS)
