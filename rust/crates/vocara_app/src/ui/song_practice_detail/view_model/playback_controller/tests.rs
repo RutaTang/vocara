@@ -509,6 +509,23 @@ fn shrinking_content_still_pulls_the_end_back_dragged_or_not() {
 }
 
 #[test]
+fn stop_goes_back_to_the_loop_start_while_looping_and_to_the_start_otherwise() {
+    let (mut c, engine, h) = controller(60_000);
+    c.ensure_loop_range(&h);
+    c.set_loop_start(&h, 20_000);
+    c.toggle_loop(&h);
+    engine.calls().clear();
+    c.stop(&h);
+    assert_eq!(*engine.calls(), ["pause", "seek:20000"]);
+
+    // Loop off, its region still set: the song's start, not the old loop's.
+    c.toggle_loop(&h);
+    engine.calls().clear();
+    c.stop(&h);
+    assert_eq!(*engine.calls(), ["pause", "seek:0"]);
+}
+
+#[test]
 fn enabling_the_loop_snaps_a_playhead_sitting_outside_it_inside() {
     let (mut c, engine, h) = controller(60_000);
     c.ensure_loop_range(&h);
