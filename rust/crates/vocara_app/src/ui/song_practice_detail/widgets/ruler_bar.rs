@@ -36,8 +36,12 @@
 //! major ticks with `m:ss` labels and minor ticks
 //! ([`TimeRulerPainter`]), the playhead's white 11 × 8 marker, and the
 //! song's end as a 1 px `TEXT_DISABLED` line. The loop region shows while
-//! looping, as an accent band with 1 px edges; off, it is not drawn, and its
-//! edges still take a drag (the cursor says where).
+//! looping, as an accent band with 1 px edges, whose handles take a drag;
+//! off, it is not drawn, and the whole ruler scrubs. (Dart's invisible
+//! handles still took a drag: the default loop starts at 0, and its start
+//! handle lay under the playhead's marker at 0:00, where a practice opens,
+//! so a drag on the marker moved the hidden loop edge and the playhead
+//! stayed put; turning Loop on later started the loop mid-song.)
 
 use std::time::Duration;
 
@@ -386,6 +390,16 @@ impl Handles {
         )
     }
 
+    /// The handle under `x` on ticks `w` wide: none while the loop is off,
+    /// when its handles are not drawn (see the module docs).
+    fn handle_at(&self, x: f64, w: f64) -> Option<Edge> {
+        if !self.ruler.loop_enabled {
+            return None;
+        }
+        let (start_x, end_x) = self.xs(w);
+        handle_at(x, w, start_x, end_x)
+    }
+
     fn seek_at(&self, dx: f64, w: f64) -> Message {
         let r = self.ruler;
         Message::Seek(millis(ms_at(
@@ -430,9 +444,8 @@ impl canvas::Program<Message> for Handles {
                     return None;
                 }
                 let p = cursor.position_in(bounds)?;
-                let (start_x, end_x) = self.xs(w);
                 state.press = Some(Press {
-                    handle: handle_at(f64::from(p.x), w, start_x, end_x),
+                    handle: self.handle_at(f64::from(p.x), w),
                     down: p,
                     last: Point::new(p.x + bounds.x, p.y + bounds.y),
                     pending: 0.0,
@@ -539,10 +552,9 @@ impl canvas::Program<Message> for Handles {
             .press
             .is_some_and(|p| p.dragging && p.handle.is_some());
         let over_handle = live(self.ruler.timeline_duration_ms, w)
-            && cursor.position_in(bounds).is_some_and(|p| {
-                let (start_x, end_x) = self.xs(w);
-                handle_at(f64::from(p.x), w, start_x, end_x).is_some()
-            });
+            && cursor
+                .position_in(bounds)
+                .is_some_and(|p| self.handle_at(f64::from(p.x), w).is_some());
         if dragging_handle || over_handle {
             mouse::Interaction::ResizingHorizontally
         } else {

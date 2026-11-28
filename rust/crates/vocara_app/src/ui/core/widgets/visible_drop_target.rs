@@ -18,8 +18,17 @@
 //! saw, gathers the files of one drop (consecutive `FileDropped` events) and
 //! hands them over together, as desktop_drop's `onDragDone` did. Platform
 //! note: winit reports no pointer movement during an external drag on macOS,
-//! so the position judged there is the last one before the drag entered the
-//! window; with no position known at all the drop is refused, never guessed.
+//! so the event loop reads the pointer from AppKit and moves the cursor
+//! there as a file hovers or drops (the vendored iced_winit's
+//! `drop_pointer`); a move is no other event that ends a drop. With no
+//! position known at all the drop is refused, never guessed. While a file
+//! hovers, the event loop keeps the cursor on the pointer, and the hover
+//! follows it.
+//!
+//! A target that takes a drop claims it (it captures the drop's events), and
+//! so does a disabled one the drop lands on: [`unclaimed_drop`] around a
+//! page then tells a drop that missed every target, which the page says in
+//! words (where its drops go) rather than letting it go without one.
 
 use std::path::PathBuf;
 
@@ -56,7 +65,8 @@ impl<'a, M> VisibleDropTarget<'a, M> {
         self
     }
 
-    /// A disabled target takes no drops and reports no hover.
+    /// A disabled target takes no drops and reports no hover; a drop on it
+    /// is still its own (see [`unclaimed_drop`]).
     pub fn enable(mut self, enable: bool) -> Self {
         self.enable = enable;
         self
@@ -67,6 +77,9 @@ impl<'a, M> VisibleDropTarget<'a, M> {
 #[derive(Debug, Default)]
 pub struct DropState {
     hover: bool,
+    /// A file is dragged over the window: from its hover until it is
+    /// dropped or the drag leaves.
+    dragged: bool,
     /// A drop's files are arriving (one `FileDropped` each).
     dropping: bool,
     /// Whether the drop arriving is one this target takes.
@@ -76,6 +89,20 @@ pub struct DropState {
 
 fn reaches(bounds: Rectangle, cursor: mouse::Cursor) -> bool {
     cursor.position_over(bounds).is_some()
+}
+
+/// Whether `event` ends a drop whose files are arriving: any event but
+/// another file of it, or the pointer moving. On macOS the event loop moves
+/// the cursor to the pointer as a drop comes in (winit reports no pointer
+/// during a drag in from another app), and a move between two files of one
+/// drop split it into one drop per file: the song page took the first and
+/// refused the rest while it was busy with it.
+fn ends_drop(event: &Event) -> bool {
+    !matches!(
+        event,
+        Event::Window(window::Event::FileDropped(_))
+            | Event::Mouse(mouse::Event::CursorMoved { .. })
+    )
 }
 
 impl<'a, M: 'a> From<VisibleDropTarget<'a, M>> for Element<'a, M> {
@@ -103,8 +130,7 @@ impl<'a, M: 'a> From<VisibleDropTarget<'a, M>> for Element<'a, M> {
                     };
                 // The files of one drop arrive back to back; the first other
                 // event ends the drop.
-                if state.dropping && !matches!(event, Event::Window(window::Event::FileDropped(_)))
-                {
+                if state.dropping && ends_drop(event) {
                     state.dropping = false;
                     let files = std::mem::take(&mut state.files);
                     if state.reached && !files.is_empty() {
@@ -112,16 +138,32 @@ impl<'a, M: 'a> From<VisibleDropTarget<'a, M>> for Element<'a, M> {
                     }
                 }
                 if !enable {
+                    // Not a drop that missed every target.
+                    if matches!(event, Event::Window(window::Event::FileDropped(_)))
+                        && reaches(bounds, cursor)
+                    {
+                        shell.capture_event();
+                    }
                     return;
                 }
                 match event {
                     Event::Window(window::Event::FileHovered(_)) => {
+                        state.dragged = true;
+                        set_hover(state, reaches(bounds, cursor), shell);
+                    }
+                    // The pointer moving under the file dragged in: the
+                    // highlight follows it.
+                    Event::Mouse(mouse::Event::CursorMoved { .. } | mouse::Event::CursorLeft)
+                        if state.dragged =>
+                    {
                         set_hover(state, reaches(bounds, cursor), shell);
                     }
                     Event::Window(window::Event::FilesHoveredLeft) => {
+                        state.dragged = false;
                         set_hover(state, false, shell);
                     }
                     Event::Window(window::Event::FileDropped(path)) => {
+                        state.dragged = false;
                         if !state.dropping {
                             state.dropping = true;
                             state.reached = reaches(bounds, cursor);
@@ -131,6 +173,7 @@ impl<'a, M: 'a> From<VisibleDropTarget<'a, M>> for Element<'a, M> {
                         }
                         if state.reached {
                             state.files.push(path.clone());
+                            shell.capture_event();
                         }
                     }
                     _ => {}
@@ -139,6 +182,48 @@ impl<'a, M: 'a> From<VisibleDropTarget<'a, M>> for Element<'a, M> {
         )
         .into()
     }
+}
+
+/// The state of [`unclaimed_drop`]: a drop's files arriving, and whether a
+/// target took it.
+#[derive(Debug, Default)]
+pub struct UnclaimedState {
+    dropping: bool,
+    claimed: bool,
+    files: Vec<PathBuf>,
+}
+
+/// `content` (a page with drop targets of its own) handing `on_drop` the
+/// paths of a drop on it that none of its targets claimed (see the module
+/// docs): one that landed beside them. Only where the page can be seen, as
+/// a target: a drop on a dialog over the page is not the page's.
+pub fn unclaimed_drop<'a, M: 'a>(
+    content: impl Into<Element<'a, M>>,
+    on_drop: impl Fn(Vec<PathBuf>) -> M + 'a,
+) -> Element<'a, M> {
+    Wrap::<M, UnclaimedState>::new(
+        content,
+        Box::new(move |state, event, bounds, cursor, shell| {
+            if state.dropping && ends_drop(event) {
+                state.dropping = false;
+                let files = std::mem::take(&mut state.files);
+                if !state.claimed && !files.is_empty() {
+                    shell.publish(on_drop(files));
+                }
+            }
+            if let Event::Window(window::Event::FileDropped(path)) = event {
+                if !state.dropping {
+                    state.dropping = true;
+                    state.claimed = !reaches(bounds, cursor);
+                    shell.request_redraw();
+                }
+                // A target inside took it (as it takes all of a drop).
+                state.claimed |= shell.is_event_captured();
+                state.files.push(path.clone());
+            }
+        }),
+    )
+    .into()
 }
 
 #[cfg(test)]
@@ -151,6 +236,7 @@ mod tests {
     enum Msg {
         Drop(Vec<PathBuf>),
         Hover(bool),
+        Missed(Vec<PathBuf>),
     }
 
     fn target<'a>() -> Element<'a, Msg> {
@@ -186,6 +272,28 @@ mod tests {
                 Msg::Hover(false),
                 Msg::Drop(vec!["/a.wav".into(), "/b.wav".into()])
             ]
+        );
+    }
+
+    #[test]
+    fn a_drop_of_several_files_with_a_move_before_each_is_one_drop() {
+        // The event loop moves the cursor to the pointer before a dropped
+        // file: each move ended the drop, and three files made three drops.
+        let mut ui = iced_test::simulator(container(target()));
+        let at = Point::new(100.0, 100.0);
+        ui.point_at(at);
+        let moved = || Event::Mouse(mouse::Event::CursorMoved { position: at });
+        let dropped = |p: &str| Event::Window(window::Event::FileDropped(PathBuf::from(p)));
+        let _ = ui.simulate([
+            moved(),
+            dropped("/a.wav"),
+            moved(),
+            dropped("/b.wav"),
+            Event::Window(window::Event::RedrawRequested(Instant::now())),
+        ]);
+        assert_eq!(
+            ui.into_messages().collect::<Vec<_>>(),
+            vec![Msg::Drop(vec!["/a.wav".into(), "/b.wav".into()])]
         );
     }
 
@@ -243,5 +351,118 @@ mod tests {
         let mut ui = iced_test::simulator(container(t));
         drop_at(&mut ui, Point::new(100.0, 100.0), &["/a.wav"]);
         assert!(ui.into_messages().next().is_none());
+    }
+
+    /// The pointer at `at`, moved there (as the event loop moves the cursor
+    /// while a file hovers).
+    fn move_to(ui: &mut iced_test::Simulator<'_, Msg>, at: Point) {
+        ui.point_at(at);
+        let _ = ui.simulate([Event::Mouse(mouse::Event::CursorMoved { position: at })]);
+    }
+
+    #[test]
+    fn the_highlight_follows_a_file_dragged_over_the_window() {
+        // The drag came in beside the target: no highlight until the
+        // pointer reaches it, none once it moves off or out of the window.
+        let mut ui = iced_test::simulator(container(target()));
+        let beside = Point::new(500.0, 100.0);
+        let over = Point::new(100.0, 100.0);
+        ui.point_at(beside);
+        let _ = ui.simulate([
+            Event::Mouse(mouse::Event::CursorMoved { position: beside }),
+            Event::Window(window::Event::FileHovered(PathBuf::from("/a.wav"))),
+        ]);
+        move_to(&mut ui, over);
+        move_to(&mut ui, beside);
+        move_to(&mut ui, over);
+        let _ = ui.simulate([Event::Mouse(mouse::Event::CursorLeft)]);
+        let _ = ui.simulate([Event::Window(window::Event::FilesHoveredLeft)]);
+        // With no file dragged, a move over it lights nothing up.
+        move_to(&mut ui, beside);
+        move_to(&mut ui, over);
+        assert_eq!(
+            ui.into_messages().collect::<Vec<_>>(),
+            vec![
+                Msg::Hover(true),
+                Msg::Hover(false),
+                Msg::Hover(true),
+                Msg::Hover(false),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_drop_dragged_onto_the_target_is_taken_where_it_lands() {
+        let mut ui = iced_test::simulator(container(target()));
+        ui.point_at(Point::new(500.0, 100.0));
+        let _ = ui.simulate([Event::Window(window::Event::FileHovered(PathBuf::from(
+            "/a.wav",
+        )))]);
+        move_to(&mut ui, Point::new(100.0, 100.0));
+        let _ = ui.simulate([
+            Event::Window(window::Event::FileDropped(PathBuf::from("/a.wav"))),
+            Event::Window(window::Event::RedrawRequested(Instant::now())),
+        ]);
+        assert_eq!(
+            ui.into_messages().collect::<Vec<_>>(),
+            vec![
+                Msg::Hover(true),
+                Msg::Hover(false),
+                Msg::Drop(vec!["/a.wav".into()])
+            ]
+        );
+    }
+
+    /// A page: the target at its left, empty space at its right, the drop
+    /// on neither reported as `Missed`.
+    fn page<'a>(target: Element<'a, Msg>) -> Element<'a, Msg> {
+        unclaimed_drop(
+            container(iced::widget::row![target, Space::new().width(Length::Fill)])
+                .width(Length::Fill)
+                .height(Length::Fill),
+            Msg::Missed,
+        )
+    }
+
+    fn drops(ui: iced_test::Simulator<'_, Msg>) -> Vec<Msg> {
+        ui.into_messages()
+            .filter(|m| !matches!(m, Msg::Hover(_)))
+            .collect()
+    }
+
+    #[test]
+    fn a_drop_beside_every_target_is_the_pages() {
+        let mut ui = iced_test::simulator(page(target()));
+        drop_at(&mut ui, Point::new(500.0, 100.0), &["/a.wav", "/b.wav"]);
+        assert_eq!(
+            drops(ui),
+            vec![Msg::Missed(vec!["/a.wav".into(), "/b.wav".into()])]
+        );
+
+        // On the target: its own, and the page's no longer.
+        let mut ui = iced_test::simulator(page(target()));
+        drop_at(&mut ui, Point::new(100.0, 100.0), &["/a.wav"]);
+        assert_eq!(drops(ui), vec![Msg::Drop(vec!["/a.wav".into()])]);
+
+        // On a disabled target: nobody's (it says nothing, and nor does the
+        // page as though nothing were there).
+        let disabled = visible_drop_target(Space::new().width(300).height(200), Msg::Drop)
+            .enable(false)
+            .into();
+        let mut ui = iced_test::simulator(page(disabled));
+        drop_at(&mut ui, Point::new(100.0, 100.0), &["/a.wav"]);
+        assert!(drops(ui).is_empty());
+    }
+
+    #[test]
+    fn a_drop_on_a_dialog_over_the_page_is_not_the_pages() {
+        let backdrop = opaque(
+            container(Space::new())
+                .width(Length::Fill)
+                .height(Length::Fill),
+        );
+        let mut ui = iced_test::simulator(stack![page(target()), backdrop]);
+        drop_at(&mut ui, Point::new(500.0, 100.0), &["/a.wav"]);
+        assert!(drops(ui).is_empty());
     }
 }

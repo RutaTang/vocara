@@ -165,7 +165,8 @@ fn cancel_escape_and_the_barrier_close_it_with_nothing() {
     let steps = drive(&mut editor, |ui| {
         ui.click("Cancel").expect("the cancel button");
         let _ = ui.tap_key(keyboard::Key::Named(Named::Escape));
-        ui.point_at(iced::Point::new(5.0, 5.0));
+        // Below the title-bar band, whose clicks are the window's.
+        ui.point_at(iced::Point::new(5.0, 100.0));
         let _ = ui.simulate(iced_test::simulator::click());
     });
     assert_eq!(steps, vec![Step::Closed(None); 3]);

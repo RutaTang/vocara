@@ -48,6 +48,7 @@ use super::controls::{dialog_button, secondary_button, DialogButton};
 use super::focus_traversal::focus_scope;
 use super::gesture::{any_tap_event, AnyTap};
 use super::studio_text::studio_text;
+use super::toolbar::{is_band_press, window_backdrop};
 use super::wrap::Wrap;
 use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::motion::{Controller, Curve, Status};
@@ -580,6 +581,11 @@ impl DialogMotion {
 /// before the barrier was there). (A second button pressed over the card
 /// is the card's, which the barrier never sees: in Flutter the pointer,
 /// down on the barrier, stayed the barrier's.)
+///
+/// Its part of the title-bar band is the window's
+/// (`toolbar::window_backdrop`): a primary press there moves or zooms the
+/// window, as the title bar does under an AppKit sheet, and dismisses
+/// nothing.
 pub fn barrier<'a, M: Clone + 'a>(
     color: Color,
     strength: f32,
@@ -593,9 +599,12 @@ pub fn barrier<'a, M: Clone + 'a>(
             ..container::Style::default()
         });
     match on_tap {
-        Some(on_tap) => opaque(Wrap::<M, AnyTap>::new(
+        Some(on_tap) => window_backdrop(Wrap::<M, AnyTap>::new(
             fill,
             Box::new(move |tap, event, bounds, cursor, shell| {
+                if !tap.is_pressed() && is_band_press(event, cursor) {
+                    return;
+                }
                 let (tapped, taken) =
                     any_tap_event(tap, event, |at| bounds.contains(at), cursor.position());
                 if tapped {
@@ -606,7 +615,7 @@ pub fn barrier<'a, M: Clone + 'a>(
                 }
             }),
         )),
-        None => opaque(fill),
+        None => window_backdrop(fill),
     }
 }
 
@@ -856,13 +865,36 @@ mod tests {
         );
     }
 
+    /// A height on the barrier below the window's title-bar band, whose
+    /// primary presses are the window's (see [`barrier`]).
+    const BELOW_BAND: f32 = crate::ui::core::widgets::toolbar::HEIGHT + 5.0;
+
+    #[test]
+    fn a_primary_press_in_the_title_bar_band_is_no_barrier_tap() {
+        let mut state = DialogState::new(ConfirmDialog::new("Delete?"));
+        let messages = run(&mut state, |ui| {
+            ui.point_at(Point::new(5.0, 5.0));
+            let _ = ui.simulate(iced_test::simulator::click());
+        });
+        assert!(messages.is_empty(), "{messages:?}");
+        // Another button there still taps the barrier.
+        let messages = run(&mut state, |ui| {
+            ui.point_at(Point::new(5.0, 5.0));
+            let _ = ui.simulate([
+                press(iced::mouse::Button::Right),
+                release(iced::mouse::Button::Right),
+            ]);
+        });
+        assert_eq!(messages, vec![Message::Cancel]);
+    }
+
     #[test]
     fn escape_and_a_barrier_tap_cancel_and_enter_does_nothing_in_a_confirm() {
         let mut state = DialogState::new(ConfirmDialog::new("Delete?"));
         let messages = run(&mut state, |ui| {
             let _ = ui.tap_key(keyboard::Key::Named(Named::Enter));
             let _ = ui.tap_key(keyboard::Key::Named(Named::Escape));
-            ui.point_at(Point::new(5.0, 5.0));
+            ui.point_at(Point::new(5.0, BELOW_BAND));
             let _ = ui.simulate(iced_test::simulator::click());
         });
         assert_eq!(messages, vec![Message::Cancel, Message::Cancel]);
@@ -883,7 +915,7 @@ mod tests {
     #[test]
     fn the_barrier_cancels_on_a_taps_release_of_any_button() {
         use iced::mouse::Button;
-        let corner = Point::new(5.0, 5.0);
+        let corner = Point::new(5.0, BELOW_BAND);
         // `ModalBarrier`'s tap: the press alone dismisses nothing; its release
         // does.
         let mut state = DialogState::new(ConfirmDialog::new("Delete?"));
@@ -905,19 +937,19 @@ mod tests {
         use iced::mouse::Button;
         let moved = |x: f32| {
             mouse(iced::mouse::Event::CursorMoved {
-                position: Point::new(x, 5.0),
+                position: Point::new(x, BELOW_BAND),
             })
         };
         let mut state = DialogState::new(ConfirmDialog::new("Delete?"));
         // Within `kTouchSlop` (18 px) of the press: still a tap.
         let messages = run(&mut state, |ui| {
-            ui.point_at(Point::new(5.0, 5.0));
+            ui.point_at(Point::new(5.0, BELOW_BAND));
             let _ = ui.simulate([press(Button::Left), moved(23.0), release(Button::Left)]);
         });
         assert_eq!(messages, vec![Message::Cancel]);
         // Past it, even if it comes back: no tap.
         let messages = run(&mut state, |ui| {
-            ui.point_at(Point::new(5.0, 5.0));
+            ui.point_at(Point::new(5.0, BELOW_BAND));
             let _ = ui.simulate([
                 press(Button::Left),
                 moved(24.0),
@@ -928,7 +960,7 @@ mod tests {
         assert!(messages.is_empty(), "{messages:?}");
         // A second button while the first is down rejects it.
         let messages = run(&mut state, |ui| {
-            ui.point_at(Point::new(5.0, 5.0));
+            ui.point_at(Point::new(5.0, BELOW_BAND));
             let _ = ui.simulate([
                 press(Button::Left),
                 press(Button::Right),
@@ -946,7 +978,7 @@ mod tests {
             let body = ui.find("Body").expect("body shown").bounds();
             ui.point_at(body.center());
             let _ = ui.simulate([press(iced::mouse::Button::Left)]);
-            ui.point_at(Point::new(5.0, 5.0));
+            ui.point_at(Point::new(5.0, BELOW_BAND));
             let _ = ui.simulate([release(iced::mouse::Button::Left)]);
         });
         assert!(messages.is_empty(), "{messages:?}");

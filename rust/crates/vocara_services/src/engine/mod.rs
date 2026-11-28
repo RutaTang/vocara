@@ -4,7 +4,7 @@
 //! decode and probe helpers of `graph_audio_playback_service.dart`'s top level).
 //!
 //! The engine is the workspace crate `vocara_engine`. Its C ABI
-//! (`vocara_engine::ffi`, 92 `extern "C"` functions) and its `device` module
+//! (`vocara_engine::ffi`, 99 `extern "C"` functions) and its `device` module
 //! exist only with the `device` feature, which forwards to the engine's. The
 //! Dart side loaded the engine as a framework and looked every symbol up by
 //! name; here it is linked in and called directly, with no lookup to fail.
@@ -49,11 +49,17 @@
 //! A `NativeEngine` is `Send + Sync`. Its calls are serialized by one mutex:
 //! the C ABI turns every call into an exclusive `&mut VeEngine`, so two at
 //! once would alias it, and the Dart side made them all from one isolate. A
-//! call that blocks (starting or stopping a recording, a commit priming its
-//! streams, a device switch) holds the lock for as long, so a poll made
-//! meanwhile waits behind it, as Dart's position timer waited on the same
-//! isolate. The lock is the happens-before edge: a call sees every effect of
-//! the calls that returned before it.
+//! call that blocks (starting a recording, a commit priming its streams)
+//! holds the lock for as long, so a poll made meanwhile waits behind it, as
+//! Dart's position timer waited on the same isolate. Two waits are made
+//! outside it, because what they wait for can take seconds: an output switch
+//! waits for the audio host, which serves its commands one at a time and may
+//! be opening the mic (a Bluetooth headset), and a recording's stop waits for
+//! the take's tail and the WAV's finalize. Only their engine halves (queueing
+//! the switch; disarming, then closing the input) run under the lock, so the
+//! playhead poll, the transport and a take's ready poll go on meanwhile. The
+//! lock is the happens-before edge: a call sees every effect of the calls
+//! that returned before it.
 //!
 //! The stateless calls touch no engine instance and run on any thread, at
 //! once if need be, as the Dart side ran them in isolates.

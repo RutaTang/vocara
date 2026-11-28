@@ -1323,14 +1323,19 @@ impl AppSettingsService {
     pub fn refresh_output_devices(&self) -> bool {
         let mut st = self.state();
         let outs = (self.queries.enumerate_outputs)();
-        let switched = match (&st.engine, st.output_device_uid.as_deref()) {
-            (Some(engine), Some(uid)) => {
-                returned(&st.watched_outputs, &outs, Some(uid)) && engine.set_output_device(uid)
+        let switch = match (&st.engine, st.output_device_uid.as_deref()) {
+            (Some(engine), Some(uid)) if returned(&st.watched_outputs, &outs, Some(uid)) => {
+                Some((Arc::clone(engine), uid.to_string()))
             }
-            _ => false,
+            _ => None,
         };
         st.watched_outputs = outs;
-        switched
+        // The switch waits for the engine's audio host, which may be busy for
+        // seconds with a mic open (a Bluetooth headset): not with the
+        // settings lock held, or every settings read (the monitor-safety
+        // reconcile on the same watch tick, the meter's gain) waits too.
+        drop(st);
+        switch.is_some_and(|(engine, uid)| engine.set_output_device(&uid))
     }
 
     /// Attaches the active engine. Applies the persisted devices immediately

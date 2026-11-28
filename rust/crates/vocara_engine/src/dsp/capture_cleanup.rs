@@ -1,5 +1,7 @@
-//! Capture-path conditioning for the mic input: a 40 Hz second-order high-pass ([`HighPass`]).
-//! Runs after the AEC, before the linear record gain. Platform-free pure DSP (lifted out of the
+//! Capture-path conditioning for the mic input: a 40 Hz second-order high-pass ([`HighPass`]),
+//! and the [`VoicePath`] that splits the mic into the echo-cancelled take and the monitor. The
+//! take's high-pass runs after the AEC, the monitor's on the mic itself; both before the linear
+//! record gain. Platform-free pure DSP (lifted out of the
 //! macOS VPIO glue) so the simulation tests can drive it.
 //!
 //! # The capture path is deliberately STATIC and LINEAR
@@ -34,6 +36,8 @@
 //! the old one-pole managed (-6 dB vs -4 dB) and DC is blocked completely.
 
 use std::f64::consts::PI;
+
+use crate::aec::Aec;
 
 /// Engine capture rate the coefficients are derived for.
 const HP_RATE: f64 = 48_000.0;
@@ -85,5 +89,127 @@ impl HighPass {
         self.z1 = self.b1 * x - self.a1 * y + self.z2;
         self.z2 = self.b2 * x - self.a2 * y;
         y
+    }
+}
+
+/// The mono mic's two signals after the channel mix, each high-passed by its own [`HighPass`]:
+///
+/// * the TAKE — echo-cancelled by the [`Aec`] — that the capture (analysis) and recording rings
+///   carry, so the backing track does not bleed into what is kept;
+/// * the MONITOR — the mic before the canceller — that the hear-yourself path plays. The
+///   canceller works in blocks and emits one block late even in pass-through (headphones, the
+///   only route the monitor is audible on), and that block (~5.3 ms at 48 kHz) was heard as
+///   extra monitor latency for nothing: what the monitor plays never enters the canceller's
+///   reference, and on headphones there is no echo to cancel.
+///
+/// Platform-free so the simulation tests drive it; the VoiceProcessingIO callback runs it once
+/// per capture. RT-safe: no alloc / lock / syscall.
+pub struct VoicePath {
+    aec: Aec,
+    take_hp: HighPass,
+    monitor_hp: HighPass,
+}
+
+impl VoicePath {
+    pub fn new(aec: Aec) -> VoicePath {
+        VoicePath {
+            aec,
+            take_hp: HighPass::new(),
+            monitor_hp: HighPass::new(),
+        }
+    }
+
+    /// The canceller, for its per-callback route state (`set_echo_free`).
+    pub fn aec_mut(&mut self) -> &mut Aec {
+        &mut self.aec
+    }
+
+    /// One capture: `mic` (the mixed mono mic) and `far` (the far-end reference for the same
+    /// samples; `None` when the canceller is bypassed) into `take` and `monitor`. Processes the
+    /// shortest of the slices; `scratch` holds the canceller's output and is at least as long.
+    pub fn process(
+        &mut self,
+        mic: &[f32],
+        far: Option<&[f32]>,
+        scratch: &mut [f32],
+        take: &mut [f32],
+        monitor: &mut [f32],
+    ) {
+        let n = mic
+            .len()
+            .min(scratch.len())
+            .min(take.len())
+            .min(monitor.len());
+        for i in 0..n {
+            monitor[i] = self.monitor_hp.process(mic[i]);
+        }
+        match far {
+            Some(far) => {
+                let n = n.min(far.len());
+                self.aec.process(&mic[..n], &far[..n], &mut scratch[..n]);
+            }
+            None => scratch[..n].copy_from_slice(&mic[..n]),
+        }
+        for i in 0..n {
+            take[i] = self.take_hp.process(scratch[i]);
+        }
+    }
+}
+
+#[cfg(test)]
+mod voice_path_tests {
+    use super::*;
+
+    /// Index of the largest magnitude.
+    fn peak_at(x: &[f32]) -> usize {
+        (0..x.len())
+            .max_by(|&a, &b| x[a].abs().total_cmp(&x[b].abs()))
+            .unwrap()
+    }
+
+    /// An impulse through the path in the canceller's pass-through (headphones, where the monitor
+    /// is audible): the take keeps the canceller's one-block latency, the monitor has none.
+    #[test]
+    fn the_monitor_skips_the_cancellers_block_of_latency() {
+        let mut path = VoicePath::new(Aec::new(48_000.0, 250.0));
+        path.aec_mut().set_echo_free(true);
+        let n = 1024;
+        let mut mic = vec![0.0f32; n];
+        mic[10] = 0.5;
+        let far = vec![0.0f32; n];
+        let (mut scratch, mut take, mut monitor) = (vec![0.0; n], vec![0.0; n], vec![0.0; n]);
+        // Callback-sized pieces, as the unit delivers them.
+        for c in (0..n).step_by(128) {
+            path.process(
+                &mic[c..c + 128],
+                Some(&far[c..c + 128]),
+                &mut scratch[c..c + 128],
+                &mut take[c..c + 128],
+                &mut monitor[c..c + 128],
+            );
+        }
+        assert_eq!(
+            peak_at(&monitor),
+            10,
+            "the monitor hears the impulse at once"
+        );
+        assert_eq!(
+            peak_at(&take) - peak_at(&monitor),
+            256,
+            "the take is one canceller block behind"
+        );
+        // Both lanes are the same high-passed voice, only shifted.
+        assert!((monitor[10] - take[266]).abs() < 1e-6);
+    }
+
+    /// With the canceller bypassed (mismatched element rates) both lanes are the high-passed mic.
+    #[test]
+    fn a_bypassed_canceller_leaves_both_lanes_the_same_voice() {
+        let mut path = VoicePath::new(Aec::new(48_000.0, 250.0));
+        let mic: Vec<f32> = (0..256).map(|i| ((i as f32) * 0.05).sin() * 0.3).collect();
+        let (mut scratch, mut take, mut monitor) = (vec![0.0; 256], vec![0.0; 256], vec![0.0; 256]);
+        path.process(&mic, None, &mut scratch, &mut take, &mut monitor);
+        assert_eq!(take, monitor);
+        assert!(take.iter().any(|&s| s.abs() > 0.1));
     }
 }

@@ -883,14 +883,37 @@ fn a_long_press_on_a_reorderable_lane_starts_a_reorder_drag() {
     ui.point_at(Point::new(100.0, 20.0));
     assert_eq!(ui.run(view(), [press(), release()]), vec![Message::Select]);
 
-    // On a clip: the long press beats its tap and its drag.
-    ui.point_at(clip_center(4000, 1000));
+    // On the lane beside its clip: the same.
+    ui.point_at(Point::new(TRACK_HEADER_W + 40.0, 30.0));
     assert!(ui.run(view(), [press()]).is_empty());
     assert_eq!(hold(&mut ui, view), vec![Message::LaneDragStart]);
-    assert!(ui.run(view(), [move_to(700.0, 300.0)]).is_empty());
     assert_eq!(ui.run(view(), [release()]), vec![Message::LaneDragEnd]);
-    // And the clip's own press was let go: moving now drags nothing.
-    assert!(ui.run(view(), [move_to(720.0, 300.0)]).is_empty());
+}
+
+#[test]
+fn a_clip_held_still_then_dragged_moves_and_reorders_nothing() {
+    // Held for half a second to aim (common on a trackpad), the press
+    // became the row's long press: the row faded, a ghost of the take's
+    // name followed the pointer, and the clip never moved.
+    let track = leaked(clips_take(&[("a".into(), 4000)]));
+    let view = || Element::from(row_of(track).reorderable(true));
+    let mut ui = LiveUi::new(WINDOW);
+    let at = clip_center(4000, 1000);
+    ui.point_at(at);
+    assert!(ui.run(view(), [press()]).is_empty());
+    std::thread::sleep(LONG_PRESS_TIMEOUT + Duration::from_millis(100));
+    let mut all = ui.run(view(), [redraw()]);
+    for dx in [10.0, 20.0, 30.0] {
+        all.extend(ui.run(view(), [move_to(at.x + dx, at.y)]));
+    }
+    all.extend(ui.run(view(), [release()]));
+    assert!(!all.contains(&Message::LaneDragStart), "{all:?}");
+    let moves = all
+        .iter()
+        .filter(|m| matches!(m, Message::ClipMoveLive { clip_id, .. } if clip_id == "a"))
+        .count();
+    assert_eq!(moves, 2, "{all:?}");
+    assert_eq!(all.last(), Some(&Message::MoveCommit), "{all:?}");
 }
 
 #[test]

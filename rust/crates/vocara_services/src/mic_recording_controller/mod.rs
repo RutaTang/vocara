@@ -69,8 +69,9 @@
 //!   flips [`MicRecordingController::is_starting`] at once (so a double tap
 //!   in the same frame is guarded) and snapshots the generation. The
 //!   [`PendingStart`] it returns is the rest: [`PendingStart::run`] blocks
-//!   for the permission prompt, the destination, the engine's arm and up to
-//!   [`MicRecordingOptions::ready_timeout`] of ready polls, so the owner runs
+//!   for the permission prompt, the destination, the engine's arm and the
+//!   ready polls (one [`MicRecordingOptions::ready_timeout`], up to half as
+//!   long again after a late reopen, see its doc), so the owner runs
 //!   it on a blocking worker (`tokio::task::spawn_blocking`) and gets the
 //!   [`MicRecordingStart`] back as a message. A pending start dropped unrun
 //!   still clears its starting flag (Dart's `finally`).
@@ -422,8 +423,14 @@ pub struct MicRecordingOptions {
     /// How long a start waits for the armed mic to actually deliver frames
     /// before giving up (see [`MicRecordingFailure::InputNotDelivering`]). A
     /// warm stream answers within one callback (~10 ms); a cold
-    /// VoiceProcessingIO open takes a few hundred. Injectable so tests can
-    /// force the timeout deterministically.
+    /// VoiceProcessingIO open takes a few hundred, and a Bluetooth headset
+    /// switching to its headset profile delivers nothing for up to the
+    /// engine's warm-up allowance (2.5 s). Past half of it with no frames,
+    /// the start asks the engine to reopen the input once — unless the stream
+    /// has been up for less than half of it (still warming up; it is asked
+    /// once it has had that long) — and the wait is extended so the reopened
+    /// stream gets half of it too. Injectable so tests can force the timeout
+    /// deterministically.
     pub ready_timeout: Duration,
 }
 
@@ -461,17 +468,27 @@ type Clock = Arc<dyn Fn() -> Instant + Send + Sync>;
 /// tests that must order a parked start's wake against another start).
 type PollSleep = Arc<dyn Fn(Duration) + Send + Sync>;
 
-/// The test seams (see [`Clock`] and [`PollSleep`]).
+/// Where the controller's diagnostics lines go, as `(area, message)`: the
+/// app's [`DiagnosticsLog`]; a collector in the tests.
+type LogSink = Arc<dyn Fn(&str, &str) + Send + Sync>;
+
+/// The test seams (see [`Clock`], [`PollSleep`] and [`LogSink`]). The ready
+/// handshake measures its wait on `ready_clock` (real time; a clock its
+/// `poll_sleep` moves in the tests that time a reopen).
 struct Seams {
     clock: Clock,
+    ready_clock: Clock,
     poll_sleep: PollSleep,
+    log: LogSink,
 }
 
 impl Default for Seams {
     fn default() -> Self {
         Seams {
             clock: Arc::new(Instant::now),
+            ready_clock: Arc::new(Instant::now),
             poll_sleep: Arc::new(thread::sleep),
+            log: Arc::new(|area, message| DiagnosticsLog::instance().log(area, message)),
         }
     }
 }
@@ -527,7 +544,9 @@ struct Inner {
     stop_finalizes: StopFinalizeGate,
     ready_timeout: Duration,
     clock: Clock,
+    ready_clock: Clock,
     poll_sleep: PollSleep,
+    log: LogSink,
     state: Mutex<State>,
     /// See [`MicRecordingController::revision`].
     revision: AtomicU64,
@@ -896,8 +915,10 @@ impl MicRecordingController {
     /// it lost (see [`MicEvent::InputDeviceLost`]).
     pub const STALL_LIMIT: Duration = Duration::from_secs(2);
 
-    /// The default [`MicRecordingOptions::ready_timeout`].
-    pub const DEFAULT_READY_TIMEOUT: Duration = Duration::from_secs(2);
+    /// The default [`MicRecordingOptions::ready_timeout`]: twice the engine's
+    /// 2.5 s warm-up allowance, so a stream gets all of it before it is
+    /// reopened, and the reopen its own half before the start gives up.
+    pub const DEFAULT_READY_TIMEOUT: Duration = Duration::from_secs(5);
 
     /// How often the owner should call [`MicRecordingController::tick`]
     /// while [`MicRecordingController::next_tick_due`] is `Some`: the
@@ -937,7 +958,9 @@ impl MicRecordingController {
                 finalize_on_quit,
                 ready_timeout: options.ready_timeout,
                 clock: seams.clock,
+                ready_clock: seams.ready_clock,
                 poll_sleep: seams.poll_sleep,
+                log: seams.log,
                 state: Mutex::new(State {
                     level: 0.0,
                     engine: None,
@@ -1225,6 +1248,95 @@ struct StartCx {
     /// The engine and token of this start's native arm (Dart's `disarm`).
     disarm: Option<(Arc<GraphAudioPlaybackService>, u64)>,
     discard: Option<String>,
+    /// Diagnostics lines `(area, message)`, written once the start has
+    /// settled (none under the state lock), in order.
+    log: Vec<(&'static str, String)>,
+}
+
+impl StartCx {
+    /// Queue the engine's own diagnostics lines (what its host did with this
+    /// arm), so they precede the controller's line about it.
+    fn engine_lines(&mut self, engine: &GraphAudioPlaybackService) {
+        self.log.extend(
+            engine
+                .take_engine_diagnostics()
+                .into_iter()
+                .map(|line| ("engine", line)),
+        );
+    }
+}
+
+/// What the ready handshake last saw, for its diagnostics lines.
+struct ReadyWatch {
+    arm_seq: u64,
+    /// The input frame counter at the arm.
+    frames_at_arm: u64,
+    /// Whether the applied state ever paired with a running stream, and the
+    /// take's written frames when it last did.
+    paired: bool,
+    baseline_written: u64,
+    /// When the start asked the engine to reopen the input, after the arm.
+    reopened_at: Option<Duration>,
+}
+
+impl ReadyWatch {
+    /// The failure's line: every fact the ready check judged, as of now, and
+    /// the mic the take would have recorded from. No device names or uids.
+    fn not_delivering(&self, engine: &GraphAudioPlaybackService, waited: Duration) -> String {
+        let applied = engine.input_applied_state();
+        let stream = engine.input_stream_state();
+        let running = GraphAudioPlaybackService::input_state_running(stream);
+        let written = engine.record_written_frames();
+        let frames = engine.input_frames_received();
+        let reopen = self.reopened_at.map_or_else(
+            || "no reopen asked".to_string(),
+            |at| format!("reopen asked at {} ms", at.as_millis()),
+        );
+        let baseline = if self.paired {
+            self.baseline_written.to_string()
+        } else {
+            "never paired".to_string()
+        };
+        format!(
+            "start: the microphone delivered nothing in {} ms ({reopen}): arm seq {}, \
+             applied seq {} gen {}, stream gen {} {}, written {baseline} -> {written}, \
+             frames received +{}, input open: {}, selected: {}",
+            waited.as_millis(),
+            self.arm_seq,
+            GraphAudioPlaybackService::applied_seq_of(applied),
+            GraphAudioPlaybackService::applied_gen_of(applied),
+            GraphAudioPlaybackService::state_gen_of(stream),
+            if running { "running" } else { "not running" },
+            frames.saturating_sub(self.frames_at_arm),
+            describe_open_input(engine, running),
+            describe_selected_input(engine),
+        )
+    }
+}
+
+/// The mic a running input stream is bound to, by its role (a uid can name
+/// hardware, so none is logged).
+fn describe_open_input(engine: &GraphAudioPlaybackService, running: bool) -> &'static str {
+    if !running {
+        return "none";
+    }
+    let actual = engine.actual_input_device();
+    if actual.is_empty() {
+        "the system default"
+    } else if actual == engine.current_input_device() {
+        "the selected input"
+    } else {
+        "another input than the selected one"
+    }
+}
+
+/// The input the user selected, by its role.
+fn describe_selected_input(engine: &GraphAudioPlaybackService) -> &'static str {
+    if engine.current_input_device().is_empty() {
+        "the system default"
+    } else {
+        "a chosen input"
+    }
 }
 
 impl ControllerStart {
@@ -1243,6 +1355,9 @@ impl ControllerStart {
             }
         };
         self.settle();
+        for (area, line) in cx.log.drain(..) {
+            (self.inner.log)(area, &line);
+        }
         // The discard runs once the start has settled, as Dart's unawaited
         // discard ran on after the start returned.
         if let Some(path) = cx.discard.take() {
@@ -1350,7 +1465,29 @@ impl ControllerStart {
         // When the stream is already open (monitoring), everything resolves
         // within one callback (~10 ms); a cold VoiceProcessingIO open takes a
         // few hundred.
+        //
+        // ONE retry: past half the timeout with no frames, the engine is asked
+        // to reopen the stream — a unit that opened and never delivered (one
+        // left running by an earlier failed stop, another engine's still up),
+        // or a kept one that stopped, was otherwise waited out to the toast on
+        // every take. Not a stream still inside half the timeout since it came
+        // up: a Bluetooth headset switching profiles delivers nothing for a
+        // while, and a reopen would only restart its switch. The reopen names
+        // the stream's generation, so one a slow open overtook is ignored. The
+        // reopened stream gets half the timeout of its own.
         let arm_seq = engine.input_intent_seq();
+        let mut watch = ReadyWatch {
+            arm_seq,
+            frames_at_arm: engine.input_frames_received(),
+            paired: false,
+            baseline_written: 0,
+            reopened_at: None,
+        };
+        let half = inner.ready_timeout / 2;
+        let mut deadline = inner.ready_timeout;
+        // When the current pairing was first seen: how long its stream has
+        // been up, as far as this wait knows.
+        let mut paired_since = Duration::ZERO;
         let mut ready = false;
         // DELTA progress under a STABLE pairing: recorded frames are the
         // file's truth but carry no generation — an outgoing stream's frames
@@ -1364,8 +1501,13 @@ impl ControllerStart {
         // timeout.
         let mut baseline_pairing: Option<u64> = None;
         let mut baseline_written = 0u64;
-        let ready_clock = Instant::now();
-        while ready_clock.elapsed() < inner.ready_timeout {
+        let ready_start = (inner.ready_clock)();
+        let waited = || (inner.ready_clock)().saturating_duration_since(ready_start);
+        loop {
+            let elapsed = waited();
+            if elapsed >= deadline {
+                break;
+            }
             if Self::abandoned(&st, generation) {
                 disarm_if_still_ours(&st, &engine, arm_token);
                 cx.discard = Some(path);
@@ -1377,10 +1519,43 @@ impl ControllerStart {
                 && GraphAudioPlaybackService::input_state_running(stream)
                 && GraphAudioPlaybackService::applied_gen_of(applied)
                     == GraphAudioPlaybackService::state_gen_of(stream);
+            if pairing_ok && baseline_pairing != Some(applied) {
+                paired_since = elapsed;
+            }
+            let warming_up = pairing_ok && elapsed.saturating_sub(paired_since) < half;
+            if watch.reopened_at.is_none() && elapsed >= half && !warming_up {
+                watch.reopened_at = Some(elapsed);
+                deadline = deadline.max(elapsed + half);
+                let gen = GraphAudioPlaybackService::state_gen_of(stream);
+                cx.engine_lines(&engine);
+                cx.log.push((
+                    "mic",
+                    format!(
+                        "start: no frames {} ms after the arm; asking the engine to reopen \
+                         the input (stream gen {gen} {}, written {})",
+                        elapsed.as_millis(),
+                        if GraphAudioPlaybackService::input_state_running(stream) {
+                            "running"
+                        } else {
+                            "not running"
+                        },
+                        baseline_written,
+                    ),
+                ));
+                engine.reopen_input(gen);
+                // The pairing the reopen replaces proves nothing about the next.
+                baseline_pairing = None;
+                drop(st);
+                (inner.poll_sleep)(READY_POLL_INTERVAL);
+                st = inner.locked();
+                continue;
+            }
             if pairing_ok {
                 if baseline_pairing != Some(applied) {
                     baseline_pairing = Some(applied);
                     baseline_written = engine.record_written_frames();
+                    watch.paired = true;
+                    watch.baseline_written = baseline_written;
                 }
                 if engine.record_written_frames() > baseline_written
                     && engine.input_applied_state() == applied
@@ -1407,8 +1582,27 @@ impl ControllerStart {
         if !ready {
             disarm_if_still_ours(&st, &engine, arm_token);
             cx.discard = Some(path);
+            // Say exactly what the check saw — nothing else records why a
+            // take was refused — and mark the engine, so an owner that can
+            // replace it (the technique page) gives the next take a fresh one.
+            cx.engine_lines(&engine);
+            cx.log
+                .push(("mic", watch.not_delivering(&engine, waited())));
+            engine.mark_input_failed(true);
             return Ok(MicRecordingStart::Failed(
                 MicRecordingFailure::InputNotDelivering,
+            ));
+        }
+        engine.mark_input_failed(false);
+        if let Some(at) = watch.reopened_at {
+            cx.engine_lines(&engine);
+            cx.log.push((
+                "mic",
+                format!(
+                    "start: the reopened input delivered {} ms after the arm (reopen asked at {} ms)",
+                    waited().as_millis(),
+                    at.as_millis()
+                ),
             ));
         }
         st.armed = Some(Armed {

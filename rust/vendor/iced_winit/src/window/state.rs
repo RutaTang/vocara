@@ -115,6 +115,12 @@ where
             .unwrap_or(mouse::Cursor::Unavailable)
     }
 
+    /// vocara: the cursor as winit last reported it, in physical pixels
+    /// (see `drop_pointer`).
+    pub fn cursor_position(&self) -> Option<winit::dpi::PhysicalPosition<f64>> {
+        self.cursor_position
+    }
+
     pub fn modifiers(&self) -> winit::keyboard::ModifiersState {
         self.modifiers
     }

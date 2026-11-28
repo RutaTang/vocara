@@ -357,6 +357,70 @@ fn a_page_that_leaves_takes_its_dialog_with_it() {
     assert_eq!(app.dialogs(), 0);
 }
 
+/// What a press in the window's title-bar band that pans, then a double
+/// tap there, report on the app's view: whether it dragged the window and
+/// zoomed it, and what else it did.
+fn moves_from_the_band(app: &App) -> (bool, bool, Vec<Message>) {
+    use iced::{mouse, Event, Point};
+    let at = Point::new(420.0, 20.0);
+    let press = || Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left));
+    let release = || Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left));
+    let mut ui = iced_test::simulator(app.view());
+    ui.point_at(at);
+    let moved = Point::new(at.x + 10.0, at.y);
+    let _ = ui.simulate([
+        press(),
+        Event::Mouse(mouse::Event::CursorMoved { position: moved }),
+        release(),
+    ]);
+    std::thread::sleep(std::time::Duration::from_millis(60));
+    ui.point_at(at);
+    let _ = ui.simulate([press(), release()]);
+    std::thread::sleep(std::time::Duration::from_millis(60));
+    let _ = ui.simulate([press(), release()]);
+    let mut dragged = false;
+    let mut zoomed = false;
+    let mut rest = Vec::new();
+    for m in ui.into_messages() {
+        match m {
+            Message::DragWindow => dragged = true,
+            Message::ToggleMaximize => zoomed = true,
+            m => rest.push(m),
+        }
+    }
+    (dragged, zoomed, rest)
+}
+
+// The content view no longer moves the window by itself (272bd6f), and
+// only the pages' toolbars moved it: the waiting and fatal windows could
+// not be moved at all, nor the window under a dialog.
+#[test]
+fn the_window_moves_and_zooms_from_its_top_band_on_every_screen() {
+    let (dragged, zoomed, _) = moves_from_the_band(&boot(None));
+    assert!(dragged && zoomed, "the home page's toolbar");
+
+    let (mut app, _) = App::new(Boot::new(AppEnvironment::Dev));
+    let _ = app.update(Message::Library(LibraryEvent::Waiting));
+    let (dragged, zoomed, _) = moves_from_the_band(&app);
+    assert!(dragged && zoomed, "the waiting window");
+
+    let (mut app, _) = App::new(Boot::new(AppEnvironment::Prod));
+    let _ = app.update(Message::Library(LibraryEvent::Finished(
+        LibraryOpen::LibraryInUse("in use".into()),
+    )));
+    let (dragged, zoomed, _) = moves_from_the_band(&app);
+    assert!(dragged && zoomed, "the fatal window");
+
+    let mut app = boot(None);
+    open_dialog(&mut app);
+    let (dragged, zoomed, rest) = moves_from_the_band(&app);
+    assert!(dragged && zoomed, "under a dialog");
+    assert!(
+        !rest.iter().any(|m| matches!(m, Message::Dialog(_))),
+        "the band's taps dismiss nothing: {rest:?}"
+    );
+}
+
 #[test]
 fn a_quit_from_the_menu_or_the_dock_runs_the_same_guard_once() {
     let hooks = Arc::new(CountingHooks::default());
