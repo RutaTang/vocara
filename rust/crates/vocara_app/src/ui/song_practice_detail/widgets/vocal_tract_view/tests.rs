@@ -766,7 +766,8 @@ fn the_bands_cover_the_last_two_seconds() {
 
 #[test]
 fn the_panel_rests_calmly_without_a_voice_or_a_take() {
-    let st = fed(8.2, 8.6);
+    // The demo's "oo", then its rest.
+    let st = fed(7.6, 8.6);
     assert!(st.resting());
     assert_eq!(st.readouts().status, Status::Resting);
     let mut st = VocalTractState::new();
@@ -851,6 +852,52 @@ fn with_no_take_the_figure_rests_and_the_panel_reads_nothing() {
     );
     assert_eq!(r.vowel, None);
     assert_eq!(r.rest, 1.0);
+}
+
+#[test]
+fn live_with_nothing_sung_yet_rests_neutral_and_reads_nothing() {
+    // Take 1's shape, then Live with no voice yet: the panel said "the last
+    // shape is held" and read Take 1's jaw, tongue and lips as Live's.
+    let t0 = Instant::now();
+    let settle = |st: &mut VocalTractState, from: Instant| {
+        for step in 1..=20 {
+            let at = from + MS * (50 * step);
+            st.update(Message::Frame(at), at);
+        }
+    };
+    let mut st = VocalTractState::new();
+    st.set_voice(Voice::Take("t1".into()));
+    st.feed(Some(ee()), 1.0, t0);
+    settle(&mut st, t0);
+    st.set_voice(Voice::Live);
+    let mut silence = ee();
+    silence.voiced = false;
+    st.feed(Some(silence.clone()), 0.0, t0 + MS * 1100);
+    settle(&mut st, t0 + MS * 1100);
+    let resting = articulate(&AH, false, Fit::Uncertain);
+    assert_eq!(st.shown().outlines.tongue, resting.outlines.tongue);
+    let r = st.readouts();
+    assert_eq!(r.status, Status::NotSung { live: true });
+    assert!(
+        r.rows.iter().all(|row| row.value == "\u{2014}"),
+        "{:?}",
+        r.rows
+    );
+    assert!(r.rows.iter().all(|row| row.band.is_none()));
+    assert_eq!(r.vowel, None);
+    assert_eq!(r.rest, 1.0);
+    {
+        let mut ui = iced_test::simulator(view_of(&st, true));
+        assert!(ui
+            .find("No voice yet: sing into the mic to see your shape.")
+            .is_ok());
+    }
+    // Once sung, its own shape, held when the voice stops.
+    st.feed(Some(ah()), 0.5, t0 + MS * 2200);
+    assert!(matches!(st.readouts().status, Status::Voiced { .. }));
+    st.feed(Some(silence), 0.6, t0 + MS * 2300);
+    assert_eq!(st.readouts().status, Status::Resting);
+    assert_ne!(st.readouts().rows[0].value, "\u{2014}");
 }
 
 #[test]

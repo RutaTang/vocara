@@ -193,6 +193,12 @@ impl PoseSpring {
         self.voiced
     }
 
+    /// Whether a voiced estimate has come since the last clear: a shape to
+    /// hold.
+    pub fn seen_voiced(&self) -> bool {
+        self.seen_voiced
+    }
+
     /// Forgets every estimate (the figure goes back to its resting look).
     pub fn clear(&mut self) {
         *self = Self::default();

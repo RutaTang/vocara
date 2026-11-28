@@ -137,6 +137,8 @@ pub enum Status {
     Voiced { fit: Fit, formants: [f32; 3] },
     /// No voice now: the shape held.
     Resting,
+    /// No voice yet in what is read (on Live, `live`): no shape to hold.
+    NotSung { live: bool },
     /// Take mode with no take to read.
     NoTake,
     /// No estimate yet, being worked out: on Live (`live`) the engine
@@ -674,6 +676,20 @@ fn status_column<'a>(status: &Status, gap: f32) -> Element<'a, Message> {
             Studio::TEXT_SECONDARY,
             false,
             "No voice just now: the last shape is held.".to_string(),
+        ),
+        Status::NotSung { live: true } => (
+            "Resting",
+            Studio::TEXT_FAINT,
+            Studio::TEXT_SECONDARY,
+            false,
+            "No voice yet: sing into the mic to see your shape.".to_string(),
+        ),
+        Status::NotSung { live: false } => (
+            "Resting",
+            Studio::TEXT_FAINT,
+            Studio::TEXT_SECONDARY,
+            false,
+            "No voice at the playhead yet.".to_string(),
         ),
         Status::NoTake => (
             "No take selected",

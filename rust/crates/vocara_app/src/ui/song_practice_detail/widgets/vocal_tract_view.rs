@@ -288,11 +288,15 @@ impl VocalTractState {
 
     /// Takes in whose voice the estimates are from now on: Live's, or the
     /// selected take's (the screen, as it feeds). Another voice than the
-    /// last carries nothing over from it ([`VocalTractState::feed`]).
+    /// last carries nothing over from it ([`VocalTractState::feed`]): not
+    /// its formants, its recent ranges, nor its shape (Live, with nothing
+    /// sung yet, held the take's last shape as its own, and read it).
     pub fn set_voice(&mut self, voice: Voice) {
         if self.voice.as_ref() != Some(&voice) {
             self.voice = Some(voice);
             self.known = None;
+            self.pose.clear();
+            self.history.clear();
         }
     }
 
@@ -310,8 +314,11 @@ impl VocalTractState {
             self.pose.clear();
             self.known = None;
         }
-        let mut pose =
-            estimate.unwrap_or_else(|| demo::articulate(&demo::AH, false, Fit::Uncertain));
+        // Before the voice has sung, the figure rests in the neutral shape
+        // nothing to read shows: there is no shape of its own to hold.
+        let mut pose = estimate
+            .filter(|pose| pose.voiced || self.pose.seen_voiced())
+            .unwrap_or_else(|| demo::articulate(&demo::AH, false, Fit::Uncertain));
         // A formant the analysis did not find this frame (0: unknown) keeps
         // the last one found in the same voice: gliding it to 0 would read
         // "F2 0 Hz" and put the vowel map's dot on a vowel nobody sang. Not
@@ -390,6 +397,11 @@ impl VocalTractState {
         !self.pose.voiced() || self.no_source
     }
 
+    /// Whether the voice read has not sung yet: no shape to hold or read.
+    fn not_sung(&self) -> bool {
+        !self.no_source && !self.pose.seen_voiced()
+    }
+
     /// Each component's range over the last two seconds, along its track.
     pub fn bands(&self) -> [Option<(f32, f32)>; 7] {
         let mut out = [None; 7];
@@ -431,6 +443,7 @@ impl VocalTractState {
     pub fn readouts(&self) -> Readouts {
         let pose = self.shown();
         let resting = self.resting();
+        let not_sung = self.not_sung();
         let positions = readouts::positions(&pose.components);
         let values = readouts::values(&pose.components);
         let bands = self.bands();
@@ -443,8 +456,9 @@ impl VocalTractState {
                 hi,
                 position: positions[i],
                 band: if resting { None } else { bands[i] },
-                // Nothing to read: no readings, rather than a shape's.
-                value: if self.no_source || (resting && i == 6) {
+                // Nothing to read, or nothing sung yet: no readings,
+                // rather than a shape's.
+                value: if self.no_source || not_sung || (resting && i == 6) {
                     "\u{2014}".to_string()
                 } else {
                     values[i].clone()
@@ -453,6 +467,10 @@ impl VocalTractState {
             .collect();
         let status = if self.no_source {
             self.why_none.unwrap_or(Status::NoTake)
+        } else if not_sung {
+            Status::NotSung {
+                live: self.voice == Some(Voice::Live),
+            }
         } else if resting {
             Status::Resting
         } else {
@@ -463,11 +481,18 @@ impl VocalTractState {
         };
         Readouts {
             rows,
-            vowel: (!self.no_source && pose.formants[0] > 0.0 && pose.formants[1] > 0.0)
+            vowel: (!self.no_source
+                && !not_sung
+                && pose.formants[0] > 0.0
+                && pose.formants[1] > 0.0)
                 .then_some((pose.formants[0], pose.formants[1])),
             trail: if resting { Vec::new() } else { self.trail() },
             status,
-            rest: if self.no_source { 1.0 } else { self.rest() },
+            rest: if self.no_source || not_sung {
+                1.0
+            } else {
+                self.rest()
+            },
         }
     }
 }
