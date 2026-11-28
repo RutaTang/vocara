@@ -1068,6 +1068,32 @@ fn a_notes_first_and_last_frames_neither_draw_nor_set_a_timbre_curves_scale() {
 }
 
 #[test]
+fn the_spectrogram_keys_its_singers_formant_band_as_power_does() {
+    // The shaded band had no entry in the spectrogram's legend.
+    let src = analyzed(&sine(24000, 220.0, SR as f64));
+    let state = synced(&src);
+    let shown = texts(&mut simulator(spectrogram, &src, &state, DOCK));
+    for label in ["F0", "F1", "Singer's formant"] {
+        assert!(shown.iter().any(|t| t == label), "{label} in {shown:?}");
+    }
+}
+
+#[test]
+fn the_vibrato_tab_says_vibrato_once() {
+    // A straight tone read "Vibrato" as the tab's title and again as its
+    // readout's label.
+    let src = analyzed(&sine(24000, 220.0, SR as f64));
+    let state = VoiceprintState::new();
+    let shown = texts(&mut simulator(vibrato, &src, &state, DOCK));
+    assert_eq!(
+        shown.iter().filter(|t| *t == "Vibrato").count(),
+        1,
+        "{shown:?}"
+    );
+    assert!(shown.iter().any(|t| t == "straight tone"), "{shown:?}");
+}
+
+#[test]
 fn the_power_legend_lists_the_formants_it_marks() {
     // F3 was listed while no F3 line was drawn: the analysis found none
     // at that frame (step_metrics has F1 and F2 only).

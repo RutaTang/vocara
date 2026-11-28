@@ -750,7 +750,8 @@ fn vibrato_header<'a>(v: Option<&Vibrato>) -> Element<'a, Message> {
     let v = match v {
         Some(v) if v.present => v,
         _ => {
-            return readout(Readout::new("Vibrato", "None".to_string()).sub("straight tone"));
+            // Not "Vibrato" again under the tab's own title.
+            return readout(Readout::new("Detected", "None".to_string()).sub("straight tone"));
         }
     };
     let healthy = v.rate_hz >= 5.0 && v.rate_hz <= 7.0;
@@ -1860,14 +1861,24 @@ pub(crate) fn header_row<'a, M: 'a>(
 }
 
 /// `_FormantLegend`: the color key for the F0 and F1/F2/F3 tracks drawn on
-/// the spectrogram.
+/// the spectrogram, and its shaded singer's-formant band (keyed as the
+/// power spectrum keys it; it had no entry).
 fn formant_legend<'a>() -> Element<'a, Message> {
     legend(vec![
         (Swatch::Dot(F0_COLOR), "F0".to_string()),
         (Swatch::Dot(FORMANT_COLORS[0]), "F1".to_string()),
         (Swatch::Dot(FORMANT_COLORS[1]), "F2".to_string()),
         (Swatch::Dot(FORMANT_COLORS[2]), "F3".to_string()),
+        (
+            Swatch::Block(wash_key(SINGERS_FORMANT_BAND)),
+            "Singer's formant".to_string(),
+        ),
     ])
+}
+
+/// The key of a translucent `wash`, as it reads over a well.
+fn wash_key(wash: Color) -> Color {
+    lerp_color(Studio::WELL, Color { a: 1.0, ..wash }, wash.a * 2.2)
 }
 
 /// The power spectrum's key: the formant markers drawn now (of `formants`,
@@ -1877,8 +1888,6 @@ fn formant_legend<'a>() -> Element<'a, Message> {
 /// first, so the keys always there keep their place at the right as these
 /// come and go.
 fn spectrum_legend<'a>(formants: &[f64]) -> Element<'a, Message> {
-    // The keys of the washes, as they read over a well.
-    let on_well = |wash: Color| lerp_color(Studio::WELL, Color { a: 1.0, ..wash }, wash.a * 2.2);
     let mut entries: Vec<(Swatch, String)> = formants
         .iter()
         .take(3)
@@ -1888,12 +1897,12 @@ fn spectrum_legend<'a>(formants: &[f64]) -> Element<'a, Message> {
         .map(|(i, _)| (Swatch::Line(FORMANT_COLORS[i]), format!("F{}", i + 1)))
         .collect();
     entries.push((
-        Swatch::Block(on_well(SPECTRUM_FILL)),
+        Swatch::Block(wash_key(SPECTRUM_FILL)),
         "Spectrum".to_string(),
     ));
     entries.push((Swatch::Line(SPECTRUM_ENVELOPE), "Envelope".to_string()));
     entries.push((
-        Swatch::Block(on_well(SINGERS_FORMANT_BAND)),
+        Swatch::Block(wash_key(SINGERS_FORMANT_BAND)),
         "Singer's formant".to_string(),
     ));
     legend(entries)
