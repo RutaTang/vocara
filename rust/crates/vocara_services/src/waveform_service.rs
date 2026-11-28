@@ -205,6 +205,12 @@ pub fn analyze_pcm(
     // The waveform's own duration counted whole 10 ms pixels.
     let pixel_ms = (pairs.len() / 2) as i64 * (1000 / i64::from(PIXELS_PER_SECOND));
     let waveform_ms = pixel_ms.min((samples.len() as i64 * 1000) / i64::from(sample_rate));
+    if waveform_ms == 0 {
+        // Under a millisecond: its partial pixel still drew a peak, but the
+        // clip came out 0 ms long, the invisible lane the doc above says
+        // this refuses (Dart's whole-pixel count never let it through).
+        return Err(WaveformError(UNREADABLE.into()));
+    }
     Ok(WaveformResult {
         peaks: downsample(&pairs, target_buckets),
         duration_ms: exact_duration_ms(audio_file_path, waveform_ms),
@@ -320,6 +326,18 @@ mod tests {
         assert_eq!(r.peaks.len(), 10);
         assert_eq!(r.duration_ms, 100);
         assert!(analyze_pcm("/x", &[], rate, 10).is_err());
+    }
+
+    /// Audio too short to last a millisecond is refused, not analyzed into
+    /// a 0 ms clip; a millisecond of it is a clip.
+    #[test]
+    fn audio_under_a_millisecond_is_refused() {
+        let rate = 48_000;
+        let short = analyze_pcm("/no/such.mp3", &[0.5; 47], rate, 10);
+        assert_eq!(short.unwrap_err().0, UNREADABLE);
+        let ms = analyze_pcm("/no/such.mp3", &[0.5; 48], rate, 10).unwrap();
+        assert_eq!(ms.duration_ms, 1);
+        assert_eq!(ms.peaks.len(), 1);
     }
 
     #[test]

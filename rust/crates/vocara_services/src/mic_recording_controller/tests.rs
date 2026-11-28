@@ -898,6 +898,43 @@ fn the_record_limit_is_reported_and_skips_the_level_update() {
     assert!(!c.is_recording());
 }
 
+/// A write failing mid-take (the disk full) is reported on the next level
+/// tick, not at Stop: the owner stops the take there, and the stop says what
+/// the writer said, that the take on disk is damaged. It wins over the limit
+/// in the same poll (the take was not saved up to it), and every bit is
+/// claimed.
+#[test]
+fn a_failed_write_is_reported_mid_take_and_skips_the_level_update() {
+    let rig = rig();
+    rig.fake.s().level_value = 0.5;
+    let dest = Dest::new(TAKE);
+    let c = controller(
+        &rig,
+        MicRecordingOptions {
+            watch_input_device: true,
+            ..granted()
+        },
+    );
+    assert!(start(&c, &dest).started());
+
+    rig.fake.s().stop_clean = false;
+    rig.fake.s().device_events = GraphAudioPlaybackService::EVENT_RECORD_FAILED
+        | GraphAudioPlaybackService::EVENT_RECORD_LIMIT;
+    let mut events = Vec::new();
+    let mut stopped = None;
+    pump(&c, &rig.clock, 50, &mut |event| {
+        events.push(event);
+        stopped = c.stop();
+    });
+
+    assert_eq!(events, [MicEvent::RecordWriteFailed]);
+    assert_eq!(rig.fake.s().device_events, 0);
+    assert_eq!(rig.fake.s().input_level_calls, 0);
+    assert!(!c.is_recording());
+    let stopped = stopped.expect("the owner's stop lands");
+    assert!(!stopped.clean, "the take on disk is reported damaged");
+}
+
 #[test]
 fn an_input_that_stops_delivering_mid_take_counts_as_lost_after_the_stall_limit() {
     let rig = rig();

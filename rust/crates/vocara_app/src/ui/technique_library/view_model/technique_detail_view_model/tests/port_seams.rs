@@ -81,6 +81,52 @@ fn a_practice_take_at_its_length_limit_is_told_nothing_of_saving() {
     );
 }
 
+/// A write failing mid-take is reported by the tick, not at Stop: the take
+/// stops there, what landed is kept (the recorder's partial is readable),
+/// and the page says why it stopped and that the example may be incomplete.
+#[test]
+fn an_example_whose_write_failed_is_stopped_at_once_and_what_landed_is_kept() {
+    let s = setup();
+    let mut rig = s.loaded();
+    rig.vm.begin_media_draft();
+    rig.vm.begin_edit();
+    rig.call_settled(|vm| vm.start_example_recording());
+    assert_eq!(rig.take_answers(), [Answer::ExampleStart(None)]);
+    s.recorder.st().clean = false;
+    s.recorder.st().events.push(MicEvent::RecordWriteFailed);
+
+    rig.call(|vm| vm.tick());
+    assert!(!rig.vm.is_recording_example(), "stopped on the tick");
+    assert_eq!(
+        rig.vm.recording_notice(),
+        Some(
+            "Recording stopped: the example could not be written to disk, which may be \
+             full. What was recorded up to then is being saved."
+        )
+    );
+    rig.settle();
+    assert_eq!(
+        rig.vm.recording_notice(),
+        Some("Recording hit a disk error. The example may be incomplete.")
+    );
+    assert_eq!(rig.vm.effective_media().len(), 2, "what landed is staged");
+}
+
+#[test]
+fn a_practice_take_whose_write_failed_is_stopped_at_once() {
+    let s = setup();
+    let mut rig = s.loaded();
+    rig.call_settled(|vm| vm.start_practice());
+    s.recorder.st().clean = false;
+    s.recorder.st().events.push(MicEvent::RecordWriteFailed);
+    rig.call(|vm| vm.tick());
+    assert!(!rig.vm.is_recording_practice(), "stopped on the tick");
+    assert_eq!(
+        rig.vm.recording_notice(),
+        Some("Recording stopped: the take could not be written to disk, which may be full.")
+    );
+}
+
 #[test]
 fn a_degraded_input_is_said_and_the_take_goes_on() {
     let s = setup();

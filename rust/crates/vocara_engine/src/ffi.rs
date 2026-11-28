@@ -606,7 +606,7 @@ pub extern "C" fn ve_create() -> *mut VeEngine {
             Arc::clone(&input_nominal_frames),
             Arc::clone(&device_event),
         );
-        let writer = RecordWriter::spawn(rec_cons);
+        let writer = RecordWriter::spawn(rec_cons, Arc::clone(&device_event));
         // The host maintains the handle's renderer gate (stream up/down), so the control
         // thread can free retired graphs immediately while no stream callback runs (the
         // grace epoch never elapses without a callback advancing the block counter).
@@ -1077,9 +1077,10 @@ pub extern "C" fn ve_start_input_recording(e: *mut VeEngine, path: *const c_char
 
 /// A fresh take starts with clean per-take state: both counters belong to exactly one
 /// recording (`ve_record_dropped_frames` after stop; `ve_record_written_frames` during it),
-/// and so does the record-limit event. The fan-out re-raises that bit on every frame past
-/// the limit until the stop lands, so a take that hit it leaves it latched after its own
-/// poller claimed it — and the next take's first poll would stop it on the spot.
+/// and so do the record-limit and record-failed events. The fan-out re-raises the limit on
+/// every frame past it, and the writer the failure on every failed write, until the stop lands,
+/// so a take that hit either leaves it latched after its own poller claimed it — and the next
+/// take's first poll would stop it on the spot.
 ///
 /// An input loss or fallback pending at the arm is stale too — when no input stream is running
 /// then (`input_state`'s running bit, see `ve_input_stream_state`). It was raised for a stream
@@ -1098,7 +1099,7 @@ fn begin_take(
 ) {
     dropped.store(0, Ordering::Release);
     written.store(0, Ordering::Release);
-    let mut stale = device::EVENT_RECORD_LIMIT;
+    let mut stale = device::EVENT_RECORD_LIMIT | device::EVENT_RECORD_FAILED;
     if input_state.load(Ordering::Acquire) & 1 == 0 {
         stale |= device::EVENT_INPUT_LOST | device::EVENT_INPUT_FELL_BACK;
     }
@@ -3897,13 +3898,18 @@ mod begin_take_tests {
     fn a_new_take_drops_stale_input_loss_and_fallback_but_keeps_the_rest() {
         use crate::device::{
             EVENT_AEC_BYPASSED, EVENT_INPUT_FELL_BACK, EVENT_INPUT_LOST, EVENT_OUTPUT_LOST,
-            EVENT_OUTPUT_REROUTED, EVENT_RECORD_LIMIT,
+            EVENT_OUTPUT_REROUTED, EVENT_RECORD_FAILED, EVENT_RECORD_LIMIT,
         };
         let dropped = AtomicU64::new(7);
         let written = AtomicU64::new(9);
         let kept = EVENT_OUTPUT_LOST | EVENT_OUTPUT_REROUTED | EVENT_AEC_BYPASSED;
-        let event =
-            AtomicU32::new(EVENT_RECORD_LIMIT | EVENT_INPUT_LOST | EVENT_INPUT_FELL_BACK | kept);
+        let event = AtomicU32::new(
+            EVENT_RECORD_LIMIT
+                | EVENT_RECORD_FAILED
+                | EVENT_INPUT_LOST
+                | EVENT_INPUT_FELL_BACK
+                | kept,
+        );
         // No input stream running at the arm: generation 3, running bit clear.
         let input_state = AtomicU64::new(3 << 1);
         super::begin_take(&dropped, &written, &event, &input_state);
@@ -3917,13 +3923,18 @@ mod begin_take_tests {
     /// this take's: a stream on the system default because the chosen mic is unavailable raises
     /// INPUT_FELL_BACK only when it opens, and nothing would raise it again. Cleared here, the take
     /// recorded from the default mic with no notice, and a dead warm stream failed as "input not
-    /// delivering" instead of "disconnected". Only the record-limit bit is the last take's.
+    /// delivering" instead of "disconnected". Only the record-limit and record-failed bits are
+    /// the last take's.
     #[test]
     fn a_take_on_a_running_stream_keeps_that_streams_loss_and_fallback() {
-        use crate::device::{EVENT_INPUT_FELL_BACK, EVENT_INPUT_LOST, EVENT_RECORD_LIMIT};
+        use crate::device::{
+            EVENT_INPUT_FELL_BACK, EVENT_INPUT_LOST, EVENT_RECORD_FAILED, EVENT_RECORD_LIMIT,
+        };
         let dropped = AtomicU64::new(7);
         let written = AtomicU64::new(9);
-        let event = AtomicU32::new(EVENT_RECORD_LIMIT | EVENT_INPUT_LOST | EVENT_INPUT_FELL_BACK);
+        let event = AtomicU32::new(
+            EVENT_RECORD_LIMIT | EVENT_RECORD_FAILED | EVENT_INPUT_LOST | EVENT_INPUT_FELL_BACK,
+        );
         // Generation 3, running.
         let input_state = AtomicU64::new((3 << 1) | 1);
         super::begin_take(&dropped, &written, &event, &input_state);

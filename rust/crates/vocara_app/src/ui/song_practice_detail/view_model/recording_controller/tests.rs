@@ -1935,6 +1935,82 @@ fn an_unreadable_partial_take_is_deleted() {
     assert_eq!(s.saves, 0);
 }
 
+/// A canonical mono float WAV holding `frames` frames: what the recorder
+/// writes.
+fn recorder_wav(frames: u32) -> Vec<u8> {
+    let data = frames * 4;
+    let mut b = Vec::new();
+    b.extend_from_slice(b"RIFF");
+    b.extend_from_slice(&(36 + data).to_le_bytes());
+    b.extend_from_slice(b"WAVEfmt ");
+    b.extend_from_slice(&16u32.to_le_bytes());
+    b.extend_from_slice(&3u16.to_le_bytes());
+    b.extend_from_slice(&1u16.to_le_bytes());
+    b.extend_from_slice(&48_000u32.to_le_bytes());
+    b.extend_from_slice(&(48_000u32 * 4).to_le_bytes());
+    b.extend_from_slice(&4u16.to_le_bytes());
+    b.extend_from_slice(&32u16.to_le_bytes());
+    b.extend_from_slice(b"data");
+    b.extend_from_slice(&data.to_le_bytes());
+    b.resize(44 + data as usize, 0);
+    b
+}
+
+/// After a disk error, a partial take that is a recording but will not
+/// analyze now (over the decode's length, a read the disk failed) is NOT
+/// deleted: boot recovery holds such a file back and tries again, and the
+/// page says so instead of calling the take lost.
+#[test]
+fn a_recorded_partial_that_will_not_analyze_now_is_left_for_recovery() {
+    let f = finalizer();
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let mic = FakeMic::new(&f);
+    let mut opts = Opts::new(&f).mic(&mic);
+    opts.analyze = Some(Arc::new(|_: &str| {
+        Err("This audio is longer than 60 minutes.".to_string())
+    }));
+    let mut s = Screen::new(opts);
+    guard(&s.files.s).dir = Some(dir.path().to_path_buf());
+    mic.s().clean = false;
+    s.record_auto();
+    let path = mic.s().last_path.clone().expect("armed");
+    std::fs::write(&path, recorder_wav(4800)).expect("the partial on disk");
+    s.stop_and_wait();
+    assert!(Path::new(&path).exists(), "the only copy of the take stays");
+    assert!(guard(&s.files.s).deleted.is_empty());
+    assert_eq!(s.saves, 0);
+    assert_eq!(
+        s.host.toasts,
+        [
+            "Recording hit a disk error, and the take could not be read yet. It was kept, \
+             and Vocara will try to recover it the next time it opens."
+        ]
+    );
+}
+
+/// What will not analyze and is not even the recorder's shape is no take:
+/// deleted, and said to be lost.
+#[test]
+fn a_partial_that_is_no_recording_is_deleted() {
+    let f = finalizer();
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let mic = FakeMic::new(&f);
+    let mut opts = Opts::new(&f).mic(&mic);
+    opts.analyze = Some(Arc::new(|_: &str| Err("unreadable".to_string())));
+    let mut s = Screen::new(opts);
+    guard(&s.files.s).dir = Some(dir.path().to_path_buf());
+    mic.s().clean = false;
+    s.record_auto();
+    let path = mic.s().last_path.clone().expect("armed");
+    std::fs::write(&path, b"partial").expect("the partial on disk");
+    s.stop_and_wait();
+    assert_eq!(guard(&s.files.s).deleted, [path]);
+    assert_eq!(
+        s.host.toasts,
+        ["Recording failed. The take could not be saved."]
+    );
+}
+
 #[test]
 fn a_clean_take_that_will_not_analyze_fails_the_finalize_through_the_gate() {
     // Dart's finalize threw out of the busy gate, whose `onError` surfaced
@@ -2096,6 +2172,64 @@ fn the_record_limit_stops_the_take_and_keeps_it() {
         ["Recording reached the six-hour maximum length. The take was saved up to that point."]
     );
     assert_eq!(s.saves, 1);
+}
+
+/// A write to the take's WAV failed mid-take (the disk full): the device
+/// watch stops the take on the tick that hears of it, as at the limit, and
+/// the finalize keeps what landed and says it may be incomplete.
+#[test]
+fn a_failed_write_stops_the_take_at_once_and_keeps_what_landed() {
+    let f = finalizer();
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let graph = Graph::new();
+    let mic = FakeMic::new(&f);
+    let mut s = Screen::new(Opts::new(&f).mic(&mic).graph(&graph));
+    guard(&s.files.s).dir = Some(dir.path().to_path_buf());
+    s.record();
+    let path = mic.s().last_path.clone().expect("armed");
+    std::fs::write(&path, b"partial").expect("the partial on disk");
+    mic.s().clean = false;
+    graph.s().pending_events = GraphAudioPlaybackService::EVENT_RECORD_FAILED
+        | GraphAudioPlaybackService::EVENT_RECORD_LIMIT;
+    s.watch_tick();
+    assert!(!s.c.is_recording(), "stopped on the tick");
+    assert!(s.pump_until(|s| !s.c.is_stopping()));
+    assert_eq!(
+        s.host.toasts,
+        [
+            "Recording stopped: the take could not be written to disk, which may be full. \
+             What was recorded up to then is being saved.",
+            "Recording hit a disk error. The take may be incomplete.",
+        ]
+    );
+    assert_eq!(s.saves, 1, "what landed is kept");
+    assert_eq!(mic.s().stop_calls, 1);
+}
+
+/// A take is stopped a few seconds short of the hour the take's analysis
+/// accepts, and kept: recorded on past it, it failed its analysis at Stop,
+/// was never staged, and boot recovery failed it on every launch.
+#[test]
+fn a_take_reaching_the_length_limit_is_stopped_and_kept() {
+    let f = finalizer();
+    let graph = Graph::new();
+    let mic = FakeMic::new(&f);
+    let mut s = Screen::new(Opts::new(&f).mic(&mic).graph(&graph));
+    s.record();
+    let limit_frames = RecordingController::TAKE_LENGTH_LIMIT.as_millis() as u64 * 48;
+    graph.s().written_frames = limit_frames - 48_000;
+    s.watch_tick();
+    assert!(s.c.is_recording(), "a second short of the limit it goes on");
+    graph.s().written_frames = limit_frames;
+    s.watch_tick();
+    assert!(!s.c.is_recording(), "one tick at the limit stops it");
+    assert!(s.pump_until(|s| !s.c.is_stopping()));
+    assert_eq!(
+        s.host.toasts,
+        ["Takes can be up to 60 minutes. This one stopped at that length and was saved."]
+    );
+    assert_eq!(s.saves, 1, "the take lands");
+    assert!(RecordingController::TAKE_LENGTH_LIMIT < MAX_PLAYBACK_DURATION);
 }
 
 #[test]

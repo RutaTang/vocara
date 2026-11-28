@@ -89,7 +89,8 @@ use vocara_model::util::dart_num::{clamp_f64, round_to_i64};
 use vocara_model::util::id::new_id;
 use vocara_services::app_settings_service::AppSettingsService;
 use vocara_services::audio_edit_service::trim_wav_head_in_place;
-use vocara_services::audio_file_service::AudioFiles;
+use vocara_services::audio_file_service::{probe_wav, AudioFiles};
+use vocara_services::engine::media::MAX_PLAYBACK_DURATION;
 use vocara_services::graph_audio_playback_service::{GraphAudioPlaybackService, SyncError};
 use vocara_services::mic_permission;
 use vocara_services::mic_recording_controller::{
@@ -594,9 +595,13 @@ enum TakeRead {
     Clean(WaveformResult),
     /// The writer hit an IO error; the partial WAV is readable.
     Partial(WaveformResult),
-    /// The writer hit an IO error; the partial WAV was unreadable and is
-    /// deleted.
+    /// The writer hit an IO error; the partial WAV was gone or not a
+    /// recording, and is deleted.
     Unreadable,
+    /// The writer hit an IO error; the partial WAV is the recorder's shape
+    /// but could not be read now. It is left where it is, for boot recovery
+    /// to try again.
+    Held,
 }
 
 type ReadSlot = Arc<Mutex<Option<TakeRead>>>;
@@ -899,6 +904,17 @@ impl RecordingController {
 
     /// The device watch's period.
     pub const DEVICE_WATCH_PERIOD: Duration = Duration::from_secs(1);
+
+    /// How long a take may run before the device watch stops it: a few
+    /// seconds short of [`MAX_PLAYBACK_DURATION`], the longest audio the
+    /// take's analysis (and every later decode of it) accepts. Nothing else
+    /// stopped a take short of the engine's six-hour WAV limit, so a take past
+    /// an hour was recorded, then failed its analysis at Stop: nothing was
+    /// staged, and boot recovery, which analyzes the same way, failed it on
+    /// every launch. The margin covers a watch tick (one a second) and the
+    /// stop's tail.
+    const TAKE_LENGTH_LIMIT: Duration =
+        MAX_PLAYBACK_DURATION.saturating_sub(Duration::from_secs(3));
 
     /// The monitor meter's period.
     pub const MONITOR_METER_PERIOD: Duration = Duration::from_millis(50);
@@ -2099,6 +2115,14 @@ impl RecordingController {
                 self.end_finalize(Ok(()), host);
                 return self.finish();
             }
+            Some(TakeRead::Held) => {
+                host.toast(
+                    "Recording hit a disk error, and the take could not be read yet. \
+                     It was kept, and Vocara will try to recover it the next time it opens.",
+                );
+                self.end_finalize(Ok(()), host);
+                return self.finish();
+            }
             None => {
                 self.end_finalize(
                     Err(ActionError::Failed("the take was not read".to_string())),
@@ -2597,6 +2621,7 @@ impl RecordingController {
                 | GraphAudioPlaybackService::EVENT_AEC_BYPASSED
                 | GraphAudioPlaybackService::EVENT_INPUT_FELL_BACK
                 | GraphAudioPlaybackService::EVENT_RECORD_LIMIT
+                | GraphAudioPlaybackService::EVENT_RECORD_FAILED
                 | GraphAudioPlaybackService::EVENT_OUTPUT_REROUTED,
         );
         // A chosen output plugged back in is switched back to (the Settings
@@ -2657,16 +2682,31 @@ impl RecordingController {
             // notice.
             host.toast(AEC_BYPASSED_NOTICE);
         }
+        if events & GraphAudioPlaybackService::EVENT_RECORD_FAILED != 0 && self.is_recording() {
+            // A write to the take's WAV failed (a full disk, a revoked
+            // permission): nothing more of the take reaches the disk while
+            // the clock runs on, and the singer sang on into nothing until
+            // Stop said so. Stop now, as for the limit below: the finalize
+            // keeps what landed and says whether it could be read.
+            host.toast(RECORD_WRITE_FAILED_NOTICE);
+            self.stop_take();
+        }
         if events & GraphAudioPlaybackService::EVENT_RECORD_LIMIT != 0 && self.is_recording() {
             // The take reached the longest recording a WAV header can
             // describe, so the engine stopped feeding the writer. Finalize
             // now: the file on disk is valid and complete up to the limit, and
             // the recording clock would otherwise keep running over audio
-            // nothing is storing.
+            // nothing is storing. Unreachable while the length limit below
+            // stops every take within the hour; kept as the engine's backstop.
             host.toast(
                 "Recording reached the six-hour maximum length. \
                  The take was saved up to that point.",
             );
+            self.stop_take();
+        }
+        if self.is_recording() && self.taken_ms() >= Self::TAKE_LENGTH_LIMIT.as_millis() as f64 {
+            // See TAKE_LENGTH_LIMIT: stopped here, the take is kept whole.
+            host.toast(&take_length_limit_notice());
             self.stop_take();
         }
         if events & GraphAudioPlaybackService::EVENT_INPUT_LOST != 0 {
@@ -2773,6 +2813,19 @@ impl Drop for RecordingController {
     }
 }
 
+/// What the song page says when a write to the take's WAV failed mid-take
+/// and the take was stopped for it.
+const RECORD_WRITE_FAILED_NOTICE: &str = "Recording stopped: the take could not be written to \
+     disk, which may be full. What was recorded up to then is being saved.";
+
+/// What the song page says when a take reached the longest one it keeps.
+fn take_length_limit_notice() -> String {
+    format!(
+        "Takes can be up to {} minutes. This one stopped at that length and was saved.",
+        MAX_PLAYBACK_DURATION.as_secs() / 60
+    )
+}
+
 /// The finalize's read of the stopped take (the busy gate's action, on a
 /// worker). `Err` is the finalize throwing.
 fn read_take(
@@ -2786,8 +2839,8 @@ fn read_take(
     }
     // The engine reported an IO error during the take (disk full, write or
     // finalize failure). Be conservative: keep the take only if the partial
-    // WAV is still present and readable; otherwise delete it so no take row
-    // points at unusable audio.
+    // WAV is still present and readable, so no take row points at unusable
+    // audio.
     let partial = catch_unwind(AssertUnwindSafe(|| {
         if Path::new(path).exists() {
             analyze(path).ok()
@@ -2797,12 +2850,22 @@ fn read_take(
     }))
     .ok()
     .flatten();
-    match partial {
-        Some(analysis) => Ok(TakeRead::Partial(analysis)),
-        None => {
-            // Best-effort cleanup of the unreadable partial file.
-            let _ = catch_unwind(AssertUnwindSafe(|| files.delete_audio(path)));
-            Ok(TakeRead::Unreadable)
-        }
+    if let Some(analysis) = partial {
+        return Ok(TakeRead::Partial(analysis));
+    }
+    // Not readable now. Deleted only when it is provably no recording: gone,
+    // or not the shape the recorder writes. An analysis can fail for reasons
+    // that say nothing about the file (over the length the decode accepts, a
+    // read the disk failed for now), and boot recovery holds such a file back
+    // to try again; deleting it here threw away the only copy of a take that
+    // a later launch could have recovered.
+    let not_a_recording = matches!(probe_wav(Path::new(path)), Ok(probe)
+        if !probe.is_some_and(|p| p.is_recorder_shaped()));
+    if not_a_recording {
+        // Best-effort cleanup of the unusable partial file.
+        let _ = catch_unwind(AssertUnwindSafe(|| files.delete_audio(path)));
+        Ok(TakeRead::Unreadable)
+    } else {
+        Ok(TakeRead::Held)
     }
 }

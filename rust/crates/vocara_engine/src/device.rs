@@ -54,6 +54,13 @@ pub const EVENT_RECORD_LIMIT: u32 = 16;
 /// long as this holds (see [`OutputBinding`]): "headphones are selected" stops
 /// being evidence that the monitor is safe once playback has moved elsewhere.
 pub const EVENT_OUTPUT_REROUTED: u32 = 32;
+/// A write to the active recording's WAV failed (a full disk, a revoked permission, a volume
+/// gone): from then on the take on disk stops growing while the recording clock keeps running,
+/// and the singer would learn it only at Stop, after singing on into nothing. The writer thread
+/// raises it on every failed write of the take (as the fan-out re-raises
+/// [`EVENT_RECORD_LIMIT`]) until the stop lands, so the UI can stop the take at once, keeping
+/// what reached the disk; the take's Stop still reports it damaged. A fresh take clears it.
+pub const EVENT_RECORD_FAILED: u32 = 64;
 
 /// Latched when a stream teardown failed to synchronously stop its callback (a cpal `pause()`
 /// error, or `AudioOutputUnitStop` failing in `vpio`). The renderer gate's `false` state means
@@ -111,6 +118,13 @@ impl Drop for DeviceHandle {
 
 /// Engine render sub-chunk for the output-boundary resampler (matches the graph's max block).
 const RESAMPLE_BLOCK: usize = 1024;
+
+/// What the output-boundary resampler renders in multiples of: it renders only the engine frames
+/// the callback still needs, rounded up to this, never a whole [`RESAMPLE_BLOCK`] at a time.
+/// Rendering a whole block whenever the FIFO ran short made every few small device callbacks
+/// (256 frames at 44.1 kHz: a 5.8 ms deadline) render 21 ms of graph audio, a spike that missed
+/// the deadline under load where the 48 kHz path, rendering just its buffer, did not.
+const RESAMPLE_QUANTUM: usize = 64;
 
 /// A discoverable device, flattened for the FFI boundary.
 pub struct DeviceDesc {
@@ -595,15 +609,19 @@ impl OutResampler {
         self.consumed_floor = 0;
     }
 
-    /// Renders one engine block into the FIFO. `false` = the cell denied this callback, and the
-    /// FIFO was NOT extended — the caller must abandon the whole callback rather than pushing
-    /// silence, because the consumed cursor is advanced from FIFO read progress: frames the
-    /// processor never rendered would push `consumed_total` past `rendered_total` and jump the
-    /// reported playhead.
+    /// Renders the `wanted` engine frames the FIFO lacks into it, rounded up to
+    /// [`RESAMPLE_QUANTUM`] and at most one engine block (see there). `false` = the cell denied
+    /// this callback, and the FIFO was NOT extended — the caller must abandon the whole callback
+    /// rather than pushing silence, because the consumed cursor is advanced from FIFO read
+    /// progress: frames the processor never rendered would push `consumed_total` past
+    /// `rendered_total` and jump the reported playhead.
     #[inline]
     #[must_use]
-    fn render_block(&mut self) -> bool {
-        let frames = self.max_block;
+    fn render_block(&mut self, wanted: usize) -> bool {
+        let frames = wanted
+            .div_ceil(RESAMPLE_QUANTUM)
+            .saturating_mul(RESAMPLE_QUANTUM)
+            .clamp(1, self.max_block);
         let n = frames * CHANNELS;
         if !self
             .rt
@@ -667,7 +685,7 @@ impl OutResampler {
             // The FIFO is sized in `new` so reaching `need_len` never reallocates.
             debug_assert!(need_len + self.max_block <= self.fifo.capacity());
             while self.fifo.len() < need_len {
-                if !self.render_block() {
+                if !self.render_block(need_len - self.fifo.len()) {
                     // Denied mid-callback (retired, or a zombie is still inside). Frames already
                     // written are real; the rest is silence, and nothing further is advanced.
                     out[done * CHANNELS..out_frames * CHANNELS].fill(0.0);
@@ -705,6 +723,32 @@ impl OutResampler {
     }
 }
 
+/// Whether a stream error leaves the stream running as it was, so nothing needs rebuilding:
+/// a missed deadline ([`cpal::ErrorKind::Xrun`]: on macOS cpal reports every
+/// `kAudioDeviceProcessorOverload` through the error callback), or a refused real-time
+/// promotion (audio still plays). Read as a lost device, one overload rebuilt the stream, an
+/// audible gap, and under sustained load it did so about once a second.
+fn stream_error_is_transient(kind: cpal::ErrorKind) -> bool {
+    matches!(
+        kind,
+        cpal::ErrorKind::Xrun | cpal::ErrorKind::RealtimeDenied
+    )
+}
+
+/// The device events an output stream's error raises: none for one that leaves the stream
+/// playing, [`EVENT_OUTPUT_LOST`] (the host's poll rebuilds the stream) for the rest.
+fn output_error_events(kind: cpal::ErrorKind) -> u32 {
+    // A stream following the system default reports a default change as DeviceChanged:
+    // cpal already rerouted it and documents that it stays active with no rebuild needed.
+    // Flagging it as lost made the host rebuild a working stream (an audible gap) and the
+    // stale binding read as a reroute, hard-muting the monitor behind a false warning.
+    if kind == cpal::ErrorKind::DeviceChanged || stream_error_is_transient(kind) {
+        0
+    } else {
+        EVENT_OUTPUT_LOST
+    }
+}
+
 /// Build + start an f32 output stream whose callback renders the shared `rt` at `ENGINE_SR`,
 /// resampling to the device's native rate (`config.sample_rate`) at the boundary. At 48 kHz the
 /// engine renders directly into the cpal buffer (identity, zero overhead). A stream error
@@ -725,15 +769,11 @@ fn build_stream(
     // render counter — sync before any callback can run.
     rt.transport().begin_output_stream();
     let err_cb = move |err: cpal::Error| {
-        // A stream following the system default reports a default change as DeviceChanged:
-        // cpal already rerouted it and documents that it stays active with no rebuild needed.
-        // Flagging it as lost made the host rebuild a working stream (an audible gap) and the
-        // stale binding read as a reroute, hard-muting the monitor behind a false warning.
-        if err.kind() == cpal::ErrorKind::DeviceChanged {
-            return;
+        // No logging/alloc on the error path: flag a loss for the host's device-event poll.
+        let lost = output_error_events(err.kind());
+        if lost != 0 {
+            event.fetch_or(lost, Ordering::Release);
         }
-        // No logging/alloc on the error path: flag the loss for the host's device-event poll.
-        event.fetch_or(EVENT_OUTPUT_LOST, Ordering::Release);
     };
     // Retire every older output callback before this stream can produce a sample: a teardown
     // that failed to stop its predecessor no longer means two callbacks racing the cell.
@@ -3075,7 +3115,8 @@ mod drift_tests {
 
 /// Background WAV writer: owns the recording ring consumer for the engine's lifetime and writes
 /// frames to a file only while a recording is active. Never touches the audio thread. Mono (the
-/// vocal mic's left channel) at `ENGINE_SR`.
+/// vocal mic's left channel) at `ENGINE_SR`. A write failing mid-take raises
+/// [`EVENT_RECORD_FAILED`] in the engine's device-event word as it happens, besides the Stop ack.
 pub struct RecordWriter {
     tx: mpsc::Sender<WriterCmd>,
     join: Option<JoinHandle<()>>,
@@ -3092,11 +3133,13 @@ enum WriterCmd {
 }
 
 impl RecordWriter {
-    pub fn spawn(rec: Consumer<[Smp; CHANNELS]>) -> RecordWriter {
+    /// `event` is the engine's device-event word, where a failed write raises
+    /// [`EVENT_RECORD_FAILED`].
+    pub fn spawn(rec: Consumer<[Smp; CHANNELS]>, event: Arc<AtomicU32>) -> RecordWriter {
         let (tx, rx) = mpsc::channel::<WriterCmd>();
         let join = std::thread::Builder::new()
             .name("vocara-rec-writer".to_string())
-            .spawn(move || writer_run(rec, rx))
+            .spawn(move || writer_run(rec, rx, event))
             .ok();
         RecordWriter { tx, join }
     }
@@ -3137,12 +3180,21 @@ impl Drop for RecordWriter {
     }
 }
 
-fn writer_run(mut rec: Consumer<[Smp; CHANNELS]>, rx: mpsc::Receiver<WriterCmd>) {
+fn writer_run(
+    mut rec: Consumer<[Smp; CHANNELS]>,
+    rx: mpsc::Receiver<WriterCmd>,
+    event: Arc<AtomicU32>,
+) {
     let mut wav: Option<crate::wav::WavStream> = None;
     // Sticky IO-error flag for the current recording: set on any create/write/finalize
     // failure and reported through Stop's ack, so the caller learns the take is damaged
     // instead of the UI silently reporting success (disk full, revoked permission).
     let mut failed = false;
+    // A failure while the take is still running is also raised at once, so the UI stops the
+    // take instead of recording on into nothing until the singer presses Stop.
+    let raise_failed = || {
+        event.fetch_or(EVENT_RECORD_FAILED, Ordering::Release);
+    };
     // A command the idle wait below already took off the channel, applied first.
     let mut next: Option<WriterCmd> = None;
     loop {
@@ -3234,13 +3286,15 @@ fn writer_run(mut rec: Consumer<[Smp; CHANNELS]>, rx: mpsc::Receiver<WriterCmd>)
             }
         }
         // Drain available frames; write the left channel (mono) when recording. A write
-        // failure sets the sticky flag (reported at Stop) but keeps draining, so the ring
-        // never backs up and any samples that still fit on disk are kept.
+        // failure sets the sticky flag (reported at Stop) and raises EVENT_RECORD_FAILED, but
+        // keeps draining, so the ring never backs up and any samples that still fit on disk
+        // are kept.
         let mut wrote = false;
         while let Some(f) = rec.pop() {
             if let Some(w) = wav.as_mut() {
                 if w.write_sample(f[0]).is_err() {
                     failed = true;
+                    raise_failed();
                 }
                 wrote = true;
             }
@@ -3257,6 +3311,7 @@ fn writer_run(mut rec: Consumer<[Smp; CHANNELS]>, rx: mpsc::Receiver<WriterCmd>)
             if let Some(w) = wav.as_mut() {
                 if w.sync_header_if_due().is_err() {
                     failed = true;
+                    raise_failed();
                 }
             }
         } else if wav.is_none() {
@@ -3285,9 +3340,11 @@ fn build_input_stream(
     epoch: u64,
     event: Arc<AtomicU32>,
 ) -> Result<DeviceHandle, String> {
-    let err_cb = move |err| {
-        let _ = err;
-        event.fetch_or(EVENT_INPUT_LOST, Ordering::Release);
+    let err_cb = move |err: cpal::Error| {
+        // A missed deadline leaves the stream running (see `stream_error_is_transient`).
+        if !stream_error_is_transient(err.kind()) {
+            event.fetch_or(EVENT_INPUT_LOST, Ordering::Release);
+        }
     };
     // `epoch` is the generation `reconfigure` minted with this stream's format: every older
     // callback is already retired, and a denied feed drops its samples rather than racing a
@@ -5493,6 +5550,40 @@ mod decode_tests {
 }
 
 #[cfg(test)]
+mod stream_error_tests {
+    //! Which cpal stream errors mean a lost device: the host rebuilds the stream on one, an
+    //! audible gap, so an error that leaves the stream playing must not raise it.
+
+    use super::{output_error_events, stream_error_is_transient, EVENT_OUTPUT_LOST};
+    use cpal::ErrorKind;
+
+    #[test]
+    fn a_missed_deadline_is_not_a_lost_device() {
+        for kind in [ErrorKind::Xrun, ErrorKind::RealtimeDenied] {
+            assert!(stream_error_is_transient(kind), "{kind:?}");
+            assert_eq!(output_error_events(kind), 0, "{kind:?}");
+        }
+        // cpal rerouted a default-following stream: it plays on.
+        assert_eq!(output_error_events(ErrorKind::DeviceChanged), 0);
+        assert!(!stream_error_is_transient(ErrorKind::DeviceChanged));
+    }
+
+    #[test]
+    fn a_stream_that_stopped_is_a_lost_device() {
+        for kind in [
+            ErrorKind::DeviceNotAvailable,
+            ErrorKind::StreamInvalidated,
+            ErrorKind::BackendError,
+            ErrorKind::DeviceBusy,
+            ErrorKind::Other,
+        ] {
+            assert!(!stream_error_is_transient(kind), "{kind:?}");
+            assert_eq!(output_error_events(kind), EVENT_OUTPUT_LOST, "{kind:?}");
+        }
+    }
+}
+
+#[cfg(test)]
 mod record_writer_tests {
     //! The recording writer's IO-failure reporting: `start` must ack file creation and
     //! `stop` must report a clean vs. damaged/missing take (no device needed — the writer
@@ -5513,7 +5604,7 @@ mod record_writer_tests {
     #[test]
     fn start_fails_when_file_cannot_be_created() {
         let (_prod, cons) = spsc::<[Smp; CHANNELS]>(64);
-        let w = RecordWriter::spawn(cons);
+        let w = RecordWriter::spawn(cons, Default::default());
         // A path under a directory that does not exist cannot be created.
         assert!(
             !w.start("/nonexistent-vocara-dir/take.wav"),
@@ -5529,7 +5620,7 @@ mod record_writer_tests {
     #[test]
     fn a_failed_start_does_not_poison_the_next_take() {
         let (mut prod, cons) = spsc::<[Smp; CHANNELS]>(1024);
-        let w = RecordWriter::spawn(cons);
+        let w = RecordWriter::spawn(cons, Default::default());
         // The failed create is fully reported by its own ack; the sticky flag must
         // describe only takes, so the NEXT take starts with a clean slate.
         assert!(!w.start("/nonexistent-vocara-dir/take.wav"));
@@ -5548,7 +5639,7 @@ mod record_writer_tests {
     #[test]
     fn clean_recording_writes_all_frames_and_reports_success() {
         let (mut prod, cons) = spsc::<[Smp; CHANNELS]>(1024);
-        let w = RecordWriter::spawn(cons);
+        let w = RecordWriter::spawn(cons, Default::default());
         let path = temp_wav("clean");
         assert!(
             w.start(path.to_str().unwrap()),
@@ -5578,7 +5669,7 @@ mod record_writer_tests {
     #[test]
     fn failure_flag_resets_for_the_next_recording() {
         let (mut prod, cons) = spsc::<[Smp; CHANNELS]>(64);
-        let w = RecordWriter::spawn(cons);
+        let w = RecordWriter::spawn(cons, Default::default());
         assert!(!w.start("/nonexistent-vocara-dir/take.wav"));
         assert!(!w.stop());
         // The sticky error from the lost take must not bleed into a new, healthy one.
@@ -5600,7 +5691,7 @@ mod record_writer_tests {
     #[test]
     fn an_idle_writer_parks_instead_of_polling() {
         let (mut prod, cons) = spsc::<[Smp; CHANNELS]>(64);
-        let w = RecordWriter::spawn(cons);
+        let w = RecordWriter::spawn(cons, Default::default());
         // The writer drains the ring once on its way to the idle wait: a thread first scheduled
         // after the pushes below drained them there, correctly, and failed the test. A command
         // round-trip first (a Stop with no take only acks): once it is answered the thread is
@@ -5633,7 +5724,7 @@ mod record_writer_tests {
         use super::{writer_run, WriterCmd};
         let (mut prod, cons) = spsc::<[Smp; CHANNELS]>(1024);
         let (tx, rx) = std::sync::mpsc::channel();
-        let join = std::thread::spawn(move || writer_run(cons, rx));
+        let join = std::thread::spawn(move || writer_run(cons, rx, Default::default()));
         let path = temp_wav("shutdown_tail");
         let (ack, ack_rx) = std::sync::mpsc::channel();
         tx.send(WriterCmd::Start(path.to_str().unwrap().to_string(), ack))
@@ -5670,7 +5761,7 @@ mod record_writer_tests {
             assert!(prod.push([0.5, 0.0])); // stale frames from the previous take
         }
         let (tx, rx) = std::sync::mpsc::channel();
-        let join = std::thread::spawn(move || writer_run(cons, rx));
+        let join = std::thread::spawn(move || writer_run(cons, rx, Default::default()));
         let path = temp_wav("stale_start");
         let (ack, ack_rx) = std::sync::mpsc::channel();
         tx.send(WriterCmd::Start(path.to_str().unwrap().to_string(), ack))
@@ -5727,7 +5818,7 @@ mod record_writer_tests {
         use super::{writer_run, WriterCmd};
         let (mut prod, cons) = spsc::<[Smp; CHANNELS]>(64);
         let (tx, rx) = std::sync::mpsc::channel();
-        let join = std::thread::spawn(move || writer_run(cons, rx));
+        let join = std::thread::spawn(move || writer_run(cons, rx, Default::default()));
         // Take A's file creates cleanly but fails its FIRST data write (the injected
         // stand-in for a disk filling mid-take).
         let path_a = temp_wav(&format!("sticky_a_{}", crate::wav::TEST_FAIL_FIRST_WRITE));
@@ -5762,10 +5853,55 @@ mod record_writer_tests {
         let _ = std::fs::remove_file(&path_b);
     }
 
+    /// A write failing mid-take (the disk filling up) is raised as EVENT_RECORD_FAILED while
+    /// the take still runs, so the UI can stop it then rather than learn it at Stop, after the
+    /// singer sang on into nothing; the Stop still reports the take damaged. A healthy take
+    /// raises nothing.
+    #[test]
+    fn a_write_failing_mid_take_is_raised_at_once() {
+        use super::EVENT_RECORD_FAILED;
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc;
+        let (mut prod, cons) = spsc::<[Smp; CHANNELS]>(64);
+        let event = Arc::new(AtomicU32::new(0));
+        let w = RecordWriter::spawn(cons, Arc::clone(&event));
+
+        let healthy = temp_wav("raised_healthy");
+        assert!(w.start(healthy.to_str().unwrap()));
+        assert!(prod.push([0.5, 0.0]));
+        while prod.free() != prod.capacity() {
+            std::thread::yield_now();
+        }
+        assert!(w.stop());
+        assert_eq!(
+            event.load(Ordering::Acquire),
+            0,
+            "a healthy take raises nothing"
+        );
+
+        let failing = temp_wav(&format!("raised_{}", crate::wav::TEST_FAIL_FIRST_WRITE));
+        assert!(
+            w.start(failing.to_str().unwrap()),
+            "the file itself creates"
+        );
+        assert!(prod.push([0.5, 0.0]));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while event.load(Ordering::Acquire) & EVENT_RECORD_FAILED == 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the failed write was never raised"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(!w.stop(), "the Stop still reports the take damaged");
+        let _ = std::fs::remove_file(&healthy);
+        let _ = std::fs::remove_file(&failing);
+    }
+
     #[test]
     fn start_while_recording_finalizes_the_previous_take_and_starts_clean() {
         let (mut prod, cons) = spsc::<[Smp; CHANNELS]>(1024);
-        let w = RecordWriter::spawn(cons);
+        let w = RecordWriter::spawn(cons, Default::default());
         let p1 = temp_wav("restart_a");
         let p2 = temp_wav("restart_b");
         assert!(w.start(p1.to_str().unwrap()));
@@ -6297,12 +6433,53 @@ mod out_resampler_tests {
         (h, res)
     }
 
+    /// A small device buffer renders about what it plays, never a whole engine block when the
+    /// FIFO runs a few frames short: 256 frames at 44.1 kHz (a 5.8 ms deadline) used to render
+    /// 1024 engine frames (21 ms of graph audio) every few callbacks.
+    #[test]
+    fn a_small_callback_renders_only_what_it_still_needs() {
+        use super::{RESAMPLE_QUANTUM, SINC_HALF};
+        let desc = GraphDesc {
+            nodes: vec![NodeEntry::new(1, Box::new(MasterNode::unity()))],
+            edges: Vec::<Edge>::new(),
+            master: 1,
+        };
+        let g = desc.compile(ENGINE_SR, 1024).unwrap();
+        let (_mic_prod, mic_cons) = spsc::<[Smp; CHANNELS]>(256);
+        let (h, rt) = spawn(g, HashMap::new(), mic_cons, 256);
+        let cell = RtCell::new(rt);
+        let mut res = OutResampler::new(44_100.0, 1024, Arc::clone(&cell), cell.claim());
+        h.play();
+        let out_frames = 256;
+        let bound = (out_frames as f64 * res.step).ceil() as u64
+            + 2 * SINC_HALF as u64
+            + RESAMPLE_QUANTUM as u64;
+        let mut out = vec![0.0; out_frames * CHANNELS];
+        let mut last = cell.transport().rendered_frames_for_test();
+        for i in 0..200 {
+            res.process(&mut out, out_frames);
+            let rendered = cell.transport().rendered_frames_for_test();
+            assert!(
+                rendered - last <= bound,
+                "callback {i} rendered {} engine frames (bound {bound})",
+                rendered - last
+            );
+            last = rendered;
+        }
+        // ...and over the run it rendered what it played, give or take the FIFO.
+        let played = (200.0 * out_frames as f64 * res.step) as u64;
+        assert!(
+            last >= played && last <= played + bound,
+            "{last} vs {played}"
+        );
+    }
+
     #[test]
     fn reported_playhead_subtracts_the_unplayed_fifo_backlog() {
         let (h, mut res) = ramp_engine();
         h.play();
         // 441 device frames consume exactly 480 engine frames; rendering happens in whole
-        // 128-frame blocks, so the raw render clock lands PAST 480 with the excess parked
+        // 64-frame quanta, so the raw render clock lands PAST 480 with the excess parked
         // in the FIFO. The reported playhead must reflect the consumed 480, not the render.
         let mut out = vec![0.0; 441 * CHANNELS];
         res.process(&mut out, 441);

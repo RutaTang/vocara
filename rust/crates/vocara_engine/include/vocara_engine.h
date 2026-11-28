@@ -68,7 +68,8 @@ size_t ve_actual_output_device(VeEngine *e, char *buf, size_t cap);
  * bit 8 = selected input unavailable, fell back to the system default,
  * bit 16 = the take reached the longest recording a WAV header can describe,
  * bit 32 = playback is not on the selected output device — the monitor is
- * muted while that holds).
+ * muted while that holds, bit 64 = a write to the recording's WAV failed: stop
+ * the take, which keeps what reached the disk).
  * Returns the claimed bits; bits outside the mask stay pending for their own
  * consumer. 0 = none. */
 uint32_t ve_poll_device_event(VeEngine *e, uint32_t mask);

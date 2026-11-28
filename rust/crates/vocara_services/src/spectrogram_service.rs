@@ -141,7 +141,8 @@ fn u32_at(b: &[u8], o: usize) -> u32 {
 ///  * the file is not RIFF/WAVE — the WAV-only decoder would fail AFTER the
 ///    whole file loaded;
 ///  * no fmt/data chunk can be found — same reasoning;
-///  * the declared PCM duration exceeds the analysis cap;
+///  * the declared PCM duration exceeds the analysis cap (a streamed WAV's
+///    0xFFFFFFFF, no size, declares the rest of the file);
 ///  * the file cannot be read.
 ///
 /// Otherwise returns where the PCM lives and how many whole frames of it to
@@ -230,7 +231,17 @@ fn admit(path: &Path) -> io::Result<Option<WavAdmission>> {
             if sample_rate == 0 || block_align == 0 || format == 0 {
                 return Ok(None);
             }
-            let size = u64::from(size);
+            // 0xFFFFFFFF declares no size: a WAV written as a stream (to a
+            // pipe, or by a recorder that never came back to patch its
+            // header) says "to the end of the file" with it. Judged as
+            // declared, every such file read as hours long and was refused
+            // however short it was, so it is the file's own length the
+            // ceilings below judge for it.
+            let size = if size == u32::MAX {
+                raf.metadata()?.len().saturating_sub(offset + 8)
+            } else {
+                u64::from(size)
+            };
             // Ceilings judge the DECLARED size first — the whole point of the
             // gate is refusing a big file from its header, before any
             // physical size is consulted.
@@ -803,6 +814,25 @@ mod tests {
         // it; the gate must trust the declared data length instead.
         let (_dir, f) = write(&wav_header(44100, 2, OVER_CAP, false, false));
         assert_eq!(admit_for_analysis(&f), None);
+    }
+
+    /// A streamed WAV's data size is 0xFFFFFFFF, "to the end of the file":
+    /// a short one is admitted for what it holds, a long one still refused.
+    #[test]
+    fn a_streamed_wav_without_a_data_size_is_judged_by_its_length() {
+        let header = wav_header(44100, 2, u32::MAX, false, false);
+        let (_dir, f) = write(&cat(&header, &zeros(UNDER_CAP as usize)));
+        assert_eq!(
+            admit_for_analysis(&f).map(|a| a.frames),
+            Some(UNDER_CAP as usize / 2)
+        );
+
+        let (_long_dir, long) = write(&header);
+        let file = fs::OpenOptions::new().write(true).open(&long).unwrap();
+        file.set_len(header.len() as u64 + u64::from(OVER_CAP))
+            .unwrap();
+        drop(file);
+        assert_eq!(admit_for_analysis(&long), None);
     }
 
     #[test]

@@ -37,7 +37,7 @@
 use std::borrow::Cow;
 use std::f64::consts::LN_10;
 use std::ops::Deref;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use vocara_model::models::voice_metrics::{finalize_ltas, register_score, Ltas, RegisterOptions};
 use vocara_model::util::dart_num::{clamp_f64, compare_f64, floor_to_i64, pow_f64};
@@ -137,6 +137,12 @@ pub struct MonitorState {
 struct LiveTract {
     body: BodyMix,
     tracker: Option<VocalTractTracker>,
+    /// The codebook the worker built for `body`, kept here until the next frame takes it. The
+    /// process's codebook cache keeps only a few bodies: looked up there alone, one evicted
+    /// between the build and the first frame (other bodies built meanwhile, say by an offline
+    /// analysis) was never found again, nor built again, and the view read "preparing" for
+    /// good.
+    built: Arc<OnceLock<Arc<Codebook>>>,
 }
 
 impl MonitorState {
@@ -470,7 +476,12 @@ impl MonitorState {
         self.analyzer.add_samples(&pcm, |f| {
             if let Some(t) = &mut self.tract {
                 if t.tracker.is_none() {
-                    t.tracker = Codebook::cached(t.body).map(VocalTractTracker::with_codebook);
+                    t.tracker = t
+                        .built
+                        .get()
+                        .cloned()
+                        .or_else(|| Codebook::cached(t.body))
+                        .map(VocalTractTracker::with_codebook);
                 }
                 if let Some(tracker) = &mut t.tracker {
                     tracker.push_live(&f, frame_rate);
@@ -672,19 +683,24 @@ impl MonitorService {
         }
         let cached = Codebook::cached(body);
         let ready = cached.is_some();
+        let built = Arc::new(OnceLock::new());
         s.tract = Some(LiveTract {
             body,
             tracker: cached.map(VocalTractTracker::with_codebook),
+            built: Arc::clone(&built),
         });
         s.notify();
         drop(s);
         if !ready {
-            let built = std::thread::Builder::new()
+            let slot = Arc::clone(&built);
+            let spawned = std::thread::Builder::new()
                 .name("vocal-tract-codebook".into())
-                .spawn(move || Codebook::prewarm(body));
-            if built.is_err() {
+                .spawn(move || {
+                    let _ = slot.set(Codebook::shared(body));
+                });
+            if spawned.is_err() {
                 // no thread to build it on: build it here rather than never
-                Codebook::prewarm(body);
+                let _ = built.set(Codebook::shared(body));
             }
         }
     }
@@ -1105,5 +1121,30 @@ mod tests {
         monitor.set_vocal_tract(None);
         assert!(monitor.read().vocal_tract().is_none());
         assert_eq!(monitor.read().vocal_tract_body(), None);
+    }
+
+    /// The codebook built for the live vocal tract is the one its first frame takes, whether
+    /// or not the process's few-body cache still holds it: one evicted in between (other
+    /// bodies built meanwhile) left the view "preparing" for good.
+    #[test]
+    fn the_codebook_built_for_the_live_tract_is_used_even_once_evicted() {
+        use crate::audio_dsp::tests::support::vowel_at;
+        // a body nothing else in this process builds, its codebook built outside the cache:
+        // as one evicted from it after the worker built it
+        let body = BodyMix::new(0.37, 0.21);
+        let codebook = Arc::new(Codebook::build(body));
+        assert!(Codebook::cached(body).is_none(), "not in the cache");
+        let monitor = MonitorService::default();
+        monitor.start();
+        monitor.lock().tract = Some(LiveTract {
+            body,
+            tracker: None,
+            built: Arc::new(OnceLock::from(codebook)),
+        });
+        assert!(monitor.read().vocal_tract_preparing());
+        monitor.feed_samples(&vowel_at(700.0, 1200.0, 2600.0, 200.0));
+        let s = monitor.read();
+        assert!(!s.vocal_tract_preparing(), "the built codebook was taken");
+        assert!(s.vocal_tract().expect("estimated").estimate.fitted);
     }
 }

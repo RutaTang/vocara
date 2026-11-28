@@ -38,7 +38,8 @@
 //!  * device-loss handling: with [`MicRecordingOptions::watch_input_device`]
 //!    (Dart's non-null `onInputDeviceLost`) the level tick polls the engine's
 //!    input events and reports [`MicEvent::InputDeviceLost`],
-//!    [`MicEvent::RecordLimitReached`] and the non-fatal
+//!    [`MicEvent::RecordLimitReached`], [`MicEvent::RecordWriteFailed`] and
+//!    the non-fatal
 //!    [`MicEvent::DeviceNotice`]s; an owner with its own device watch leaves
 //!    it off — the poll claims only the masked bits, so two watchers can
 //!    coexist;
@@ -340,6 +341,13 @@ pub enum MicEvent {
     /// `onRecordLimitReached`).
     RecordLimitReached,
 
+    /// A write to the take's WAV failed (a full disk, a revoked permission):
+    /// the owner should stop the take now, which KEEPS what reached the disk,
+    /// and say the take was cut short. Without it the singer sang on into
+    /// nothing and learned only at Stop. Only with
+    /// [`MicRecordingOptions::watch_input_device`].
+    RecordWriteFailed,
+
     /// A user-facing message: the input degraded without being lost (echo
     /// cancellation unavailable, so playback can bleed into the take; or the
     /// selected microphone fell back to the system default). Only with
@@ -387,9 +395,10 @@ pub struct MicRecordingOptions {
     pub on_quit_finalize: Option<QuitFinalize>,
 
     /// Dart's non-null `onInputDeviceLost`: the level tick polls the
-    /// engine's input-lost, echo-cancellation, fallback and record-limit
-    /// events and reports them ([`MicEvent::InputDeviceLost`],
-    /// [`MicEvent::RecordLimitReached`], [`MicEvent::DeviceNotice`]), and
+    /// engine's input-lost, echo-cancellation, fallback, record-limit and
+    /// record-write-failure events and reports them
+    /// ([`MicEvent::InputDeviceLost`], [`MicEvent::RecordLimitReached`],
+    /// [`MicEvent::RecordWriteFailed`], [`MicEvent::DeviceNotice`]), and
     /// counts a delivering input that stalls as lost. When false the
     /// controller does not poll device events at all (an owner with its own
     /// device watch keeps polling the input bits itself; the poll claims
@@ -478,7 +487,8 @@ const READY_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const WATCHED_EVENTS: u32 = GraphAudioPlaybackService::EVENT_INPUT_LOST
     | GraphAudioPlaybackService::EVENT_AEC_BYPASSED
     | GraphAudioPlaybackService::EVENT_INPUT_FELL_BACK
-    | GraphAudioPlaybackService::EVENT_RECORD_LIMIT;
+    | GraphAudioPlaybackService::EVENT_RECORD_LIMIT
+    | GraphAudioPlaybackService::EVENT_RECORD_FAILED;
 
 /// The shared mic-recording core (see the module doc).
 ///
@@ -756,6 +766,12 @@ impl Inner {
             }
             if polled & GraphAudioPlaybackService::EVENT_INPUT_FELL_BACK != 0 {
                 events.push(MicEvent::DeviceNotice(INPUT_FELL_BACK_NOTICE));
+            }
+            // A failed write first: a take that also reached the limit was
+            // not saved up to it.
+            if polled & GraphAudioPlaybackService::EVENT_RECORD_FAILED != 0 {
+                events.push(MicEvent::RecordWriteFailed);
+                return;
             }
             if polled & GraphAudioPlaybackService::EVENT_RECORD_LIMIT != 0 {
                 events.push(MicEvent::RecordLimitReached);

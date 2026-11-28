@@ -1213,8 +1213,9 @@ fn the_input_word_helpers_split_the_packed_words() {
             GraphAudioPlaybackService::EVENT_INPUT_FELL_BACK,
             GraphAudioPlaybackService::EVENT_RECORD_LIMIT,
             GraphAudioPlaybackService::EVENT_OUTPUT_REROUTED,
+            GraphAudioPlaybackService::EVENT_RECORD_FAILED,
         ],
-        [1, 2, 4, 8, 16, 32]
+        [1, 2, 4, 8, 16, 32, 64]
     );
 }
 

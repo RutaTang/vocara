@@ -80,13 +80,20 @@ contains() {
 }
 
 # The slice's minimum macOS: LC_BUILD_VERSION's minos, or for an old-style
-# binary LC_VERSION_MIN_MACOSX's version.
+# binary LC_VERSION_MIN_MACOSX's version. Fails when otool does.
+#
+# otool's output is read whole first, never piped: awk leaves at its first
+# match, and an otool still writing into the pipe then died of SIGPIPE, which
+# pipefail made the pipeline's status and set -e the end of the script,
+# without a word of why.
 minimum() {
-  otool -arch "$1" -l "$BIN" | awk '
+  local commands
+  commands="$(otool -arch "$1" -l "$BIN")" || return 1
+  awk '
     $1 == "cmd" { cmd = $2 }
     cmd == "LC_BUILD_VERSION" && $1 == "minos" { print $2; exit }
     cmd == "LC_VERSION_MIN_MACOSX" && $1 == "version" { print $2; exit }
-  '
+  ' <<<"$commands"
 }
 
 ARCHS="$(lipo -archs "$BIN")"
@@ -102,8 +109,9 @@ for arch in x86_64 arm64; do
   esac
   want=10.15
   [[ "$arch" == arm64 ]] && want=11.0
-  got="$(minimum "$arch")"
-  if [[ "$got" == "$want" ]]; then
+  if ! got="$(minimum "$arch")"; then
+    fail "otool could not read the $arch slice's load commands"
+  elif [[ "$got" == "$want" ]]; then
     echo "$arch: minimum macOS $got"
   else
     fail "$arch slice is built for macOS ${got:-?}, not $want"

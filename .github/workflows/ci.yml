@@ -128,7 +128,8 @@ jobs:
   # for its owner: the release workflow's run of the same check, on the
   # notarized build (the same team), is the one that proves the move on a
   # real update. A failure here that the check puts down to that protection
-  # is the signature, not the move.
+  # is the signature, not the move: the check exits 3 for it alone
+  # (launch-check.sh's APP_DATA_REFUSED), and only that status is tolerated.
   release-launch:
     name: Release launch and update (manual)
     if: github.event_name == 'workflow_dispatch'
@@ -139,18 +140,29 @@ jobs:
         with:
           toolchain: "1.99.1"
           targets: aarch64-apple-darwin
+      # Assigned first: a substitution inside echo's argument took echo's
+      # status, so a failed build passed with an empty path.
       - name: Build the prod release bundle, signed ad hoc
         id: bundle
-        run: echo "app=$(rust/packaging/macos/bundle.sh --flavor prod)" >> "$GITHUB_OUTPUT"
+        run: |
+          APP="$(rust/packaging/macos/bundle.sh --flavor prod)"
+          echo "app=$APP" >> "$GITHUB_OUTPUT"
       - name: Launch it and check it boots unsandboxed, under the hardened runtime
         run: .github/scripts/launch-check.sh "${{ steps.bundle.outputs.app }}"
       # An update starts from no library outside the container: the fresh
       # install's goes first.
-      # Reported, not gating: see above. The release workflow runs the same
-      # check on the notarized build, and there it gates publishing.
+      # Gating, except for the App Data protection's refusal of this ad-hoc
+      # build (status 3, see above), which says nothing about the move: the
+      # release workflow runs the same check on the notarized build, and
+      # there every failure gates publishing. Any other failure fails here.
       - name: Update to it from the last sandboxed release and check the library moved
-        continue-on-error: true
         run: |
           set -euo pipefail
           rm -rf "$HOME/Library/Application Support/com.rutatang.vocara"
-          .github/scripts/launch-check.sh --update "${{ steps.bundle.outputs.app }}"
+          status=0
+          .github/scripts/launch-check.sh --update "${{ steps.bundle.outputs.app }}" || status=$?
+          if [ "$status" -eq 3 ]; then
+            echo "Not proven here: macOS kept this ad-hoc build out of the container (see the warning above)."
+            exit 0
+          fi
+          exit "$status"

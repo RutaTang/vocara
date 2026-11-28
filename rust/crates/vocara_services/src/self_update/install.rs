@@ -558,6 +558,13 @@ pub struct SwapPlan<'a> {
 /// output of every step that can fail the swap reaches the log, so a failed
 /// update's log says WHY (a full disk, a permission, a locked file): the
 /// helper has no terminal, and Vocara has already quit.
+///
+/// A failed copy's half is removed before the backup goes back, and what
+/// `rm` could not remove of it (a locked file) is moved aside first: `mv`
+/// onto a directory that still exists moves INTO it, which put the backup
+/// inside the half copy and reported the previous version restored. If the
+/// half cannot even be moved aside, the swap says the previous version was
+/// not restored, and where it is.
 pub fn swap_script(plan: &SwapPlan<'_>) -> OsString {
     let mut script = b"set -u\nPATH=/usr/bin:/bin:/usr/sbin:/sbin\nexport PATH\n".to_vec();
     for (name, path) in [
@@ -602,6 +609,16 @@ pub fn swap_script(plan: &SwapPlan<'_>) -> OsString {
              \tlog \"installed $TARGET\"\n\
              else\n\
              \t/bin/rm -rf \"$TARGET\" 2>>\"$LOG\"\n\
+             \tif [ -e \"$TARGET\" ] || [ -L \"$TARGET\" ]; then\n\
+             \t\tHALF=\"$TARGET.incomplete-$$\"\n\
+             \t\t/bin/rm -rf \"$HALF\"\n\
+             \t\tif ! /bin/mv \"$TARGET\" \"$HALF\" 2>>\"$LOG\"; then\n\
+             \t\t\tfail \"could not install the update, nor restore the previous version (it is at $BACKUP)\"\n\
+             \t\t\t/bin/rm -rf \"$STAGING\"\n\
+             \t\t\texit 1\n\
+             \t\tfi\n\
+             \t\tlog \"left the incomplete copy at $HALF\"\n\
+             \tfi\n\
              \tif [ -e \"$BACKUP\" ] && ! /bin/mv \"$BACKUP\" \"$TARGET\" 2>>\"$LOG\"; then\n\
              \t\tfail \"could not install the update, nor restore the previous version (it is at $BACKUP)\"\n\
              \t\t/bin/rm -rf \"$STAGING\"\n\
