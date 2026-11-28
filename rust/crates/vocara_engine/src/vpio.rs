@@ -23,7 +23,8 @@ use std::ffi::c_void;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 use objc2_audio_toolbox::{
     kAUVoiceIOProperty_BypassVoiceProcessing, kAUVoiceIOProperty_VoiceProcessingEnableAGC,
@@ -48,7 +49,8 @@ use crate::aec::Aec;
 use crate::capture_layout::{
     downmix_to_mono, CaptureLayout, DeadCaptureStreak, InputChannelMix, MAX_CAPTURE_CH,
 };
-use crate::device::InputCell;
+use crate::device::{InputCell, Transport};
+use crate::diag::{self, ElementFormat};
 use crate::dsp::capture_cleanup::HighPass;
 use crate::live::RtCell;
 use crate::ring::{spsc, Consumer, Producer};
@@ -77,18 +79,18 @@ const AEC_BLOCK_FRAMES: u32 = 256;
 /// one-off transient.
 const INPUT_LOST_STREAK: u32 = 20;
 /// How long a unit that has not delivered its first frame may fail or come back empty before it
-/// is flagged lost: comfortably longer than a Bluetooth headset's switch to its headset profile,
-/// so a warming-up mic is never a "disconnected" one (see [`DeadCaptureStreak`]). Deliberately
-/// longer than a take arm's ~2 s ready check too: an arm whose mic never delivers is refused by
-/// that check ("not delivering") before this runs out, and a shorter allowance would raise a
-/// loss under a slow-but-healthy warm-up that the take's first poll then stopped. This covers a
-/// unit opened with no arm waiting on it (a selected mic that came back mid-session).
-const INPUT_WARMUP_SECS: f64 = 2.5;
-
-/// The warm-up allowance in frames of the mic element at `rate` (what each dead cycle counts).
+/// is flagged lost ([`crate::input_health::INPUT_WARMUP`], 2.5 s): comfortably longer than a
+/// Bluetooth headset's switch to its headset profile, so a warming-up mic is never a
+/// "disconnected" one (see [`DeadCaptureStreak`]). A take arm's ready check asks for a reopen
+/// only once a stream has had this long, and waits past it before it gives up. The warm-up
+/// allowance in frames of the mic element at `rate` (what each dead cycle counts).
 fn input_warmup_frames(rate: f64) -> u64 {
-    (rate * INPUT_WARMUP_SECS) as u64
+    (rate * crate::input_health::INPUT_WARMUP.as_secs_f64()) as u64
 }
+
+/// How long a new unit waits for another engine's unit to release the mic (see [`make_room`]):
+/// one health tick of the holder's host, plus its teardown, with room to spare.
+const RELEASE_WAIT: Duration = Duration::from_millis(2000);
 
 /// Estimated record round-trip latency (frames @ ENGINE_SR): output IO (buffer + safety + device
 /// latency) + acoustic flight + input IO + the AEC block. The captured vocal lands this far behind
@@ -277,28 +279,249 @@ unsafe impl Send for OutCtx {}
 pub struct Vpio {
     unit: AudioUnit,
     /// Callback refcons: the callbacks hold their raw addresses, so these must outlive the
-    /// unit. `Option` so a failed stop can leak them instead of freeing memory a surviving
-    /// callback still dereferences (see [`Drop`]).
+    /// unit. `Option` so a failed stop can hand them to the leaked unit instead of freeing
+    /// memory a surviving callback still dereferences (see [`Drop`]).
     _in: Option<Box<InCtx>>,
     _out: Option<Box<OutCtx>>,
     started: bool,
+    /// This unit's entry in the process's unit registry ([`UNITS`]).
+    id: u64,
+    /// The engine that opened it (its diagnostics tag).
+    owner: u64,
+    /// Raised by another engine's open: release the mic (see [`make_room`]).
+    release: Arc<AtomicBool>,
 }
 
 // SAFETY: constructed, started, stopped and dropped only on the single AudioHost thread.
 unsafe impl Send for Vpio {}
+
+/// Every VoiceProcessingIO unit this process has started and not yet disposed. A process gets
+/// one working VPIO unit: a second one, opened while the first still runs, fails to start or
+/// starts and never delivers. Two ways in, both guarded here:
+///
+/// * a unit whose stop FAILED is left running (disposing it under a callback that may still be
+///   inside would free the callback's state). It is parked in `leaked`, and the next open in
+///   the process, whichever engine's, retries its stop first (see [`reap_leaked`]);
+/// * each page builds its own engine, and an engine going away (the technique page disposes its
+///   engine on a worker) can still hold its unit when the next one opens. The newer open asks
+///   every other engine's unit to release (its host drops it on its next health tick) and waits
+///   for it, bounded (see [`make_room`]).
+struct Units {
+    live: Vec<LiveUnit>,
+    leaked: Vec<LeakedUnit>,
+    next_id: u64,
+}
+
+struct LiveUnit {
+    id: u64,
+    owner: u64,
+    release: Arc<AtomicBool>,
+}
+
+/// A unit whose stop failed: still running, its callback state kept alive with it.
+struct LeakedUnit {
+    unit: AudioUnit,
+    owner: u64,
+    _in: Option<Box<InCtx>>,
+    _out: Option<Box<OutCtx>>,
+}
+
+// SAFETY: the unit and its contexts are only touched under the [`UNITS`] lock, by whichever
+// host thread opens the next unit; a leaked unit's callbacks are retired by epoch (they feed
+// and render nothing) and only read their own contexts.
+unsafe impl Send for LeakedUnit {}
+
+static UNITS: Mutex<Units> = Mutex::new(Units {
+    live: Vec::new(),
+    leaked: Vec::new(),
+    next_id: 1,
+});
+
+fn units() -> std::sync::MutexGuard<'static, Units> {
+    UNITS.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Retry the stop of every unit whose stop failed earlier. One that stops now is uninitialized,
+/// disposed and its callback state freed (the stop joined its callbacks). One that still will
+/// not stop is disposed anyway — a second running unit would keep every later open from
+/// delivering — but its callback state stays allocated for good, so a callback that may still
+/// be inside never reads freed memory. Logged either way, as engine `owner`'s line.
+fn reap_leaked(owner: u64) {
+    let leaked = std::mem::take(&mut units().leaked);
+    for mut l in leaked {
+        // SAFETY: `l.unit` is a unit this module created and never disposed; its contexts are
+        // still allocated (held by `l`).
+        unsafe {
+            let st = AudioOutputUnitStop(l.unit);
+            if st == 0 {
+                let u = AudioUnitUninitialize(l.unit);
+                let d = AudioComponentInstanceDispose(l.unit);
+                diag::note(
+                    owner,
+                    &format!(
+                        "vpio: stopped the unit engine {} could not stop earlier (uninitialize {u}, dispose {d})",
+                        l.owner
+                    ),
+                );
+                drop(l);
+            } else {
+                let d = AudioComponentInstanceDispose(l.unit);
+                if let Some(inp) = l._in.take() {
+                    std::mem::forget(inp);
+                }
+                if let Some(out) = l._out.take() {
+                    std::mem::forget(out);
+                }
+                diag::note(
+                    owner,
+                    &format!(
+                        "vpio: the unit engine {} could not stop still refuses (AudioOutputUnitStop {st}); disposed it anyway (dispose {d}), its callback state kept allocated",
+                        l.owner
+                    ),
+                );
+            }
+        }
+    }
+}
+
+/// Make room for engine `owner`'s new unit: reap the leaked units, then ask every other
+/// engine's live unit to release the mic and wait for them, at most [`RELEASE_WAIT`]. A holder
+/// that does not let go in time (its host thread busy) is logged and the open goes ahead.
+fn make_room(owner: u64) {
+    reap_leaked(owner);
+    let others: Vec<(u64, u64)> = units()
+        .live
+        .iter()
+        .filter(|l| l.owner != owner)
+        .map(|l| {
+            l.release.store(true, Ordering::Release);
+            (l.id, l.owner)
+        })
+        .collect();
+    if others.is_empty() {
+        return;
+    }
+    let holders = others
+        .iter()
+        .map(|(_, o)| format!("engine {o}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    diag::note(
+        owner,
+        &format!("vpio: {holders} still holds a mic unit; asking it to release"),
+    );
+    let start = Instant::now();
+    loop {
+        let still = units()
+            .live
+            .iter()
+            .any(|l| others.iter().any(|(id, _)| *id == l.id));
+        if !still {
+            diag::note(
+                owner,
+                &format!(
+                    "vpio: the other mic unit released after {} ms",
+                    start.elapsed().as_millis()
+                ),
+            );
+            return;
+        }
+        if start.elapsed() >= RELEASE_WAIT {
+            diag::note(
+                owner,
+                &format!(
+                    "vpio: {holders} did not release its mic unit within {} ms; opening another",
+                    RELEASE_WAIT.as_millis()
+                ),
+            );
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Register a started unit of engine `owner`; its id and release flag.
+fn register_live(owner: u64) -> (u64, Arc<AtomicBool>) {
+    let mut u = units();
+    let id = u.next_id;
+    u.next_id += 1;
+    let release = Arc::new(AtomicBool::new(false));
+    u.live.push(LiveUnit {
+        id,
+        owner,
+        release: Arc::clone(&release),
+    });
+    (id, release)
+}
+
+/// How a device is attached, for a diagnostics line.
+fn transport_name(t: Option<Transport>) -> &'static str {
+    match t {
+        Some(Transport::BuiltIn) => "built-in",
+        Some(Transport::Usb) => "usb",
+        Some(Transport::Bluetooth) => "bluetooth",
+        Some(Transport::Hdmi) => "hdmi",
+        Some(Transport::DisplayPort) => "displayport",
+        Some(Transport::Network) => "network",
+        Some(Transport::Thunderbolt) => "thunderbolt",
+        Some(Transport::FireWire) => "firewire",
+        Some(Transport::Pci) => "pci",
+        Some(Transport::Aggregate) => "aggregate",
+        Some(Transport::Virtual) => "virtual",
+        Some(Transport::Other) => "other",
+        Some(Transport::Unknown) | None => "unknown transport",
+    }
+}
+
+/// The transport of the mic a unit binds: the selected device, or the system default input.
+fn bound_transport(device_uid: Option<&str>) -> Option<Transport> {
+    use objc2_core_audio::{
+        kAudioDevicePropertyTransportType, kAudioHardwarePropertyDefaultInputDevice,
+        kAudioObjectPropertyScopeGlobal, kAudioObjectSystemObject,
+    };
+    match device_uid {
+        Some(uid) => device_transport(uid),
+        // SAFETY: plain u32 property reads on the system object and a device id it returned.
+        None => unsafe {
+            let dev = dev_get_u32(
+                kAudioObjectSystemObject as u32,
+                kAudioHardwarePropertyDefaultInputDevice,
+                kAudioObjectPropertyScopeGlobal,
+            )?;
+            dev_get_u32(
+                dev,
+                kAudioDevicePropertyTransportType,
+                kAudioObjectPropertyScopeGlobal,
+            )
+            .map(Transport::from_core_audio)
+        },
+    }
+}
+
+impl Layout {
+    fn element(&self) -> ElementFormat {
+        ElementFormat {
+            rate: self.rate,
+            channels: self.channels,
+            interleaved: self.interleaved,
+        }
+    }
+}
 
 impl Vpio {
     /// Create + initialize + start a VPIO unit feeding `input` (mic) and, when `with_output`,
     /// rendering `rt` to the speaker through element 0 (enables AEC). `device_uid` selects the
     /// input device: None = system default; a UID that cannot be resolved or bound is an ERROR,
     /// not a silent fallback — the caller (`device.rs::open_mic`) owns retrying on the default and
-    /// telling the user. MUST run on the AudioHost thread.
+    /// telling the user. MUST run on the AudioHost thread. `owner` is the engine's diagnostics
+    /// tag: whose unit this is in the process's registry, and the prefix of its lines.
     pub fn start(
         device_uid: Option<&str>,
         input: Arc<InputCell>,
         rt: Arc<RtCell>,
         with_output: bool,
         event: Arc<AtomicU32>,
+        owner: u64,
     ) -> Result<Vpio, String> {
         // Resolve the selected input device BEFORE building anything. An unresolvable UID must
         // FAIL the open: the host only learns of a fallback when `start` returns Err (device.rs
@@ -312,6 +535,24 @@ impl Vpio {
                 None => return Err(format!("input device {uid} not found")),
             },
             None => None,
+        };
+        // At most one live unit per process: a unit an earlier failed stop left running, or
+        // another engine's still open, makes this one fail or never deliver.
+        make_room(owner);
+        // Shrink the IO buffer BEFORE initialize (low latency + keeps the echo in AEC range),
+        // and publish the record round-trip latency so recorded takes can be time-aligned.
+        // Measure on the device the VPIO unit will actually bind to (`device_uid` below), not
+        // the system defaults — a non-default mic has its own buffer/latency/safety offsets.
+        // The IO-only figure (no AEC block) also bounds the ref-ring baseline below: an
+        // enshrined ring depth past it would make the echo non-causal (AEC dead for the
+        // session), so the baseline cap is derived from it, not from a buffer-size constant.
+        let io_round_trip = tune_io_and_round_trip(device_uid);
+        RECORD_LATENCY_FRAMES.store(io_round_trip + AEC_BLOCK_FRAMES, Ordering::Relaxed);
+        AEC_BYPASSED.store(false, Ordering::Relaxed);
+        let mic_role = if device_uid.is_some() {
+            "selected"
+        } else {
+            "system default"
         };
         unsafe {
             let mut desc = AudioComponentDescription {
@@ -335,17 +576,6 @@ impl Vpio {
                 AudioComponentInstanceDispose(unit);
                 Err(msg)
             };
-
-            // Shrink the IO buffer BEFORE initialize (low latency + keeps the echo in AEC range),
-            // and publish the record round-trip latency so recorded takes can be time-aligned.
-            // Measure on the device the VPIO unit will actually bind to (`device_uid` below), not
-            // the system defaults — a non-default mic has its own buffer/latency/safety offsets.
-            // The IO-only figure (no AEC block) also bounds the ref-ring baseline below: an
-            // enshrined ring depth past it would make the echo non-causal (AEC dead for the
-            // session), so the baseline cap is derived from it, not from a buffer-size constant.
-            let io_round_trip = tune_io_and_round_trip(device_uid);
-            RECORD_LATENCY_FRAMES.store(io_round_trip + AEC_BLOCK_FRAMES, Ordering::Relaxed);
-            AEC_BYPASSED.store(false, Ordering::Relaxed);
 
             let on: u32 = 1;
             let off: u32 = 0;
@@ -525,6 +755,18 @@ impl Vpio {
             // adopt it, or this unit's own callbacks would be denied as zombies. No callback has
             // fired yet (start below).
             in_ctx.epoch = in_ctx.input.reconfigure(in_layout.rate, 1);
+            if out_ctx.is_none() {
+                diag::note(
+                    owner,
+                    &diag::vpio_verdict(
+                        in_layout.element(),
+                        None,
+                        None,
+                        mic_role,
+                        transport_name(bound_transport(device_uid)),
+                    ),
+                );
+            }
             if let Some(oc) = out_ctx.as_mut() {
                 let out_layout = get_asbd(unit, kAudioUnitScope_Input, ELEM_OUTPUT)
                     .map(|a| Layout::from(&a))
@@ -533,7 +775,18 @@ impl Vpio {
                 // Duplex sanity: the far-end ring is pushed at the output element's rate and
                 // popped at the input element's, and `output_cb` writes engine-rate samples
                 // without resampling — so the AEC needs both negotiated rates at VPIO_RATE.
-                match classify_duplex_rates(in_layout.rate, out_layout.rate, VPIO_RATE) {
+                let check = classify_duplex_rates(in_layout.rate, out_layout.rate, VPIO_RATE);
+                diag::note(
+                    owner,
+                    &diag::vpio_verdict(
+                        in_layout.element(),
+                        Some(out_layout.element()),
+                        Some(check),
+                        mic_role,
+                        transport_name(bound_transport(device_uid)),
+                    ),
+                );
+                match check {
                     DuplexRateCheck::AecOn => {}
                     DuplexRateCheck::BypassAec => {
                         // The mic element negotiated VPIO's internal voice rate: far-end
@@ -582,20 +835,31 @@ impl Vpio {
                 return bail(unit, format!("AudioOutputUnitStart failed: {st}"));
             }
 
+            let (id, release) = register_live(owner);
             Ok(Vpio {
                 unit,
                 _in: Some(in_ctx),
                 _out: out_ctx,
                 started: true,
+                id,
+                owner,
+                release,
             })
         }
     }
 
+    /// Whether another engine's open asked this unit to release the mic (see [`make_room`]):
+    /// the host drops it on its next health tick.
+    pub fn release_requested(&self) -> bool {
+        self.release.load(Ordering::Acquire)
+    }
+
     /// Stop + uninitialize + dispose. Idempotent. MUST run on the AudioHost thread.
     ///
-    /// Returns false when the stop FAILED, i.e. the unit may still be running its callbacks. The
-    /// unit is then deliberately left alive (not uninitialized, not disposed) — see [`Drop`].
-    fn stop(&mut self) -> bool {
+    /// `Err(status)` when `AudioOutputUnitStop` FAILED, i.e. the unit may still be running its
+    /// callbacks. The unit is then deliberately left alive (not uninitialized, not disposed) —
+    /// see [`Drop`].
+    fn stop(&mut self) -> Result<(), i32> {
         unsafe {
             if !self.unit.is_null() {
                 if self.started {
@@ -612,36 +876,56 @@ impl Vpio {
                         // it while a callback may be inside frees the refcon contexts out from
                         // under it, which is a use-after-free, not merely a data race. The
                         // callbacks themselves are already harmless — the cells retire them by
-                        // epoch — so a leaked, silently-rendering unit is the cheap outcome. It
-                        // is also bounded: this needs CoreAudio's stop to fail, which is not a
-                        // path a session takes repeatedly.
-                        return false;
+                        // epoch. The next open in the process retries the stop (see
+                        // [`reap_leaked`]): left running, it kept every later unit from
+                        // delivering.
+                        return Err(st);
                     }
-                    AudioUnitUninitialize(self.unit);
+                    let u = AudioUnitUninitialize(self.unit);
+                    if u != 0 {
+                        diag::note(
+                            self.owner,
+                            &format!("vpio: AudioUnitUninitialize returned {u}"),
+                        );
+                    }
                     self.started = false;
                 }
-                AudioComponentInstanceDispose(self.unit);
+                let d = AudioComponentInstanceDispose(self.unit);
+                if d != 0 {
+                    diag::note(
+                        self.owner,
+                        &format!("vpio: AudioComponentInstanceDispose returned {d}"),
+                    );
+                }
                 self.unit = std::ptr::null_mut();
             }
-            true
+            Ok(())
         }
     }
 }
 
 impl Drop for Vpio {
     fn drop(&mut self) {
+        units().live.retain(|l| l.id != self.id);
         // Stop (joins the RT callback) BEFORE the contexts are freed: no callback runs afterward.
-        if !self.stop() {
+        if let Err(st) = self.stop() {
             // The stop failed, so a callback may still be inside. Its refcons are the addresses
-            // of `_in` / `_out`, which this drop is about to free — leak them instead. `stop`
-            // left the unit alive for the same reason, and both cells have already retired this
-            // generation, so what leaks renders silence and feeds nothing.
-            if let Some(inp) = self._in.take() {
-                std::mem::forget(inp);
-            }
-            if let Some(out) = self._out.take() {
-                std::mem::forget(out);
-            }
+            // of `_in` / `_out`, which this drop would free — park them with the unit instead,
+            // for the next open to retry the stop (see [`reap_leaked`]). Both cells have already
+            // retired this generation, so what runs meanwhile renders silence and feeds nothing.
+            diag::note(
+                self.owner,
+                &format!(
+                    "vpio: AudioOutputUnitStop failed ({st}); the unit is left running until the next mic open retries its stop"
+                ),
+            );
+            let unit = std::mem::replace(&mut self.unit, std::ptr::null_mut());
+            units().leaked.push(LeakedUnit {
+                unit,
+                owner: self.owner,
+                _in: self._in.take(),
+                _out: self._out.take(),
+            });
         }
     }
 }
@@ -808,6 +1092,9 @@ unsafe extern "C-unwind" fn input_cb(
             if ctx.dead.on_dead(frames) {
                 ctx.event
                     .fetch_or(crate::device::EVENT_INPUT_LOST, Ordering::Release);
+                // And tell the host this stream is dead, so a later arm reopens it instead of
+                // keeping it (the event above belongs to the owners' pollers). One store.
+                ctx.input.mark_dead(ctx.epoch);
             }
             // The output callback still pushed this cycle's reference: consume (discard) it so
             // push/pop stay 1:1 and the ring never accumulates a permanent backlog (which would
@@ -830,6 +1117,7 @@ unsafe extern "C-unwind" fn input_cb(
             if ctx.dead.on_dead(frames) {
                 ctx.event
                     .fetch_or(crate::device::EVENT_INPUT_LOST, Ordering::Release);
+                ctx.input.mark_dead(ctx.epoch);
             }
             // Same 1:1 discard as the render-failure path above: an empty success also skipped
             // the normal pops while the output side kept pushing.
@@ -1344,7 +1632,7 @@ mod tests {
     #[test]
     fn an_unresolvable_input_uid_fails_the_open_instead_of_binding_the_default() {
         let (input, rt, event) = cells();
-        let err = Vpio::start(Some("vocara-no-such-device"), input, rt, false, event)
+        let err = Vpio::start(Some("vocara-no-such-device"), input, rt, false, event, 0)
             .err()
             .expect("an unresolvable UID must not open on the system default");
         assert_eq!(err, "input device vocara-no-such-device not found");

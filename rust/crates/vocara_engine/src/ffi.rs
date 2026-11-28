@@ -98,6 +98,8 @@ pub struct VeEngine {
     // Declared first so it drops first: dropping `host` stops the stream and joins the audio
     // thread (the RT side is gone) before `handle` reclaims any retired graphs.
     host: AudioHost,
+    /// This engine's diagnostics tag (see [`crate::diag`]), unique in the process.
+    tag: u64,
     handle: EngineHandle,
     /// Device-event flags (e.g. output lost), set by the stream error callback; polled by Dart.
     device_event: Arc<AtomicU32>,
@@ -454,6 +456,7 @@ impl Drop for VeEngine {
         for j in self.feeder_join.drain(..) {
             let _ = j.join();
         }
+        crate::diag::note(self.tag, "destroyed");
     }
 }
 
@@ -615,9 +618,11 @@ pub extern "C" fn ve_create() -> *mut VeEngine {
         let input_applied = Arc::new(AtomicU64::new(0));
         let actual_input_uid = Arc::new(std::sync::Mutex::new(String::new()));
         let output_binding = Arc::new(std::sync::Mutex::new(device::OutputBinding::default()));
+        let tag = crate::diag::next_engine_tag();
         // The handshake's uid proves an output opened; it is NOT stored as the user's pick. The
         // pick starts empty ("follow the system default") and lives only in `output_binding`.
         let (host, _opened_output_uid) = device::spawn_audio_host(
+            tag,
             rt_cell,
             Arc::clone(&input_cell),
             Arc::clone(&device_event),
@@ -628,8 +633,10 @@ pub extern "C" fn ve_create() -> *mut VeEngine {
             Arc::clone(&actual_input_uid),
             Arc::clone(&output_binding),
         )?;
+        crate::diag::note(tag, "created");
         Ok(Box::into_raw(Box::new(VeEngine {
             host,
+            tag,
             handle,
             device_event,
             current_input_uid: String::new(),
@@ -1044,6 +1051,45 @@ pub extern "C" fn ve_input_frames(e: *mut VeEngine, out: *mut c_float, max_frame
         }
         n
     })
+}
+
+/// Ask the host to reopen the input stream if it is still generation `generation` (the high bits
+/// of `ve_input_stream_state`): a take's ready check that saw no frames from the stream it armed
+/// on. A request a newer stream overtook (a slow open finished meanwhile) is stale and keeps the
+/// stream. With no stream open and the input wanted, the host opens one (a retry of a failed
+/// open). Fire-and-forget, like the other input calls; the applied state and the stream state
+/// say when the new stream is up. 0 = ok.
+#[no_mangle]
+pub extern "C" fn ve_reopen_input(e: *mut VeEngine, generation: u64) -> c_int {
+    with_engine(e, -1, |eng| {
+        eng.host.reopen_input(generation);
+        0
+    })
+}
+
+/// Take the oldest queued engine diagnostics line (see [`crate::diag`]: what the audio host and
+/// the mic unit decided — input syncs, negotiated formats, failed stops) into `buf` (up to
+/// `cap`, NUL-terminated, truncated to fit). Returns the bytes written, 0 when no line is
+/// queued. Process-wide: each line names the engine that wrote it. Needs no engine.
+#[no_mangle]
+pub extern "C" fn ve_take_diagnostic(buf: *mut c_char, cap: usize) -> usize {
+    if buf.is_null() || cap < 2 {
+        return 0;
+    }
+    catch_unwind(AssertUnwindSafe(|| {
+        let Some(line) = crate::diag::take() else {
+            return 0;
+        };
+        // Truncate on a char boundary, leaving room for the NUL.
+        let mut n = line.len().min(cap - 1);
+        while !line.is_char_boundary(n) {
+            n -= 1;
+        }
+        let dst = unsafe { std::slice::from_raw_parts_mut(buf, cap) };
+        copy_cstr(dst, &line[..n]);
+        n
+    }))
+    .unwrap_or(0)
 }
 
 /// Start recording the live input to a mono 48 kHz WAV at `path` (writer thread). Blocks

@@ -160,6 +160,14 @@ uint64_t ve_input_intent_seq(VeEngine *e);
  * contract: (applied >> 24) >= armSeq AND the state word shows running with the SAME
  * generation — all three ready facts then anchor to one stream instance. */
 uint64_t ve_input_applied_state(VeEngine *e);
+/* Reopen the input stream if it is still generation `generation` (the state word's high bits):
+ * a take's ready check that saw no frames. A newer stream keeps; with no stream open and the
+ * input wanted, one is opened. Fire-and-forget. 0 = ok. */
+int ve_reopen_input(VeEngine *e, uint64_t generation);
+/* Take the oldest queued engine diagnostics line (input syncs, negotiated mic formats, failed
+ * stops; each names its engine) into `buf` (<= cap, NUL-terminated). Returns the bytes
+ * written, 0 = none queued. Process-wide; no engine needed. */
+size_t ve_take_diagnostic(char *buf, size_t cap);
 
 int ve_play(VeEngine *e);
 int ve_pause(VeEngine *e);
