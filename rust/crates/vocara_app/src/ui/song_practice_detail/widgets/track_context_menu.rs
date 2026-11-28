@@ -193,7 +193,7 @@ pub struct TrackMenu {
     /// default.
     pub current_color_value: Option<i64>,
     /// The colour the track shows with no tint of its own (the screen's
-    /// `track_row::channel_color`), for the automatic swatch.
+    /// `track_row::take_color`), for the automatic swatch.
     pub default_color: Color,
 }
 
