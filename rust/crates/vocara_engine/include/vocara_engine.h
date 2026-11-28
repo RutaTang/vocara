@@ -16,6 +16,10 @@ extern "C" {
 
 /* Opaque engine handle. */
 typedef struct VeEngine VeEngine;
+/* Opaque pending host reply (ve_set_output_device_begin) and pending recording stop
+ * (ve_stop_input_recording_begin): each is waited on, and freed, exactly once. */
+typedef struct VeHostReply VeHostReply;
+typedef struct VeStopPending VeStopPending;
 
 /* Decoded PCM handed back from ve_decode (interleaved stereo f32, `frames * 2` floats).
  * Free with ve_free_decoded. */
@@ -55,6 +59,12 @@ size_t ve_enum_output_devices(VeDeviceInfo *out, size_t cap);
  * for when the mic closes — ve_actual_output_device says what renders. Negative = nothing could be
  * opened. */
 int ve_set_output_device(VeEngine *e, const char *uid);
+/* ve_set_output_device in two halves: queue the switch and return its reply unwaited (NULL on
+ * a bad argument), then wait for it and free it. The wait touches no engine: a caller that
+ * serializes its engine calls with a lock releases it before waiting, so calls behind it are
+ * not stuck behind a slow mic open on the host. -2 = the host thread went away unanswered. */
+VeHostReply *ve_set_output_device_begin(VeEngine *e, const char *uid);
+int ve_host_reply_wait(VeHostReply *reply);
 /* Write the active output UID into `buf` (<= cap, NUL-terminated); returns its byte length. */
 size_t ve_current_output_device(VeEngine *e, char *buf, size_t cap);
 /* Write the UID the engine is ACTUALLY rendering to (empty = nothing open). Differs from
@@ -145,6 +155,13 @@ int ve_start_input_recording(VeEngine *e, const char *path);
 /* Stop the input recording (finalizes the WAV). 0 = ok; -2 = an IO error occurred during
  * the recording (the WAV at the recorded path is missing, damaged, or incomplete). */
 int ve_stop_input_recording(VeEngine *e);
+/* ve_stop_input_recording in three parts: disarm (returns the pending stop; NULL for a null
+ * engine), wait for the take's tail and the WAV finalize (touches no engine; frees the pending
+ * stop; 0 = ok, -2 = IO error), then let the input close if nothing else needs it. A caller
+ * serializing engine calls with a lock releases it for the wait. */
+VeStopPending *ve_stop_input_recording_begin(VeEngine *e);
+int ve_stop_input_recording_wait(VeStopPending *pending);
+int ve_stop_input_recording_end(VeEngine *e);
 /* Frames the recording ring dropped during the current/latest take (reset at each start).
  * Nonzero = the take on disk is missing that many frames (writer thread stalled past the
  * ring's headroom) — the UI must not present the take as gapless. */

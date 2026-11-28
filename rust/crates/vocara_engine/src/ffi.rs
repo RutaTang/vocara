@@ -784,18 +784,54 @@ pub extern "C" fn ve_enum_input_devices(out: *mut VeDeviceInfo, cap: usize) -> u
 /// nothing could be opened.
 #[no_mangle]
 pub extern "C" fn ve_set_output_device(e: *mut VeEngine, uid: *const c_char) -> c_int {
-    with_engine(e, -1, |eng| {
+    let pending = ve_set_output_device_begin(e, uid);
+    if pending.is_null() {
+        return -1;
+    }
+    ve_host_reply_wait(pending)
+}
+
+/// A host command's reply, waited on with [`ve_host_reply_wait`] outside any lock the caller
+/// holds over the engine. Owns only a channel: it stays valid if the engine is destroyed
+/// meanwhile (the wait then reads -2).
+pub struct VeHostReply(std::sync::mpsc::Receiver<c_int>);
+
+/// The first half of [`ve_set_output_device`]: queue the switch on the audio host and return
+/// its reply without waiting (null on a null engine or a bad UID). The host serves commands one
+/// at a time, so the switch can wait behind a slow mic open; a caller that serializes its
+/// engine calls with a lock releases it before [`ve_host_reply_wait`], so the playhead poll and
+/// the transport calls are not stuck behind the open too.
+#[no_mangle]
+pub extern "C" fn ve_set_output_device_begin(
+    e: *mut VeEngine,
+    uid: *const c_char,
+) -> *mut VeHostReply {
+    with_engine(e, std::ptr::null_mut(), |eng| {
         if uid.is_null() {
-            return -1;
+            return std::ptr::null_mut();
         }
         let s = match unsafe { CStr::from_ptr(uid) }.to_str() {
             Ok(s) => s,
-            Err(_) => return -1,
+            Err(_) => return std::ptr::null_mut(),
         };
         // The host records the pick itself (in `output_binding`, on every branch including a
         // failed open), so there is nothing to cache here — see [`VeEngine::output_binding`].
-        eng.host.set_output_device(s)
+        Box::into_raw(Box::new(VeHostReply(eng.host.begin_set_output_device(s))))
     })
+}
+
+/// Wait for a host reply from [`ve_set_output_device_begin`] and free it: the command's own
+/// status (0 = acted on, negative = nothing could be opened), -2 if the host thread went away
+/// unanswered, -1 for null. Touches no engine; call it exactly once per reply.
+#[no_mangle]
+pub extern "C" fn ve_host_reply_wait(reply: *mut VeHostReply) -> c_int {
+    if reply.is_null() {
+        return -1;
+    }
+    // SAFETY: `reply` came from `Box::into_raw` in `ve_set_output_device_begin` and is waited on
+    // exactly once (the caller's contract), so this reclaims it once.
+    let reply = unsafe { Box::from_raw(reply) };
+    catch_unwind(AssertUnwindSafe(|| reply.0.recv().unwrap_or(-2))).unwrap_or(-2)
 }
 
 /// Write the UID of the device the engine is ACTUALLY rendering to into `buf` (up to `cap`);
@@ -1157,7 +1193,57 @@ fn begin_take(
 /// is missing, damaged, or incomplete).
 #[no_mangle]
 pub extern "C" fn ve_stop_input_recording(e: *mut VeEngine) -> c_int {
-    with_engine(e, -1, |eng| {
+    let pending = ve_stop_input_recording_begin(e);
+    if pending.is_null() {
+        return -1;
+    }
+    let code = ve_stop_input_recording_wait(pending);
+    ve_stop_input_recording_end(e);
+    code
+}
+
+/// A recording stop in flight (see [`ve_stop_input_recording_begin`]): what its wait needs,
+/// none of it the engine itself, so it stays valid if the engine is destroyed meanwhile.
+pub struct VeStopPending {
+    frames_in: Arc<AtomicU64>,
+    last: u64,
+    writer: device::RecordStopper,
+}
+
+/// The first third of [`ve_stop_input_recording`]: disarm the recording (the input callback
+/// stops feeding the take's ring) and return what the wait needs (null on a null engine). The
+/// stop's two waits — the take's tail landing and the writer's finalize, up to 250 ms plus a
+/// file flush — then run in [`ve_stop_input_recording_wait`], which touches no engine: a caller
+/// that serializes its engine calls with a lock releases it for them, so the playhead poll and
+/// a mic's ready poll are not stalled behind a stop. [`ve_stop_input_recording_end`] then lets
+/// the input close if nothing else needs it. The caller must not start another recording on
+/// this engine before the end.
+#[no_mangle]
+pub extern "C" fn ve_stop_input_recording_begin(e: *mut VeEngine) -> *mut VeStopPending {
+    with_engine(e, std::ptr::null_mut(), |eng| {
+        // Read before the disarm, so a callback in flight across it counts as an advance.
+        let last = eng.input_frames_in.load(Ordering::Acquire);
+        eng.rec_active.store(false, Ordering::Release);
+        Box::into_raw(Box::new(VeStopPending {
+            frames_in: Arc::clone(&eng.input_frames_in),
+            last,
+            writer: eng.writer.stopper(),
+        }))
+    })
+}
+
+/// The stop's waits (see [`ve_stop_input_recording_begin`]); frees `pending`. 0 = the take
+/// finalized clean; -2 = an IO error occurred during the recording (the WAV at the recorded path
+/// is missing, damaged, or incomplete); -1 for null. Call it exactly once per pending stop.
+#[no_mangle]
+pub extern "C" fn ve_stop_input_recording_wait(pending: *mut VeStopPending) -> c_int {
+    if pending.is_null() {
+        return -1;
+    }
+    // SAFETY: `pending` came from `Box::into_raw` in `ve_stop_input_recording_begin` and is
+    // waited on exactly once (the caller's contract), so this reclaims it once.
+    let p = unsafe { Box::from_raw(pending) };
+    catch_unwind(AssertUnwindSafe(|| {
         // The input callback samples `rec_active` ONCE per buffer, so a callback already in
         // flight when the flag drops still pushes its whole slice. Stopping the writer
         // immediately would drain + finalize BEFORE that tail lands — the take would lose up
@@ -1165,25 +1251,33 @@ pub extern "C" fn ve_stop_input_recording(e: *mut VeEngine) -> c_int {
         // stale-ring sweep. Wait for two frame-counter advances (the in-flight callback plus
         // one boundary that provably observed the cleared flag) before finalizing; bail out
         // on a deadline so a dead input stream (device loss mid-take) can't hang the stop.
-        let mut last = eng.input_frames_in.load(Ordering::Acquire);
-        eng.rec_active.store(false, Ordering::Release);
+        let mut last = p.last;
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(250);
         let mut advances = 0u32;
         while advances < 2 && std::time::Instant::now() < deadline {
             std::thread::sleep(std::time::Duration::from_millis(2));
-            let now = eng.input_frames_in.load(Ordering::Acquire);
+            let now = p.frames_in.load(Ordering::Acquire);
             if now != last {
                 advances += 1;
                 last = now;
             }
         }
-        let clean = eng.writer.stop();
-        sync_input(eng);
-        if clean {
+        if p.writer.stop() {
             0
         } else {
             -2
         }
+    }))
+    .unwrap_or(-2)
+}
+
+/// The last third of [`ve_stop_input_recording`]: the recording no longer needs the input, so
+/// it closes unless monitoring or the analysis capture still wants it. 0 = ok.
+#[no_mangle]
+pub extern "C" fn ve_stop_input_recording_end(e: *mut VeEngine) -> c_int {
+    with_engine(e, -1, |eng| {
+        sync_input(eng);
+        0
     })
 }
 

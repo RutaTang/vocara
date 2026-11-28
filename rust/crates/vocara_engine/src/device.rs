@@ -3316,6 +3316,28 @@ impl RecordWriter {
     /// read the file immediately). Returns `false` when any IO error occurred since start —
     /// the take on disk is missing, damaged, or incomplete.
     pub fn stop(&self) -> bool {
+        self.stopper().stop()
+    }
+
+    /// A handle that stops the recording later, from any thread, without the writer itself:
+    /// the engine's stop waits for the take's tail and the finalize outside the engine's lock
+    /// (see `ffi::ve_stop_input_recording_begin`).
+    pub fn stopper(&self) -> RecordStopper {
+        RecordStopper {
+            tx: self.tx.clone(),
+        }
+    }
+}
+
+/// See [`RecordWriter::stopper`].
+pub struct RecordStopper {
+    tx: mpsc::Sender<WriterCmd>,
+}
+
+impl RecordStopper {
+    /// [`RecordWriter::stop`]: stop and finalize, blocking until the WAV is written; `false`
+    /// when an IO error damaged the take (or the writer is gone).
+    pub fn stop(&self) -> bool {
         let (ack, rx) = mpsc::channel();
         if self.tx.send(WriterCmd::Stop(ack)).is_err() {
             return false;
@@ -3588,10 +3610,21 @@ impl AudioHost {
     /// on the default when it could not be opened, or — while the mic unit owns the output — the
     /// pick is recorded for when the mic closes. Negative = nothing could be opened.
     pub fn set_output_device(&self, uid: &str) -> i32 {
-        self.request(|reply| HostCmd::SetOutput {
+        self.begin_set_output_device(uid).recv().unwrap_or(-2)
+    }
+
+    /// [`set_output_device`](Self::set_output_device) without the wait: the command is sent and
+    /// its reply comes on the returned channel (-2 if the host thread is gone, as the channel
+    /// then closes unanswered). The switch waits behind every command queued ahead of it — a
+    /// slow mic open among them — so the engine's caller waits on this outside the engine's
+    /// lock, where the playhead poll and the transport calls are not stuck behind it.
+    pub fn begin_set_output_device(&self, uid: &str) -> mpsc::Receiver<i32> {
+        let (reply, rx) = mpsc::channel();
+        let _ = self.tx.send(HostCmd::SetOutput {
             uid: uid.to_string(),
             reply,
-        })
+        });
+        rx
     }
 
     // The input nudge is FIRE-AND-FORGET: VoiceProcessingIO setup (create/initialize/start a
@@ -3624,15 +3657,6 @@ impl AudioHost {
             reply,
         });
         0
-    }
-
-    /// Send a command and block for its i32 reply (-2 if the host thread is gone).
-    fn request(&self, make: impl FnOnce(mpsc::Sender<i32>) -> HostCmd) -> i32 {
-        let (reply, rx) = mpsc::channel();
-        if self.tx.send(make(reply)).is_err() {
-            return -2;
-        }
-        rx.recv().unwrap_or(-2)
     }
 
     /// Send a command without waiting for the reply (the reply channel is dropped).

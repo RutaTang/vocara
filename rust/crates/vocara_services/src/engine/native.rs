@@ -36,6 +36,12 @@ unsafe impl Send for Handle {}
 /// unavailable one, without reaching the C ABI.
 pub struct NativeEngine {
     engine: Mutex<Handle>,
+    /// Serializes a recording's start against a stop in flight: a stop releases the engine
+    /// lock while it waits for the take's tail and the WAV finalize (see
+    /// [`EngineBindings::stop_input_recording`]), and nothing may start the next take on the
+    /// writer before that stop has finished with it. Taken before the engine lock, never
+    /// under it.
+    recording: Mutex<()>,
 }
 
 impl NativeEngine {
@@ -50,6 +56,7 @@ impl NativeEngine {
         }
         Ok(NativeEngine {
             engine: Mutex::new(Handle(e)),
+            recording: Mutex::new(()),
         })
     }
 
@@ -135,11 +142,29 @@ impl EngineBindings for NativeEngine {
     }
 
     fn set_output_device(&self, uid: &str) -> Result<(), EngineError> {
+        const CALL: &str = "ve_set_output_device";
         let cuid = c_string(uid);
+        // The switch queues on the audio host behind whatever it is doing — a slow mic open
+        // among them — so it is waited for OUTSIDE the engine lock: the playhead poll, the
+        // transport and a take's ready poll go on meanwhile. Only the queueing is under it.
         // SAFETY: a NUL-terminated string alive for the call.
-        self.status("ve_set_output_device", |e| {
-            ffi::ve_set_output_device(e, cuid.as_ptr())
-        })
+        let Some(reply) = self.read(None, |e| {
+            Some(ffi::ve_set_output_device_begin(e, cuid.as_ptr()))
+        }) else {
+            return Err(EngineError::Unavailable);
+        };
+        if reply.is_null() {
+            return Err(EngineError::Refused {
+                call: CALL,
+                code: -1,
+            });
+        }
+        // SAFETY: `reply` came from the begin above and is waited on exactly once; the wait
+        // touches no engine, so a destroy meanwhile cannot invalidate it.
+        match ffi::ve_host_reply_wait(reply) {
+            0 => Ok(()),
+            code => Err(EngineError::Refused { call: CALL, code }),
+        }
     }
 
     fn current_output_device(&self) -> String {
@@ -250,6 +275,10 @@ impl EngineBindings for NativeEngine {
     }
 
     fn start_input_recording(&self, path: &str) -> Result<(), EngineError> {
+        let _recording = self
+            .recording
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let cpath = c_string(path);
         // SAFETY: a NUL-terminated string alive for the call.
         self.status("ve_start_input_recording", |e| {
@@ -258,11 +287,34 @@ impl EngineBindings for NativeEngine {
     }
 
     fn stop_input_recording(&self) -> Result<(), EngineError> {
-        match self.status("ve_stop_input_recording", |e| {
-            ffi::ve_stop_input_recording(e)
-        }) {
-            Err(EngineError::Refused { code: -2, .. }) => Err(EngineError::RecordingIo),
-            r => r,
+        const CALL: &str = "ve_stop_input_recording";
+        let _recording = self
+            .recording
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        // Disarm under the engine lock; wait for the take's tail and the finalize (up to 250 ms
+        // plus a file flush) OUTSIDE it, so the playhead poll and the transport are not stalled
+        // behind the stop; then let the input close under it again.
+        let Some(pending) = self.read(None, |e| Some(ffi::ve_stop_input_recording_begin(e))) else {
+            return Err(EngineError::Unavailable);
+        };
+        if pending.is_null() {
+            return Err(EngineError::Refused {
+                call: CALL,
+                code: -1,
+            });
+        }
+        // SAFETY: `pending` came from the begin above and is waited on exactly once; the wait
+        // touches no engine, so a destroy meanwhile cannot invalidate it.
+        let code = ffi::ve_stop_input_recording_wait(pending);
+        // A destroy that landed during the wait closed the input with the engine.
+        self.read((), |e| {
+            ffi::ve_stop_input_recording_end(e);
+        });
+        match code {
+            0 => Ok(()),
+            -2 => Err(EngineError::RecordingIo),
+            code => Err(EngineError::Refused { call: CALL, code }),
         }
     }
 
@@ -843,8 +895,16 @@ mod tests {
     fn a_destroyed_engine_answers_as_unavailable() {
         let e = NativeEngine {
             engine: Mutex::new(Handle(ptr::null_mut())),
+            recording: Mutex::new(()),
         };
         assert_eq!(e.play(), Err(EngineError::Unavailable));
+        // The calls that wait outside the engine lock refuse before they wait.
+        assert_eq!(e.set_output_device(""), Err(EngineError::Unavailable));
+        assert_eq!(
+            e.start_input_recording("/x.wav"),
+            Err(EngineError::Unavailable)
+        );
+        assert_eq!(e.stop_input_recording(), Err(EngineError::Unavailable));
         assert_eq!(e.reopen_input(1), Err(EngineError::Unavailable));
         // The diagnostics queue is the process's, not the engine's: still readable.
         let _ = e.take_diagnostics();
