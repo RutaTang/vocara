@@ -3,7 +3,8 @@
 
 use std::ffi::{c_char, c_int};
 use std::ptr;
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use vocara_engine::ffi::{self, VeEngine};
 
@@ -131,13 +132,35 @@ fn split_sends(sends: &[(i32, f32)]) -> (Vec<i32>, Vec<f32>) {
 #[allow(clippy::too_many_arguments)]
 impl EngineBindings for NativeEngine {
     fn destroy(&self) {
-        let mut h = self.lock();
-        let e = std::mem::replace(&mut h.0, ptr::null_mut());
-        if !e.is_null() {
-            // SAFETY: `e` is the pointer ve_create returned, nulled above under
-            // the lock, so it is destroyed exactly once and no call can be
-            // inside the engine meanwhile (each holds the lock throughout).
-            ffi::ve_destroy(e);
+        let e = std::mem::replace(&mut self.lock().0, ptr::null_mut());
+        if e.is_null() {
+            return;
+        }
+        // Torn down off the caller's thread. The teardown stops the engine's audio units
+        // (the mic's voice-processing unit takes a while to stop) and joins its audio host, and
+        // the caller is the UI thread as a page leaves: the page transition froze meanwhile.
+        // Nothing else reaches `e` any more: it was nulled under the lock, so every later call
+        // finds the engine destroyed, and the calls that wait outside the lock (the output
+        // switch, a stop's tail) wait on what they took with them, not on the engine.
+        let pending = Arc::new(AtomicPtr::new(e));
+        let teardown = {
+            let pending = Arc::clone(&pending);
+            move || {
+                let e = pending.swap(ptr::null_mut(), Ordering::AcqRel);
+                if !e.is_null() {
+                    // SAFETY: `e` is the pointer ve_create returned, taken out of the handle
+                    // under the lock and out of `pending` by one swap, so it is destroyed
+                    // exactly once, and no call can enter the engine any more.
+                    ffi::ve_destroy(e);
+                }
+            }
+        };
+        let spawned = std::thread::Builder::new()
+            .name("vocara-engine-teardown".into())
+            .spawn(teardown.clone());
+        if spawned.is_err() {
+            // No thread to give it to: torn down here, as before.
+            teardown();
         }
     }
 
