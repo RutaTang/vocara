@@ -2342,6 +2342,26 @@ fn a_toast_takes_no_press_meant_for_what_it_covers() {
     assert_eq!(h.vm().analysis().dock_tab(), DockTab::VocalTract);
 }
 
+// Escape leaves the lyrics Focus view on the page too, through the window
+// backdrop the page lays it on.
+#[test]
+fn escape_leaves_the_lyrics_focus_view_on_the_page() {
+    let mut h = Harness::open(Setup::default());
+    h.send(Message::Lyrics(lyrics_panel::Message::SetLyricsFocus(true)));
+    assert!(h.vm().lyrics_focus());
+    let escape = iced_test::simulator::press_key(
+        iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape),
+        None,
+    );
+    let messages: Vec<Message> = {
+        let mut ui = h.ui();
+        let _ = ui.simulate([escape]);
+        ui.into_messages().collect()
+    };
+    h.feed(messages);
+    assert!(!h.vm().lyrics_focus());
+}
+
 // Sync's Clear asks first, as Delete clip does: one click took a whole
 // song's tap timing at once, saved, with nothing to go back to.
 #[test]
