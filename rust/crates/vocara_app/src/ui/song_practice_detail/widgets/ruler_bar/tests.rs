@@ -171,6 +171,58 @@ fn with_the_loop_off_a_click_on_its_edge_still_seeks() {
     assert_eq!(seeks(&messages).len(), 1, "{messages:?}");
 }
 
+/// Looping from 2 s to 8 s, the playhead on the loop's start (where Loop
+/// on snaps it).
+fn at_the_loop_start() -> RulerBar {
+    RulerBar {
+        position: Duration::from_millis(2000),
+        ..ruler(0, TIMELINE_MS, 2000, 8000)
+    }
+}
+
+// With Loop on, the playhead snaps to the loop's start, and a drag on its
+// marker moved the loop's start instead, the playhead following it.
+#[test]
+fn with_the_loop_on_a_drag_on_the_playhead_marker_over_its_start_scrubs() {
+    let from = Point::new(at(2000.0).x, 4.0);
+    let messages = run(at_the_loop_start(), from, drag(from, &[10.0, 20.0, 30.0]));
+    assert!(starts(&messages).is_empty(), "{messages:?}");
+    assert!(ends(&messages).is_empty(), "{messages:?}");
+    let s = seeks(&messages);
+    assert_eq!(s.len(), 2, "{messages:?}");
+    let expected = 2000.0 + 60.0 / f64::from(LANE_W) * TIMELINE_MS as f64;
+    assert!((s[1] as f64 - expected).abs() <= 1.0, "{s:?}");
+    // At the marker's tip too, a little off its centre.
+    let tip = Point::new(at(2000.0).x + 4.0, 8.5);
+    let messages = run(at_the_loop_start(), tip, drag(tip, &[10.0, 20.0]));
+    assert!(starts(&messages).is_empty(), "{messages:?}");
+    assert!(!seeks(&messages).is_empty(), "{messages:?}");
+}
+
+#[test]
+fn with_the_loop_on_its_start_handle_is_still_reached_down_its_edge() {
+    let from = at(2000.0);
+    assert!(from.y >= MARKER_HIT_HEIGHT, "below the marker's head");
+    let messages = run(at_the_loop_start(), from, drag(from, &[10.0, 20.0, 30.0]));
+    assert!(seeks(&messages).is_empty(), "{messages:?}");
+    let s = starts(&messages);
+    assert!(!s.is_empty(), "{messages:?}");
+    assert!(*s.last().unwrap() > 2000, "{s:?}");
+    // And beside the marker's head, on the handle's grip.
+    let beside = Point::new(at(2000.0).x - 7.5, 4.0);
+    let messages = run(at_the_loop_start(), beside, drag(beside, &[-10.0, -20.0]));
+    assert!(!starts(&messages).is_empty(), "{messages:?}");
+}
+
+#[test]
+fn the_marker_takes_a_press_on_its_head_alone() {
+    assert!(on_marker(Point::new(100.0, 0.0), Some(100.0)));
+    assert!(on_marker(Point::new(106.0, 9.0), Some(100.0)));
+    assert!(!on_marker(Point::new(107.0, 4.0), Some(100.0)));
+    assert!(!on_marker(Point::new(100.0, 10.0), Some(100.0)));
+    assert!(!on_marker(Point::new(100.0, 4.0), None), "out of view");
+}
+
 #[test]
 fn a_loop_narrower_than_a_handle_still_moves_left() {
     // The end's handle lies over the start's: a leftward drag took the end,
