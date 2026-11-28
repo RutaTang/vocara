@@ -307,3 +307,45 @@ fn the_card_keeps_its_place_as_the_list_filters() {
         "{card_top} {card_bottom}"
     );
 }
+
+/// Up and Down past the list's edge scroll it so the highlighted row shows
+/// whole: a long library scrolled out from under the highlight before.
+#[test]
+fn the_list_follows_the_highlight_past_its_edge() {
+    // 20 rows of 28 px (no tags) in a 360 px list: 572 px of content.
+    let rows = vec![28.0; 20];
+    // In view: nothing to do.
+    assert_eq!(reveal(&rows, 3, 0.0, 360.0), None);
+    // Row 12 (top 342, bottom 370) runs past the bottom: scrolled so its
+    // bottom meets the list's.
+    assert_eq!(reveal(&rows, 12, 0.0, 360.0), Some(10.0));
+    // The last row shows the padding under it too.
+    assert_eq!(reveal(&rows, 19, 0.0, 360.0), Some(212.0));
+    // Back up above the offset: scrolled to its top, the first to 0.
+    assert_eq!(reveal(&rows, 5, 200.0, 360.0), Some(146.0));
+    assert_eq!(reveal(&rows, 0, 200.0, 360.0), Some(0.0));
+    // A list that fits never scrolls.
+    assert_eq!(reveal(&rows[..5], 4, 0.0, 360.0), None);
+}
+
+#[test]
+fn down_past_the_lists_bottom_asks_for_a_scroll_and_a_search_for_the_top() {
+    let many: Vec<Technique> = (0..20)
+        .map(|i| {
+            let at = DateTime::utc_ymd(2026, 1, 1);
+            Technique::new(format!("t{i}"), format!("Technique {i:02}"), at, at)
+        })
+        .collect();
+    let mut picker = loaded(Some(many));
+    for _ in 0..12 {
+        let _ = picker.update(Message::Next);
+    }
+    assert!(
+        picker.reveal.is_some(),
+        "row 12 runs past the list's bottom"
+    );
+    let _: Task<()> = picker.take_reveal();
+    assert!(picker.reveal.is_none(), "taken once");
+    let _ = picker.update(Message::Query("Technique".into()));
+    assert_eq!(picker.reveal, Some(0.0), "a new search starts at the top");
+}

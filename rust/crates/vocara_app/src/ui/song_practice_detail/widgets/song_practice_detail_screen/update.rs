@@ -1352,6 +1352,8 @@ impl SongPracticeDetailScreen {
             return;
         };
         let Some(picked) = open.picker.update(m) else {
+            // Still open: the list follows the highlight Up and Down moved.
+            step.task(open.picker.take_reveal().map(Message::TechniquePicker));
             return;
         };
         let Some(open) = self.picker.take() else {

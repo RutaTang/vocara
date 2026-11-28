@@ -33,6 +33,7 @@ use iced::advanced::layout::{self, Layout};
 use iced::advanced::widget::{Operation, Tree};
 use iced::advanced::{overlay, renderer, Clipboard, Shell, Widget};
 use iced::alignment::{Horizontal, Vertical};
+use iced::widget::scrollable::AbsoluteOffset;
 use iced::widget::{button, center, column, container, opaque, row, stack, Column, Space};
 use iced::{
     keyboard, mouse, widget, Element, Event, Length, Padding, Pixels, Rectangle, Renderer, Size,
@@ -61,7 +62,7 @@ pub const WIDTH: f32 = 420.0;
 pub const LIST_MAX_HEIGHT: f32 = 360.0;
 
 /// What the user did in the picker.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Message {
     /// The search text changed.
     Query(String),
@@ -75,6 +76,8 @@ pub enum Message {
     PickHighlighted,
     /// A tap on the barrier, or Escape.
     Cancel,
+    /// The list scrolled to this offset.
+    Scrolled(f32),
 }
 
 /// An open picker: its title, the search as typed, and the library once it
@@ -90,6 +93,11 @@ pub struct TechniquePicker {
     /// The highlighted row, in the list as filtered (Return picks it).
     highlight: usize,
     search: widget::Id,
+    /// The list, its scroll offset, and where it is to scroll next so the
+    /// highlight shows ([`Self::take_reveal`]).
+    list: widget::Id,
+    list_offset: f32,
+    reveal: Option<f32>,
 }
 
 impl TechniquePicker {
@@ -102,6 +110,9 @@ impl TechniquePicker {
             failed: false,
             highlight: 0,
             search: widget::Id::unique(),
+            list: widget::Id::unique(),
+            list_offset: 0.0,
+            reveal: None,
         }
     }
 
@@ -162,23 +173,53 @@ impl TechniquePicker {
         filtered.get(self.highlight.min(last)).copied()
     }
 
+    /// Where the list scrolls so the highlighted row shows whole, if it does
+    /// not already.
+    fn reveal_highlight(&self) -> Option<f32> {
+        let heights: Vec<f32> = self.filtered().into_iter().map(row_height).collect();
+        reveal(&heights, self.highlight, self.list_offset, LIST_MAX_HEIGHT)
+    }
+
+    /// The scroll that brings the highlighted row into view, once: Up and
+    /// Down moved the highlight past the list's edge (or a search started
+    /// over), so the list follows it.
+    pub fn take_reveal<T: Send + 'static>(&mut self) -> Task<T> {
+        match self.reveal.take() {
+            Some(y) => iced::widget::operation::scroll_to(
+                self.list.clone(),
+                AbsoluteOffset {
+                    x: None,
+                    y: Some(y),
+                },
+            ),
+            None => Task::none(),
+        }
+    }
+
     /// Handles `message`; `Some` when the picker closes: `Some(technique)`
     /// picked, `None` cancelled.
     pub fn update(&mut self, message: Message) -> Option<Option<Technique>> {
         match message {
             Message::Query(query) => {
-                // A new search highlights its first match.
+                // A new search highlights its first match, at the top.
                 self.query = query;
                 self.highlight = 0;
+                self.reveal = Some(0.0);
                 None
             }
             Message::Previous => {
                 self.highlight = self.highlight.saturating_sub(1);
+                self.reveal = self.reveal_highlight();
                 None
             }
             Message::Next => {
                 let last = self.filtered().len().saturating_sub(1);
                 self.highlight = (self.highlight + 1).min(last);
+                self.reveal = self.reveal_highlight();
+                None
+            }
+            Message::Scrolled(y) => {
+                self.list_offset = y;
                 None
             }
             Message::PickHighlighted => self.highlighted().map(|t| Some(t.clone())),
@@ -256,10 +297,15 @@ impl TechniquePicker {
         )
         .width(Length::Fill)
         .padding(LIST_PADDING);
-        container(scrollable(rows).fading())
-            .width(Length::Fill)
-            .max_height(LIST_MAX_HEIGHT)
-            .into()
+        container(
+            scrollable(rows)
+                .id(self.list.clone())
+                .on_scroll(|viewport| Message::Scrolled(viewport.absolute_offset().y))
+                .fading(),
+        )
+        .width(Length::Fill)
+        .max_height(LIST_MAX_HEIGHT)
+        .into()
     }
 }
 
@@ -310,6 +356,37 @@ pub const SEARCH_TEXT_INSET: f32 = 9.0 + 14.0 + 7.0;
 /// `highlighted`, radius 4), 10 px in: a 14 px `TEXT_SECONDARY` waypoints
 /// glyph, the name (12 px medium) and, when it has tags, them joined by
 /// " · " under it (11 px `TEXT_FAINT`) — one line each.
+/// A row's height, as [`technique_row`] lays it out: its 6 px padding above
+/// and below, the name's line, and the tags' line when it has tags.
+fn row_height(t: &Technique) -> f32 {
+    12.0 + theme::type_scale::LINE + if t.tags.is_empty() { 0.0 } else { 14.0 }
+}
+
+/// The offset a list scrolled to `offset`, `viewport` tall, scrolls to so
+/// row `index` of rows `heights` tall shows whole (the list's padding
+/// included at its ends); `None` when it already does, or the list fits.
+fn reveal(heights: &[f32], index: usize, offset: f32, viewport: f32) -> Option<f32> {
+    let content = 2.0 * LIST_PADDING + heights.iter().sum::<f32>();
+    if content <= viewport || index >= heights.len() {
+        return None;
+    }
+    let top = LIST_PADDING + heights[..index].iter().sum::<f32>();
+    let bottom = top + heights[index];
+    let first = index == 0;
+    let last = index + 1 == heights.len();
+    if top < offset {
+        Some(if first { 0.0 } else { top })
+    } else if bottom > offset + viewport {
+        Some(if last {
+            content - viewport
+        } else {
+            bottom - viewport
+        })
+    } else {
+        None
+    }
+}
+
 fn technique_row(t: &Technique, highlighted: bool) -> Element<'_, Message> {
     let mut labels = column![studio_text(t.name.as_str())
         .size(theme::type_scale::BODY)
