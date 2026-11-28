@@ -552,6 +552,29 @@ fn a_library_left_behind_in_the_container_is_named_for_the_app() {
 }
 
 #[test]
+fn a_container_left_with_files_but_no_library_is_not_named_for_the_app() {
+    // After a first notice the user copied what they needed and deleted the
+    // container's library; its logs, stems and models are still there. That
+    // is no library to tell anyone about, at every launch, for good.
+    let bundle_id = "test.sandbox-migration.files-left";
+    let home = tempfile::tempdir().unwrap();
+    let at = Locations::under_home(home.path(), bundle_id);
+    write(&at.container.join("logs/diagnostics.log"), b"[storage] ...");
+    write(&at.container.join("stems_cache/ab.vocal.wav"), b"RIFF a stem");
+    write(
+        &at.unsandboxed.join("vocara.db"),
+        b"SQLite format 3\0 moved",
+    );
+    let before = snapshot(home.path());
+    assert!(matches!(
+        settle_in(bundle_id, &at, &quick()),
+        Outcome::FilesLeftInContainer
+    ));
+    assert_ne!(library_left_behind(), Some(at.container.clone()));
+    assert_eq!(snapshot(home.path()), before, "left as it is");
+}
+
+#[test]
 fn every_entry_names_its_folders_in_words_the_log_keeps() {
     let e = || io::Error::from_raw_os_error(libc::EPERM);
     let outcomes = [
@@ -563,6 +586,7 @@ fn every_entry_names_its_folders_in_words_the_log_keeps() {
         Outcome::StaysInContainer(Why::UnsandboxedUnreadable(e())),
         Outcome::StaysInContainer(Why::UnsandboxedNotEmpty),
         Outcome::StaysInContainer(Why::MoveFailed(e())),
+        Outcome::FilesLeftInContainer,
     ];
     assert!(Outcome::NothingToMove.describe(ID).is_none());
     for outcome in &outcomes {
