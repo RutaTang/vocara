@@ -716,6 +716,15 @@ impl SongPracticeDetailScreen {
             can_export: track.has_clip(),
             reseparate: vm.can_reseparate(),
             current_color_value: track.color_value,
+            // The lane's colour with its tint cleared, through the one rule
+            // every surface draws a channel's colour by.
+            default_color: channel_color(
+                &AudioTrack {
+                    color_value: None,
+                    ..track.clone()
+                },
+                &self.shown.vocal_takes,
+            ),
         }
     }
 
@@ -908,6 +917,10 @@ impl SongPracticeDetailScreen {
         let menu = (self.menu.as_ref() == Some(&OpenMenu::Bus(bus.id.clone()))).then(|| {
             bus_context_menu(&BusMenu {
                 current_color_value: bus.color_value,
+                default_color: bus_color(&FxBus {
+                    color_value: None,
+                    ..FxBus::clone(bus)
+                }),
             })
             .map(Message::BusMenu)
         });

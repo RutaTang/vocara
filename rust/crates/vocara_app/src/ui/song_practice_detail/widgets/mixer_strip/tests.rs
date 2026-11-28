@@ -205,6 +205,28 @@ fn the_squeeze_threshold_is_the_tallest_strips_fixed_rows_plus_travel() {
 }
 
 #[test]
+fn the_dock_at_its_least_mixer_height_shows_whole_strips() {
+    use crate::ui::song_practice_detail::view_model::analysis_cache::MIXER_MIN_DOCK_HEIGHT;
+    // The dock's floor on the Mixer is exactly the squeeze threshold: the
+    // desk's padding and a strip's cap round the strip's least content.
+    let least = MIXER_MIN_DOCK_HEIGHT as f32;
+    let inner = least - DESK_PADDING.top - DESK_PADDING.bottom - 3.0;
+    assert_eq!(inner, STRIP_MIN_CONTENT_HEIGHT);
+    // There the strips are whole columns, their faders filling the room
+    // left (no strip scrolling on its own), and their dB fields show.
+    let tracks = takes(1..3);
+    let mut ui = simulator(Size::new(900.0, least), desk(&tracks, &[], false).view());
+    let fader = take_fader(&mut ui, 0);
+    assert!(fader.height >= 50.0, "{fader:?}");
+    assert!(
+        (fader.height - SQUEEZED_FADER_HEIGHT).abs() > 0.5,
+        "{fader:?}"
+    );
+    let field = text_at(&mut ui, "0.0", 1).expect("the second take's dB field");
+    assert!(field.y + field.height <= least, "{field:?}");
+}
+
+#[test]
 fn an_empty_desk_says_so() {
     let mut ui = simulator(Size::new(600.0, 300.0), MixerStrip::new(&[], &[]).view());
     assert!(text_at(&mut ui, "No tracks yet", 0).is_some());
@@ -391,6 +413,83 @@ fn the_fader_maps_its_travel_linearly_and_clamps() {
     // span holds at 1 px instead of flipping the clamp.
     assert_eq!(vertical_fader_value(6.5, 10.0), 0.5);
     assert_eq!(vertical_fader_value(0.0, 0.5), 1.0);
+    // The cap's centre is where the level reads.
+    for v in [0.0, 0.3, 0.5, 1.0] {
+        let y = vertical_fader_y(v, 216.0);
+        assert!((vertical_fader_value(y, 216.0) - v).abs() < 1e-6, "{v}");
+    }
+}
+
+/// A take at `volume`.
+fn take_at(volume: f64) -> Vec<Arc<AudioTrack>> {
+    vec![Arc::new(AudioTrack {
+        volume,
+        ..(*take(0)).clone()
+    })]
+}
+
+#[test]
+fn a_press_on_the_cap_holds_it_where_it_was_grabbed() {
+    let tracks = take_at(0.5);
+    let mut ui = simulator(STRIP, desk(&tracks, &[], false).view());
+    let fader = bus_fader(&mut ui, 0, &strip_db(0.5));
+    let cap = vertical_fader_y(0.5, fader.height);
+    assert_eq!(cap_grab(cap + 4.0, 0.5, fader.height), Some(4.0));
+    assert_eq!(cap_grab(cap + 30.0, 0.5, fader.height), None);
+    // Pressed 4 px below the cap's centre: the level stays; 20 px up from
+    // there, it reads the cap 20 px up.
+    let at = on_column(fader, cap + 4.0);
+    drive(&mut ui, &drag_steps(at, &[Point::new(at.x, at.y - 20.0)]));
+    let messages: Vec<_> = ui.into_messages().collect();
+    let v = volumes(&messages);
+    assert_eq!(v.len(), 1, "the press alone moved nothing: {v:?}");
+    let expected = vertical_fader_value(cap - 20.0, fader.height);
+    assert!((v[0].1 - expected).abs() < 1e-3, "{v:?} vs {expected}");
+    assert_eq!(count_of(&messages, &Message::CommitTrackVolume), 1);
+    // A click on the cap, unmoved, neither changes nor saves the level.
+    let mut ui = simulator(STRIP, desk(&tracks, &[], false).view());
+    ui.point_at(on_column(fader, cap - 3.0));
+    let _ = ui.simulate([press(), release()]);
+    assert!(ui.into_messages().next().is_none());
+    // Off the cap, a press still sets the level where it lands.
+    let mut ui = simulator(STRIP, desk(&tracks, &[], false).view());
+    ui.point_at(on_column(fader, cap + 40.0));
+    let _ = ui.simulate([press(), release()]);
+    let messages: Vec<_> = ui.into_messages().collect();
+    let v = volumes(&messages);
+    assert!((v[0].1 - vertical_fader_value(cap + 40.0, fader.height)).abs() < 1e-3);
+    assert_eq!(count_of(&messages, &Message::CommitTrackVolume), 1);
+}
+
+#[test]
+fn a_double_click_resets_a_fader_to_0_db() {
+    let tracks = take_at(0.5);
+    let mut ui = simulator(STRIP, desk(&tracks, &[], false).view());
+    let fader = bus_fader(&mut ui, 0, &strip_db(0.5));
+    ui.point_at(on_column(fader, vertical_fader_y(0.5, fader.height)));
+    let _ = ui.simulate([press(), release()]);
+    let _ = ui.simulate([press(), release()]);
+    let messages: Vec<_> = ui.into_messages().collect();
+    assert_eq!(
+        messages,
+        vec![
+            Message::SetTrackVolumeLive {
+                id: "t0".to_string(),
+                volume: 1.0,
+            },
+            Message::CommitTrackVolume,
+        ]
+    );
+    assert_eq!(fader_db(1.0), "0.0");
+    // The master's too.
+    let mut ui = simulator(STRIP, desk(&tracks, &[], false).view());
+    let master = master_fader(&mut ui);
+    ui.point_at(on_column(master, master.height - FADER_PAD));
+    let _ = ui.simulate([press(), release()]);
+    let _ = ui.simulate([press(), release()]);
+    let messages: Vec<_> = ui.into_messages().collect();
+    assert!(messages.contains(&Message::SetMasterVolumeLive { gain: 1.0 }));
+    assert_eq!(messages.last(), Some(&Message::CommitMasterVolume));
 }
 
 // ------------------------------------------ strips keep their own drag
@@ -804,7 +903,9 @@ fn the_input_strip_sets_the_record_gain_and_commits_the_gains() {
     let label = text_at(&mut ui, "50%", 0).expect("the monitor's reading");
     let field = text_at(&mut ui, "+20.0", 0).expect("the record gain's field");
     let fader = fader_between(label, field, 1);
-    let c = on_column(fader, fader.height / 2.0);
+    // Pressed off its cap (below it) and dragged up: the press sets the
+    // gain, the drag raises it.
+    let c = on_column(fader, fader.height - FADER_PAD);
     drive(&mut ui, &drag_steps(c, &[Point::new(c.x, c.y - 40.0)]));
     let messages: Vec<_> = ui.into_messages().collect();
     let dbs: Vec<f64> = messages
@@ -954,8 +1055,8 @@ fn the_record_gain_maps_onto_the_rec_fader() {
 
 #[test]
 fn a_take_without_a_tint_keeps_a_stable_color_from_its_id() {
-    // "t1": 't' (116) + '1' (49) = 165; 165 % 16 = 5 → teal.
-    assert_eq!(default_take_color("t1"), argb(0xFF49_B6A8));
+    // "t1": 't' (116) + '1' (49) = 165; 165 % 5 = 0 → coral.
+    assert_eq!(default_take_color("t1"), argb(0xFFD9_8C7E));
     assert_eq!(default_take_color("t1"), default_take_color("t1"));
     let mut tinted = (*take(1)).clone();
     tinted.color_value = Some(0xFF22_CC44);
