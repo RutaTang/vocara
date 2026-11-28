@@ -278,6 +278,33 @@ fn a_mouse_drag_still_moves_and_commits_the_clip() {
     assert_eq!(lane.commits, 1);
 }
 
+#[test]
+fn a_dragged_clip_is_selected_before_it_moves() {
+    // The selection stayed on the clip selected before, and Delete then
+    // asked about that one, not the clip just moved.
+    let mut lane = ClipLane::new(&[("a", 4000), ("b", 8000)]);
+    let at = clip_center(4000, 1000);
+    lane.ui.point_at(at);
+    lane.run([press(), lane.by(at, 30.0), lane.by(at, 80.0), release()]);
+    let selects: Vec<&Message> = lane
+        .messages
+        .iter()
+        .filter(|m| matches!(m, Message::SelectClip(_)))
+        .collect();
+    assert_eq!(selects, [&Message::SelectClip("a".into())]);
+    let first_move = lane
+        .messages
+        .iter()
+        .position(|m| matches!(m, Message::ClipMoveLive { .. }))
+        .expect("a live move");
+    assert!(
+        matches!(&lane.messages[0], Message::SelectClip(id) if id == "a") && first_move > 0,
+        "{:?}",
+        lane.messages
+    );
+    assert_eq!(lane.commits, 1);
+}
+
 /// The row at the top of a lane list, with 30 lanes' worth below it.
 fn lane_list<'a>(row: TrackRow<'a, Message>) -> Element<'a, Message> {
     let mut list = column![row].width(Length::Fill);

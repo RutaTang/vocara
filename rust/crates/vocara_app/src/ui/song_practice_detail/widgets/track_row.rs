@@ -29,8 +29,9 @@
 //!
 //! - A clip's move-drag starts once the pointer has moved more than a pixel
 //!   horizontally (a mouse's hit slop; the movement up to then is
-//!   swallowed, `DragStartBehavior.start`); each move reports the clip's new
-//!   start ([`Message::ClipMoveLive`]); the release commits
+//!   swallowed, `DragStartBehavior.start`); it selects the clip
+//!   ([`Message::SelectClip`]), each move reports the clip's new start
+//!   ([`Message::ClipMoveLive`]), and the release commits
 //!   ([`Message::MoveCommit`]). A press that does not drag is a tap (released
 //!   within the 18 px tap slop): it selects the clip, opens the note, or
 //!   selects the lane. Only the primary button: a two-finger trackpad swipe
@@ -403,7 +404,7 @@ pub fn clip_peaks(clip: &AudioClip) -> Arc<[f64]> {
 pub enum Message {
     /// A tap on the header or on the lane's empty stretch: select the lane.
     Select,
-    /// A clip (its id) was tapped, to select it.
+    /// A clip (its id) was tapped, or its move-drag began, to select it.
     SelectClip(String),
     /// Every tick of a clip's move-drag: the clip and its new absolute start
     /// (ms).
@@ -1051,8 +1052,12 @@ impl LaneState {
                 if let Hit::Clip(id) = &press.target {
                     if (p.x - press.at.x).abs() > DRAG_SLOP {
                         // The drag wins: no tap. The movement that won it is
-                        // swallowed (`DragStartBehavior.start`).
+                        // swallowed (`DragStartBehavior.start`). The clip
+                        // dragged is the one selected, as in a DAW: the
+                        // selection stayed where it was, and Delete then
+                        // asked about another clip.
                         if let Some(base_start_ms) = g.clip_start(id) {
+                            shell.publish(Message::SelectClip(id.clone()));
                             self.drag = Some(ClipDrag {
                                 clip_id: id.clone(),
                                 base_start_ms,
