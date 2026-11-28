@@ -584,10 +584,10 @@ fn a_buss_output_menu_opens_under_its_chip() {
         .buses(vec![bus("a", "Reverb"), bus("b", "Delay")])
         .height(900.0);
     let mut ui = ui();
-    let chip = bounds(&mut ui, &vm, STEREO_OUT);
+    let chip = bounds(&mut ui, &vm, MASTER);
     vm.open_menu = Some(InspectorMenu::Output(Channel::Bus("a".into())));
     // The menu's first row repeats the chip's label.
-    let item = nth(&mut ui, &vm, STEREO_OUT, 1);
+    let item = nth(&mut ui, &vm, MASTER, 1);
     assert!((item.x - chip.x).abs() < 30.0, "{chip:?} {item:?}");
     assert!(item.y - (chip.y + chip.height) < 30.0);
     assert!(item.y > chip.y + chip.height);
@@ -597,7 +597,7 @@ fn a_buss_output_menu_opens_under_its_chip() {
 fn a_menu_for_another_channel_is_not_shown_over_this_one() {
     let mut vm = Vm::new().track(vocal("t1")).buses(vec![bus("a", "Reverb")]);
     vm.open_menu = Some(InspectorMenu::Output(Channel::Track("t0".into())));
-    assert_eq!(count(&mut ui(), &vm, STEREO_OUT), 1, "only the chip");
+    assert_eq!(count(&mut ui(), &vm, MASTER), 1, "only the chip");
 }
 
 #[test]
@@ -620,7 +620,7 @@ fn a_take_can_be_routed_to_a_bus_and_back_to_the_master() {
     let mut ui = ui();
     let output = InspectorMenu::Output(Channel::Track("t1".into()));
     assert_eq!(
-        tap(&mut ui, &vm, STEREO_OUT),
+        tap(&mut ui, &vm, MASTER),
         vec![Message::OpenMenu(output.clone())]
     );
     vm.open_menu = Some(output);
@@ -632,7 +632,7 @@ fn a_take_can_be_routed_to_a_bus_and_back_to_the_master() {
         }]
     );
     assert_eq!(
-        tap_nth(&mut ui, &vm, STEREO_OUT, 1),
+        tap_nth(&mut ui, &vm, MASTER, 1),
         vec![Message::SetTrackBus {
             track_id: "t1".into(),
             bus_id: None,
@@ -1208,17 +1208,43 @@ fn the_offer_sets_never_feed_a_bus_twice() {
     let targets = vec![&a, &b, &c];
     let sends = vec![TrackSend::new("a", 0.0), TrackSend::new("b", 0.0)];
     let ids = |v: Vec<&FxBus>| v.iter().map(|b| b.id.clone()).collect::<Vec<_>>();
-    assert_eq!(ids(addable_targets(&sends, &targets)), vec!["c"]);
-    assert_eq!(ids(retarget_options(&sends, 0, &targets)), vec!["a", "c"]);
-    assert_eq!(ids(retarget_options(&sends, 1, &targets)), vec!["b", "c"]);
-    assert!(can_add_send(&sends, &targets));
-    assert!(!can_add_send(&sends, &[&a, &b]));
+    assert_eq!(ids(addable_targets(&sends, None, &targets)), vec!["c"]);
+    assert_eq!(
+        ids(retarget_options(&sends, 0, None, &targets)),
+        vec!["a", "c"]
+    );
+    assert_eq!(
+        ids(retarget_options(&sends, 1, None, &targets)),
+        vec!["b", "c"]
+    );
+    assert!(can_add_send(&sends, None, &targets));
+    assert!(!can_add_send(&sends, None, &[&a, &b]));
+    // The output's bus is fed already: no send offers it.
+    assert!(addable_targets(&sends, Some("c"), &targets).is_empty());
+    assert!(!can_add_send(&sends, Some("c"), &targets));
+    assert_eq!(
+        ids(retarget_options(&sends, 0, Some("c"), &targets)),
+        vec!["a"]
+    );
+    assert_eq!(
+        ids(addable_targets(&[], Some("b"), &targets)),
+        vec!["a", "c"]
+    );
     assert_eq!(send_name("b", &targets), "B");
     assert_eq!(send_name("zz", &targets), "—");
     let buses = vec![Arc::new(a.clone()), Arc::new(b.clone())];
-    assert_eq!(output_name(None, &buses), STEREO_OUT);
+    assert_eq!(output_name(None, &buses), MASTER);
     assert_eq!(output_name(Some("b"), &buses), "B");
-    assert_eq!(output_name(Some("gone"), &buses), STEREO_OUT);
+    assert_eq!(output_name(Some("gone"), &buses), MASTER);
+}
+
+#[test]
+fn the_master_has_one_name_wherever_it_is_a_destination() {
+    use crate::ui::song_practice_detail::widgets::mixer_strip::bus_name;
+    // The arrange's and the mixer's name, in the inspector's Output too.
+    assert_eq!(MASTER, "Master");
+    assert_eq!(output_name(None, &[]), MASTER);
+    assert_eq!(bus_name(&[], None), output_name(None, &[]));
 }
 
 #[test]

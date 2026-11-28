@@ -46,8 +46,8 @@ use crate::util::to_string_as_fixed;
 
 // ------------------------------------------------------------------ pan knob
 
-/// How many logical pixels of horizontal drag sweep the pan from center to
-/// one side (`d.delta.dx / 80`).
+/// How many logical pixels of drag sweep the pan from center to one side
+/// (`d.delta.dx / 80`).
 pub const PAN_DRAG_PIXELS: f64 = 80.0;
 
 /// The knob's `L##` / `C` / `R##` label for a pan in [-1, 1].
@@ -63,13 +63,15 @@ pub fn pan_label(value: f64) -> String {
     }
 }
 
-/// The pan a drag reaches from `from` after a horizontal move of `dx`.
-pub fn pan_after_drag(from: f64, dx: f64) -> f64 {
-    (from + dx / PAN_DRAG_PIXELS).clamp(-1.0, 1.0)
+/// The pan a drag reaches from `from` after a move of `dx` across and `dy`
+/// down: right or up turns it right, as a knob turns (Dart's knob took the
+/// horizontal move only, so the usual vertical knob drag did nothing).
+pub fn pan_after_drag(from: f64, dx: f64, dy: f64) -> f64 {
+    (from + (dx - dy) / PAN_DRAG_PIXELS).clamp(-1.0, 1.0)
 }
 
 /// `StudioPanKnob`: a compact rotary pan knob ([-1, 1]; 0 = center). Drag
-/// horizontally to pan, double-tap to re-center; optionally shows an
+/// right or up to pan right, double-tap to re-center; optionally shows an
 /// `L##`/`C`/`R##` label below.
 pub struct StudioPanKnob<'a, M> {
     value: f64,
@@ -168,8 +170,11 @@ impl<'a, M: Clone + 'a> From<StudioPanKnob<'a, M>> for Element<'a, M> {
                         match state.gesture.moved(*position) {
                             Some(Gesture::PanStart) => state.drag = Some(value),
                             Some(Gesture::PanUpdate(delta)) => {
-                                let next =
-                                    pan_after_drag(state.drag.unwrap_or(value), f64::from(delta.x));
+                                let next = pan_after_drag(
+                                    state.drag.unwrap_or(value),
+                                    f64::from(delta.x),
+                                    f64::from(delta.y),
+                                );
                                 state.drag = Some(next);
                                 shell.publish(on_changed(next));
                             }
@@ -871,6 +876,37 @@ mod tests {
         ]);
         let second = pans(ui.into_messages());
         assert!((second.last().unwrap() - (-0.5 - 8.0 / 80.0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_vertical_drag_turns_the_knob_up_is_right() {
+        let c = Point::new(512.0, 384.0);
+        let mut ui = simulator(knob_at(0.0));
+        ui.point_at(c);
+        // The first move only wins the pan; the next 16 px up turn it.
+        let _ = ui.simulate([
+            press(),
+            move_to(c.x, c.y - 20.0),
+            move_to(c.x, c.y - 36.0),
+            release(),
+        ]);
+        let up = pans(ui.into_messages());
+        assert!((up.last().unwrap() - 16.0 / 80.0).abs() < 1e-9, "{up:?}");
+        let mut ui = simulator(knob_at(0.0));
+        ui.point_at(c);
+        let _ = ui.simulate([
+            press(),
+            move_to(c.x, c.y + 20.0),
+            move_to(c.x, c.y + 36.0),
+            release(),
+        ]);
+        let down = pans(ui.into_messages());
+        assert!(
+            (down.last().unwrap() + 16.0 / 80.0).abs() < 1e-9,
+            "{down:?}"
+        );
+        // Across still turns it as before.
+        assert_eq!(pan_after_drag(0.0, 8.0, 0.0), 0.1);
     }
 
     #[test]

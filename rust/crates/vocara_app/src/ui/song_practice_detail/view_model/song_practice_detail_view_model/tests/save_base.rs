@@ -281,16 +281,22 @@ fn a_routing_edit_syncs_the_engine_once_through_its_save() {
         Some(bus.as_str())
     );
 
+    // A send goes to another bus: the output's own bus hears the take
+    // already, and a send there is refused.
+    s.act(|vm| vm.mixer_do(|m, h| m.create_bus(h, "Room")));
+    s.settle();
+    let room = s.practice().fx_buses[1].id.clone();
     let before = engine.syncs();
-    s.act(|vm| vm.mixer_do(|m, h| m.add_track_send(h, &take, &bus)));
+    s.act(|vm| vm.mixer_do(|m, h| m.add_track_send(h, &take, &room)));
     s.settle();
     assert_eq!(engine.syncs() - before, 1);
+    assert_eq!(s.practice().vocal_tracks[0].sends.len(), 1);
 
     let before = engine.syncs();
     s.act(|vm| vm.mixer_do(|m, h| m.delete_bus(h, &bus)));
     s.settle();
     assert_eq!(engine.syncs() - before, 1);
-    assert!(s.practice().fx_buses.is_empty());
+    assert_eq!(s.practice().fx_buses.len(), 1);
 }
 
 #[test]

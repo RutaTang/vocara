@@ -86,7 +86,7 @@ use iced::widget::{canvas as canvas_widget, column, container, row, Column, Spac
 use iced::{
     mouse, window, Color, Element, Length, Padding, Point, Rectangle, Renderer, Size, Theme,
 };
-use vocara_model::models::audio_fx::{EqBand, FxKind, TrackFx};
+use vocara_model::models::audio_fx::{EqBand, FxKind, ReverbSettings, TrackFx};
 use vocara_model::models::fx_presets::FxPresets;
 
 pub use eq::EqInput;
@@ -255,6 +255,24 @@ pub fn current_preset(fx: &TrackFx) -> Option<&'static str> {
             } == *fx
         })
         .map(|p| p.name)
+}
+
+/// The Mix a Delay, Saturation or Doubler takes when it is switched on at
+/// 0 %: their defaults (Dart's too) mix nothing in, so switching one on
+/// changed nothing you could hear. The values sit among the vocal presets'
+/// (delay 15–26 %, saturation 25–35 %, doubler 35 %).
+pub const AUDIBLE_DELAY_MIX: f64 = 0.2;
+pub const AUDIBLE_SATURATION_MIX: f64 = 0.3;
+pub const AUDIBLE_DOUBLER_MIX: f64 = 0.35;
+
+/// The Mix an effect keeps as its power button turns it `on`: `audible`
+/// for one switched on at 0 %, else its own (a Mix the user set stays).
+fn audible_mix(on: bool, mix: f64, audible: f64) -> f64 {
+    if on && mix <= 0.0 {
+        audible
+    } else {
+        mix
+    }
 }
 
 /// The equalizer's badge: its enabled bands ("4 bands", "1 band").
@@ -501,9 +519,13 @@ impl<'a> FxPanel<'a> {
             FxKind::Delay => simple_insert(
                 "Delay",
                 f.delay_on,
-                toggle(f.delay_on, |fx, v| TrackFx {
-                    delay_on: v,
-                    ..fx.clone()
+                toggle(f.delay_on, |fx, v| {
+                    let mut n = TrackFx {
+                        delay_on: v,
+                        ..fx.clone()
+                    };
+                    n.delay.mix = audible_mix(v, n.delay.mix, AUDIBLE_DELAY_MIX);
+                    n
                 }),
                 vec![
                     slider("Time", f.delay.time_ms, 1.0, 1500.0, "ms", |fx, v| {
@@ -526,9 +548,13 @@ impl<'a> FxPanel<'a> {
             FxKind::Saturation => simple_insert(
                 "Saturation",
                 f.saturation_on,
-                toggle(f.saturation_on, |fx, v| TrackFx {
-                    saturation_on: v,
-                    ..fx.clone()
+                toggle(f.saturation_on, |fx, v| {
+                    let mut n = TrackFx {
+                        saturation_on: v,
+                        ..fx.clone()
+                    };
+                    n.saturation.mix = audible_mix(v, n.saturation.mix, AUDIBLE_SATURATION_MIX);
+                    n
                 }),
                 vec![
                     slider("Drive", f.saturation.drive_db, 0.0, 36.0, "dB", |fx, v| {
@@ -546,9 +572,13 @@ impl<'a> FxPanel<'a> {
             FxKind::Doubler => simple_insert(
                 "Doubler",
                 f.doubler_on,
-                toggle(f.doubler_on, |fx, v| TrackFx {
-                    doubler_on: v,
-                    ..fx.clone()
+                toggle(f.doubler_on, |fx, v| {
+                    let mut n = TrackFx {
+                        doubler_on: v,
+                        ..fx.clone()
+                    };
+                    n.doubler.mix = audible_mix(v, n.doubler.mix, AUDIBLE_DOUBLER_MIX);
+                    n
                 }),
                 vec![
                     slider("Delay", f.doubler.delay_ms, 1.0, 50.0, "ms", |fx, v| {
@@ -617,28 +647,33 @@ impl<'a> FxPanel<'a> {
                     ..fx.clone()
                 }),
                 vec![
-                    parameter_row(
-                        "Space",
-                        dropdown(
-                            "Space…",
-                            true,
-                            Length::Fill,
-                            DROPDOWN_MENU_WIDTH,
-                            FxPresets::reverb()
-                                .into_iter()
-                                .map(|p| {
-                                    MenuItem::new(
-                                        p.name,
-                                        set.committed(TrackFx {
-                                            reverb: p.reverb,
-                                            ..f.clone()
-                                        }),
-                                    )
-                                })
-                                .collect(),
-                        ),
-                        "",
-                    ),
+                    {
+                        let (label, placeholder) = space_label(&f.reverb);
+                        let current = current_space(&f.reverb);
+                        parameter_row(
+                            "Space",
+                            dropdown(
+                                label,
+                                placeholder,
+                                Length::Fill,
+                                DROPDOWN_MENU_WIDTH,
+                                FxPresets::reverb()
+                                    .into_iter()
+                                    .map(|p| {
+                                        MenuItem::new(
+                                            p.name,
+                                            set.committed(TrackFx {
+                                                reverb: p.reverb,
+                                                ..f.clone()
+                                            }),
+                                        )
+                                        .selected(current == Some(p.name))
+                                    })
+                                    .collect(),
+                            ),
+                            "",
+                        )
+                    },
                     slider("Size", f.reverb.room_size, 0.0, 1.0, "", |fx, v| {
                         let mut n = fx.clone();
                         n.reverb.room_size = v;
@@ -665,9 +700,11 @@ impl<'a> FxPanel<'a> {
 /// reverb send, reset to off: nothing else in the UI sets or clears it, so
 /// an old take's audible send goes with a preset rather than staying for
 /// good. Aux sends / output routing live on the track, so they're untouched.
-/// Its pop-up reads the preset the chain is, else "None"; a hairline closes
-/// the inspector's identity block under it.
+/// Its pop-up reads the preset the chain is, else [`CUSTOM`], and its menu
+/// checks that preset, as the Output and Interpretation menus check theirs;
+/// a hairline closes the inspector's identity block under it.
 fn preset_row<'a>(fx: &TrackFx, set: &Setter) -> Element<'a, Message> {
+    let current = current_preset(fx);
     let items = FxPresets::vocal()
         .into_iter()
         .map(|p| {
@@ -679,9 +716,9 @@ fn preset_row<'a>(fx: &TrackFx, set: &Setter) -> Element<'a, Message> {
                 }),
             )
             .subtitle(Some(p.description.to_string()))
+            .selected(current == Some(p.name))
         })
         .collect();
-    let current = current_preset(fx);
     let row = row![
         studio_text("Preset")
             .size(type_scale::LABEL)
@@ -689,7 +726,7 @@ fn preset_row<'a>(fx: &TrackFx, set: &Setter) -> Element<'a, Message> {
             .color(Studio::TEXT_SECONDARY),
         Space::new().width(Length::Fill),
         dropdown(
-            current.unwrap_or(NO_PRESET),
+            current.unwrap_or(CUSTOM),
             current.is_none(),
             Length::Fixed(PRESET_POPUP_WIDTH),
             PRESET_MENU_WIDTH,
@@ -712,8 +749,33 @@ fn preset_row<'a>(fx: &TrackFx, set: &Setter) -> Element<'a, Message> {
     .into()
 }
 
-/// The preset pop-up's text for a chain no preset is.
-pub const NO_PRESET: &str = "None";
+/// The preset pop-up's text for a chain no preset is, and the Space
+/// pop-up's for a reverb no space is. (The preset's read "None", which is
+/// no item of its menu, as soon as an effect was switched on.)
+pub const CUSTOM: &str = "Custom";
+
+/// The Space pop-up's text before any space is chosen.
+pub const NO_SPACE: &str = "Space…";
+
+/// The reverb space `reverb` is, if any.
+pub fn current_space(reverb: &ReverbSettings) -> Option<&'static str> {
+    FxPresets::reverb()
+        .into_iter()
+        .find(|p| p.reverb == *reverb)
+        .map(|p| p.name)
+}
+
+/// The Space pop-up's text and whether it is a placeholder: the space the
+/// reverb is; [`NO_SPACE`] while it holds its untouched defaults (no space
+/// chosen yet); else [`CUSTOM`], its values edited off every space. (It read
+/// "Space…" whatever was chosen.)
+pub fn space_label(reverb: &ReverbSettings) -> (&'static str, bool) {
+    match current_space(reverb) {
+        Some(name) => (name, false),
+        None if *reverb == ReverbSettings::DEFAULT => (NO_SPACE, true),
+        None => (CUSTOM, true),
+    }
+}
 
 /// The preset pop-up's width (the mockup's 118 px minimum).
 const PRESET_POPUP_WIDTH: f32 = 118.0;
