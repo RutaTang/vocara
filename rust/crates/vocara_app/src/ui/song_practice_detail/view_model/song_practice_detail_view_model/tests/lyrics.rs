@@ -226,19 +226,69 @@ fn a_dropped_file_of_another_kind_is_refused_with_a_word() {
     assert_eq!(s.toasts, ["Drop a .lrc or .txt lyrics file."]);
 }
 
+fn times(s: &Screen) -> Vec<Option<i64>> {
+    s.vm.lyrics().iter().map(|l| l.time_ms).collect()
+}
+
 #[test]
 fn a_fixed_typo_in_the_first_chorus_leaves_the_second_its_own_time() {
     // Times were matched to the edited text by line text alone, first come
-    // first served.
+    // first served: the second chorus took the first one's time. The first
+    // keeps its own, as a line reworded where it stood.
     let (_f, mut s) = Fixture::open(Setup::default());
     let call = s.call(|vm| vm.import_lyrics("[00:30.00]chorus\n[00:40.00]verse\n[01:30.00]chorus"));
     assert!(s.landed(call));
-    let times =
-        |s: &Screen| -> Vec<Option<i64>> { s.vm.lyrics().iter().map(|l| l.time_ms).collect() };
     assert!(set_text(&mut s, "chorus!\nverse\nchorus"));
-    assert_eq!(times(&s), [None, Some(40000), Some(90000)]);
+    assert_eq!(times(&s), [Some(30000), Some(40000), Some(90000)]);
     assert!(set_text(&mut s, "verse\nchorus")); // the first chorus deleted
     assert_eq!(times(&s), [Some(40000), Some(90000)]);
+}
+
+#[test]
+fn a_synced_line_reworded_where_it_stands_keeps_its_time() {
+    // Times were kept by identical text only: a fixed word un-synced the
+    // line ("4 of 6 lines synced").
+    let (_f, mut s) = Fixture::open(Setup::default());
+    let call = s.call(|vm| {
+        vm.import_lyrics("[00:01.00]First line\n[00:03.00]Second line 第二行\n[00:05.00]Third")
+    });
+    assert!(s.landed(call));
+    assert!(set_text(
+        &mut s,
+        "First line\nSecond line 第二行 edited\nThird, louder"
+    ));
+    assert_eq!(times(&s), [Some(1000), Some(3000), Some(5000)]);
+    assert_eq!(words(&s)[1], "Second line 第二行 edited");
+}
+
+#[test]
+fn among_edits_an_inserted_line_starts_untimed_and_a_deleted_one_takes_its_time_along() {
+    let (_f, mut s) = Fixture::open(Setup::default());
+    let call = s.call(|vm| {
+        vm.import_lyrics(
+            "[00:01.00]one more time\n[00:02.00]hold the line\n[00:03.00]let it go\n\
+             [00:04.00]the last word",
+        )
+    });
+    assert!(s.landed(call));
+    // "hold the line" reworded, a line inserted after it, "let it go" gone.
+    assert!(set_text(
+        &mut s,
+        "one more time\nhold the line now\nsomething new entirely\nthe last word"
+    ));
+    assert_eq!(times(&s), [Some(1000), Some(2000), None, Some(4000)]);
+}
+
+#[test]
+fn a_line_rewritten_with_nothing_in_common_is_new() {
+    // Another line where one stood is not that line: its time would mark
+    // words the singer never sang there.
+    let (_f, mut s) = Fixture::open(Setup::default());
+    let call =
+        s.call(|vm| vm.import_lyrics("[00:01.00]one\n[00:02.00]Hello world\n[00:03.00]three"));
+    assert!(s.landed(call));
+    assert!(set_text(&mut s, "one\nGoodbye moon\nthree"));
+    assert_eq!(times(&s), [Some(1000), None, Some(3000)]);
 }
 
 #[test]
@@ -248,8 +298,7 @@ fn an_edit_keeps_the_times_of_the_lines_it_continues() {
     assert!(s.landed(call));
     // A line inserted: the others keep their own times, the new one has none.
     assert!(set_text(&mut s, "one\nnew\ntwo\nthree"));
-    let times: Vec<Option<i64>> = s.vm.lyrics().iter().map(|l| l.time_ms).collect();
-    assert_eq!(times, [Some(1000), None, Some(2000), Some(3000)]);
+    assert_eq!(times(&s), [Some(1000), None, Some(2000), Some(3000)]);
 }
 
 #[test]

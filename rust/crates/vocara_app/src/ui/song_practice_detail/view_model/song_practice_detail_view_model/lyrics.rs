@@ -31,6 +31,122 @@ fn any_timed(lines: &[LyricLine]) -> bool {
     lines.iter().any(LyricLine::is_synced)
 }
 
+/// How alike two lines must read for the new one to be the old one
+/// reworded (see [`line_likeness`]).
+const REWORDED_LIKENESS: f64 = 0.5;
+
+/// The most line pairs one changed stretch is compared over: past it the
+/// stretch was rewritten wholesale (a paste over the lyrics), and its new
+/// lines are new.
+const REWORDED_PAIRS_CAP: usize = 400;
+
+/// The most characters of a line compared.
+const REWORDED_CHARS_CAP: usize = 256;
+
+/// The length of the longest common subsequence of `a` and `b`.
+fn common_run<T: PartialEq>(a: &[T], b: &[T]) -> usize {
+    let mut row = vec![0usize; b.len() + 1];
+    for x in a {
+        let mut diagonal = 0;
+        for (j, y) in b.iter().enumerate() {
+            let above = row[j + 1];
+            row[j + 1] = if x == y {
+                diagonal + 1
+            } else {
+                above.max(row[j])
+            };
+            diagonal = above;
+        }
+    }
+    row[b.len()]
+}
+
+/// How alike two lines read, 0 to 1: twice what they share over what they
+/// hold together, by characters (a fixed typo) or by words (a word added to
+/// a short line), whichever is more.
+fn line_likeness(a: &str, b: &str) -> f64 {
+    let ratio = |common: usize, total: usize| {
+        if total == 0 {
+            0.0
+        } else {
+            2.0 * common as f64 / total as f64
+        }
+    };
+    let ca: Vec<char> = a.chars().take(REWORDED_CHARS_CAP).collect();
+    let cb: Vec<char> = b.chars().take(REWORDED_CHARS_CAP).collect();
+    let wa: Vec<&str> = a.split_whitespace().collect();
+    let wb: Vec<&str> = b.split_whitespace().collect();
+    ratio(common_run(&ca, &cb), ca.len() + cb.len())
+        .max(ratio(common_run(&wa, &wb), wa.len() + wb.len()))
+}
+
+/// Pairs the lines an edit reworded where they stood. Between two lines the
+/// alignment `from` (index of `next` → index of `prev`) kept, the old lines
+/// it dropped and the new ones it took are one changed stretch; there each
+/// new line with words takes the old line with words it most reads like, in
+/// order, when they read alike enough ([`REWORDED_LIKENESS`]). A new line
+/// like none of them is an insert, and an old one nothing took a delete.
+fn pair_edited_lines(prev: &[&str], next: &[&str], from: &mut [Option<usize>]) {
+    // The stretches lie between the kept lines, which run in order.
+    let (mut p, mut n) = (0, 0);
+    for j in 0..next.len() {
+        if let Some(i) = from[j] {
+            pair_stretch(prev, next, p..i, n..j, from);
+            p = i + 1;
+            n = j + 1;
+        }
+    }
+    pair_stretch(prev, next, p..prev.len(), n..next.len(), from);
+}
+
+/// [`pair_edited_lines`] over one changed stretch: the old lines `p`, the
+/// new lines `n`.
+fn pair_stretch(
+    prev: &[&str],
+    next: &[&str],
+    p: std::ops::Range<usize>,
+    n: std::ops::Range<usize>,
+    from: &mut [Option<usize>],
+) {
+    let old: Vec<usize> = p.filter(|&i| !prev[i].is_empty()).collect();
+    let new: Vec<usize> = n.filter(|&j| !next[j].is_empty()).collect();
+    if old.is_empty() || new.is_empty() || old.len() * new.len() > REWORDED_PAIRS_CAP {
+        return;
+    }
+    let like: Vec<Vec<f64>> = old
+        .iter()
+        .map(|&i| {
+            new.iter()
+                .map(|&j| line_likeness(prev[i], next[j]))
+                .collect()
+        })
+        .collect();
+    // The best total likeness of the pairs from (a, b) on, in order.
+    let (n_old, n_new) = (old.len(), new.len());
+    let mut best = vec![vec![0.0f64; n_new + 1]; n_old + 1];
+    for a in (0..n_old).rev() {
+        for b in (0..n_new).rev() {
+            let mut v = best[a + 1][b].max(best[a][b + 1]);
+            if like[a][b] >= REWORDED_LIKENESS {
+                v = v.max(best[a + 1][b + 1] + like[a][b]);
+            }
+            best[a][b] = v;
+        }
+    }
+    let (mut a, mut b) = (0, 0);
+    while a < n_old && b < n_new {
+        if like[a][b] >= REWORDED_LIKENESS && best[a][b] == best[a + 1][b + 1] + like[a][b] {
+            from[new[b]] = Some(old[a]);
+            a += 1;
+            b += 1;
+        } else if best[a][b] == best[a + 1][b] {
+            a += 1;
+        } else {
+            b += 1;
+        }
+    }
+}
+
 fn same_words(a: Option<&[LyricLine]>, b: &[LyricLine]) -> bool {
     let Some(a) = a else {
         return false;
@@ -212,10 +328,14 @@ impl SongPracticeDetailViewModel {
     }
 
     /// Replaces lyrics from edited plain text, keeping existing line times
-    /// by MATCHING TEXT (not position): inserting, deleting, or reordering a
-    /// line in the editor must not pin an old timestamp onto different words
-    /// — or onto a blank line. Answers whether the write landed (the editor
-    /// keeps the draft if not).
+    /// on the lines they belong to: an unchanged line keeps its own, matched
+    /// in order, and a line reworded where it stood (a fixed typo, a word
+    /// added) keeps the time of the line it replaced when the two still
+    /// read alike (see [`pair_edited_lines`]). An inserted line starts
+    /// untimed and a deleted line's time goes with it: inserting, deleting,
+    /// or reordering a line in the editor must not pin an old timestamp
+    /// onto different words — or onto a blank line. Answers whether the
+    /// write landed (the editor keeps the draft if not).
     pub fn set_lyrics_text(&mut self, text: &str) -> Started {
         let call = self.next_call();
         self.set_lyrics_text_inner(text, LyricsThen::Reply(call));
@@ -241,7 +361,10 @@ impl SongPracticeDetailViewModel {
         // one's time.
         let prev_texts: Vec<&str> = prev.iter().map(|l| dart_string::trim(&l.text)).collect();
         let next_texts: Vec<&str> = parsed.iter().map(|l| dart_string::trim(&l.text)).collect();
-        let from = align_lines_default(&prev_texts, &next_texts);
+        let mut from = align_lines_default(&prev_texts, &next_texts);
+        // Matched on equal text alone, fixing a typo in a synced line lost
+        // its time.
+        pair_edited_lines(&prev_texts, &next_texts, &mut from);
         let mut next: Vec<LyricLine> = parsed
             .iter()
             .enumerate()
