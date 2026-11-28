@@ -116,8 +116,10 @@ const SCROLLED_DRY_HEIGHT: f32 = 120.0;
 const SEND_MENU_WIDTH: f32 = 160.0;
 const OUTPUT_MENU_WIDTH: f32 = 180.0;
 
-/// The output routing's "no bus" destination.
-pub const STEREO_OUT: &str = "Stereo Out";
+/// The output routing's "no bus" destination: the master, by the name the
+/// arrange and the mixer give it. (The inspector called it "Stereo Out"
+/// while the mixer strips' menus said "Master": one output, two names.)
+pub const MASTER: &str = "Master";
 
 // Pass / warn / flag indicator colors for the scorecard dots (the status
 // tokens: in tune, warn, off).
@@ -495,9 +497,9 @@ pub fn short_clock(ms: i64) -> String {
 }
 
 /// The Output pop-up's label: the destination bus's name, else
-/// [`STEREO_OUT`].
+/// [`MASTER`].
 pub fn output_name(dest: Option<&str>, buses: &[Arc<FxBus>]) -> String {
-    let mut name = STEREO_OUT.to_string();
+    let mut name = MASTER.to_string();
     for b in buses {
         if Some(b.id.as_str()) == dest {
             name = b.name.clone();
@@ -540,32 +542,43 @@ pub fn send_fader_value(level_db: f64) -> f64 {
     ((level_db + 48.0) / 48.0).clamp(0.0, 1.0)
 }
 
-/// The buses the empty send slot offers: those no slot already feeds. Two
-/// sends into one bus feed it twice, so the bus hears the sum and neither
-/// fader reads what you hear.
-pub fn addable_targets<'b>(sends: &[TrackSend], targets: &[&'b FxBus]) -> Vec<&'b FxBus> {
+/// Whether a send into `bus` would feed it a second time: a slot already
+/// feeds it, or it is the channel's output (`dest`). The bus would hear the
+/// sum, and neither control would read what you hear.
+fn already_fed(sends: &[TrackSend], dest: Option<&str>, bus: &FxBus) -> bool {
+    dest == Some(bus.id.as_str()) || sends.iter().any(|s| s.bus_id == bus.id)
+}
+
+/// The buses the empty send slot offers: those neither a slot nor the
+/// output (`dest`) already feeds.
+pub fn addable_targets<'b>(
+    sends: &[TrackSend],
+    dest: Option<&str>,
+    targets: &[&'b FxBus],
+) -> Vec<&'b FxBus> {
     targets
         .iter()
-        .filter(|b| !sends.iter().any(|s| s.bus_id == b.id))
+        .filter(|b| !already_fed(sends, dest, b))
         .copied()
         .collect()
 }
 
 /// Whether the empty send slot shows: a bus left to feed, and a free slot.
-pub fn can_add_send(sends: &[TrackSend], targets: &[&FxBus]) -> bool {
-    !addable_targets(sends, targets).is_empty() && sends.len() < MAX_SENDS
+pub fn can_add_send(sends: &[TrackSend], dest: Option<&str>, targets: &[&FxBus]) -> bool {
+    !addable_targets(sends, dest, targets).is_empty() && sends.len() < MAX_SENDS
 }
 
-/// The buses a slot's target pop-up offers: its own target, plus the ones no
-/// slot feeds.
+/// The buses a slot's target pop-up offers: its own target, plus the ones
+/// neither a slot nor the output (`dest`) feeds.
 pub fn retarget_options<'b>(
     sends: &[TrackSend],
     slot: usize,
+    dest: Option<&str>,
     targets: &[&'b FxBus],
 ) -> Vec<&'b FxBus> {
     targets
         .iter()
-        .filter(|b| sends[slot].bus_id == b.id || !sends.iter().any(|s| s.bus_id == b.id))
+        .filter(|b| sends[slot].bus_id == b.id || !already_fed(sends, dest, b))
         .copied()
         .collect()
 }
@@ -1290,7 +1303,7 @@ fn routing_section<'a, M: Clone + 'a>(
             insp,
             &menu,
             || {
-                retarget_options(sends, i, &strip.targets)
+                retarget_options(sends, i, strip.dest, &strip.targets)
                     .iter()
                     .map(|b| {
                         StudioMenuItem::new(b.name.clone(), on(channel.retarget_send(i, &b.id)))
@@ -1340,8 +1353,8 @@ fn routing_section<'a, M: Clone + 'a>(
             .align_y(Vertical::Center),
         ]);
     }
-    if can_add_send(sends, &strip.targets) {
-        let addable = addable_targets(sends, &strip.targets);
+    if can_add_send(sends, strip.dest, &strip.targets) {
+        let addable = addable_targets(sends, strip.dest, &strip.targets);
         let menu = InspectorMenu::AddSend(channel.clone());
         let opened = open_menu(
             insp,
@@ -1366,10 +1379,9 @@ fn routing_section<'a, M: Clone + 'a>(
         insp,
         &menu,
         || {
-            let mut items = vec![
-                StudioMenuItem::new(STEREO_OUT, on(strip.channel.route(None)))
-                    .selected(dest.is_none()),
-            ];
+            let mut items =
+                vec![StudioMenuItem::new(MASTER, on(strip.channel.route(None)))
+                    .selected(dest.is_none())];
             items.extend(strip.outputs.iter().map(|b| {
                 StudioMenuItem::new(b.name.clone(), on(strip.channel.route(Some(&b.id))))
                     .selected(dest == Some(b.id.as_str()))

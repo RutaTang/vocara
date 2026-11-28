@@ -40,7 +40,7 @@ use iced::{
 };
 
 use crate::ui::core::icons::{self, Icon};
-use crate::ui::core::theme::{self, bare_button, font, type_scale, Studio};
+use crate::ui::core::theme::{self, font, type_scale, Studio};
 use crate::ui::core::widgets::cap_label::cap_label;
 use crate::ui::core::widgets::confirm_dialog::{ConfirmDialog, StudioPrompt};
 use crate::ui::core::widgets::fading_scrollbar::{no_scrollbar, scrollable};
@@ -49,25 +49,16 @@ use crate::ui::core::widgets::studio_text::studio_text;
 
 // ------------------------------------------------------------------- tints
 
-/// The preset lane tints (ARGB) — 16 colors, two rows of eight, tuned to read
-/// well on the dark studio panels as a 3 px bar + waveform fill.
-pub const TRACK_COLOR_PALETTE: [i64; 16] = [
-    0xFFE3604E, // red
-    0xFFE2934A, // orange
-    0xFFD9B44A, // amber
-    0xFFB7C44A, // lime
-    0xFF6FB562, // green
-    0xFF49B6A8, // teal
-    0xFF4AAEC4, // cyan
-    0xFF5B8DEF, // blue
-    0xFF6F7CE8, // indigo
-    0xFF8C7CE8, // violet
-    0xFFB06FE0, // purple
-    0xFFD46BA8, // pink
-    0xFFD46172, // rose
-    0xFFB57C5A, // tan
-    0xFF8A93A8, // slate
-    0xFF7FB0A0, // sage
+/// The preset lane tints (ARGB): `DESIGN.md`'s track colours, one muted
+/// colour per track of equal lightness ([`Studio::TRACK_COLORS`]). The menu
+/// offered Dart's sixteen saturated tints, which matched no default colour
+/// and none of the design's.
+pub const TRACK_COLOR_PALETTE: [i64; 5] = [
+    0xFFD98C7E, // coral
+    0xFFC9A46E, // ochre
+    0xFF6FB39A, // sage
+    0xFF8FA3D9, // periwinkle
+    0xFFB48FD0, // lilac
 ];
 
 /// Dart's `Color(value)`: an ARGB int (its low 32 bits) as a color.
@@ -86,7 +77,7 @@ pub fn argb(value: i64) -> Color {
 /// its UTF-16 code units, Dart's `codeUnits`), so a take keeps the same color
 /// across sessions and takes read as distinct (vs a flat gray). (Dart fell
 /// back to `Studio.waveform` for an empty palette; the palette is a constant
-/// of sixteen here.)
+/// of five here.)
 pub fn default_take_color(id: &str) -> Color {
     let h: i64 = id.encode_utf16().map(i64::from).sum();
     argb(TRACK_COLOR_PALETTE[(h % TRACK_COLOR_PALETTE.len() as i64) as usize])
@@ -197,7 +188,7 @@ pub const MENU_MARGIN: f32 = 8.0;
 /// The track menu's flags (the non-callback half of `TrackMenuActions`).
 /// Vocal-only actions are hidden for the accompaniment; `can_merge_down`
 /// hides "Merge" when there is no lane below.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct TrackMenu {
     pub is_vocal: bool,
     pub can_merge_down: bool,
@@ -212,13 +203,16 @@ pub struct TrackMenu {
     /// The track's current custom tint (ARGB), or `None` when it uses the
     /// default.
     pub current_color_value: Option<i64>,
+    /// The colour the track shows with no tint of its own (the screen's
+    /// `track_row::channel_color`), for the automatic swatch.
+    pub default_color: Color,
 }
 
 /// What the track menu's rows report (the callbacks of `TrackMenuActions`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TrackAction {
-    /// Picks a lane tint (ARGB).
-    PickColor(i64),
+    /// Picks a lane tint (ARGB); `None` clears it, back to the default.
+    PickColor(Option<i64>),
     Rename,
     Separate,
     /// Copies the lane's audio out to a user-chosen location.
@@ -239,7 +233,11 @@ pub enum TrackAction {
 /// extract, the vocal-take actions, export, re-analyze, and delete.
 pub fn track_context_menu<'a>(menu: &TrackMenu) -> Element<'a, TrackAction> {
     let mut rows = column![
-        color_grid(menu.current_color_value, TrackAction::PickColor),
+        color_grid(
+            menu.current_color_value,
+            menu.default_color,
+            TrackAction::PickColor
+        ),
         menu_divider(),
         menu_row(Some(Icon::Pencil), "Rename", TrackAction::Rename),
     ];
@@ -329,15 +327,19 @@ pub fn track_context_menu<'a>(menu: &TrackMenu) -> Element<'a, TrackAction> {
 /// The FX-bus menu's flags — a slimmer cousin of [`TrackMenu`]: a bus has no
 /// notes, clips, split/merge or re-analyze, so it offers just color, rename,
 /// duplicate and delete.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct BusMenu {
     pub current_color_value: Option<i64>,
+    /// The colour the bus shows with no tint of its own
+    /// (`track_row::bus_color`), for the automatic swatch.
+    pub default_color: Color,
 }
 
 /// What the bus menu's rows report (`BusMenuActions`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BusAction {
-    PickColor(i64),
+    /// Picks the bus's tint (ARGB); `None` clears it, back to the default.
+    PickColor(Option<i64>),
     Rename,
     Duplicate,
     Delete,
@@ -346,7 +348,11 @@ pub enum BusAction {
 /// `showBusContextMenu`'s menu, styled like the track menu.
 pub fn bus_context_menu<'a>(menu: &BusMenu) -> Element<'a, BusAction> {
     let rows = column![
-        color_grid(menu.current_color_value, BusAction::PickColor),
+        color_grid(
+            menu.current_color_value,
+            menu.default_color,
+            BusAction::PickColor
+        ),
         menu_divider(),
         menu_row(Some(Icon::Pencil), "Rename", BusAction::Rename),
         menu_row(Some(Icon::Copy), "Duplicate", BusAction::Duplicate),
@@ -588,11 +594,24 @@ impl<M> MenuRow<M> {
             Studio::TEXT_SECONDARY
         }
     }
+
+    /// The label's weight: medium on the current item.
+    pub fn font(&self) -> iced::Font {
+        if self.selected {
+            font::MEDIUM
+        } else {
+            font::REGULAR
+        }
+    }
 }
+
+/// The check at the end of a menu's current item.
+pub const SELECTED_CHECK: Color = Studio::ACCENT_BRIGHT;
 
 impl<'a, M: Clone + 'a> From<MenuRow<M>> for Element<'a, M> {
     fn from(r: MenuRow<M>) -> Self {
         let color = r.color();
+        let weight = r.font();
         let mut content = row![].spacing(ICON_GAP).align_y(Vertical::Center);
         if let Some(icon) = r.icon {
             content = content.push(
@@ -605,11 +624,7 @@ impl<'a, M: Clone + 'a> From<MenuRow<M>> for Element<'a, M> {
         let mut labels = column![studio_text(r.label)
             .size(type_scale::BODY)
             .line_height(Pixels(type_scale::LINE))
-            .font(if r.selected {
-                font::MEDIUM
-            } else {
-                font::REGULAR
-            })
+            .font(weight)
             .color(color)
             .ellipsis(1)]
         .width(Length::Fill);
@@ -626,7 +641,7 @@ impl<'a, M: Clone + 'a> From<MenuRow<M>> for Element<'a, M> {
         }
         content = content.push(labels);
         if r.selected {
-            content = content.push(icons::icon(Icon::Check, MENU_ICON, Studio::ACCENT_BRIGHT));
+            content = content.push(icons::icon(Icon::Check, MENU_ICON, SELECTED_CHECK));
         }
         let row = button(container(content).center_y(Length::Fill))
             .width(Length::Fill)
@@ -674,21 +689,61 @@ pub const COLOR_GRID_PADDING: Padding = Padding {
     left: ROW_PADDING_X,
 };
 
+/// The automatic swatch: a [`SWATCH`] px tall pill this wide, reading
+/// [`AUTO`] on the lane's default colour.
+pub const AUTO_SWATCH_WIDTH: f32 = 40.0;
+pub const AUTO: &str = "Auto";
+
+/// One swatch of the colour grid: its colour, what a pick stores (`None`
+/// clears the lane's tint, back to its default colour), and whether it is
+/// the lane's colour now.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Swatch {
+    pub color: Color,
+    pub value: Option<i64>,
+    pub selected: bool,
+}
+
+/// The colour grid's swatches, in order: the automatic one, in the lane's
+/// `default` colour; the palette's; and a stored tint the palette does not
+/// hold (an earlier palette's), so the lane's colour is always on the grid.
+/// The one the lane shows is ringed: its stored tint's, else the automatic
+/// one. (No swatch was ringed for a lane in its default colour, and none
+/// could restore it.)
+pub fn swatches(current: Option<i64>, default: Color) -> Vec<Swatch> {
+    let mut out = vec![Swatch {
+        color: default,
+        value: None,
+        selected: current.is_none(),
+    }];
+    out.extend(TRACK_COLOR_PALETTE.iter().map(|&value| Swatch {
+        color: argb(value),
+        value: Some(value),
+        selected: current == Some(value),
+    }));
+    if let Some(value) = current.filter(|v| !TRACK_COLOR_PALETTE.contains(v)) {
+        out.push(Swatch {
+            color: argb(value),
+            value: Some(value),
+            selected: true,
+        });
+    }
+    out
+}
+
 /// `_ColorGrid`: the inline lane-color picker — a "Color" section label
-/// (11 px semibold `TEXT_SECONDARY`) over the preset swatches, eight to a
-/// row.
+/// (11 px semibold `TEXT_SECONDARY`) over the [`swatches`], eight to a row.
+/// `default` is the colour the lane shows with no tint of its own.
 fn color_grid<'a, M: Clone + 'a>(
     current: Option<i64>,
-    on_pick: impl Fn(i64) -> M,
+    default: Color,
+    on_pick: impl Fn(Option<i64>) -> M,
 ) -> Element<'a, M> {
-    let rows = TRACK_COLOR_PALETTE.chunks(SWATCHES_A_ROW).map(|chunk| {
-        Row::with_children(
-            chunk
-                .iter()
-                .map(|&value| color_swatch(argb(value), current == Some(value), on_pick(value))),
-        )
-        .spacing(SWATCH_GAP)
-        .into()
+    let all = swatches(current, default);
+    let rows = all.chunks(SWATCHES_A_ROW).map(|chunk| {
+        Row::with_children(chunk.iter().map(|s| color_swatch(*s, on_pick(s.value))))
+            .spacing(SWATCH_GAP)
+            .into()
     });
     container(column![
         container(cap_label("Color")).padding(Padding {
@@ -701,27 +756,55 @@ fn color_grid<'a, M: Clone + 'a>(
     .into()
 }
 
-/// `_ColorSwatch`: a [`SWATCH`] px disc of `color`, ringed 2 px in
-/// `TEXT_PRIMARY` when it is the lane's tint, else outlined 1 px in a faint
-/// white so a dark tint keeps its edge on the card.
-fn color_swatch<'a, M: Clone + 'a>(color: Color, selected: bool, on_tap: M) -> Element<'a, M> {
-    let disc =
-        container(Space::new().width(SWATCH).height(SWATCH)).style(move |_| container::Style {
-            background: Some(color.into()),
-            border: Border {
-                color: if selected {
-                    Studio::TEXT_PRIMARY
-                } else {
-                    theme::alpha(Color::WHITE, 0.10)
-                },
-                width: if selected { 2.0 } else { 1.0 },
-                radius: (SWATCH / 2.0).into(),
-            },
-            ..container::Style::default()
-        });
-    button(disc)
+/// A swatch's outline: 2 px `TEXT_PRIMARY` round the lane's colour, 2 px of
+/// it at half strength under the pointer, else 1 px of faint white so a dark
+/// tint keeps its edge on the card.
+pub fn swatch_outline(selected: bool, hovered: bool) -> (Color, f32) {
+    if selected {
+        (Studio::TEXT_PRIMARY, 2.0)
+    } else if hovered {
+        (theme::alpha(Studio::TEXT_PRIMARY, 0.5), 2.0)
+    } else {
+        (theme::alpha(Color::WHITE, 0.10), 1.0)
+    }
+}
+
+/// `_ColorSwatch`: a [`SWATCH`] px disc of the swatch's colour (the
+/// automatic one a pill reading [`AUTO`]), outlined by [`swatch_outline`].
+fn color_swatch<'a, M: Clone + 'a>(swatch: Swatch, on_tap: M) -> Element<'a, M> {
+    let Swatch {
+        color, selected, ..
+    } = swatch;
+    let face: Element<'a, M> = if swatch.value.is_none() {
+        container(
+            studio_text(AUTO)
+                .size(type_scale::AXIS)
+                .font(font::SEMIBOLD)
+                .color(Studio::BACKGROUND),
+        )
+        .center_x(AUTO_SWATCH_WIDTH)
+        .center_y(SWATCH)
+        .into()
+    } else {
+        Space::new().width(SWATCH).height(SWATCH).into()
+    };
+    button(face)
         .padding(0)
-        .style(bare_button)
+        .style(move |_, status| {
+            let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+            let (outline, width) = swatch_outline(selected, hovered);
+            button::Style {
+                background: Some(color.into()),
+                text_color: Studio::BACKGROUND,
+                border: Border {
+                    color: outline,
+                    width,
+                    radius: (SWATCH / 2.0).into(),
+                },
+                shadow: iced::Shadow::default(),
+                snap: true,
+            }
+        })
         .on_press(on_tap)
         .into()
 }

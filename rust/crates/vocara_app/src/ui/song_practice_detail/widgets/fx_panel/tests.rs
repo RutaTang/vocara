@@ -146,16 +146,137 @@ fn the_badges_read_the_bands_and_a_bypassed_module() {
 }
 
 #[test]
-fn the_preset_reads_the_chain_it_is_else_none() {
+fn the_preset_reads_the_chain_it_is_else_custom() {
     assert_eq!(current_preset(&TrackFx::flat()), Some("Flat"));
     let custom = with(|fx| fx.comp_on = true);
     assert_eq!(current_preset(&custom), None);
     let mut ui = simulator(SIZE, view(track(Some(&custom))));
-    assert!(text_at(&mut ui, NO_PRESET, 0).is_some());
+    // "Custom", not "None": no menu item reads "None".
+    assert_eq!(CUSTOM, "Custom");
+    assert!(text_at(&mut ui, CUSTOM, 0).is_some());
+    assert!(text_at(&mut ui, "None", 0).is_none());
     // A preset in another plugin order is still that preset.
     let mut warm = FxPresets::vocal()[1].fx.clone();
     warm.order.reverse();
     assert_eq!(current_preset(&warm), Some(FxPresets::vocal()[1].name));
+}
+
+/// The check glyph a menu's current item ends with.
+fn check() -> String {
+    char::from(crate::ui::core::icons::Icon::Check).to_string()
+}
+
+#[test]
+fn the_preset_menu_checks_the_current_preset_and_reopens_at_its_top() {
+    let warm = FxPresets::vocal()[1].fx.clone();
+    let mut ui = simulator(Size::new(W, 900.0), view(track(Some(&warm))));
+    let popup = text_at(&mut ui, "Warm Lead", 0).expect("the preset pop-up");
+    ui.click(nth("Warm Lead", 0)).expect("the preset pop-up");
+    assert_eq!(count(&mut ui, &check()), 1, "the current preset's check");
+    // The check sits on Warm Lead's row (the pop-up's own text is first).
+    let row = text_at(&mut ui, "Warm Lead", 1).expect("Warm Lead's row");
+    let next = text_at(&mut ui, FxPresets::vocal()[2].name, 0).expect("the next row");
+    let mark = text_at(&mut ui, &check(), 0).expect("the check");
+    assert!(row.y < mark.center_y() && mark.center_y() < next.y);
+    // Where a row shows, its list's scroll taken in.
+    let shown = |ui: &mut iced_test::Simulator<'_, Message>, label: &str| {
+        ui.find(nth(label, 0))
+            .ok()
+            .and_then(|t| t.visible_bounds())
+            .map(|b| b.y)
+    };
+    let probe = FxPresets::vocal()[4].name;
+    let at_top = shown(&mut ui, probe).expect("a row the list shows");
+    // Scroll the list down, close it, and open it again.
+    ui.point_at(Point::new(W / 2.0, row.center_y()));
+    let _ = ui.simulate([wheel(0.0, -2.0)]);
+    let scrolled = shown(&mut ui, probe).expect("still shown");
+    assert!(
+        scrolled < at_top,
+        "the list scrolled ({scrolled} vs {at_top})"
+    );
+    let _ = ui.tap_key(iced::keyboard::key::Named::Escape);
+    assert!(shown(&mut ui, probe).is_none(), "closed");
+    ui.point_at(popup.center());
+    let _ = ui.simulate([press(), release()]);
+    assert_eq!(
+        shown(&mut ui, probe),
+        Some(at_top),
+        "the menu opens at its top, not where it was scrolled"
+    );
+}
+
+#[test]
+fn the_space_pop_up_reads_the_space_chosen_else_custom() {
+    let hall = FxPresets::reverb()
+        .into_iter()
+        .find(|p| p.name == "Hall")
+        .expect("Hall")
+        .reverb;
+    assert_eq!(space_label(&hall), ("Hall", false));
+    assert_eq!(space_label(&ReverbSettings::DEFAULT), (NO_SPACE, true));
+    let edited = ReverbSettings {
+        room_size: 0.7,
+        ..hall
+    };
+    assert_eq!(space_label(&edited), (CUSTOM, true));
+    // On the panel: the pop-up reads the space, and its menu checks it.
+    let fx = with(|fx| {
+        fx.reverb_on = true;
+        fx.reverb = hall;
+    });
+    let mut ui = simulator(SIZE, view(track(Some(&fx))));
+    assert!(text_at(&mut ui, NO_SPACE, 0).is_none());
+    ui.click(nth("Hall", 0)).expect("the Space pop-up");
+    assert!(text_at(&mut ui, "Karaoke", 0).is_some(), "the menu is open");
+    assert_eq!(count(&mut ui, &check()), 1, "the chosen space's check");
+    let fx = with(|fx| {
+        fx.reverb_on = true;
+        fx.reverb = edited;
+    });
+    let mut ui = simulator(SIZE, view(track(Some(&fx))));
+    assert!(text_at(&mut ui, CUSTOM, 0).is_some());
+}
+
+#[test]
+fn switching_on_a_silent_effect_makes_it_heard() {
+    for (title, mix) in [
+        ("Delay", AUDIBLE_DELAY_MIX),
+        ("Saturation", AUDIBLE_SATURATION_MIX),
+        ("Doubler", AUDIBLE_DOUBLER_MIX),
+    ] {
+        let mut ui = simulator(SIZE, view(track(None)));
+        let at = toggle_for(&mut ui, title);
+        ui.point_at(at);
+        let _ = ui.simulate([press(), release()]);
+        let edits = track_edits(&ui.into_messages().collect::<Vec<_>>());
+        assert_eq!(edits.len(), 1, "{title}");
+        let e = &edits[0];
+        let (on, got) = match title {
+            "Delay" => (e.delay_on, e.delay.mix),
+            "Saturation" => (e.saturation_on, e.saturation.mix),
+            _ => (e.doubler_on, e.doubler.mix),
+        };
+        assert!(on, "{title} on");
+        assert_eq!(got, mix, "{title} switched on at an audible Mix");
+        assert!(mix > 0.0);
+    }
+    // A Mix of the user's own stays as it is, on and off.
+    let set = with(|fx| fx.delay.mix = 0.6);
+    let mut ui = simulator(SIZE, view(track(Some(&set))));
+    let at = toggle_for(&mut ui, "Delay");
+    ui.point_at(at);
+    let _ = ui.simulate([press(), release()]);
+    let edits = track_edits(&ui.into_messages().collect::<Vec<_>>());
+    assert_eq!(edits[0].delay.mix, 0.6);
+    let on = with(|fx| fx.saturation_on = true);
+    let mut ui = simulator(SIZE, view(track(Some(&on))));
+    let at = toggle_for(&mut ui, "Saturation");
+    ui.point_at(at);
+    let _ = ui.simulate([press(), release()]);
+    let edits = track_edits(&ui.into_messages().collect::<Vec<_>>());
+    assert!(!edits[0].saturation_on);
+    assert_eq!(edits[0].saturation.mix, 0.0, "switching off leaves the Mix");
 }
 
 // ------------------------------------------------------------- the chain
@@ -289,7 +410,7 @@ fn choosing_a_preset_replaces_the_chain_but_keeps_the_order() {
         fx.send_db = -12.0;
     });
     let mut ui = simulator(SIZE, view(track(Some(&fx))));
-    ui.click(nth(NO_PRESET, 0)).expect("the preset pop-up");
+    ui.click(nth(CUSTOM, 0)).expect("the preset pop-up");
     let preset = &FxPresets::vocal()[0];
     ui.click(nth(preset.name, 0)).expect("the first preset");
     let messages: Vec<_> = ui.into_messages().collect();
