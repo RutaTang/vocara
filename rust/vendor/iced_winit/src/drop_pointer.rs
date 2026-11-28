@@ -157,6 +157,18 @@ pub fn position(
     // winit made for this window, which the window keeps alive; it is read
     // on the main thread, as AppKit requires.
     let view: &NSView = unsafe { handle.ns_view.cast::<NSView>().as_ref() };
+    position_in(view)
+}
+
+/// The pointer's position over `view` (a window's content view), in
+/// physical pixels from its top left; `None` with the pointer outside it or
+/// the view in no window. Main thread only, as AppKit is (the caller's
+/// view proves it is there). Also read by `drag_operation`, from AppKit's
+/// own drag callback.
+#[cfg(target_os = "macos")]
+pub fn position_in(
+    view: &objc2_app_kit::NSView,
+) -> Option<winit::dpi::PhysicalPosition<f64>> {
     let ns_window = view.window()?;
     let in_window = ns_window.mouseLocationOutsideOfEventStream();
     let in_view = view.convertPoint_fromView(in_window, None);
@@ -165,7 +177,7 @@ pub fn position(
         (in_view.x, in_view.y),
         (bounds.size.width, bounds.size.height),
         view.isFlipped(),
-        window.scale_factor(),
+        ns_window.backingScaleFactor(),
     )
     .map(|(x, y)| winit::dpi::PhysicalPosition::new(x, y))
 }

@@ -34,6 +34,8 @@ pub mod gesture;
 pub mod insert_text;
 // vocara: the pointer during a drag in from another app (see the module).
 mod drop_pointer;
+// vocara: what such a drag may do where the pointer is (see the module).
+pub mod drag_operation;
 // vocara: a control-click is a secondary click on macOS (see the module).
 mod secondary_click;
 
@@ -368,6 +370,10 @@ where
                                 // (`insert_text`).
                                 gesture::accept_touches(&window);
                                 insert_text::accept(&window);
+                                // vocara: and a drag in from another app
+                                // is told where nothing takes its drop
+                                // (`drag_operation`).
+                                drag_operation::accept(&window);
 
                                 #[cfg(target_os = "macos")]
                                 if let Some(position) = position {
@@ -1228,6 +1234,17 @@ async fn run_instance<P>(
                                 .entry(id)
                                 .or_default()
                                 .event(&window_event, Instant::now());
+                            // vocara: a drag that starts, drops or leaves
+                            // holds no verdict from before
+                            // (`drag_operation`).
+                            if matches!(
+                                window_event,
+                                winit::event::WindowEvent::HoveredFile(_)
+                                    | winit::event::WindowEvent::DroppedFile(_)
+                                    | winit::event::WindowEvent::HoveredFileCancelled
+                            ) {
+                                drag_operation::clear();
+                            }
                             if around == drop_pointer::Around::MoveFirst
                                 && let Some(position) = drop_pointer::moved(
                                     window.state.cursor_position(),
@@ -1332,6 +1349,27 @@ async fn run_instance<P>(
                                 .get_mut(&id)
                                 .expect("Get user interface");
 
+                            // vocara: an update for the cursor's move
+                            // under a file hovering over the window (or the
+                            // hover's start) is the app's verdict on a drop
+                            // there (`drag_operation`).
+                            let judged = drags
+                                .get(&id)
+                                .is_some_and(|drag| drag.next_read().is_some())
+                                && window_events.iter().any(|event| {
+                                    matches!(
+                                        event,
+                                        core::Event::Mouse(
+                                            mouse::Event::CursorMoved { .. }
+                                        ) | core::Event::Window(
+                                            core::window::Event::FileHovered(_)
+                                        )
+                                    )
+                                });
+                            if judged {
+                                drag_operation::open();
+                            }
+
                             // vocara: each wheel event on its own, its
                             // gesture `gesture::current`.
                             let (ui_state, statuses) = gesture::update_each(
@@ -1349,6 +1387,13 @@ async fn run_instance<P>(
                                     )
                                 },
                             );
+
+                            if judged {
+                                drag_operation::close(
+                                    gesture::view_of(&window.raw).unwrap_or(0),
+                                    window.state.cursor_position(),
+                                );
+                            }
 
                             #[cfg(feature = "unconditional-rendering")]
                             window.request_redraw(

@@ -25,6 +25,11 @@
 //! hovers, the event loop keeps the cursor on the pointer, and the hover
 //! follows it.
 //!
+//! While a file hovers, a target the cursor reaches says so to the event
+//! loop (`iced_winit::drag_operation`), which tells AppKit "no drop here"
+//! where no target did: the copy badge shows only over a target, and a drop
+//! anywhere else slides back to where it came from.
+//!
 //! A target that takes a drop claims it (it captures the drop's events), and
 //! so does a disabled one the drop lands on: [`unclaimed_drop`] around a
 //! page then tells a drop that missed every target, which the page says in
@@ -177,6 +182,12 @@ impl<'a, M: 'a> From<VisibleDropTarget<'a, M>> for Element<'a, M> {
                         }
                     }
                     _ => {}
+                }
+                // While a file hovers, a drop where the cursor is would be
+                // this target's: the drag is told so, and is told "none"
+                // where no target says it (`iced_winit::drag_operation`).
+                if state.dragged && reaches(bounds, cursor) {
+                    iced_winit::drag_operation::reached();
                 }
             }),
         )
@@ -389,6 +400,59 @@ mod tests {
                 Msg::Hover(false),
             ]
         );
+    }
+
+    /// What a drag hovering at `at` is told, after the update for its move
+    /// there, as the event loop brackets it (`iced_winit::drag_operation`).
+    fn told_at(
+        ui: &mut iced_test::Simulator<'_, Msg>,
+        at: Point,
+    ) -> iced_winit::drag_operation::Operation {
+        use iced_winit::drag_operation as drag;
+        let pointer =
+            iced_winit::winit::dpi::PhysicalPosition::new(f64::from(at.x), f64::from(at.y));
+        drag::open();
+        move_to(ui, at);
+        drag::close(1, Some(pointer));
+        drag::operation(1, Some(pointer))
+    }
+
+    #[test]
+    fn a_drag_is_told_none_where_no_target_would_take_its_drop() {
+        use iced_winit::drag_operation::{clear, Operation};
+        clear();
+        let over = Point::new(100.0, 100.0);
+        let beside = Point::new(500.0, 100.0);
+        let hover = |ui: &mut iced_test::Simulator<'_, Msg>| {
+            ui.point_at(beside);
+            let _ = ui.simulate([Event::Window(window::Event::FileHovered(PathBuf::from(
+                "/a.wav",
+            )))]);
+        };
+
+        let mut ui = iced_test::simulator(page(target()));
+        hover(&mut ui);
+        assert_eq!(told_at(&mut ui, beside), Operation::None);
+        assert_eq!(told_at(&mut ui, over), Operation::Copy);
+        assert_eq!(told_at(&mut ui, beside), Operation::None);
+
+        // A disabled target takes nothing.
+        let disabled = visible_drop_target(Space::new().width(300).height(200), Msg::Drop)
+            .enable(false)
+            .into();
+        let mut ui = iced_test::simulator(page(disabled));
+        hover(&mut ui);
+        assert_eq!(told_at(&mut ui, over), Operation::None);
+
+        // Nor does one under a layer that takes the pointer (a dialog's).
+        let covered = stack![
+            page(target()),
+            opaque(Space::new().width(Length::Fill).height(Length::Fill))
+        ];
+        let mut ui = iced_test::simulator(covered);
+        hover(&mut ui);
+        assert_eq!(told_at(&mut ui, over), Operation::None);
+        clear();
     }
 
     #[test]

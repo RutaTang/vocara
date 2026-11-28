@@ -171,6 +171,17 @@ SkParagraph does), and keep the version iced's renderers use.
   each window (`insert_text::accept`) and, before each event, hands each
   record to its window's interface as an input method commit
   (`insert_text::take`). `Cargo.toml` adds the Foundation features it reads.
+  winit's window delegate answers `draggingEntered:` with "copy" and has
+  no `draggingUpdated:`, so the copy badge showed over the whole window
+  and a drop beside every target landed on nothing: `src/drag_operation.rs`
+  (new) gives the delegate's class a `draggingUpdated:` (added, never
+  replaced) that answers "none" only where the app, in the update for the
+  cursor's last move under the hovering file, found no drop target taking
+  it at that very spot (`drag_operation::reached`, called by the app's
+  targets); anywhere it has not looked yet it answers "copy", as before.
+  `src/lib.rs` brackets those updates (`open`, `close`) and clears the
+  verdict as a drag starts, drops or leaves; `src/drop_pointer.rs`'s read
+  is split out for it (`position_in`).
 The effects' layers are compositing iced has no primitive for, which
 Flutter did:
 
@@ -226,7 +237,9 @@ Moving iced_winit to a new release: carry `src/gesture.rs` and the marked
 lines over; drop the logical pixel delta if upstream scales it, and the
 whole patch if winit and iced come to pass the momentum phase and the
 trackpad's touches on, and `drop_pointer` if winit comes to report the
-pointer during a drag in (`draggingUpdated:`). Moving winit to a new
+pointer during a drag in (`draggingUpdated:`), and `drag_operation` if
+its delegate comes to answer `draggingUpdated:` itself (the method is then
+not added, and the badge is winit's again). Moving winit to a new
 release: check that its view still lets touches through to the method
 added to its class (CI's `macos_touches` test does), and whether its
 `insertText:replacementRange:` still drops unmarked text outside a key
