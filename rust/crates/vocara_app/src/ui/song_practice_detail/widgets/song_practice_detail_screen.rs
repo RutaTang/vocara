@@ -170,6 +170,10 @@ pub const NOT_LOADED: &str = "Could not load this practice.";
 /// A drop with nothing the engine can play.
 pub const NO_AUDIO_IN_DROP: &str = "No supported audio files in the drop.";
 
+/// A drop beside every drop zone (on the transport, the inspector, the
+/// dock): where audio goes.
+pub const DROP_ON_A_LANE: &str = "Drop audio on the backing track or a take.";
+
 /// A drop on the workspace while it catches up on a save.
 pub const WAIT_FOR_SAVE: &str = "Wait for your last save to finish.";
 

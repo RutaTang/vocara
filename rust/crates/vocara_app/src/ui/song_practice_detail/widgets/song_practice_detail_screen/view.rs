@@ -25,8 +25,8 @@ use vocara_model::util::dart_num::round_to_i64;
 
 use super::{
     ms, selected_track_ref, DropZone, InterpretationAction, Message, OpenMenu, Shown,
-    SongPracticeDetailScreen, FINISHING_SAVE, MIN_TIMELINE_HEIGHT, NOT_LOADED, WAIT_FOR_SAVE,
-    WAIT_FOR_SEPARATION,
+    SongPracticeDetailScreen, DROP_ON_A_LANE, FINISHING_SAVE, MIN_TIMELINE_HEIGHT, NOT_LOADED,
+    WAIT_FOR_SAVE, WAIT_FOR_SEPARATION,
 };
 use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::motion::Curve;
@@ -43,7 +43,7 @@ use crate::ui::core::widgets::slide::inert;
 use crate::ui::core::widgets::studio_controls::studio_fader;
 use crate::ui::core::widgets::studio_hint::spinner;
 use crate::ui::core::widgets::studio_text::studio_text;
-use crate::ui::core::widgets::visible_drop_target::visible_drop_target;
+use crate::ui::core::widgets::visible_drop_target::{unclaimed_drop, visible_drop_target};
 use crate::ui::core::widgets::waveform_painter::{crisp, PlayheadPainter, TimelineGridPainter};
 use crate::ui::core::widgets::wrap::Wrap;
 use crate::ui::song_practice_detail::view_model::analysis_source::AnalysisSource;
@@ -272,7 +272,7 @@ impl SongPracticeDetailScreen {
             )),
             (None, None) => None,
         };
-        stack![
+        let layers = stack![
             container(content)
                 .width(Length::Fill)
                 .height(Length::Fill)
@@ -286,8 +286,10 @@ impl SongPracticeDetailScreen {
             ),
             slot(editor),
             slot(picker),
-        ]
-        .into()
+        ];
+        // A drop beside every zone (the transport, the inspector, the
+        // dock): said where audio goes, not let go without a word.
+        unclaimed_drop(layers, |_| Message::RefusedDrop(DROP_ON_A_LANE))
     }
 
     fn transport_bar<'a>(&'a self, practice: &'a SongPractice) -> TransportBar<'a> {

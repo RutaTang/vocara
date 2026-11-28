@@ -1940,6 +1940,25 @@ fn a_drop_with_no_supported_audio_says_so() {
     assert_eq!(h.files.imports.load(Ordering::SeqCst), 0);
 }
 
+// A drop beside every zone (here on the transport bar, which Finder showed
+// a copy badge over all the same) went nowhere, without a word.
+#[test]
+fn a_drop_beside_every_zone_says_where_audio_goes() {
+    let mut h = Harness::open(Setup::default());
+    let record = h
+        .find("Record")
+        .expect("the Record button")
+        .bounds()
+        .center();
+    h.drop_at(record, &["/src/a.wav"]);
+    assert_eq!(h.screen.snack(), Some(DROP_ON_A_LANE));
+    assert_eq!(h.files.imports.load(Ordering::SeqCst), 0);
+    // On a lane: no word, the drop is the lane's.
+    let mut h = Harness::open(Setup::default());
+    h.drop_at(lane_at(&h, "Take 1"), &["/src/a.wav"]);
+    assert_ne!(h.screen.snack(), Some(DROP_ON_A_LANE));
+}
+
 #[test]
 fn a_drop_hint_clicked_browses_for_its_zone() {
     let mut h = Harness::open(Setup::default());

@@ -533,6 +533,9 @@ async fn run_instance<P>(
     let mut wheels: Vec<(window::Id, Option<gesture::Wheel>)> = Vec::new();
     let mut embedders: FxHashMap<window::Id, gesture::Embedder> =
         FxHashMap::default();
+    // vocara: each window's drag in from another app (`drop_pointer`).
+    let mut drags: FxHashMap<window::Id, drop_pointer::Drag> =
+        FxHashMap::default();
     let mut messages = Vec::new();
     let mut actions = 0;
 
@@ -771,10 +774,36 @@ async fn run_instance<P>(
                             }
                         }
 
-                        if let Some(redraw_at) = window_manager.redraw_at() {
+                        // vocara: the pointer, read again over a window a
+                        // file hovers over (see `drop_pointer`); the cursor
+                        // moves where it changed.
+                        for (id, window) in window_manager.iter_mut() {
+                            if drags
+                                .get_mut(&id)
+                                .is_some_and(|drag| drag.due(now))
+                                && let Some(position) = drop_pointer::moved(
+                                    window.state.cursor_position(),
+                                    drop_pointer::position(&window.raw),
+                                )
+                            {
+                                synthesize(
+                                    &program,
+                                    id,
+                                    window,
+                                    drop_pointer::cursor_moved(position),
+                                    &mut events,
+                                );
+                            }
+                        }
+
+                        // vocara: and wakes for the next read.
+                        if let Some(wake_at) = drop_pointer::wake_at(
+                            window_manager.redraw_at(),
+                            next_read(&drags),
+                        ) {
                             let _ =
                                 control_sender.start_send(Control::ChangeFlow(
-                                    ControlFlow::WaitUntil(redraw_at),
+                                    ControlFlow::WaitUntil(wake_at),
                                 ));
                         } else {
                             let _ = control_sender.start_send(
@@ -1146,24 +1175,26 @@ async fn run_instance<P>(
                             // where the pointer is, which winit does not
                             // report during a drag in from another app (see
                             // `drop_pointer`): the cursor moves there first,
-                            // unless it is there already.
-                            if matches!(
-                                window_event,
-                                winit::event::WindowEvent::HoveredFile(_)
-                                    | winit::event::WindowEvent::DroppedFile(_)
-                            ) {
-                                if let Some(position) = drop_pointer::moved(
+                            // unless it is there already. While a file
+                            // hovers, the pointer is read again (above); once
+                            // the drag leaves, the cursor leaves too (below).
+                            let around = drags
+                                .entry(id)
+                                .or_default()
+                                .event(&window_event, Instant::now());
+                            if around == drop_pointer::Around::MoveFirst
+                                && let Some(position) = drop_pointer::moved(
                                     window.state.cursor_position(),
                                     drop_pointer::position(&window.raw),
-                                ) {
-                                    synthesize(
-                                        &program,
-                                        id,
-                                        window,
-                                        drop_pointer::cursor_moved(position),
-                                        &mut events,
-                                    );
-                                }
+                                )
+                            {
+                                synthesize(
+                                    &program,
+                                    id,
+                                    window,
+                                    drop_pointer::cursor_moved(position),
+                                    &mut events,
+                                );
                             }
                             window.state.update(
                                 &program,
@@ -1193,6 +1224,16 @@ async fn run_instance<P>(
                                     wheels.push((id, wheel));
                                 }
                                 events.push((id, event));
+                            }
+
+                            if around == drop_pointer::Around::LeaveAfter {
+                                synthesize(
+                                    &program,
+                                    id,
+                                    window,
+                                    drop_pointer::cursor_left(),
+                                    &mut events,
+                                );
                             }
                         }
                     }
@@ -1358,10 +1399,14 @@ async fn run_instance<P>(
                             }
                         }
 
-                        if let Some(redraw_at) = window_manager.redraw_at() {
+                        // vocara: or for a drag's next read.
+                        if let Some(wake_at) = drop_pointer::wake_at(
+                            window_manager.redraw_at(),
+                            next_read(&drags),
+                        ) {
                             let _ =
                                 control_sender.start_send(Control::ChangeFlow(
-                                    ControlFlow::WaitUntil(redraw_at),
+                                    ControlFlow::WaitUntil(wake_at),
                                 ));
                         } else {
                             let _ = control_sender.start_send(
@@ -1377,6 +1422,17 @@ async fn run_instance<P>(
     }
 
     let _ = ManuallyDrop::into_inner(user_interfaces);
+}
+
+/// vocara: when the pointer is read next over a window a file hovers over
+/// (see `drop_pointer`).
+fn next_read(
+    drags: &FxHashMap<window::Id, drop_pointer::Drag>,
+) -> Option<Instant> {
+    drags
+        .values()
+        .filter_map(drop_pointer::Drag::next_read)
+        .min()
 }
 
 /// vocara: hands `window` a pointer event winit did not report (see

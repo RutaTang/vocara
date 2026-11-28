@@ -481,6 +481,23 @@ fn a_drop_of_two_clips_adds_both() {
     assert_eq!(added, ["/sandbox/a.wav", "/sandbox/b.m4a"]);
 }
 
+// A drop in the editor beside the examples' zone went nowhere, without a
+// word; the read view takes no drop at all.
+#[test]
+fn a_drop_beside_the_examples_zone_says_where_clips_go() {
+    let setup = Setup::new(twang(ID, vec![])).media(FakeMedia::sandbox());
+    let mut h = Harness::loaded(setup);
+    let title = h.find("Twang").expect("the title").center();
+    h.drop_at(title, &["/tmp/a.wav"]);
+    assert_eq!(h.screen.snack(), None, "the read view takes no drop");
+    h.edit();
+    let title = h.find(EDIT_TITLE).expect("the editor's title").center();
+    h.drop_at(title, &["/tmp/a.wav"]);
+    assert_eq!(h.screen.snack(), Some(DROP_ON_EXAMPLES));
+    h.settle();
+    assert!(h.vm().effective_media().is_empty());
+}
+
 // technique_media_pool_guard_test: 'a lone clip refused for its size says
 // so' — the refusal's words reach the snack bar.
 #[test]
