@@ -408,6 +408,12 @@ fn the_page_lays_out_its_sections_under_the_header() {
         "The engine runs at 48.0 kHz; devices are resampled to/from this rate automatically. \
          The input device is used for recording and live monitoring."
     ));
+    // That footnote sits with the device lists it is about, above
+    // Recording, not under the reverb.
+    let at = |label: &str| page.ui().find(nth(label, 0)).expect(label).bounds().y;
+    let footnote = at(&engine_footnote(48_000.0));
+    assert!(at("Audio input") < footnote && footnote < at("Recording"));
+    assert!(footnote < at("Reverb"));
     // Nothing to warn about, nothing to mark, nothing to choose between.
     assert!(!page.shows_containing("could not be saved"));
     assert!(!page.shows_containing("Bluetooth"));
@@ -508,10 +514,17 @@ fn refresh_devices_rereads_the_lists_and_one_asked_for_meanwhile_follows() {
     let devices = Devices::new();
     let mut page = Setup::new().devices(&devices).mount();
     assert_eq!(devices.reads.load(Ordering::SeqCst), 1, "once on open");
+    assert_eq!(page.screen.toast(), None);
     devices.set_outputs(vec![output("new", "New Headphones", AudioTransport::Usb)]);
     page.click_nth("Refresh devices", 0);
     assert_eq!(devices.reads.load(Ordering::SeqCst), 2);
     assert!(page.shows("New Headphones"));
+    // The button's refresh says it ran (a list that did not change looked
+    // like a press that did nothing); the poll's, and the one on open,
+    // say nothing.
+    assert_eq!(page.screen.toast(), Some(DEVICES_REFRESHED));
+    page.send(Message::ToastExpired(page.screen.toast_seq().expect("up")));
+    assert_eq!(page.screen.toast(), None);
 
     // A poll while that refresh runs is owed, not dropped or doubled.
     let running = page.send_held(Message::Poll);
@@ -519,6 +532,11 @@ fn refresh_devices_rereads_the_lists_and_one_asked_for_meanwhile_follows() {
     assert!(run_task(owed).is_empty());
     page.drive(running);
     assert_eq!(devices.reads.load(Ordering::SeqCst), 4);
+    assert_eq!(
+        page.screen.toast(),
+        Some(DEVICES_REFRESHED),
+        "once the owed one ran"
+    );
     assert_eq!(DEVICE_POLL, Duration::from_millis(1500));
 }
 
@@ -693,6 +711,78 @@ fn the_take_offset_row_shows_and_sets_the_recording_offset() {
     assert!(page.shows("+25 ms"));
     page.send(Message::Choose(Choice::RecordingOffset(-15.0)));
     assert!(page.shows("-15 ms"));
+}
+
+/// A double click on the take offset slider puts it back at no offset.
+#[test]
+fn a_double_click_resets_the_take_offset_to_zero() {
+    let mut page = Setup::new().mount();
+    page.send(Message::Choose(Choice::RecordingOffset(40.0)));
+    page.send(Message::OffsetReleased);
+    let messages: Vec<Message> = {
+        let mut ui = page.ui();
+        let slider = ui.find(OFFSET_SLIDER).expect("the slider").bounds();
+        ui.point_at(iced::Point::new(
+            slider.x + slider.width * 0.8,
+            slider.center_y(),
+        ));
+        let _ = ui.simulate(iced_test::simulator::click());
+        let _ = ui.simulate(iced_test::simulator::click());
+        ui.into_messages().collect()
+    };
+    assert_eq!(
+        messages.last(),
+        Some(&Message::OffsetReleased),
+        "{messages:?}"
+    );
+    assert!(messages.contains(&Message::Choose(Choice::RecordingOffset(0.0))));
+    for message in messages {
+        page.send(message);
+    }
+    assert_eq!(page.settings().recording_offset_ms(), 0.0);
+    assert!(page.shows("0 ms"));
+}
+
+/// The take offset is bipolar: its fill runs from no offset (the middle)
+/// to the knob, either way, not from the left end.
+#[test]
+fn the_take_offset_slider_fills_from_its_middle() {
+    use crate::ui::core::widgets::animated::testing::{near, Frames};
+    use crate::ui::core::widgets::controls::{SLIDER_FILL, SLIDER_TRACK};
+    use iced::time::Instant;
+
+    // Where the slider lies in the row.
+    let slider = {
+        let mut ui = Simulator::with_size(
+            fonts(),
+            Size::new(900.0, 80.0),
+            iced::widget::container(offset_row(0.0)).width(900),
+        );
+        ui.find(OFFSET_SLIDER).expect("the slider").bounds()
+    };
+    let y = slider.center_y().round();
+    let pixel = |window: &mut Frames, ms: f64, x: f32| {
+        window.frame(
+            iced::widget::container(offset_row(ms)).width(900),
+            &[],
+            Instant::now(),
+        );
+        window.pixel(iced::Point::new(x, y))
+    };
+    let (left, right) = (
+        slider.x + slider.width * 0.25,
+        slider.x + slider.width * 0.6,
+    );
+    let mut window = Frames::new(Size::new(900.0, 80.0));
+    // +100 ms (past the middle): filled between the middle and the knob,
+    // not at the left.
+    let positive = AppSettingsService::RECORDING_OFFSET_MAX_MS * 0.5;
+    assert!(near(pixel(&mut window, positive, right), SLIDER_FILL));
+    assert!(near(pixel(&mut window, positive, left), SLIDER_TRACK));
+    // Below zero: filled from the knob to the middle.
+    let negative = AppSettingsService::RECORDING_OFFSET_MIN_MS * 0.8;
+    assert!(near(pixel(&mut window, negative, left), SLIDER_FILL));
+    assert!(near(pixel(&mut window, negative, right), SLIDER_TRACK));
 }
 
 // ------------------------------------------------------- the monitoring
@@ -1468,6 +1558,103 @@ fn licenses_opens_the_license_page_and_its_back_returns_to_settings() {
     assert!(!page.screen.licenses_open());
     assert!(page.shows("Check for updates"));
     assert!(page.navigations.is_empty(), "Settings stays");
+}
+
+/// Back from the license page puts Settings back where it was scrolled:
+/// the page took Settings' widgets, and with them its scroll.
+#[test]
+fn back_from_the_licenses_keeps_the_settings_scroll() {
+    use iced::advanced::widget::operation::{self, Operation};
+    use iced::advanced::widget::Id as WidgetId;
+    use iced::{Rectangle, Vector};
+    use iced_test::runtime::user_interface::{Cache, UserInterface};
+
+    /// Reads how far the settings' scroll view is scrolled.
+    struct Offset(Option<f32>);
+    impl Operation for Offset {
+        fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+            operate(self);
+        }
+        fn scrollable(
+            &mut self,
+            id: Option<&WidgetId>,
+            _bounds: Rectangle,
+            _content_bounds: Rectangle,
+            translation: Vector,
+            _state: &mut dyn operation::Scrollable,
+        ) {
+            if id == Some(&SCROLL) {
+                self.0 = Some(translation.y);
+            }
+        }
+    }
+
+    let mut page = Setup::new().mount();
+    page.send(Message::Scrolled(240.0));
+    page.click("Licenses");
+    let back = page.send_held(Message::Licenses(licenses::Message::Back));
+    assert!(!page.screen.licenses_open());
+    let operations: Vec<_> = match iced_test::runtime::task::into_stream(back) {
+        Some(stream) => {
+            use iced::futures::StreamExt;
+            iced::futures::executor::block_on(
+                stream
+                    .filter_map(|action| async move {
+                        match action {
+                            iced_test::runtime::Action::Widget(op) => Some(op),
+                            _ => None,
+                        }
+                    })
+                    .collect(),
+            )
+        }
+        None => Vec::new(),
+    };
+    assert!(!operations.is_empty(), "Back scrolls Settings back");
+    // Settings, rebuilt in a short window: its scroll view comes back at
+    // the offset it had.
+    let mut renderer = iced::futures::executor::block_on(
+        <iced::Renderer as iced::advanced::renderer::Headless>::new(
+            font::REGULAR,
+            theme::DEFAULT_TEXT_SIZE.into(),
+            None,
+        ),
+    )
+    .expect("a headless renderer");
+    let mut ui = UserInterface::build(
+        page.screen.view(),
+        Size::new(1100.0, 600.0),
+        Cache::default(),
+        &mut renderer,
+    );
+    for mut op in operations {
+        ui.operate(&renderer, op.as_mut());
+    }
+    let mut offset = Offset(None);
+    ui.operate(&renderer, &mut offset);
+    assert_eq!(offset.0, Some(240.0));
+}
+
+/// The diagnostics bundle names the version About shows when there is no
+/// app bundle to read it from (it wrote "app version: unknown").
+#[test]
+fn the_diagnostics_bundle_names_the_built_version() {
+    assert_eq!(
+        built_version(),
+        format!(
+            "{} ({})",
+            UpdateCheckService::APP_VERSION,
+            UpdateCheckService::APP_BUILD_NUMBER
+        )
+    );
+    let dir = TempDir::new().expect("a temporary folder");
+    let log = own_log(dir.path());
+    let bundle = log
+        .export_archive_with_version(&built_version())
+        .expect("a bundle");
+    let text = std::fs::read_to_string(&bundle).expect("the bundle");
+    DiagnosticsLog::discard_archive(&bundle);
+    assert!(text.contains(&format!("app version: {}\n", built_version())));
 }
 
 #[test]

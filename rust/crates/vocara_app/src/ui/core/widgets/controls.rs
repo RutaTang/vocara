@@ -1080,6 +1080,8 @@ pub struct ThinSlider<'a, M> {
     knob: f32,
     off: bool,
     height: f32,
+    /// A bipolar slider's zero, which its fill runs from.
+    origin: Option<f32>,
 }
 
 /// A thin slider at `value` (0 to 1).
@@ -1095,6 +1097,7 @@ pub fn thin_slider<'a, M>(
         knob: KNOB,
         off: false,
         height: SLIDER_HEIGHT,
+        origin: None,
     }
 }
 
@@ -1114,6 +1117,13 @@ impl<M> ThinSlider<'_, M> {
     /// A taller hit row (the knob stays centred).
     pub fn height(mut self, height: f32) -> Self {
         self.height = height;
+        self
+    }
+
+    /// A bipolar slider: the fill runs from `origin` (its zero, 0 to 1
+    /// along the track) to the knob, either way, not from the left end.
+    pub fn origin(mut self, origin: f32) -> Self {
+        self.origin = Some(origin.clamp(0.0, 1.0));
         self
     }
 }
@@ -1186,10 +1196,11 @@ impl<M: Clone> canvas::Program<M> for ThinSlider<'_, M> {
         _cursor: mouse::Cursor,
     ) -> Vec<Geometry> {
         let mut frame = Frame::new(renderer, bounds.size());
-        draw_thin_slider(
+        draw_thin_slider_from(
             &mut frame,
             bounds.size(),
             self.value,
+            self.origin,
             self.knob,
             if self.off {
                 SLIDER_FILL_OFF
@@ -1218,6 +1229,19 @@ impl<M: Clone> canvas::Program<M> for ThinSlider<'_, M> {
 /// `fill`, the knob (`knob` across) and its shadow. Shared with the
 /// horizontal fader (`studio_controls::studio_fader`).
 pub fn draw_thin_slider(frame: &mut Frame, size: Size, value: f32, knob: f32, fill: Color) {
+    draw_thin_slider_from(frame, size, value, None, knob, fill);
+}
+
+/// [`draw_thin_slider`], the fill from the knob's place at `origin` (a
+/// bipolar slider's zero) to the knob when given, else from the left end.
+fn draw_thin_slider_from(
+    frame: &mut Frame,
+    size: Size,
+    value: f32,
+    origin: Option<f32>,
+    knob: f32,
+    fill: Color,
+) {
     let mid = (size.height / 2.0).round();
     let x = thin_slider_knob_x(value, size.width, knob);
     let track = |from: f32, to: f32| {
@@ -1228,7 +1252,8 @@ pub fn draw_thin_slider(frame: &mut Frame, size: Size, value: f32, knob: f32, fi
         )
     };
     frame.fill(&track(0.0, size.width), SLIDER_TRACK);
-    frame.fill(&track(0.0, x), fill);
+    let from = origin.map_or(0.0, |o| thin_slider_knob_x(o, size.width, knob));
+    frame.fill(&track(from.min(x), from.max(x)), fill);
     let r = knob / 2.0;
     // `0 1px 2px rgba(0,0,0,.6)`: a soft disc a pixel down.
     frame.fill(
