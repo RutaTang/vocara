@@ -1155,6 +1155,72 @@ fn command_z_undoes_and_shift_command_z_redoes_in_a_multi_line_field() {
     assert_eq!(content.text(), "another note");
 }
 
+/// ↓ on a multi-line field's last line takes the caret to the end of the
+/// text and ↑ on its first line to the start, as a macOS text view's do
+/// (cosmic-text left the caret where it was on that line, so a summary
+/// that looks like one line could not be reached the end of with ↓); with
+/// ⇧ they select to there. Between lines they move a line.
+#[test]
+fn up_and_down_past_a_multi_line_fields_first_and_last_lines_go_to_its_ends() {
+    let shifted = |named: Named| {
+        let shift = keyboard::Modifiers::SHIFT;
+        [
+            Event::Keyboard(keyboard::Event::ModifiersChanged(shift)),
+            Event::Keyboard(keyboard::Event::KeyPressed {
+                key: keyboard::Key::Named(named),
+                modified_key: keyboard::Key::Named(named),
+                physical_key: keyboard::key::Physical::Unidentified(
+                    keyboard::key::NativeCode::Unidentified,
+                ),
+                location: keyboard::Location::Standard,
+                modifiers: shift,
+                text: None,
+                repeat: false,
+            }),
+            Event::Keyboard(keyboard::Event::ModifiersChanged(
+                keyboard::Modifiers::empty(),
+            )),
+        ]
+    };
+    let mut window = window();
+    let mut content = Content::with_text("line one\nline two");
+    // At the start of the second line.
+    let at = Point::new(TEXT_X + 1.0, LINE_TOP + LINE + 7.0);
+    let run = |window: &mut Window, content: &mut Content, events: &[Event]| {
+        let (messages, _) = window.run(prose(content, false), at, events, Instant::now());
+        for message in messages {
+            if let Msg::Edit(action) = message {
+                content.perform(action);
+            }
+        }
+    };
+    run(&mut window, &mut content, &click());
+    run(
+        &mut window,
+        &mut content,
+        &[key(Named::ArrowDown), typed("Z")],
+    );
+    assert_eq!(content.text(), "line one\nline twoZ");
+    // Up from the last line moves a line; again, on the first, the start.
+    run(&mut window, &mut content, &[key(Named::ArrowUp)]);
+    run(
+        &mut window,
+        &mut content,
+        &[key(Named::ArrowUp), typed("A")],
+    );
+    assert_eq!(content.text(), "Aline one\nline twoZ");
+    // ⇧↓ selects down a line, then to the end.
+    run(&mut window, &mut content, &shifted(Named::ArrowDown));
+    run(&mut window, &mut content, &shifted(Named::ArrowDown));
+    assert_eq!(content.selection().as_deref(), Some("line one\nline twoZ"));
+    // From the end, ⇧↑ selects up a line, then to the start.
+    run(&mut window, &mut content, &[key(Named::ArrowDown)]);
+    assert_eq!(content.selection(), None);
+    run(&mut window, &mut content, &shifted(Named::ArrowUp));
+    run(&mut window, &mut content, &shifted(Named::ArrowUp));
+    assert_eq!(content.selection().as_deref(), Some("Aline one\nline twoZ"));
+}
+
 /// Edit ▸ Emoji & Symbols inserts with no key press and nothing marked,
 /// which winit drops; the run loop commits that text alone
 /// (`iced_winit::insert_text`), never typed text nor a composition's, and
