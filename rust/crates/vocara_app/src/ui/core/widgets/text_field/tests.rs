@@ -841,6 +841,13 @@ fn typed(text: &str) -> Event {
     iced_test::simulator::press_key(keyboard::Key::Character(text.into()), Some(text.into()))
 }
 
+/// A letter pressed with ⌃ held, as AppKit sends it: `letter` as the key
+/// and the control character it makes as the text.
+#[cfg(target_os = "macos")]
+fn control_typed(letter: &str, text: &str) -> Event {
+    iced_test::simulator::press_key(keyboard::Key::Character(letter.into()), Some(text.into()))
+}
+
 fn key(named: Named) -> Event {
     iced_test::simulator::press_key(keyboard::Key::Named(named), None)
 }
@@ -1148,7 +1155,10 @@ fn up_and_down_move_the_caret_to_the_ends_and_go_no_further() {
 }
 
 /// macOS's Emacs keys move the caret: ⌃A to the start, ⌃E to the end
-/// (they became Home and End, which on macOS only scroll the text).
+/// (they became Home and End, which on macOS only scroll the text). Each
+/// press arrives as AppKit sends it: the letter as its key, and as its text
+/// the control character the press makes (`characters`, which winit hands
+/// on as the text with all modifiers), U+0001 and U+0005.
 #[cfg(target_os = "macos")]
 #[test]
 fn control_a_and_control_e_move_the_caret_on_macos() {
@@ -1164,7 +1174,12 @@ fn control_a_and_control_e_move_the_caret_on_macos() {
     let (messages, _) = window.run(
         field(&text),
         at,
-        &[control.clone(), typed("a"), release.clone(), typed("X")],
+        &[
+            control.clone(),
+            control_typed("a", "\u{1}"),
+            release.clone(),
+            typed("X"),
+        ],
         t0 + 300 * MS,
     );
     assert_eq!(input_of(messages), Some(format!("X{text}")));
@@ -1172,7 +1187,7 @@ fn control_a_and_control_e_move_the_caret_on_macos() {
     let (messages, _) = window.run(
         field(&text),
         at,
-        &[control, typed("e"), release, typed("Y")],
+        &[control, control_typed("e", "\u{5}"), release, typed("Y")],
         t0 + 400 * MS,
     );
     assert_eq!(input_of(messages), Some(format!("{text}Y")));

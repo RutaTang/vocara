@@ -113,12 +113,15 @@ fn a_test_binary_cannot_update_itself() {
 
 // ------------------------------------------------------- disk images
 
-/// Held by each test here that attaches a disk image: across processes too
-/// (two test runs at once share the machine's disks), as a shared `flock`
-/// on a file every run sees and none writes.
+/// Held by each test here that attaches a disk image, so they attach one at a
+/// time: across processes too (two test runs at once share the machine's
+/// disks), as an exclusive `flock` on a file every run sees and none writes.
+/// A shared lock held them apart from nothing: three tests attaching and
+/// detaching at once made `hdiutil`'s service drop a detach, and an image
+/// stayed attached.
 fn disks() -> std::fs::File {
     let file = std::fs::File::open("/usr/bin/hdiutil").expect("hdiutil is where it always is");
-    file.lock_shared().expect("the disk images' lock");
+    file.lock().expect("the disk images' lock");
     file
 }
 
