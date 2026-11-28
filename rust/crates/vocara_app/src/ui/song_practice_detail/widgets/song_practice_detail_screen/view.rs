@@ -71,7 +71,7 @@ use crate::ui::song_practice_detail::widgets::timeline::{
 };
 use crate::ui::song_practice_detail::widgets::track_context_menu::{
     bus_context_menu, clip_context_menu, menu_host, studio_menu, track_context_menu, BusMenu,
-    StudioMenuItem, TrackMenu,
+    MenuAnchor, StudioMenuItem, TrackMenu, MENU_ANCHOR_BELOW_DY,
 };
 use crate::ui::song_practice_detail::widgets::track_row::{bus_color, channel_color};
 use crate::ui::song_practice_detail::widgets::track_row::{
@@ -783,7 +783,10 @@ impl SongPracticeDetailScreen {
             .max_width(INTERPRETATION_MAX_WIDTH);
         let menu = (self.menu == Some(OpenMenu::Interpretations))
             .then(|| self.interpretations_menu(practice));
-        let dropdown = menu_host(dropdown, menu, Message::DismissMenu);
+        // Under its button, as the inspector's pop-ups open: at the press it
+        // covered the button and ran off toward the right panel.
+        let dropdown = menu_host(dropdown, menu, Message::DismissMenu)
+            .anchor(MenuAnchor::Below(MENU_ANCHOR_BELOW_DY));
         let new_take = ghost_button("New take", Some(glyphs::PLUS), Some(Message::NewTake));
         section_row(
             section_label("Vocal takes"),
