@@ -502,7 +502,7 @@ impl Inverter {
         // 3. refine
         let mut steps = 0;
         while steps < cfg.max_steps {
-            let (lo, hi) = self.region(&x0);
+            let (lo, hi) = region(&x0, self.trust);
             let model = |p: &[f64]| -> [f64; 3] {
                 let mut lf = fx0;
                 for (i, row) in jac.iter().enumerate() {
@@ -512,10 +512,7 @@ impl Inverter {
                 }
                 lf
             };
-            let mut step = [0.0; N_FIT];
-            for j in 0..N_FIT {
-                step[j] = 0.5 * (hi[j] - lo[j]).max(1e-6);
-            }
+            let step = start_step(&x0, &lo, &hi);
             let r = nelder_mead(
                 |p| cost(p, Some(&model(p)), &smooth),
                 &x0.0,
@@ -585,18 +582,6 @@ impl Inverter {
             confidence: c * exp(-(residual / RESIDUAL_SCALE) * (residual / RESIDUAL_SCALE)),
             fitted: true,
         };
-    }
-
-    /// The trust region around `x` (inside the search box).
-    fn region(&self, x: &Posture) -> ([f64; N_FIT], [f64; N_FIT]) {
-        let mut lo = [0.0; N_FIT];
-        let mut hi = [0.0; N_FIT];
-        for j in 0..N_FIT {
-            let r = self.trust * (HI[j] - LO[j]);
-            lo[j] = (x.0[j] - r).max(LO[j]);
-            hi[j] = (x.0[j] + r).min(HI[j]);
-        }
-        (lo, hi)
     }
 
     /// ∂ln Fᵢ/∂pⱼ at `x` (whose ln F is `fx`) by forward differences (backward at the box's
@@ -702,6 +687,34 @@ impl Smoothness {
     }
 }
 
+/// The trust region of radius `trust` (a fraction of the search box) around `x`, inside the
+/// search box.
+fn region(x: &Posture, trust: f64) -> ([f64; N_FIT], [f64; N_FIT]) {
+    let mut lo = [0.0; N_FIT];
+    let mut hi = [0.0; N_FIT];
+    for j in 0..N_FIT {
+        let r = trust * (HI[j] - LO[j]);
+        lo[j] = (x.0[j] - r).max(LO[j]);
+        hi[j] = (x.0[j] + r).min(HI[j]);
+    }
+    (lo, hi)
+}
+
+/// The Nelder–Mead simplex's start step in the trust region `lo`..`hi` around `x0`: half the
+/// region's width per articulator, pointing into the region. Towards the region's top unless
+/// that leaves it, then down: on the search box's top the region's top is `x0` itself, and an
+/// upward step clamped back onto `x0` gave a simplex flat in that articulator, which Nelder–Mead
+/// can then never move: a fit that reached an articulator's top (the lips at full aperture, say)
+/// could not refine it back down. Past the region's middle the step down stays inside it.
+fn start_step(x0: &Posture, lo: &[f64; N_FIT], hi: &[f64; N_FIT]) -> [f64; N_FIT] {
+    let mut step = [0.0; N_FIT];
+    for j in 0..N_FIT {
+        let s = 0.5 * (hi[j] - lo[j]).max(1e-6);
+        step[j] = if x0.0[j] + s > hi[j] { -s } else { s };
+    }
+    step
+}
+
 /// Broyden's update of the Jacobian after a step x0 → x1 that took ln F from f0 to f1.
 fn broyden(jac: &mut [[f64; N_FIT]; 3], x0: &Posture, x1: &Posture, f0: &[f64; 3], f1: &[f64; 3]) {
     let mut dx = [0.0; N_FIT];
@@ -722,5 +735,64 @@ fn broyden(jac: &mut [[f64; N_FIT]; 3], x0: &Posture, x1: &Posture, f0: &[f64; 3
         for j in 0..N_FIT {
             jac[i][j] += r * dx[j] / dd;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::posture::LIP_AP;
+
+    /// A start on the search box's top, the minimum inside: the trust region's top is the start.
+    fn on_the_top() -> (Posture, [f64; N_FIT], [f64; N_FIT]) {
+        let mut x0 = Posture::NEUTRAL;
+        x0.0[LIP_AP] = HI[LIP_AP];
+        let (lo, hi) = region(&x0, TRUST_INIT);
+        assert_eq!(hi[LIP_AP], x0.0[LIP_AP]);
+        (x0, lo, hi)
+    }
+
+    #[test]
+    fn the_start_step_points_into_the_trust_region() {
+        let (x0, lo, hi) = on_the_top();
+        let step = start_step(&x0, &lo, &hi);
+        for j in 0..N_FIT {
+            let p = x0.0[j] + step[j];
+            assert!(step[j] != 0.0, "articulator {j}: no step");
+            assert!(
+                (lo[j]..=hi[j]).contains(&p),
+                "articulator {j}: {p} outside {}..{}",
+                lo[j],
+                hi[j]
+            );
+        }
+        assert!(step[LIP_AP] < 0.0, "on the top the step goes down");
+    }
+
+    #[test]
+    fn a_start_on_the_box_top_can_leave_it() {
+        let (x0, lo, hi) = on_the_top();
+        // a bowl whose minimum lies inside the region, below the top in the lips' aperture
+        let mut target = x0.0;
+        target[LIP_AP] = 0.5 * (lo[LIP_AP] + hi[LIP_AP]);
+        let bowl = |p: &[f64]| (0..N_FIT).map(|j| (p[j] - target[j]).powi(2)).sum::<f64>();
+        let step = start_step(&x0, &lo, &hi);
+        let r = nelder_mead(
+            bowl,
+            &x0.0,
+            NelderMeadOpts {
+                step: Some(&step),
+                lo: Some(&lo),
+                hi: Some(&hi),
+                max_iter: Some(NM_ITERATIONS),
+                tol: Some(1e-10),
+            },
+        );
+        assert!(
+            (r.x()[LIP_AP] - target[LIP_AP]).abs() < 1e-3,
+            "the lips' aperture stayed at {} (minimum {})",
+            r.x()[LIP_AP],
+            target[LIP_AP]
+        );
     }
 }

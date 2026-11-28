@@ -14,7 +14,10 @@ pub const MAX_DIM: usize = 8;
 /// Options of [`nelder_mead`]; `None` takes the default noted on each field.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct NelderMeadOpts<'a> {
-    /// initial simplex step per coordinate (default 0.1·|x0| or 0.05 near zero)
+    /// initial simplex step per coordinate, either sign (default 0.1·|x0| or 0.05 near zero).
+    /// The step's vertex is clamped into the box like every other point, so a step out of the
+    /// box from an `x0` on its bound collapses onto `x0` and that coordinate never moves: step
+    /// into the box (negative from an upper bound)
     pub step: Option<&'a [f64]>,
     /// lower bounds (default −∞)
     pub lo: Option<&'a [f64]>,
@@ -188,5 +191,29 @@ pub fn nelder_mead(
         n,
         fx: values[best],
         iters: it,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_negative_step_from_the_upper_bound_moves_off_it() {
+        // x0 on the upper bound, the minimum inside the box
+        let bowl = |p: &[f64]| (p[0] - 0.4).powi(2) + (p[1] - 0.3).powi(2);
+        let r = nelder_mead(
+            bowl,
+            &[1.0, 0.5],
+            NelderMeadOpts {
+                step: Some(&[-0.5, 0.25]),
+                lo: Some(&[0.0, 0.0]),
+                hi: Some(&[1.0, 1.0]),
+                max_iter: None,
+                tol: Some(1e-12),
+            },
+        );
+        assert!((r.x()[0] - 0.4).abs() < 1e-4, "x = {:?}", r.x());
+        assert!((r.x()[1] - 0.3).abs() < 1e-4, "x = {:?}", r.x());
     }
 }
