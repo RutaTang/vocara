@@ -528,6 +528,11 @@ pub const TOGGLE_INSET: f32 = 3.0;
 /// [`TOGGLE_INSET`] in from its edges, radius 4 — under the pointer too, so
 /// a click on it shows at once (the icon's colour alone did not change
 /// while the pointer was over it). Off, it is a plain group button.
+///
+/// The fill is there on and off, clear while off: a click that toggles it
+/// changes no widget, so the button and its tooltip keep their state. Off
+/// as the bare button and on in a stack, each click made them anew, and the
+/// tooltip the click had sent away came back at the next move.
 pub fn group_toggle<'a, M: Clone + 'a>(
     icon: impl Into<IconSource>,
     tip: impl Into<String>,
@@ -535,14 +540,13 @@ pub fn group_toggle<'a, M: Clone + 'a>(
     on: bool,
 ) -> Element<'a, M> {
     let toggle = group_button(icon, tip, on_press, on);
-    if !on {
-        return toggle;
-    }
     let fill = container(
         container(Space::new())
             .width(Length::Fill)
             .height(Length::Fill)
-            .style(|_| crate::ui::core::theme::boxed(Some(TOGGLE_ON), radius::SMALL, None)),
+            .style(move |_| {
+                crate::ui::core::theme::boxed(on.then_some(TOGGLE_ON), radius::SMALL, None)
+            }),
     )
     .padding(TOGGLE_INSET)
     .width(GROUP_BUTTON_WIDTH)
@@ -1708,6 +1712,41 @@ mod tests {
         let (off, on) = (hovered(false), hovered(true));
         assert!(near(off, Studio::SURFACE_RAISED), "{off:?}");
         assert!(near(on, TOGGLE_ON), "{on:?}");
+    }
+
+    /// The tooltip a toggle's click sends away stays away while the pointer
+    /// stays on it: the click turned it on or off, which made the button and
+    /// its tooltip anew, and the tip faded back in at the next move.
+    #[test]
+    fn a_toggles_tooltip_stays_away_after_the_click_that_toggles_it() {
+        use crate::ui::core::widgets::animated::testing::MS;
+        let view = |on: bool| -> Element<'static, Msg> {
+            container(ToolbarGroup::new().push(group_toggle(
+                glyphs::LOOP,
+                "Loop",
+                Some(Msg::Go),
+                on,
+            )))
+            .padding(10)
+            .into()
+        };
+        // Under the group, where the tip shows (nothing else is drawn).
+        let tip = |window: &Frames| window.ink(Point::new(0.0, 46.0), Point::new(120.0, 100.0));
+        for on in [false, true] {
+            let mut window = Frames::new(Size::new(120.0, 100.0));
+            let t0 = Instant::now();
+            window.point_at(Point::new(27.0, 25.0));
+            window.frame(view(on), &[], t0);
+            window.frame(view(on), &[], t0 + 200 * MS);
+            assert!(tip(&window) > 0x40, "on: {on}: the tip is up");
+            let (_, sent) = window.frame_messages(view(on), &[press(), release()], t0 + 300 * MS);
+            assert_eq!(sent, vec![Msg::Go]);
+            // The page toggles it, and the pointer moves on the button.
+            window.point_at(Point::new(28.0, 25.0));
+            window.frame(view(!on), &[], t0 + 400 * MS);
+            window.frame(view(!on), &[], t0 + 600 * MS);
+            assert_eq!(tip(&window), 0, "on: {on}: the tip came back");
+        }
     }
 
     #[test]
