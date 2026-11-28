@@ -610,6 +610,34 @@ fn every_live_tab_waits_titled_with_its_badge_and_a_word() {
 }
 
 #[test]
+fn the_live_power_and_ltas_hints_line_up_with_their_titles() {
+    // The title stood in from the tab's edge for the dB axis, the hint's
+    // well did not: on Take the plot lines up with the title.
+    let monitor = MonitorService::default();
+    monitor.start();
+    let src = Source {
+        monitor: Some(Arc::new(monitor)),
+        ..Source::default()
+    };
+    let state = VoiceprintState::new();
+    let right = DOCK.width - TAB_PADDING.right;
+    for (tab, title, hint) in [
+        (power as Tab, "Power spectrum", POWER_LIVE_HINT),
+        (ltas as Tab, "LTAS · running average", LTAS_LIVE_HINT),
+    ] {
+        let mut ui = simulator(tab, &src, &state, DOCK);
+        let title = ui.find(title).expect("the title").bounds();
+        let hint = ui.find(hint).expect("the hint").bounds();
+        assert_eq!(title.x, TAB_PADDING.left + AXIS_WIDTH);
+        // Centred in a well from the title's left to the tab's right.
+        assert!(
+            (hint.center_x() - (title.x + right) / 2.0).abs() < 1.0,
+            "{title:?} {hint:?}"
+        );
+    }
+}
+
+#[test]
 fn a_held_live_note_tunes_and_maps_its_register() {
     let src = live(&sine(48000, 220.0, SR as f64));
     let state = VoiceprintState::new();

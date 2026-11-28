@@ -436,7 +436,7 @@ pub fn power_tab<'a>(src: &'a dyn AnalysisSource) -> Element<'a, Message> {
             .spacing(14)
             .align_y(Vertical::Center);
         let body = if strip.column.is_empty() {
-            well_hint(POWER_LIVE_HINT)
+            axis_well_hint(POWER_LIVE_HINT)
         } else {
             spectrum_strip(strip)
         };
@@ -611,7 +611,7 @@ pub fn ltas_tab<'a>(src: &'a dyn AnalysisSource) -> Element<'a, Message> {
                                 .into()
                         ),
                     ),
-                    well_hint(LTAS_LIVE_HINT),
+                    axis_well_hint(LTAS_LIVE_HINT),
                 ],
                 TAB_PADDING,
             ),
@@ -1598,6 +1598,17 @@ fn well_hint<'a>(hint: &'static str) -> Element<'a, Message> {
     plot_well(center(
         text(hint).size(type_scale::BODY).color(Studio::TEXT_FAINT),
     ))
+}
+
+/// [`well_hint`] where the tab's plot will be, right of its dB axis's
+/// column, so it lines up with the title over it as the plot does (Power's
+/// and LTAS's on Live until the mic has given a spectrum): the title stood
+/// in for the axis, the hint did not.
+fn axis_well_hint<'a>(hint: &'static str) -> Element<'a, Message> {
+    row![Space::new().width(AXIS_WIDTH), well_hint(hint)]
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
 }
 
 /// The live tabs' words while the mic has given them nothing yet.
