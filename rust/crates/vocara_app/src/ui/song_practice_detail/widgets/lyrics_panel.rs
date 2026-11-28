@@ -937,9 +937,13 @@ pub fn right_panel<'a>(
     };
     container(row![
         vrule(),
-        column![tab_bar(data.right_tab, notes_count(&data)), hrule(), body]
-            .width(Length::Fill)
-            .height(Length::Fill),
+        column![
+            tab_bar(data.right_tab, notes_count(&data), techniques_count(&data)),
+            hrule(),
+            body
+        ]
+        .width(Length::Fill)
+        .height(Length::Fill),
     ])
     .width(PANEL_WIDTH)
     .height(Length::Fill)
@@ -955,6 +959,16 @@ fn notes_count(data: &RightPanelData<'_>) -> usize {
         return 0;
     }
     data.all_notes.len()
+}
+
+/// The count the Techniques tab shows: the markers it lists, the selected
+/// take's (none on the backing, which the tab says takes none). It had no
+/// count where Notes had one.
+fn techniques_count(data: &RightPanelData<'_>) -> usize {
+    match data.selected_track {
+        Some(track) if !track.is_backing() => data.selected_track_techniques.len(),
+        _ => 0,
+    }
 }
 
 /// The 1 px line under the header.
@@ -1002,20 +1016,21 @@ fn panel_button<'a>(
 }
 
 /// `_TabBar`: the 36 px header — the Lyrics / Notes / Techniques tab strip
-/// (the notes' count after its tab) and the hide button.
-fn tab_bar<'a>(active: RightTab, notes: usize) -> Element<'a, Message> {
+/// (the notes' and the techniques' counts after their tabs) and the hide
+/// button.
+fn tab_bar<'a>(active: RightTab, notes: usize, techniques: usize) -> Element<'a, Message> {
     let mut notes_tab = tab(RightTab::Notes, "Notes");
     if notes > 0 {
         notes_tab = notes_tab.count(notes);
     }
+    let mut techniques_tab = tab(RightTab::Techniques, "Techniques");
+    if techniques > 0 {
+        techniques_tab = techniques_tab.count(techniques);
+    }
     container(
         row![
             tab_strip(
-                vec![
-                    tab(RightTab::Lyrics, "Lyrics"),
-                    notes_tab,
-                    tab(RightTab::Techniques, "Techniques"),
-                ],
+                vec![tab(RightTab::Lyrics, "Lyrics"), notes_tab, techniques_tab,],
                 Some(active),
                 TabSize::Panel,
                 Message::SetRightTab,
