@@ -48,12 +48,13 @@
 //!   within a pixel (`LongPressDraggable` for a mouse): it reports
 //!   [`Message::LaneDragStart`], the row fades to 35 % and a label follows
 //!   the pointer until the release ([`Message::LaneDragEnd`]). The long
-//!   press beats the row's own taps and a clip drag not yet started; a
-//!   control that takes its pointer on contact (the fader, the buttons)
-//!   beats it. While the screen says another lane is being dragged, a
-//!   reorderable row reports the pointer entering and leaving it
-//!   ([`Message::LaneDragOver`]: the screen sets [`TrackRow::dropping`],
-//!   the 2 px drop line) and a release over it
+//!   press beats the row's own taps; a control that takes its pointer on
+//!   contact (the fader, the buttons, a clip: Dart's long press beat a clip
+//!   drag not yet started, so a press held still to aim, then dragged,
+//!   reordered the take) beats it. While the screen says another lane is
+//!   being dragged, a reorderable row reports the pointer entering and
+//!   leaving it ([`Message::LaneDragOver`]: the screen sets
+//!   [`TrackRow::dropping`], the 2 px drop line) and a release over it
 //!   ([`Message::CrossLaneMove`]). The whole row — an expanded take's
 //!   sub-lanes too — is the drop target; only the main row drags and
 //!   highlights.
@@ -996,6 +997,19 @@ impl LaneState {
                         tap: true,
                     }
                 });
+                // A clip takes its pointer on contact, as a fader does: the
+                // row's long press does not start from it. A press held
+                // still for half a second to aim, then dragged, turned the
+                // clip's move into a reorder of the whole take.
+                if matches!(
+                    &self.press,
+                    Some(LanePress {
+                        target: Hit::Clip(_),
+                        ..
+                    })
+                ) {
+                    shell.capture_event();
+                }
             }
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Right)) => {
                 let Some(p) = cursor.position_over(bounds) else {
