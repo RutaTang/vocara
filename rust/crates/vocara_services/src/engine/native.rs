@@ -12,6 +12,9 @@ use super::{c_chars_to_string, c_string, EngineBindings, EngineError, UID_CAP};
 /// Samples per frame in the buffers the engine reads and fills.
 const CHANNELS: usize = vocara_engine::sample::CHANNELS;
 
+/// The longest engine diagnostics line read in one piece (longer ones are cut).
+const DIAGNOSTIC_CAP: usize = 1024;
+
 /// The engine pointer `ve_create` returned, or null once destroyed.
 struct Handle(*mut VeEngine);
 
@@ -277,6 +280,28 @@ impl EngineBindings for NativeEngine {
 
     fn input_applied_state(&self) -> u64 {
         self.read(0, |e| ffi::ve_input_applied_state(e))
+    }
+
+    fn reopen_input(&self, generation: u64) -> Result<(), EngineError> {
+        self.status("ve_reopen_input", |e| ffi::ve_reopen_input(e, generation))
+    }
+
+    fn take_diagnostics(&self) -> Vec<String> {
+        // The queue is process-wide (each line names its engine), so it is read whether or not
+        // this engine is still alive, and without its lock.
+        let mut lines = Vec::new();
+        let mut buf: Vec<c_char> = vec![0; DIAGNOSTIC_CAP];
+        // Bounded: a queue refilled as fast as it is read cannot hold the caller.
+        for _ in 0..vocara_engine::diag::QUEUE_CAP + 1 {
+            // SAFETY: `buf` holds DIAGNOSTIC_CAP chars, the cap passed; the engine writes at
+            // most that many, NUL-terminated.
+            let n = ffi::ve_take_diagnostic(buf.as_mut_ptr(), DIAGNOSTIC_CAP);
+            if n == 0 {
+                break;
+            }
+            lines.push(c_chars_to_string(&buf));
+        }
+        lines
     }
 
     fn play(&self) -> Result<(), EngineError> {
@@ -820,6 +845,9 @@ mod tests {
             engine: Mutex::new(Handle(ptr::null_mut())),
         };
         assert_eq!(e.play(), Err(EngineError::Unavailable));
+        assert_eq!(e.reopen_input(1), Err(EngineError::Unavailable));
+        // The diagnostics queue is the process's, not the engine's: still readable.
+        let _ = e.take_diagnostics();
         assert_eq!(
             e.tracks_add("/x.wav", 0, 1.0, false, true, -1),
             Err(EngineError::Unavailable)
