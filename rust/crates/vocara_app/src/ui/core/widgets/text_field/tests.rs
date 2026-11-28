@@ -990,6 +990,113 @@ fn a_keyboard_move_reveals_the_caret_at_once() {
     assert!((back - end).abs() < 0.01, "{back} {end}");
 }
 
+/// ⌘Z (⇧⌘Z with `shift`) as winit reports it: ⌘ (and ⇧) held, the key
+/// pressed with them and no text, the keys let go.
+fn command_z(shift: bool) -> [Event; 3] {
+    let held = if shift {
+        keyboard::Modifiers::COMMAND | keyboard::Modifiers::SHIFT
+    } else {
+        keyboard::Modifiers::COMMAND
+    };
+    let key = keyboard::Key::Character(if shift { "Z" } else { "z" }.into());
+    [
+        Event::Keyboard(keyboard::Event::ModifiersChanged(held)),
+        Event::Keyboard(keyboard::Event::KeyPressed {
+            key: key.clone(),
+            modified_key: key,
+            physical_key: keyboard::key::Physical::Code(keyboard::key::Code::KeyZ),
+            location: keyboard::Location::Standard,
+            modifiers: held,
+            text: None,
+            repeat: false,
+        }),
+        Event::Keyboard(keyboard::Event::ModifiersChanged(
+            keyboard::Modifiers::empty(),
+        )),
+    ]
+}
+
+/// ⌘Z takes the edits back one step at a time and ⇧⌘Z puts them back, in
+/// a one-line field: each letter here is a step of its own, the caret moved
+/// between them (a run of typing is one step: `undo`).
+#[test]
+fn command_z_undoes_and_shift_command_z_redoes_in_a_one_line_field() {
+    let mut window = window();
+    let at = Point::new(TEXT_X + 1.0, MIDDLE);
+    let t0 = Instant::now();
+    window.run(field(""), at, &click(), t0);
+    let mut text = String::new();
+    let step = |window: &mut Window, events: &[Event], text: &mut String| {
+        let (messages, _) = window.run(field(text), at, events, t0);
+        if let Some(changed) = input_of(messages) {
+            *text = changed;
+        }
+    };
+    step(&mut window, &[typed("a")], &mut text);
+    step(&mut window, &[key(Named::ArrowLeft), typed("b")], &mut text);
+    step(
+        &mut window,
+        &[key(Named::ArrowRight), typed("c")],
+        &mut text,
+    );
+    assert_eq!(text, "bac");
+    let (undo, redo) = (command_z(false), command_z(true));
+    let mut seen = Vec::new();
+    for _ in 0..4 {
+        step(&mut window, &undo, &mut text);
+        seen.push(text.clone());
+    }
+    assert_eq!(seen, ["ba", "a", "", ""], "and no z typed");
+    step(&mut window, &redo, &mut text);
+    step(&mut window, &redo, &mut text);
+    assert_eq!(text, "ba");
+    // The caret came back with the text: typing goes on where it was.
+    step(&mut window, &[typed("d")], &mut text);
+    assert_eq!(text, "bad");
+}
+
+/// The same in a multi-line field, whose owner performs each edit: the
+/// whole text is put back, then its caret.
+#[test]
+fn command_z_undoes_and_shift_command_z_redoes_in_a_multi_line_field() {
+    let mut window = window();
+    let mut content = Content::new();
+    let at = Point::new(TEXT_X + 1.0, MIDDLE);
+    let run = |window: &mut Window, content: &mut Content, events: &[Event]| {
+        let (messages, _) = window.run(prose(content, false), at, events, Instant::now());
+        for message in messages {
+            if let Msg::Edit(action) = message {
+                content.perform(action);
+            }
+        }
+    };
+    run(&mut window, &mut content, &click());
+    run(&mut window, &mut content, &[typed("a")]);
+    run(&mut window, &mut content, &[key(Named::Enter)]);
+    run(&mut window, &mut content, &[key(Named::ArrowUp)]);
+    run(&mut window, &mut content, &[typed("b")]);
+    assert_eq!(content.text(), "ba\n");
+    let (undo, redo) = (command_z(false), command_z(true));
+    run(&mut window, &mut content, &undo);
+    assert_eq!(content.text(), "a\n");
+    // Its caret is put back where the text was, on the next frame.
+    run(&mut window, &mut content, &[]);
+    run(&mut window, &mut content, &[typed("c")]);
+    assert_eq!(content.text(), "ca\n");
+    run(&mut window, &mut content, &undo);
+    assert_eq!(content.text(), "a\n");
+    run(&mut window, &mut content, &undo);
+    assert_eq!(content.text(), "", "a run of typing, one step");
+    run(&mut window, &mut content, &redo);
+    run(&mut window, &mut content, &redo);
+    assert_eq!(content.text(), "ca\n");
+    run(&mut window, &mut content, &[]);
+    // A text the owner puts in from outside leaves nothing to undo.
+    content = Content::with_text("another note");
+    run(&mut window, &mut content, &undo);
+    assert_eq!(content.text(), "another note");
+}
+
 /// Edit ▸ Emoji & Symbols inserts with no key press and nothing marked,
 /// which winit drops; the run loop commits that text alone
 /// (`iced_winit::insert_text`), never typed text nor a composition's, and

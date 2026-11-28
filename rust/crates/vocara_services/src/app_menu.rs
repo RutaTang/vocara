@@ -7,7 +7,7 @@
 //! main thread; the app calls it when its window has opened, which is after
 //! winit's.
 //!
-//! Every item but four is nil-targeted, as in the xib: its action goes to
+//! Every item but six is nil-targeted, as in the xib: its action goes to
 //! the first responder chain, and AppKit enables the item only while
 //! something there implements it. The Quit item sends `terminate:`, so it
 //! goes through the quit guard ([`crate::quit_request`]). The app-menu titles
@@ -15,19 +15,23 @@
 //! `FlutterAppDelegate` replaced with `CFBundleDisplayName`, else
 //! `CFBundleName`; an unbundled run (`cargo run`) uses the process name.
 //!
-//! The four are Cut, Copy, Paste and Select All, whose ⌘X, ⌘C, ⌘V and ⌘A
-//! are also the keys iced's text inputs handle, from the key events winit's
-//! view receives. Nothing in the responder chain of the app's window
-//! implements `cut:`, `copy:`, `paste:` or `selectAll:` (winit's view,
-//! window, window delegate and application delegate do not), so
-//! nil-targeted, the four would be disabled there, and whether the keys
-//! reached iced would rest on what AppKit does with a disabled item's key
-//! equivalent. Instead they target an object of ours, the edit target, which
-//! keeps them enabled and answers each of the four actions in two steps:
+//! The six are Cut, Copy, Paste, Select All, Undo and Redo, whose ⌘X, ⌘C,
+//! ⌘V, ⌘A, ⌘Z and ⇧⌘Z are also the keys the app's text fields handle, from
+//! the key events winit's view receives. Nothing in the responder chain of
+//! the app's window implements `cut:`, `copy:`, `paste:` or `selectAll:`
+//! (winit's view, window, window delegate and application delegate do not),
+//! nor can undo anything there, so nil-targeted, the six would be disabled
+//! there, and whether the keys reached the fields would rest on what AppKit
+//! does with a disabled item's key equivalent. Instead they target an
+//! object of ours, the edit target, which keeps them enabled and answers
+//! each of the six actions in two steps:
 //! 1. it sends the action down the responder chain, as a nil-targeted item
 //!    would (`-[NSApplication sendAction:to:from:]` with no target), so a
-//!    native panel's field editor or an `NSTextField` cuts, copies, pastes or
-//!    selects all, as in the Flutter app;
+//!    native panel's field editor or an `NSTextField` cuts, copies, pastes,
+//!    selects all or undoes, as in the Flutter app; Undo and Redo only to a
+//!    responder that, asked (`validateMenuItem:`, else
+//!    `validateUserInterfaceItem:`), can take them now, since a window's
+//!    own undo with nothing to undo would otherwise keep ⌘Z from the field;
 //! 2. when nothing there takes it, it hands the keystroke to the key window,
 //!    whose `sendEvent:` passes a keyDown to its first responder (winit's
 //!    view) and not back through the menu, so iced's focused text input gets
@@ -109,14 +113,19 @@ pub enum Item {
     },
 }
 
-/// An Edit item whose key iced's text inputs handle: its action, its key
-/// (with ⌘), and that key's virtual key code on the ANSI layout, which the
-/// edit target gives the keystroke it makes for a click on the item.
+/// An Edit item whose key the app's text fields handle: its action, its key
+/// (with ⌘; an uppercase key with ⇧ too), and that key's virtual key code
+/// on the ANSI layout, which the edit target gives the keystroke it makes
+/// for a click on the item.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EditKey {
     pub action: &'static CStr,
     pub key: &'static str,
     pub key_code: u16,
+    /// Whether the action goes down the responder chain only to a
+    /// responder that says it can take it now (Undo and Redo, see the
+    /// module doc).
+    pub only_if_valid: bool,
 }
 
 /// Cut, ⌘X (`kVK_ANSI_X`).
@@ -124,28 +133,46 @@ pub const CUT: EditKey = EditKey {
     action: c"cut:",
     key: "x",
     key_code: 7,
+    only_if_valid: false,
 };
 /// Copy, ⌘C (`kVK_ANSI_C`).
 pub const COPY: EditKey = EditKey {
     action: c"copy:",
     key: "c",
     key_code: 8,
+    only_if_valid: false,
 };
 /// Paste, ⌘V (`kVK_ANSI_V`).
 pub const PASTE: EditKey = EditKey {
     action: c"paste:",
     key: "v",
     key_code: 9,
+    only_if_valid: false,
 };
 /// Select All, ⌘A (`kVK_ANSI_A`).
 pub const SELECT_ALL: EditKey = EditKey {
     action: c"selectAll:",
     key: "a",
     key_code: 0,
+    only_if_valid: false,
+};
+/// Undo, ⌘Z (`kVK_ANSI_Z`): the text fields' own history.
+pub const UNDO: EditKey = EditKey {
+    action: c"undo:",
+    key: "z",
+    key_code: 6,
+    only_if_valid: true,
+};
+/// Redo, ⇧⌘Z.
+pub const REDO: EditKey = EditKey {
+    action: c"redo:",
+    key: "Z",
+    key_code: 6,
+    only_if_valid: true,
 };
 
 /// The items that target the edit target.
-pub const EDIT_KEYS: [EditKey; 4] = [CUT, COPY, PASTE, SELECT_ALL];
+pub const EDIT_KEYS: [EditKey; 6] = [CUT, COPY, PASTE, SELECT_ALL, UNDO, REDO];
 
 const fn cmd(key: &'static str) -> Option<Shortcut> {
     Some(Shortcut {
@@ -326,11 +353,11 @@ pub fn main_menu(app_name: &str) -> Menu {
         "Edit",
         None,
         vec![
-            item("Undo", c"undo:", cmd("z")),
-            item("Redo", c"redo:", cmd("Z")),
+            // To the edit target: the text fields handle ⌘Z, ⇧⌘Z, ⌘X, ⌘C,
+            // ⌘V and ⌘A too (see the module doc).
+            edit_key("Undo", UNDO),
+            edit_key("Redo", REDO),
             Separator,
-            // To the edit target: iced's text inputs handle ⌘X, ⌘C, ⌘V and
-            // ⌘A too (see the module doc).
             edit_key("Cut", CUT),
             edit_key("Copy", COPY),
             edit_key("Paste", PASTE),
@@ -389,14 +416,14 @@ mod macos {
 
     use objc2::rc::Retained;
     use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, Sel};
-    use objc2::{define_class, msg_send, DefinedClass, MainThreadMarker, MainThreadOnly};
+    use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadMarker, MainThreadOnly};
     use objc2_app_kit::{
         NSApplication, NSEvent, NSEventModifierFlags, NSEventType, NSMenu, NSMenuItem,
         NSMenuItemValidation, NSWindow,
     };
     use objc2_foundation::{ns_string, NSBundle, NSPoint, NSProcessInfo, NSString};
 
-    use super::{EditKey, Item, Menu, Role, Target, COPY, CUT, PASTE, SELECT_ALL};
+    use super::{EditKey, Item, Menu, Role, Target, COPY, CUT, PASTE, REDO, SELECT_ALL, UNDO};
 
     static INSTALLED: AtomicBool = AtomicBool::new(false);
 
@@ -433,6 +460,16 @@ mod macos {
             fn select_all_action(&self, sender: Option<&AnyObject>) {
                 self.perform(&SELECT_ALL, sender);
             }
+
+            #[unsafe(method(undo:))]
+            fn undo_action(&self, sender: Option<&AnyObject>) {
+                self.perform(&UNDO, sender);
+            }
+
+            #[unsafe(method(redo:))]
+            fn redo_action(&self, sender: Option<&AnyObject>) {
+                self.perform(&REDO, sender);
+            }
         }
 
         unsafe impl NSObjectProtocol for EditTarget {}
@@ -468,13 +505,16 @@ mod macos {
                 return;
             }
             let app = NSApplication::sharedApplication(self.mtm());
+            let action = Sel::register(key.action);
             // SAFETY: `key.action` names an action method
             // (`-(void)name:(id)sender`). With no target, AppKit sends it
             // only to an object in the responder chain that implements it,
             // with `sender` (the menu item that sent it here, or nil), as it
             // sends a nil-targeted item's action. The edit target is not in
             // any responder chain, so this does not come back here.
-            if unsafe { app.sendAction_to_from(Sel::register(key.action), None, sender) } {
+            if (!key.only_if_valid || can_take(&app, action, sender))
+                && unsafe { app.sendAction_to_from(action, None, sender) }
+            {
                 return;
             }
             let Some(window) = app.keyWindow() else {
@@ -490,6 +530,31 @@ mod macos {
                 }
             }
         }
+    }
+
+    /// Whether the responder `action` would go to down the responder chain
+    /// can take it now, by its own answer for `sender` (the menu item):
+    /// `validateMenuItem:`, else `validateUserInterfaceItem:`, else yes.
+    fn can_take(app: &NSApplication, action: Sel, sender: Option<&AnyObject>) -> bool {
+        // SAFETY: `targetForAction:to:from:` only looks the chain up.
+        let Some(target) = (unsafe { app.targetForAction_to_from(action, None, sender) }) else {
+            return false;
+        };
+        let Some(item) = sender else {
+            return true;
+        };
+        let class = target.class();
+        if class.responds_to(sel!(validateMenuItem:)) {
+            // SAFETY: `-(BOOL)validateMenuItem:(NSMenuItem *)`, which the
+            // target answers (checked), sent the menu item that chose the
+            // action.
+            return unsafe { msg_send![&*target, validateMenuItem: item] };
+        }
+        if class.responds_to(sel!(validateUserInterfaceItem:)) {
+            // SAFETY: `-(BOOL)validateUserInterfaceItem:(id)`, likewise.
+            return unsafe { msg_send![&*target, validateUserInterfaceItem: item] };
+        }
+        true
     }
 
     /// Sets the edit target's ivar while it lives.
@@ -523,19 +588,20 @@ mod macos {
     }
 
     /// The keystroke of `key`'s item, for `window`: a keyDown of the key
-    /// with ⌘, then its keyUp with the modifiers held now. After a click
-    /// those are none, and winit, which takes the modifiers from every key
-    /// event, does not keep ⌘ as held.
+    /// with ⌘ (and ⇧, for an uppercase key), then its keyUp with the
+    /// modifiers held now. After a click those are none, and winit, which
+    /// takes the modifiers from every key event, does not keep ⌘ as held.
     fn keystroke(key: &EditKey, window: &NSWindow) -> [Option<Retained<NSEvent>>; 2] {
         let chars = NSString::from_str(key.key);
         let time = NSProcessInfo::processInfo().systemUptime();
         let number = window.windowNumber();
         let held =
             NSEvent::modifierFlags_class() & NSEventModifierFlags::DeviceIndependentFlagsMask;
-        [
-            (NSEventType::KeyDown, NSEventModifierFlags::Command),
-            (NSEventType::KeyUp, held),
-        ]
+        let mut down = NSEventModifierFlags::Command;
+        if key.key.bytes().any(|b| b.is_ascii_uppercase()) {
+            down |= NSEventModifierFlags::Shift;
+        }
+        [(NSEventType::KeyDown, down), (NSEventType::KeyUp, held)]
         .map(|(kind, flags)| {
             NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
                 kind,
@@ -679,7 +745,8 @@ mod tests {
     /// `MainMenu.xib`'s main menu, item for item, as [`describe`] writes it:
     /// `title | key | action [| tag n] [| edit target]`, `title > menu title
     /// [role]`, `---`. Dumped from the xib, `APP_NAME` read as "Vocara",
-    /// with Cut, Copy, Paste and Select All sent to the edit target.
+    /// with Undo, Redo, Cut, Copy, Paste and Select All sent to the edit
+    /// target.
     const XIB: &str = "\
 Vocara > Vocara
   About Vocara | - | orderFrontStandardAboutPanel:
@@ -694,8 +761,8 @@ Vocara > Vocara
   ---
   Quit Vocara | ⌘q | terminate:
 Edit > Edit
-  Undo | ⌘z | undo:
-  Redo | ⌘Z | redo:
+  Undo | ⌘z | undo: | edit target
+  Redo | ⌘Z | redo: | edit target
   ---
   Cut | ⌘x | cut: | edit target
   Copy | ⌘c | copy: | edit target
@@ -807,10 +874,10 @@ Help > Help [Help]
         }
     }
 
-    /// Every item that takes ⌘X, ⌘C, ⌘V or ⌘A, the keys iced's text inputs
-    /// handle, sends its action to the edit target, which hands the key on
-    /// to the window when nothing in the responder chain takes the action;
-    /// and the edit target gets no other item.
+    /// Every item that takes ⌘Z, ⇧⌘Z, ⌘X, ⌘C, ⌘V or ⌘A, the keys the text
+    /// fields handle, sends its action to the edit target, which hands the
+    /// key on to the window when nothing in the responder chain takes the
+    /// action; and the edit target gets no other item.
     #[test]
     fn the_keys_iceds_text_inputs_handle_go_through_the_edit_target() {
         fn actions(menu: &Menu, out: &mut Vec<(Option<&'static CStr>, Option<Shortcut>, Target)>) {

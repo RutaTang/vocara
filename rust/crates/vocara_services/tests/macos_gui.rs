@@ -15,14 +15,15 @@
 //! 1. the delegate: one without `applicationSupportsSecureRestorableState:`
 //!    answers YES once set (and is NSApp's delegate: AppKit's `setDelegate:`
 //!    ran); one that answers NO keeps its answer;
-//! 2. the menu bar: Cut, Copy, Paste and Select All carry ⌘X, ⌘C, ⌘V and
-//!    ⌘A, share one explicit target, and are enabled though nothing in the
-//!    responder chain implements their actions; Quit is ⌘Q, Minimize ⌘M,
+//! 2. the menu bar: Cut, Copy, Paste, Select All, Undo and Redo carry ⌘X,
+//!    ⌘C, ⌘V, ⌘A, ⌘Z and ⇧⌘Z, share one explicit target, and are enabled
+//!    though nothing in the responder chain implements their actions (or,
+//!    for Undo and Redo, has anything to undo); Quit is ⌘Q, Minimize ⌘M,
 //!    Enter Full Screen ⌃⌘F;
-//! 3. a winit-like view, key and first responder: ⌘C, ⌘V, ⌘X and ⌘A each
-//!    reach its `keyDown:` once, as the very event sent; a click on each of
-//!    the four items (no key event current) hands it one ⌘-keyDown of the
-//!    item's key, with its ANSI key code, and one keyUp without ⌘;
+//! 3. a winit-like view, key and first responder: ⌘C, ⌘V, ⌘X, ⌘A and ⌘Z
+//!    each reach its `keyDown:` once, as the very event sent; a click on
+//!    each of the six items (no key event current) hands it one ⌘-keyDown
+//!    of the item's key, with its ANSI key code, and one keyUp without ⌘;
 //! 4. an `NSTextField` being edited: ⌘A ⌘C copies its text to the general
 //!    pasteboard, ⌘A ⌘V pastes over it, ⌘A ⌘X cuts it;
 //! 5. `NSApp.terminate(nil)` returns, and the quit reaches
@@ -563,6 +564,8 @@ mod macos {
                 "a",
                 NSEventModifierFlags::Command,
             ),
+            ("Undo", c"undo:", "z", NSEventModifierFlags::Command),
+            ("Redo", c"redo:", "Z", NSEventModifierFlags::Command),
             ("Quit ", c"terminate:", "q", NSEventModifierFlags::Command),
             (
                 "Minimize",
@@ -600,7 +603,10 @@ mod macos {
                 item_key == key && (item_mask == mask || system_full_screen),
                 format!("\"{item_title}\" has key \"{item_key}\" with {item_mask:?}, the xib's {mask:?} {key}"),
             );
-            if matches!(name, "cut:" | "copy:" | "paste:" | "selectAll:") {
+            if matches!(
+                name,
+                "cut:" | "copy:" | "paste:" | "selectAll:" | "undo:" | "redo:"
+            ) {
                 edit_items.push((menu, item));
             }
         }
@@ -617,7 +623,7 @@ mod macos {
                     (Some(target), Some(first)) => std::ptr::eq(&**target, &**first),
                     _ => false,
                 }),
-            "Cut, Copy, Paste and Select All share one explicit target",
+            "Cut, Copy, Paste, Select All, Undo and Redo share one explicit target",
         );
         for (_, item) in &edit_items {
             checks.check(
@@ -634,7 +640,7 @@ mod macos {
         let view = KeyView::new(mtm, frame);
         let window = new_window(mtm, "Vocara GUI test: keys", &view);
         make_key(&app, &window, &view, "key view");
-        for (key, code) in [("c", 8), ("v", 9), ("x", 7), ("a", 0)] {
+        for (key, code) in [("c", 8), ("v", 9), ("x", 7), ("a", 0), ("z", 6)] {
             let sent = press(&app, key, code, &window);
             let received = view.take();
             let downs: Vec<_> = received
@@ -665,6 +671,8 @@ mod macos {
             ("Paste", "v", 9),
             ("Cut", "x", 7),
             ("Select All", "a", 0),
+            ("Undo", "z", 6),
+            ("Redo", "Z", 6),
         ] {
             let Some((menu, item)) = edit_items
                 .iter()
