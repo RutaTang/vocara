@@ -583,6 +583,54 @@ mod tests {
         assert!(near(window.pixel(edge), OUTLINE_HOVERED), "outline");
     }
 
+    // The outlines of the cards scrolled under Home's toolbar were drawn
+    // over it: the outline's layer was clipped to the card, not to the list
+    // it scrolls in.
+    #[test]
+    fn a_card_scrolled_under_the_toolbar_draws_no_outline_over_it() {
+        use crate::ui::core::widgets::animated::testing::{near, Frames, BACKGROUND};
+        use crate::ui::core::widgets::fading_scrollbar::scrollable;
+        use iced::time::Instant;
+        use iced::{mouse, Event};
+
+        const BAR: Color = Color::from_rgb8(0x40, 0x10, 0x10);
+        let p = summary(2, 1, true);
+        // A 50 px toolbar over a list whose card starts 20 px down it.
+        let view = || -> Element<'static, Msg> {
+            iced::widget::column![
+                container(Space::new())
+                    .width(Length::Fill)
+                    .height(50)
+                    .style(|_| boxed(Some(BAR), 0.0, None)),
+                scrollable(iced::widget::column![
+                    Space::new().height(20),
+                    container(card(&p, None)).padding([0, 20]),
+                    Space::new().height(1000),
+                ])
+                .width(Length::Fill)
+                .height(Length::Fill),
+            ]
+            .into()
+        };
+        let mut window = Frames::new(Size::new(400.0, 400.0));
+        // Beside the card, so it is not hovered.
+        window.point_at(Point::new(350.0, 300.0));
+        window.frame(view(), &[], Instant::now());
+        let band = Point::new(100.0, 60.0);
+        assert!(near(window.pixel(band), BACKGROUND), "the card below it");
+        // Scrolled 60 px: the card's top 40 px are under the toolbar.
+        let wheel = Event::Mouse(mouse::Event::WheelScrolled {
+            delta: mouse::ScrollDelta::Pixels { x: 0.0, y: -60.0 },
+        });
+        let t0 = Instant::now();
+        window.frame(view(), &[wheel], t0);
+        window.frame(view(), &[], t0 + Duration::from_secs(1));
+        assert!(!near(window.pixel(band), BACKGROUND), "scrolled up to it");
+        // The card's left edge, under the toolbar and in the list.
+        assert!(near(window.pixel(Point::new(20.0, 30.0)), BAR), "over the bar");
+        assert!(near(window.pixel(Point::new(20.0, 100.0)), Studio::BORDER));
+    }
+
     #[test]
     fn the_band_draws_the_waveform_in_the_practice_s_colour() {
         use crate::ui::core::widgets::animated::testing::{near, over, Frames};
