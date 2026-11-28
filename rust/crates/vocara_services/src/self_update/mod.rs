@@ -363,8 +363,9 @@ impl SelfUpdate {
     /// The once-per-run start-up work, all local: a swap that failed after
     /// the last run quit for it is reported now (the helper relaunched the
     /// previous version and left the reason behind; this is the first moment
-    /// anyone can show it), and the downloads earlier runs left behind are
-    /// swept ([`files::sweep_stale_downloads`]). Blocking: off the UI thread.
+    /// anyone can show it), and the downloads and staged installs earlier
+    /// runs left behind are swept ([`files::sweep_stale_downloads`]).
+    /// Blocking: off the UI thread.
     pub fn startup(&self) {
         if self.inner.started_up.swap(true, Ordering::SeqCst) {
             return;

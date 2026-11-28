@@ -15,7 +15,7 @@
 //! Every attempt has its own directory, so none can see, truncate or install
 //! another's bytes; each route that ends one takes its directory with it
 //! ([`discard_download`]), and what a Vocara that stopped existing
-//! mid-download left behind is swept at the next launch
+//! mid-download or mid-install left behind is swept at the next launch
 //! ([`sweep_stale_downloads`]).
 
 use std::io::Read;
@@ -45,6 +45,14 @@ pub const INSTALL_LOG: &str = "update.log";
 /// beyond any plausible stall in one, so one another live Vocara is
 /// streaming into can never be old enough to qualify.
 pub const STALE_DOWNLOAD_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// How long a staging directory must have sat untouched before
+/// [`sweep_stale_downloads`] removes it. A live one is in use for minutes at
+/// most: staged in seconds, then the swap helper waits for Vocara to exit
+/// (at most `install::EXIT_WAIT_TICKS`, three minutes), copies it into place
+/// and removes it. An hour is far beyond that, and short enough that a
+/// whole app's copy an interrupted install left does not sit there for long.
+pub const STALE_STAGING_AGE: Duration = Duration::from_secs(60 * 60);
 
 /// Most entries one sweep looks at, so a directory that somehow filled up
 /// cannot turn a launch into a long walk.
@@ -112,10 +120,18 @@ pub fn discard_download(dmg: &Path) {
 /// front of a recursive delete, and both callers — the discard and the sweep
 /// — share it, so the two can never disagree about which trees are Vocara's.
 pub fn is_download_dir_name(name: &str) -> bool {
-    let Some(rest) = name
-        .strip_prefix(DOWNLOAD_PREFIX)
-        .and_then(|r| r.strip_prefix('-'))
-    else {
+    is_private_dir_name(name, DOWNLOAD_PREFIX)
+}
+
+/// `stage-<pid>-<n>`, exactly as [`create_private_dir`] spells it (see
+/// [`is_download_dir_name`]).
+pub fn is_staging_dir_name(name: &str) -> bool {
+    is_private_dir_name(name, STAGING_PREFIX)
+}
+
+/// `<prefix>-<pid>-<n>`, exactly as [`create_private_dir`] spells it.
+fn is_private_dir_name(name: &str, prefix: &str) -> bool {
+    let Some(rest) = name.strip_prefix(prefix).and_then(|r| r.strip_prefix('-')) else {
         return false;
     };
     let mut parts = rest.split('-');
@@ -126,35 +142,44 @@ pub fn is_download_dir_name(name: &str) -> bool {
     digits(pid) && digits(n)
 }
 
-/// Removes download directories left behind by Vocara runs that no longer
-/// exist: a crash, a log-out, a quit mid-download — everything the discard
-/// on the routes that end a download cannot reach. Run once per launch.
+/// Removes download and staging directories left behind by Vocara runs that
+/// no longer exist: a crash, a log-out, a quit mid-download or mid-install
+/// (before the swap helper, which prunes its own staging directory, took
+/// over) — everything the routes that end an attempt cannot reach. Run once
+/// per launch.
 ///
 /// Deliberately narrow, because it deletes trees: only entries directly
 /// under `updates`; only real directories (not a symlink planted under one
-/// of these names); only names of the exact `dl-<pid>-<n>` shape; and only
-/// ones nothing has touched for [`STALE_DOWNLOAD_AGE`], which keeps a
-/// download another live Vocara is streaming into safe.
-///
-/// `stage-<pid>-<n>` is deliberately NOT swept, however old it looks: the
-/// swap helper works out of it after its Vocara is gone, and it prunes its
-/// own directory. Blocking: off the UI thread.
+/// of these names); only names of the exact `dl-<pid>-<n>` or
+/// `stage-<pid>-<n>` shape; and only ones nothing has touched for
+/// [`STALE_DOWNLOAD_AGE`] (a download) or [`STALE_STAGING_AGE`] (a staged
+/// app), which keeps a download another live Vocara is streaming into, and
+/// a staged app a swap helper is about to install, safe. Blocking: off the
+/// UI thread.
 pub fn sweep_stale_downloads(updates: &Path) {
     let Ok(entries) = std::fs::read_dir(updates) else {
         return;
     };
     for entry in entries.take(MAX_SWEPT_ENTRIES).flatten() {
         let name = entry.file_name();
-        if !name.to_str().is_some_and(is_download_dir_name) {
+        let Some(stale_after) = name.to_str().and_then(|name| {
+            if is_download_dir_name(name) {
+                Some(STALE_DOWNLOAD_AGE)
+            } else if is_staging_dir_name(name) {
+                Some(STALE_STAGING_AGE)
+            } else {
+                None
+            }
+        }) else {
             continue;
-        }
+        };
         // `file_type` does not follow symlinks: a link named `dl-1-0` is not
         // a directory here, and stays where it is.
         if !entry.file_type().is_ok_and(|t| t.is_dir()) {
             continue;
         }
         let path = entry.path();
-        if last_touched(&path).is_none_or(|age| age < STALE_DOWNLOAD_AGE) {
+        if last_touched(&path).is_none_or(|age| age < stale_after) {
             continue;
         }
         let _ = std::fs::remove_dir_all(&path);
@@ -285,7 +310,8 @@ mod tests {
 
     /// A Vocara that died mid-download left its image; the next launch's
     /// sweep removes it — and nothing a live Vocara is still writing, no
-    /// staging directory, nothing not named as Vocara's.
+    /// staging directory a swap could still be using, nothing not named as
+    /// Vocara's.
     #[test]
     fn only_a_download_no_live_vocara_is_writing_is_swept() {
         let updates = tempfile::tempdir().unwrap();
@@ -304,7 +330,7 @@ mod tests {
 
         let staging = create_private_dir(updates, STAGING_PREFIX).unwrap();
         std::fs::write(staging.join("marker"), b"x").unwrap();
-        age(&staging, old);
+        age(&staging, STALE_STAGING_AGE / 2);
         let odd = updates.join("dl-notapid");
         std::fs::create_dir(&odd).unwrap();
         age(&odd, old);
@@ -315,9 +341,49 @@ mod tests {
 
         assert!(!stale.exists(), "an abandoned download must not survive");
         assert!(live.exists(), "one still being written stays");
-        assert!(staging.exists(), "the swap helper works out of staging");
+        assert!(staging.exists(), "a swap helper may still work out of it");
         assert!(odd.exists() && staging.join("marker").exists());
         assert!(std::fs::symlink_metadata(&link).is_ok(), "a link stays");
+    }
+
+    /// An install interrupted before its swap helper took over (Vocara quit
+    /// or crashed while staging) left a whole app's copy; the next launch
+    /// sweeps it once it is older than any swap could still be using — and
+    /// leaves a recent one, and anything not named as Vocara's staging.
+    #[test]
+    fn a_staging_directory_no_swap_can_be_using_is_swept() {
+        let updates = tempfile::tempdir().unwrap();
+        let updates = updates.path();
+        let old = STALE_STAGING_AGE * 2;
+
+        let stale = create_private_dir(updates, STAGING_PREFIX).unwrap();
+        std::fs::create_dir_all(stale.join("vocara.app/Contents")).unwrap();
+        age(&stale.join("vocara.app"), old);
+        age(&stale, old);
+
+        let recent = create_private_dir(updates, STAGING_PREFIX).unwrap();
+        std::fs::create_dir_all(recent.join("vocara.app/Contents")).unwrap();
+        age(&recent.join("vocara.app"), old);
+        age(&recent, STALE_STAGING_AGE / 2);
+
+        let odd = updates.join("stage-1-2-3");
+        std::fs::create_dir(&odd).unwrap();
+        age(&odd, old);
+
+        sweep_stale_downloads(updates);
+
+        assert!(!stale.exists(), "an abandoned staging directory must go");
+        assert!(recent.exists(), "one a swap could still use stays");
+        assert!(
+            odd.exists(),
+            "only the exact stage-<pid>-<n> shape is swept"
+        );
+        for name in ["stage-1-2", "stage-12-0"] {
+            assert!(is_staging_dir_name(name), "{name}");
+        }
+        for name in ["stage-", "stage-1", "stage-a-1", "dl-1-2", "xstage-1-2"] {
+            assert!(!is_staging_dir_name(name), "{name}");
+        }
     }
 
     /// A failed swap's reason is reported by the relaunched Vocara once.
