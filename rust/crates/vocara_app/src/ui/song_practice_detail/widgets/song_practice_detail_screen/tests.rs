@@ -2098,6 +2098,8 @@ fn deleting_a_note_asks_first() {
         panic!("a confirmation");
     };
     assert_eq!(confirm.title, "Delete this note?");
+    // Destructive: Return does not confirm it, so a stray one loses nothing.
+    assert!(confirm.destructive);
     h.answer(DialogResult::Confirmed(false));
     h.settle();
     assert_eq!(notes(&h), 1, "cancelled");
@@ -2531,6 +2533,8 @@ fn importing_a_lyrics_file_over_lyrics_asks_first() {
         panic!("a confirmation");
     };
     assert_eq!(confirm.title, "Replace the current lyrics?");
+    // Destructive: Return does not confirm it, so a stray one loses nothing.
+    assert!(confirm.destructive);
     h.answer(DialogResult::Confirmed(false));
     h.settle();
     assert_eq!(stored(&h), before, "cancelled");
@@ -2582,6 +2586,8 @@ fn saving_the_lyrics_editor_empty_asks_before_deleting_the_lyrics() {
         panic!("a confirmation");
     };
     assert_eq!(confirm.title, "Delete the lyrics?");
+    // Destructive: Return does not confirm it, so a stray one loses nothing.
+    assert!(confirm.destructive);
     h.answer(DialogResult::Confirmed(false));
     h.settle();
     assert_eq!(h.repo.stored().lyrics.len(), 2, "cancelled");
