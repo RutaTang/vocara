@@ -1050,8 +1050,9 @@ impl canvas::Program<Message> for LevelMeter {
 
 /// `_promptLabel`'s dialog: a tiny single-field dialog to rename a clip. It
 /// closes with the trimmed label ([`DialogResult::Text`]`(Some(..))`; an
-/// empty value clears back to the file name), or with `Text(None)` if
-/// cancelled (Cancel, a barrier tap, Escape).
+/// empty value puts back the name the clip was added with, as
+/// `rename_media` says), or with `Text(None)` if cancelled (Cancel, a
+/// barrier tap, Escape).
 ///
 /// The app's dialog stack owns it (`Dialog::RenameExample`), as it owns the
 /// other studio dialogs: it draws [`view`](Self::view) over the window, runs

@@ -203,7 +203,18 @@ impl<M> Widget<M, Theme, Renderer> for Tooltip<'_, M> {
     ) {
         let state = tree.state.downcast_mut::<State>();
         match event {
-            Event::Window(window::Event::RedrawRequested(at)) => state.frame(*at, shell),
+            Event::Window(window::Event::RedrawRequested(at)) => {
+                // Something came over the target under a still pointer (a
+                // dialog's barrier, which takes the pointer from what lies
+                // beneath): the tip goes at once, as for a press, until the
+                // pointer enters the target again. It stayed drawn over the
+                // dimmed page until the pointer moved.
+                if state.hovered && cursor.is_levitating() {
+                    state.hovered = false;
+                    state.dismissed = true;
+                }
+                state.frame(*at, shell);
+            }
             Event::Mouse(mouse::Event::ButtonPressed(_)) => {
                 if !state.dismissed {
                     state.dismissed = true;
@@ -512,6 +523,36 @@ mod tests {
         window.frame(view(), &[], t1 + 400 * MS);
         window.frame(view(), &[], t1 + 550 * MS);
         assert!(near(on_tip(&window), tip_at(1.0)), "back");
+    }
+
+    #[test]
+    fn a_dialog_over_a_still_pointer_sends_it_away_at_once() {
+        // A layer over the target that takes the pointer, as a dialog's
+        // barrier does (here a clear one), or none.
+        let page = |covered: bool| -> Element<'_, ()> {
+            let over: Element<'_, ()> = if covered {
+                crate::ui::core::widgets::toolbar::window_backdrop(
+                    Space::new().width(Length::Fill).height(Length::Fill),
+                )
+            } else {
+                Space::new().width(Length::Fill).height(Length::Fill).into()
+            };
+            iced::widget::stack![view(), over].into()
+        };
+        let mut window = Frames::new(Size::new(200.0, 100.0));
+        let t0 = Instant::now();
+        window.point_at(Point::new(20.0, 10.0));
+        window.frame(page(false), &[], t0);
+        window.frame(page(false), &[], t0 + 150 * MS);
+        assert!(near(on_tip(&window), tip_at(1.0)), "shown");
+        // The dialog opens; the pointer does not move.
+        let t1 = t0 + 200 * MS;
+        window.frame_still(page(true), &[], t1);
+        window.frame_still(page(true), &[], t1 + 75 * MS);
+        assert!(near(on_tip(&window), BACKGROUND), "gone");
+        // Closed again, the pointer still: it stays away.
+        assert!(!window.frame_still(page(false), &[], t1 + 200 * MS));
+        assert!(near(on_tip(&window), BACKGROUND));
     }
 
     #[test]

@@ -610,6 +610,34 @@ fn every_live_tab_waits_titled_with_its_badge_and_a_word() {
 }
 
 #[test]
+fn the_live_power_and_ltas_hints_line_up_with_their_titles() {
+    // The title stood in from the tab's edge for the dB axis, the hint's
+    // well did not: on Take the plot lines up with the title.
+    let monitor = MonitorService::default();
+    monitor.start();
+    let src = Source {
+        monitor: Some(Arc::new(monitor)),
+        ..Source::default()
+    };
+    let state = VoiceprintState::new();
+    let right = DOCK.width - TAB_PADDING.right;
+    for (tab, title, hint) in [
+        (power as Tab, "Power spectrum", POWER_LIVE_HINT),
+        (ltas as Tab, "LTAS · running average", LTAS_LIVE_HINT),
+    ] {
+        let mut ui = simulator(tab, &src, &state, DOCK);
+        let title = ui.find(title).expect("the title").bounds();
+        let hint = ui.find(hint).expect("the hint").bounds();
+        assert_eq!(title.x, TAB_PADDING.left + AXIS_WIDTH);
+        // Centred in a well from the title's left to the tab's right.
+        assert!(
+            (hint.center_x() - (title.x + right) / 2.0).abs() < 1.0,
+            "{title:?} {hint:?}"
+        );
+    }
+}
+
+#[test]
 fn a_held_live_note_tunes_and_maps_its_register() {
     let src = live(&sine(48000, 220.0, SR as f64));
     let state = VoiceprintState::new();
@@ -950,15 +978,17 @@ fn a_timbre_curve_breaks_at_gaps_and_a_flat_one_draws_nothing() {
         .collect();
     let size = Size::new(500.0, 100.0);
     let runs = timbre_curve(&m, &m.ring, 500, size);
+    // A non-finite value breaks the line, but is no silence: the frames
+    // beside it are drawn (the take's first and last frame are not).
     assert_eq!(runs.len(), 2);
-    assert_eq!(runs[0].len(), 10);
-    assert_eq!(runs[1].len(), 29);
+    assert_eq!(runs[0].len(), 9);
+    assert_eq!(runs[1].len(), 28);
     // The extremes sit 7% in from the edges.
     let ys: Vec<f32> = runs.iter().flatten().map(|p| p.y).collect();
     assert!((ys[0] - 93.0).abs() < 1e-3);
     assert!((ys.last().unwrap() - 7.0).abs() < 1e-3);
     // Frames at their window centres on the time axis.
-    assert!((runs[0][0].x as f64 - m.time_of_frame(0) * 1000.0).abs() < 1e-3);
+    assert!((runs[0][0].x as f64 - m.time_of_frame(1) * 1000.0).abs() < 1e-3);
     // The step's flat RING... here CPP: one value, no range.
     assert!(timbre_curve(&m, &m.cpp, 500, size).is_empty());
     assert!(timbre_curve(&m, &m.f3, 500, size).is_empty());
@@ -987,7 +1017,7 @@ fn a_timbre_curve_breaks_where_there_is_no_voice_and_scales_to_the_voice() {
         .collect();
     let size = Size::new(500.0, 100.0);
     let runs = timbre_curve(&m, &m.ring, 500, size);
-    assert_eq!(runs.iter().map(Vec::len).collect::<Vec<_>>(), [15, 15]);
+    assert_eq!(runs.iter().map(Vec::len).collect::<Vec<_>>(), [13, 13]);
     // The voiced extremes fill the plot, 7% in from its edges.
     let ys: Vec<f32> = runs.iter().flatten().map(|p| p.y).collect();
     assert!((ys[0] - 93.0).abs() < 1e-3, "{}", ys[0]);
@@ -995,6 +1025,72 @@ fn a_timbre_curve_breaks_where_there_is_no_voice_and_scales_to_the_voice() {
     // An audible frame with no pitch (breath) is no voice either.
     m.active = vec![1; 40];
     assert_eq!(timbre_curve(&m, &m.ring, 500, size).len(), 2);
+}
+
+#[test]
+fn a_notes_first_and_last_frames_neither_draw_nor_set_a_timbre_curves_scale() {
+    // Each note's first and last frame (their window partly over the
+    // silence beside the note) read far past the rest: each drew as a
+    // spike to the top, and the voice between them lay flat in the bottom
+    // tenth.
+    let n = 200;
+    let mut m = VoiceMetrics::clone(&step_metrics());
+    m.frames = n;
+    let silent = |f: usize| (95..105).contains(&f);
+    let edge = |f: usize| [0, 94, 105, n - 1].contains(&f);
+    m.active = (0..n).map(|f| u8::from(!silent(f))).collect();
+    m.f0 = (0..n)
+        .map(|f| if silent(f) { f32::NAN } else { 220.0 })
+        .collect();
+    m.ring = (0..n)
+        .map(|f| {
+            if edge(f) {
+                40.0
+            } else {
+                -10.0 + (f % 10) as f32 * 0.1
+            }
+        })
+        .collect();
+    // A millisecond a pixel.
+    let size = Size::new(3000.0, 100.0);
+    let runs = timbre_curve(&m, &m.ring, 3000, size);
+    // Each note from its second frame to the one before its last.
+    assert_eq!(runs.iter().map(Vec::len).collect::<Vec<_>>(), [93, 93]);
+    let x = |f: usize| (m.time_of_frame(f as i64) * 1000.0) as f32;
+    assert!((runs[0][0].x - x(1)).abs() < 1e-3);
+    assert!((runs[0][92].x - x(93)).abs() < 1e-3);
+    assert!((runs[1][0].x - x(106)).abs() < 1e-3);
+    // The voice fills the plot, 7% in from its edges.
+    let ys: Vec<f32> = runs.iter().flatten().map(|p| p.y).collect();
+    let top = ys.iter().copied().fold(f32::INFINITY, f32::min);
+    let bottom = ys.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    assert!((top - 7.0).abs() < 1e-3 && (bottom - 93.0).abs() < 1e-3);
+}
+
+#[test]
+fn the_spectrogram_keys_its_singers_formant_band_as_power_does() {
+    // The shaded band had no entry in the spectrogram's legend.
+    let src = analyzed(&sine(24000, 220.0, SR as f64));
+    let state = synced(&src);
+    let shown = texts(&mut simulator(spectrogram, &src, &state, DOCK));
+    for label in ["F0", "F1", "Singer's formant"] {
+        assert!(shown.iter().any(|t| t == label), "{label} in {shown:?}");
+    }
+}
+
+#[test]
+fn the_vibrato_tab_says_vibrato_once() {
+    // A straight tone read "Vibrato" as the tab's title and again as its
+    // readout's label.
+    let src = analyzed(&sine(24000, 220.0, SR as f64));
+    let state = VoiceprintState::new();
+    let shown = texts(&mut simulator(vibrato, &src, &state, DOCK));
+    assert_eq!(
+        shown.iter().filter(|t| *t == "Vibrato").count(),
+        1,
+        "{shown:?}"
+    );
+    assert!(shown.iter().any(|t| t == "straight tone"), "{shown:?}");
 }
 
 #[test]

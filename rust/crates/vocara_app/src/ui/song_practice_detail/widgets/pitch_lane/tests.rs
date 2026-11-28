@@ -19,6 +19,7 @@ use vocara_model::util::dart_num::pow_f64;
 
 use super::*;
 use crate::ui::core::theme::app_theme;
+use crate::ui::song_practice_detail::widgets::track_row::TRACK_HEADER_W;
 
 const SR: i64 = 48000;
 const HOP: i64 = 512;
@@ -733,6 +734,50 @@ fn the_pitch_lane_names_the_note_the_frame_under_it_sings() {
     assert!(ui.find("Pitch").is_ok());
     let mut ui = iced_test::simulator(lane(in_last_cell));
     assert!(ui.find("C4 +0¢").is_ok());
+}
+
+/// The note under the playhead sits beside its label in a track's lane and
+/// under it in the Pitch tab's narrower column: inside the column either
+/// way, at its whole width (it ran on past the column into the well).
+#[test]
+fn the_note_at_the_playhead_stays_inside_the_header_column() {
+    let step = step_metrics();
+    let at = (centre_seconds(19) * 1000.0).round() as i64;
+    let bounds = |header_width: f32, height: f32| {
+        let mut ui = iced_test::simulator(Element::<()>::from(
+            pitch_lane(
+                &track(0, 500),
+                500,
+                at,
+                header_width,
+                false,
+                Some(Arc::clone(&step)),
+            )
+            .height(height),
+        ));
+        let label = ui.find("Note at playhead").expect("the label").bounds();
+        let value = ui.find("A3 +0¢").expect("the note").bounds();
+        (label, value)
+    };
+    // A track's lane: beside the label, within the lane's height (its
+    // bottom padding 10) and the column (its right padding 10 and line 1).
+    let (label, beside) = bounds(TRACK_HEADER_W, PITCH_LANE_HEIGHT);
+    assert_eq!(beside.y, label.y);
+    assert!(
+        beside.x + beside.width <= TRACK_HEADER_W - 11.0,
+        "{beside:?}"
+    );
+    assert!(
+        beside.y + beside.height <= PITCH_LANE_HEIGHT - 10.0,
+        "{beside:?}"
+    );
+    // The Pitch tab's 132 px column (`pitch_tab`): under the label.
+    let (label, under) = bounds(132.0, 400.0);
+    assert!(under.y >= label.y + label.height, "{label:?} {under:?}");
+    assert_eq!(under.x, label.x);
+    assert_eq!(under.width, beside.width);
+    assert!(under.x + under.width <= 132.0 - 11.0, "{under:?}");
+    assert!(label.x + label.width <= 132.0 - 11.0, "{label:?}");
 }
 
 // ------------------------------------------------------ analysis_lanes_test

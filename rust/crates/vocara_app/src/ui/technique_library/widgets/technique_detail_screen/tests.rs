@@ -376,6 +376,17 @@ fn an_empty_technique_shows_every_field_with_a_placeholder() {
     assert_eq!(h.count("No examples yet"), 1);
 }
 
+// The acoustic signature's placeholder read "RING", where the app writes
+// "Ring" (the Timbre tab, the Summary, the technique's own analysis).
+#[test]
+fn the_acoustic_signature_placeholder_names_ring_as_the_app_does() {
+    assert_eq!(ACOUSTIC_HINT, "How it reads in Ring, tilt, CPP, formants");
+    let mut h = Harness::loaded(Setup::new(twang(ID, vec![])));
+    h.edit();
+    let form = h.screen.form.as_deref().expect("the form");
+    assert!(form.acoustic.text().is_empty(), "the placeholder shows");
+}
+
 // technique_detail_layout_test: 'a failed load shows the error state, not
 // an endless spinner'. Regression: the screen watches only the view model,
 // and the load's failure path notified nothing but the (unwatched) command —
@@ -716,6 +727,47 @@ fn cancel_asks_before_discarding_typed_edits() {
     assert!(!h.screen.editing());
     assert_eq!(h.vm().technique().unwrap().name, "Twang");
     assert_eq!(h.setup.repo.st().base_saves, 0);
+}
+
+// "Keep editing" gives the keyboard back to the field the user was in: the
+// press on Cancel (or Back) had taken it, and typing after the dialog went
+// nowhere. Before any field was used, the Name field, as the form opened.
+#[test]
+fn keep_editing_gives_the_keyboard_back_to_the_field_in_use() {
+    use crate::ui::core::widgets::text_field::editor::{Action, Edit};
+    let mut h = Harness::loaded(Setup::new(twang(ID, vec![])));
+    let keep = |h: &mut Harness| {
+        let request = h.dialog.take().expect("the unsaved-changes dialog");
+        let mut step = h
+            .screen
+            .handle((request.on_result)(DialogResult::Confirmed(false)));
+        let task = std::mem::replace(&mut step.update.task, Task::none());
+        h.absorb(step);
+        crate::ui::home::testing::focused_after(h.screen.view(), h.size, task)
+    };
+    h.edit();
+    h.send(Message::Prose(
+        ProseField::Description,
+        Action::Edit(Edit::Insert('x')),
+    ));
+    h.click("Cancel");
+    assert_eq!(keep(&mut h), Some(ProseField::Description.id()));
+    assert!(h.screen.editing(), "kept editing");
+    // A line field typed in after it, then Back.
+    h.send(Message::Field(LineField::Aliases, "Edge, Belt".into()));
+    h.send(Message::Back);
+    assert_eq!(keep(&mut h), Some(LineField::Aliases.id()));
+
+    // A wheel over a field after typing in another takes no keyboard.
+    let mut h = Harness::loaded(Setup::new(twang(ID, vec![])));
+    h.edit();
+    h.send(Message::Field(LineField::Name, "Twang, edited".into()));
+    h.send(Message::Prose(
+        ProseField::Cues,
+        Action::Scroll { lines: 1 },
+    ));
+    h.click("Cancel");
+    assert_eq!(keep(&mut h), Some(NAME_FIELD));
 }
 
 // The read view's Delete: confirmed, it deletes and goes back to the

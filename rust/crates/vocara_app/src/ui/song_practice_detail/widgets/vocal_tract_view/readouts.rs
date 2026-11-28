@@ -137,6 +137,8 @@ pub enum Status {
     Voiced { fit: Fit, formants: [f32; 3] },
     /// No voice now: the shape held.
     Resting,
+    /// No voice yet in what is read (on Live, `live`): no shape to hold.
+    NotSung { live: bool },
     /// Take mode with no take to read.
     NoTake,
     /// No estimate yet, being worked out: on Live (`live`) the engine
@@ -346,22 +348,41 @@ pub const KNOB_RADIUS: f32 = 5.0;
 /// The range ends' text size.
 pub const END_SIZE: f32 = 9.0;
 
-/// Where a `w` × `h` track puts its marker for `position` (0 to 1) and the
-/// middle of its range ends' labels (y). The marker travels between the
-/// knob's radius from either end, so at an end it shows whole (it was cut
-/// in half by the track's edge); the labels sit as high as the track
-/// allows, clear of the knob's top at the full row height, and are drawn
-/// over the marker: at an end the knob hid them ("Back", "Closed").
-pub fn track_marks(w: f32, h: f32, position: f32) -> (Point, f32) {
-    let mid = (h / 2.0).round();
+/// The range ends' line: their text's natural height, half above their
+/// middle and half below.
+pub const END_LINE: f32 = END_SIZE * 1.2;
+
+/// The marker's glow's reach (`0 0 10px`), the farthest of its rings.
+pub const GLOW_RADIUS: f32 = 10.0;
+
+/// The least track the range ends are drawn on.
+const ENDS_MIN_HEIGHT: f32 = 22.0;
+
+/// Where a `w` × `h` track puts its marker for `position` (0 to 1), the
+/// middle of its range ends' labels (y), and how far the marker's glow
+/// reaches. The marker travels between the knob's radius from either end,
+/// so at an end it shows whole (it was cut in half by the track's edge).
+/// The labels sit at the top, the line and marker under them, the glow
+/// reaching up to the labels' line and no further: at an end the knob and
+/// its glow lay over the end's label ("Back", "Rounded", "Closed",
+/// "Breathy"), grey on white. A row too tight for the whole glow under the
+/// labels draws it closer in.
+pub fn track_marks(w: f32, h: f32, position: f32) -> (Point, f32, f32) {
     let travel = (w - 2.0 * KNOB_RADIUS).max(0.0);
-    let knob = Point::new(
-        KNOB_RADIUS.min(w / 2.0) + position.clamp(0.0, 1.0) * travel,
-        mid,
-    );
-    // Half the label's height above its middle stays inside the track.
-    let label = (mid - KNOB_RADIUS - END_SIZE / 2.0).max(END_SIZE * 0.6);
-    (knob, label)
+    let x = KNOB_RADIUS.min(w / 2.0) + position.clamp(0.0, 1.0) * travel;
+    if h < ENDS_MIN_HEIGHT {
+        let mid = (h / 2.0).round();
+        return (Point::new(x, mid), END_LINE / 2.0, GLOW_RADIUS);
+    }
+    // A pixel between the labels' line and the glow.
+    let top = END_LINE + 1.0;
+    let glow = ((h - top) / 2.0).clamp(KNOB_RADIUS, GLOW_RADIUS);
+    (Point::new(x, top + glow), END_LINE / 2.0, glow)
+}
+
+/// Whether a track `h` tall draws its range ends.
+fn shows_ends(h: f32) -> bool {
+    h >= ENDS_MIN_HEIGHT
 }
 
 /// A component's track: the 2 px line, the band over its recent range, the
@@ -387,7 +408,7 @@ impl canvas::Program<Message> for Track {
     ) -> Vec<Geometry> {
         let mut frame = Frame::new(renderer, bounds.size());
         let w = bounds.width;
-        let (knob, label_y) = track_marks(w, bounds.height, self.position);
+        let (knob, label_y, glow) = track_marks(w, bounds.height, self.position);
         let mid = knob.y;
         let live = 1.0 - 0.55 * self.rest;
         frame.fill(
@@ -409,11 +430,15 @@ impl canvas::Program<Message> for Track {
                 alpha(BAND, BAND.a * live),
             );
         }
-        // The glow (`0 0 10px`), the ring (`0 0 0 3px` at 20 %), the knob.
-        for (r, a) in [(10.0, 0.07), (8.0, 0.10), (6.5, 0.14)] {
-            frame.fill(&Path::circle(knob, r), alpha(GLOW, a * live * live));
+        // The glow (`0 0 10px`), the ring (`0 0 0 3px` at 20 %), the knob;
+        // the rings drawn in towards the knob as the glow's reach is.
+        let reach = |r: f32| {
+            KNOB_RADIUS + (r - KNOB_RADIUS) * (glow - KNOB_RADIUS) / (GLOW_RADIUS - KNOB_RADIUS)
+        };
+        for (r, a) in [(GLOW_RADIUS, 0.07), (8.0, 0.10), (6.5, 0.14)] {
+            frame.fill(&Path::circle(knob, reach(r)), alpha(GLOW, a * live * live));
         }
-        frame.fill(&Path::circle(knob, 8.0), alpha(GLOW, 0.20 * live));
+        frame.fill(&Path::circle(knob, reach(8.0)), alpha(GLOW, 0.20 * live));
         frame.fill(
             &Path::circle(knob, KNOB_RADIUS),
             if self.rest > 0.0 {
@@ -433,8 +458,7 @@ impl canvas::Program<Message> for Track {
             align_y: Vertical::Center,
             ..canvas::Text::default()
         };
-        // Last, over the marker.
-        if bounds.height >= 22.0 {
+        if shows_ends(bounds.height) {
             frame.fill_text(end(self.lo, 0.0, Alignment::Left));
             frame.fill_text(end(self.hi, w, Alignment::Right));
         }
@@ -652,6 +676,20 @@ fn status_column<'a>(status: &Status, gap: f32) -> Element<'a, Message> {
             Studio::TEXT_SECONDARY,
             false,
             "No voice just now: the last shape is held.".to_string(),
+        ),
+        Status::NotSung { live: true } => (
+            "Resting",
+            Studio::TEXT_FAINT,
+            Studio::TEXT_SECONDARY,
+            false,
+            "No voice yet: sing into the mic to see your shape.".to_string(),
+        ),
+        Status::NotSung { live: false } => (
+            "Resting",
+            Studio::TEXT_FAINT,
+            Studio::TEXT_SECONDARY,
+            false,
+            "No voice at the playhead yet.".to_string(),
         ),
         Status::NoTake => (
             "No take selected",

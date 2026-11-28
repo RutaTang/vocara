@@ -253,10 +253,16 @@ pub enum InterpretationAction {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Asked {
     DeleteTrack(String),
-    DeleteClip { track_id: String, clip_id: String },
+    DeleteClip {
+        track_id: String,
+        clip_id: String,
+    },
     RenameTrack(String),
     Separate(String),
-    RemoveTechnique { track_id: String, marker_id: String },
+    RemoveTechnique {
+        track_id: String,
+        marker_id: String,
+    },
     RenameBus(String),
     DeleteBus(String),
     NewInterpretation,
@@ -265,7 +271,12 @@ pub enum Asked {
     ClearLyricTimes,
     ImportLyrics(PathBuf),
     SaveEmptyLyrics(lyrics_panel::SaveTicket),
-    DeleteNote { track_id: String, note_id: String },
+    /// The lyrics editor left (to this mode) over unsaved text.
+    DiscardLyricsDraft(lyrics_panel::LyricsMode),
+    DeleteNote {
+        track_id: String,
+        note_id: String,
+    },
 }
 
 /// A result that is cloneable (the screen's messages are) but landed once:

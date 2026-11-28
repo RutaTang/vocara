@@ -1102,6 +1102,9 @@ fn header<'a, M: 'a>(lane: &PitchLane, notes: &[PitchNote], in_tune: f64) -> Ele
         }
         // Live readout of the note under the playhead: its median, which
         // the label says (the Timbre tab reads the pitch of the frame).
+        // Beside the label where the column has room for both (a track's
+        // lane), under it where it has not (the Pitch tab's narrower
+        // column), never running out into the well.
         content = content.push(
             row![
                 line("Note at playhead".to_string(), Studio::TEXT_FAINT),
@@ -1110,7 +1113,9 @@ fn header<'a, M: 'a>(lane: &PitchLane, notes: &[PitchNote], in_tune: f64) -> Ele
                     Studio::TEXT_SECONDARY,
                 ),
             ]
-            .spacing(6),
+            .spacing(6)
+            .wrap()
+            .vertical_spacing(0),
         );
     }
     content.width(Length::Fill).into()

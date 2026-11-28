@@ -644,21 +644,33 @@ fn the_panel_fits_the_dock() {
 #[test]
 fn a_marker_at_a_track_end_shows_whole_and_leaves_its_label_clear() {
     // At an end the knob was cut in half by the track's edge and covered
-    // the end's label ("Back", "Closed").
-    let (w, h) = (160.0, readouts::ROW - 1.0);
-    for position in [0.0, 1.0] {
-        let (knob, label_y) = readouts::track_marks(w, h, position);
-        assert!(knob.x - readouts::KNOB_RADIUS >= 0.0, "{knob:?}");
-        assert!(knob.x + readouts::KNOB_RADIUS <= w, "{knob:?}");
-        assert!(
-            label_y + readouts::END_SIZE / 2.0 <= knob.y - readouts::KNOB_RADIUS,
-            "the label ({label_y}) runs into the knob at {knob:?}"
-        );
-        assert!(label_y - readouts::END_SIZE / 2.0 >= 0.0, "{label_y}");
+    // the end's label ("Back", "Closed"); then, in the tighter rows, the
+    // knob and its glow still lay over the label's lower half.
+    let w = 160.0;
+    for row in [readouts::ROW, readouts::ROW_TIGHT, readouts::ROW_MIN] {
+        let h = row - 1.0;
+        for position in [0.0, 1.0] {
+            let (knob, label_y, glow) = readouts::track_marks(w, h, position);
+            assert!(knob.x - readouts::KNOB_RADIUS >= 0.0, "{knob:?}");
+            assert!(knob.x + readouts::KNOB_RADIUS <= w, "{knob:?}");
+            // The label's line, its descenders included, above the glow.
+            assert!(
+                label_y + readouts::END_LINE / 2.0 <= knob.y - glow,
+                "row {row}: the label ({label_y}) runs into the glow ({glow}) at {knob:?}"
+            );
+            assert!(label_y - readouts::END_LINE / 2.0 >= 0.0, "{label_y}");
+            // The knob and its glow inside the track.
+            assert!(glow >= readouts::KNOB_RADIUS);
+            assert!(knob.y + glow <= h + 1e-3, "row {row}: {knob:?} {glow}");
+        }
     }
+    // The mockup's glow where the row has room for it.
+    let (_, _, glow) = readouts::track_marks(w, 40.0, 0.5);
+    assert_eq!(glow, readouts::GLOW_RADIUS);
     // The ends still read as the ends.
-    let (lo, _) = readouts::track_marks(w, h, 0.0);
-    let (hi, _) = readouts::track_marks(w, h, 1.0);
+    let h = readouts::ROW - 1.0;
+    let (lo, _, _) = readouts::track_marks(w, h, 0.0);
+    let (hi, _, _) = readouts::track_marks(w, h, 1.0);
     assert_eq!(
         (lo.x, hi.x),
         (readouts::KNOB_RADIUS, w - readouts::KNOB_RADIUS)
@@ -754,7 +766,8 @@ fn the_bands_cover_the_last_two_seconds() {
 
 #[test]
 fn the_panel_rests_calmly_without_a_voice_or_a_take() {
-    let st = fed(8.2, 8.6);
+    // The demo's "oo", then its rest.
+    let st = fed(7.6, 8.6);
     assert!(st.resting());
     assert_eq!(st.readouts().status, Status::Resting);
     let mut st = VocalTractState::new();
@@ -839,6 +852,52 @@ fn with_no_take_the_figure_rests_and_the_panel_reads_nothing() {
     );
     assert_eq!(r.vowel, None);
     assert_eq!(r.rest, 1.0);
+}
+
+#[test]
+fn live_with_nothing_sung_yet_rests_neutral_and_reads_nothing() {
+    // Take 1's shape, then Live with no voice yet: the panel said "the last
+    // shape is held" and read Take 1's jaw, tongue and lips as Live's.
+    let t0 = Instant::now();
+    let settle = |st: &mut VocalTractState, from: Instant| {
+        for step in 1..=20 {
+            let at = from + MS * (50 * step);
+            st.update(Message::Frame(at), at);
+        }
+    };
+    let mut st = VocalTractState::new();
+    st.set_voice(Voice::Take("t1".into()));
+    st.feed(Some(ee()), 1.0, t0);
+    settle(&mut st, t0);
+    st.set_voice(Voice::Live);
+    let mut silence = ee();
+    silence.voiced = false;
+    st.feed(Some(silence.clone()), 0.0, t0 + MS * 1100);
+    settle(&mut st, t0 + MS * 1100);
+    let resting = articulate(&AH, false, Fit::Uncertain);
+    assert_eq!(st.shown().outlines.tongue, resting.outlines.tongue);
+    let r = st.readouts();
+    assert_eq!(r.status, Status::NotSung { live: true });
+    assert!(
+        r.rows.iter().all(|row| row.value == "\u{2014}"),
+        "{:?}",
+        r.rows
+    );
+    assert!(r.rows.iter().all(|row| row.band.is_none()));
+    assert_eq!(r.vowel, None);
+    assert_eq!(r.rest, 1.0);
+    {
+        let mut ui = iced_test::simulator(view_of(&st, true));
+        assert!(ui
+            .find("No voice yet: sing into the mic to see your shape.")
+            .is_ok());
+    }
+    // Once sung, its own shape, held when the voice stops.
+    st.feed(Some(ah()), 0.5, t0 + MS * 2200);
+    assert!(matches!(st.readouts().status, Status::Voiced { .. }));
+    st.feed(Some(silence), 0.6, t0 + MS * 2300);
+    assert_eq!(st.readouts().status, Status::Resting);
+    assert_ne!(st.readouts().rows[0].value, "\u{2014}");
 }
 
 #[test]

@@ -1258,6 +1258,18 @@ impl Harness {
         self.send((request.on_result)(result));
     }
 
+    /// Closes the open dialog with `result`, then runs the widget operations
+    /// the page asks for on it as drawn (fresh: nothing holds the keyboard
+    /// there, as nothing did under the dialog): the widget that then holds
+    /// the keyboard, if any.
+    fn answer_focusing(&mut self, result: DialogResult) -> Option<iced::widget::Id> {
+        let request = self.dialog.take().expect("a dialog is open");
+        let mut step = self.screen.handle((request.on_result)(result));
+        let task = std::mem::replace(&mut step.update.task, Task::none());
+        self.absorb(step);
+        crate::ui::home::testing::focused_after(self.screen.view(), self.size, task)
+    }
+
     fn ui(&self) -> Simulator<'_, Message> {
         Simulator::with_size(settings(), self.size, self.screen.view())
     }
@@ -2294,6 +2306,48 @@ fn the_note_editor_keeps_the_keyboard_as_a_snack_bar_comes_and_goes() {
     assert_eq!(typed_in_note(&messages), "c", "the snack bar went");
 }
 
+// A tap on the barrier keeps a note with unsaved text open, but the press
+// took the keyboard out of the field: what was typed next went nowhere.
+#[test]
+fn the_note_editor_keeps_the_keyboard_after_a_tap_on_its_barrier() {
+    use iced_test::simulator::typewrite;
+    let mut h = Harness::open(Setup::default());
+    h.send(Message::Row {
+        track_id: "t1".into(),
+        message: track_row::Message::AddNote,
+    });
+    let title = h.find("Note at 0:00").expect("the editor").bounds();
+    let mut ui = LiveUi::new(h.size);
+    let mut events = vec![
+        live_ui::move_to(title.x + 60.0, title.y + 50.0),
+        live_ui::press(),
+        live_ui::release(),
+    ];
+    events.extend(typewrite("a"));
+    let messages = ui.run(h.screen.view(), events);
+    assert_eq!(typed_in_note(&messages), "a");
+    h.feed(messages);
+    // A tap on the barrier, far from the card.
+    let messages = ui.run(
+        h.screen.view(),
+        [
+            live_ui::move_to(300.0, 760.0),
+            live_ui::press(),
+            live_ui::release(),
+        ],
+    );
+
+    for message in messages {
+        let mut step = h.screen.handle(message);
+        let task = std::mem::replace(&mut step.update.task, Task::none());
+        h.absorb(step);
+        ui.perform(h.screen.view(), task);
+    }
+    assert!(h.screen.note_editor().is_some(), "kept open");
+    let messages = ui.run(h.screen.view(), typewrite("b"));
+    assert_eq!(typed_in_note(&messages), "b", "typing goes on");
+}
+
 // The picker's search, likewise.
 #[test]
 fn the_technique_picker_keeps_the_keyboard_as_a_snack_bar_goes() {
@@ -2600,6 +2654,157 @@ fn saving_the_lyrics_editor_empty_asks_before_deleting_the_lyrics() {
     assert_eq!(h.vm().lyrics_mode(), LyricsMode::Read, "saved, it closes");
 }
 
+// A dialog the lyrics editor's own controls asked (Save's "Delete the
+// lyrics?", an import's "Replace the current lyrics?"), cancelled, gives
+// the editor the keyboard back: the press on Save had taken it, so typing
+// went nowhere and the page's keys took what was meant for the editor
+// (Backspace asked to delete the selected clip). A dialog the user clicked
+// away to (a clip's Delete) leaves the keyboard where it was.
+#[test]
+fn a_cancelled_dialog_from_the_lyrics_editor_gives_it_the_keyboard_back() {
+    use crate::ui::song_practice_detail::view_model::song_practice_detail_view_model::LyricsMode;
+    use iced::widget::text_editor::{Action, Edit};
+    use vocara_model::models::lyric_line::LyricLine;
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let file = dir.path().join("song.txt");
+    std::fs::write(&file, "imported one\nimported two").expect("lyrics");
+    let mut t = take("t1", "Take 1");
+    t.clips = vec![
+        AudioClip {
+            id: "c1".into(),
+            audio_file_path: "/pool/c1.wav".into(),
+            duration_ms: 400,
+            start_ms: 0,
+            waveform_peaks: Vec::new(),
+        },
+        AudioClip {
+            id: "c2".into(),
+            audio_file_path: "/pool/c2.wav".into(),
+            duration_ms: 400,
+            start_ms: 500,
+            waveform_peaks: Vec::new(),
+        },
+    ];
+    let mut p = practice(vec![t]);
+    p.lyrics = vec![
+        LyricLine::new("First line", Some(1200)),
+        LyricLine::new("Second line", Some(4800)),
+    ];
+    let mut h = Harness::open(Setup {
+        practice: p,
+        ..Setup::default()
+    });
+    let panel = Message::Lyrics;
+    h.send(panel(lyrics_panel::Message::SetLyricsMode(
+        lyrics_panel::LyricsMode::Edit,
+    )));
+    let editor = h.screen.lyrics.editor_id();
+    h.send(panel(lyrics_panel::Message::EditorAction(
+        Action::SelectAll,
+    )));
+    h.send(panel(lyrics_panel::Message::EditorAction(Action::Edit(
+        Edit::Backspace,
+    ))));
+    h.send(panel(lyrics_panel::Message::ApplyEditedLyrics));
+    assert!(h.dialog.is_some(), "Delete the lyrics?");
+    assert_eq!(
+        h.answer_focusing(DialogResult::Confirmed(false)),
+        Some(editor.clone())
+    );
+    assert_eq!(h.vm().lyrics_mode(), LyricsMode::Edit, "still editing");
+
+    h.send(panel(lyrics_panel::Message::ImportLyricsFromFile(
+        file.clone(),
+    )));
+    assert!(h.dialog.is_some(), "Replace the current lyrics?");
+    assert_eq!(
+        h.answer_focusing(DialogResult::Confirmed(false)),
+        Some(editor)
+    );
+
+    h.send(Message::Row {
+        track_id: "t1".into(),
+        message: track_row::Message::ClipContextMenu("c2".into()),
+    });
+    h.click("Delete clip");
+    let Dialog::Confirm(confirm) = h.dialog() else {
+        panic!("a confirmation");
+    };
+    assert_eq!(confirm.title, "Delete this clip?");
+    assert_eq!(h.answer_focusing(DialogResult::Confirmed(false)), None);
+}
+
+// The lyrics editor's Cancel threw typed edits away without a word: over
+// text that differs from the lyrics it asks first, as the technique
+// editor's Cancel does, and "Keep editing" keeps the draft and gives the
+// editor the keyboard back. The toolbar's toggles leave the editor too.
+#[test]
+fn leaving_the_lyrics_editor_over_unsaved_text_asks_first() {
+    use crate::ui::song_practice_detail::view_model::song_practice_detail_view_model::LyricsMode;
+    use crate::ui::technique_library::widgets::technique_detail_screen::DISCARD_TITLE;
+    use iced::widget::text_editor::{Action, Edit};
+    use vocara_model::models::lyric_line::LyricLine;
+    let mut p = practice(vec![take("t1", "Take 1")]);
+    p.lyrics = vec![LyricLine::new("First line", Some(1200))];
+    let mut h = Harness::open(Setup {
+        practice: p,
+        ..Setup::default()
+    });
+    let panel = Message::Lyrics;
+    let mode = |m| panel(lyrics_panel::Message::SetLyricsMode(m));
+    // Nothing typed: Cancel closes at once.
+    h.send(mode(lyrics_panel::LyricsMode::Edit));
+    h.send(mode(lyrics_panel::LyricsMode::Read));
+    assert!(h.dialog.is_none(), "nothing to lose: no prompt");
+    assert_eq!(h.vm().lyrics_mode(), LyricsMode::Read);
+
+    h.send(mode(lyrics_panel::LyricsMode::Edit));
+    let editor = h.screen.lyrics.editor_id();
+    h.send(panel(lyrics_panel::Message::EditorAction(Action::Move(
+        iced::widget::text_editor::Motion::DocumentEnd,
+    ))));
+    h.send(panel(lyrics_panel::Message::EditorAction(Action::Edit(
+        Edit::Insert('!'),
+    ))));
+    h.send(mode(lyrics_panel::LyricsMode::Read));
+    let Dialog::Confirm(confirm) = h.dialog() else {
+        panic!("a confirmation");
+    };
+    assert_eq!(confirm.title, DISCARD_TITLE);
+    assert_eq!(confirm.confirm_label, "Discard");
+    assert_eq!(confirm.cancel_label, "Keep editing");
+    // Destructive: Return does not confirm it, so a stray one loses nothing.
+    assert!(confirm.destructive);
+    assert_eq!(
+        h.answer_focusing(DialogResult::Confirmed(false)),
+        Some(editor)
+    );
+    assert_eq!(h.vm().lyrics_mode(), LyricsMode::Edit, "kept editing");
+    assert_eq!(h.vm().lyrics_draft(), Some("First line!"));
+
+    // The toolbar's Sync: asked the same; Discard goes there.
+    h.send(mode(lyrics_panel::LyricsMode::Sync));
+    h.answer(DialogResult::Confirmed(true));
+    assert_eq!(h.vm().lyrics_mode(), LyricsMode::Sync);
+    assert_eq!(h.vm().lyrics_draft(), None);
+    assert_eq!(h.vm().lyrics()[0].text, "First line", "nothing saved");
+
+    // Typed back to the lyrics as they are: nothing to lose.
+    h.send(mode(lyrics_panel::LyricsMode::Edit));
+    h.send(panel(lyrics_panel::Message::EditorAction(Action::Move(
+        iced::widget::text_editor::Motion::DocumentEnd,
+    ))));
+    h.send(panel(lyrics_panel::Message::EditorAction(Action::Edit(
+        Edit::Insert('!'),
+    ))));
+    h.send(panel(lyrics_panel::Message::EditorAction(Action::Edit(
+        Edit::Backspace,
+    ))));
+    h.send(mode(lyrics_panel::LyricsMode::Read));
+    assert!(h.dialog.is_none());
+    assert_eq!(h.vm().lyrics_mode(), LyricsMode::Read);
+}
+
 // "Paste lyrics" opened an empty editor: the words still had to be pasted
 // by hand. It opens on the clipboard's text.
 #[test]
@@ -2709,6 +2914,24 @@ fn the_interpretation_switcher_opens_its_menu_and_creates_one() {
         .collect();
     assert_eq!(names, ["Interpretation 1", "Tender"]);
     assert!(h.shows("Tender"), "the chip shows the new interpretation");
+}
+
+// The interpretation's delete was the one delete dialog that did not say
+// it cannot be undone.
+#[test]
+fn deleting_an_interpretation_says_it_cannot_be_undone() {
+    let mut h = Harness::open(Setup::default());
+    h.click("Interpretation 1");
+    h.send(Message::InterpretationMenu(InterpretationAction::Delete));
+    let Dialog::Confirm(confirm) = h.dialog() else {
+        panic!("a confirmation");
+    };
+    assert_eq!(confirm.title, "Delete \"Interpretation 1\"?");
+    assert_eq!(
+        confirm.body.as_deref(),
+        Some("This removes the interpretation and all of its takes. This cannot be undone.")
+    );
+    assert!(confirm.destructive);
 }
 
 // detail_arrange_journey: 'the "New take" button adds an empty vocal lane'.

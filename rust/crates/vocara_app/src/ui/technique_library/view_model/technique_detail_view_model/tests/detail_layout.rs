@@ -242,6 +242,28 @@ fn media_mutations_during_an_in_flight_save_are_no_ops() {
 }
 
 #[test]
+fn clearing_an_examples_caption_puts_back_the_name_it_was_added_with() {
+    // Cleared, the caption read "Audio example": the pooled file is named
+    // by its content hash. It reads the name the clip came with, as the
+    // card did before the rename.
+    let hash = "9f64a747".to_string() + &"0".repeat(56);
+    let added = TechniqueMedia {
+        path: format!("/pool/{hash}.wav"),
+        label: "vocal2".into(),
+        ..example("m2", "")
+    };
+    let s = Setup::new(technique(vec![added]));
+    let mut rig = s.loaded();
+    rig.vm.begin_media_draft();
+    let label = |rig: &Rig| rig.vm.effective_media()[0].display_label();
+    rig.vm.rename_media("m2", "Slow version");
+    assert_eq!(label(&rig), "Slow version");
+    rig.vm.rename_media("m2", "   ");
+    assert_eq!(label(&rig), "vocal2");
+    assert!(!rig.vm.has_media_draft(), "nothing left to save");
+}
+
+#[test]
 fn the_reverse_races_are_refused_too_no_second_save_and_no_draft_discard_while_the_commit_is_airborne(
 ) {
     let s = Setup::new(technique(vec![m1()]));

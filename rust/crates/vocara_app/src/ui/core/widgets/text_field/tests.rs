@@ -706,6 +706,37 @@ fn a_right_click_in_a_multi_line_field_selects_the_word_on_its_line() {
     assert_eq!(window.board.0.as_deref(), Some("word"));
 }
 
+/// A double click at a word's start in a multi-line field selects that
+/// word alone, as the single-line field's does: iced's editor took the word
+/// before it too ("alpha beta" for a click on the "b" of "beta"), on any
+/// line. Inside a word, that word; past the end of the text, the last word.
+#[test]
+fn a_double_click_at_a_words_start_in_a_multi_line_field_selects_that_word_alone() {
+    let double_click = |content: &mut Content, at: Point| {
+        let mut window = window();
+        // Each press handled, and its published actions performed, before
+        // the next comes, as the app's run loop does.
+        for _ in 0..2 {
+            let (messages, _) = window.run(prose(content, false), at, &click(), Instant::now());
+            for message in messages {
+                if let Msg::Edit(action) = message {
+                    content.perform(action);
+                }
+            }
+        }
+        content.selection()
+    };
+    let mut content = Content::with_text("alpha beta gamma\nAline one");
+    let start = Point::new(TEXT_X + width("alpha ") + 1.0, MIDDLE);
+    assert_eq!(double_click(&mut content, start).as_deref(), Some("beta"));
+    let second = Point::new(TEXT_X + width("Aline ") + 1.0, LINE_TOP + LINE + 7.0);
+    assert_eq!(double_click(&mut content, second).as_deref(), Some("one"));
+    let middle = Point::new(TEXT_X + width("alpha beta ga"), MIDDLE);
+    assert_eq!(double_click(&mut content, middle).as_deref(), Some("gamma"));
+    let past = Point::new(TEXT_X + 200.0, LINE_TOP + LINE + 7.0);
+    assert_eq!(double_click(&mut content, past).as_deref(), Some("one"));
+}
+
 #[test]
 fn a_read_only_field_selects_and_copies_and_shows_no_caret() {
     let content = Content::with_text("https://example.com/download");

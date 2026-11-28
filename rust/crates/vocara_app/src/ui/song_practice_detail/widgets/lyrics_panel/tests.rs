@@ -1306,6 +1306,26 @@ fn with_the_backing_selected_the_notes_tab_counts_nothing() {
 }
 
 #[test]
+fn the_techniques_tab_counts_the_takes_markers_as_notes_counts_notes() {
+    // Notes had a count after its tab; Techniques had none.
+    let mut vm = Vm::reading(Vec::new());
+    vm.tab = RightTab::Techniques;
+    vm.track = Some(annotated_take(AudioTrackKind::Vocal));
+    let state = LyricsPanelState::new();
+    let mut ui = PanelUi::new(Size::new(300.0, 600.0));
+    let tab = bounds_of(&mut ui, &state, &vm, "Techniques")
+        .expect("the tab")
+        .bounds();
+    let count = bounds_of(&mut ui, &state, &vm, "1")
+        .expect("its count")
+        .bounds();
+    assert!(count.x > tab.x + tab.width, "{tab:?} {count:?}");
+    // None for the backing, which takes no techniques.
+    vm.track = Some(annotated_take(AudioTrackKind::Accompaniment));
+    assert!(bounds_of(&mut ui, &state, &vm, "1").is_none(), "no count");
+}
+
+#[test]
 fn with_nothing_selected_the_tabs_say_what_to_do() {
     let mut vm = Vm::reading(Vec::new());
     let state = LyricsPanelState::new();

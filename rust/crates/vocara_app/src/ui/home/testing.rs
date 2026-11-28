@@ -187,3 +187,60 @@ pub(crate) fn spawn_task<M: Send + 'static>(task: Task<M>) -> std::sync::mpsc::R
     });
     receiver
 }
+
+/// Runs the widget operations `task` asks for (a focus) on `view` as drawn
+/// in a `size` window, fresh, with nothing holding the keyboard: the widget
+/// that then holds it, if any. The rest of the task is dropped.
+pub(crate) fn focused_after<M: Send + 'static>(
+    view: iced::Element<'_, M>,
+    size: iced::Size,
+    task: Task<M>,
+) -> Option<iced::widget::Id> {
+    use iced::advanced::widget::operation::{Focusable, Operation};
+    use iced::futures::StreamExt;
+    use iced::widget::Id;
+    use iced_test::runtime::user_interface::{Cache, UserInterface};
+    use iced_test::runtime::Action;
+
+    /// The widget holding the keyboard.
+    struct Focused(Option<Id>);
+    impl Operation for Focused {
+        fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+            operate(self);
+        }
+        fn focusable(&mut self, id: Option<&Id>, _: iced::Rectangle, state: &mut dyn Focusable) {
+            if state.is_focused() {
+                self.0 = id.cloned();
+            }
+        }
+    }
+
+    let operations: Vec<Box<dyn Operation>> = match iced_test::runtime::task::into_stream(task) {
+        Some(stream) => iced::futures::executor::block_on(
+            stream
+                .filter_map(|action| async move {
+                    match action {
+                        Action::Widget(op) => Some(op),
+                        _ => None,
+                    }
+                })
+                .collect(),
+        ),
+        None => Vec::new(),
+    };
+    let mut renderer = iced::futures::executor::block_on(
+        <iced::Renderer as iced::advanced::renderer::Headless>::new(
+            crate::ui::core::theme::font::REGULAR,
+            crate::ui::core::theme::DEFAULT_TEXT_SIZE.into(),
+            None,
+        ),
+    )
+    .expect("a headless renderer");
+    let mut ui = UserInterface::build(view, size, Cache::default(), &mut renderer);
+    for mut op in operations {
+        ui.operate(&renderer, op.as_mut());
+    }
+    let mut focused = Focused(None);
+    ui.operate(&renderer, &mut focused);
+    focused.0
+}

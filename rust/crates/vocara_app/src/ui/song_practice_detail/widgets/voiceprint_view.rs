@@ -84,6 +84,7 @@ use crate::ui::core::theme::{self, boxed, fill, font, type_scale, Studio};
 use crate::ui::core::widgets::cap_label::cap_label;
 use crate::ui::core::widgets::controls::{labelled, meter_color};
 use crate::ui::core::widgets::fading_scrollbar::{scrollable, Fading};
+use crate::ui::core::widgets::keyed::keyed;
 use crate::ui::core::widgets::material_tooltip::material_tooltip;
 use crate::ui::core::widgets::painter::{KeyedCache, Same};
 use crate::ui::core::widgets::spectrogram_painter::{
@@ -435,7 +436,7 @@ pub fn power_tab<'a>(src: &'a dyn AnalysisSource) -> Element<'a, Message> {
             .spacing(14)
             .align_y(Vertical::Center);
         let body = if strip.column.is_empty() {
-            well_hint(POWER_LIVE_HINT)
+            axis_well_hint(POWER_LIVE_HINT)
         } else {
             spectrum_strip(strip)
         };
@@ -610,7 +611,7 @@ pub fn ltas_tab<'a>(src: &'a dyn AnalysisSource) -> Element<'a, Message> {
                                 .into()
                         ),
                     ),
-                    well_hint(LTAS_LIVE_HINT),
+                    axis_well_hint(LTAS_LIVE_HINT),
                 ],
                 TAB_PADDING,
             ),
@@ -749,7 +750,8 @@ fn vibrato_header<'a>(v: Option<&Vibrato>) -> Element<'a, Message> {
     let v = match v {
         Some(v) if v.present => v,
         _ => {
-            return readout(Readout::new("Vibrato", "None".to_string()).sub("straight tone"));
+            // Not "Vibrato" again under the tab's own title.
+            return readout(Readout::new("Detected", "None".to_string()).sub("straight tone"));
         }
     };
     let healthy = v.rate_hz >= 5.0 && v.rate_hz <= 7.0;
@@ -1599,6 +1601,17 @@ fn well_hint<'a>(hint: &'static str) -> Element<'a, Message> {
     ))
 }
 
+/// [`well_hint`] where the tab's plot will be, right of its dB axis's
+/// column, so it lines up with the title over it as the plot does (Power's
+/// and LTAS's on Live until the mic has given a spectrum): the title stood
+/// in for the axis, the hint did not.
+fn axis_well_hint<'a>(hint: &'static str) -> Element<'a, Message> {
+    row![Space::new().width(AXIS_WIDTH), well_hint(hint)]
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
+}
+
 /// The live tabs' words while the mic has given them nothing yet.
 pub const POWER_LIVE_HINT: &str = "Sing into the mic to see your power spectrum.";
 pub const LTAS_LIVE_HINT: &str = "Sing into the mic to build your live average spectrum.";
@@ -1614,25 +1627,31 @@ pub(crate) const PLOT_TAB_MIN_HEIGHT: f32 = 224.0;
 /// A tab `content` laid out at least [`PLOT_TAB_MIN_HEIGHT`] tall: on a
 /// dock shorter than that it scrolls, as the Summary does. At the dock's
 /// least height these tabs cut their readouts off or crushed their chart
-/// to a line.
+/// to a line. `tab` names the tab: its scroll view's id, and the key its
+/// state is kept by, so each tab opens at its top (drawn in the same place,
+/// one tab opened scrolled where the last was left).
 pub(crate) fn scrolls_when_short<'a, M: 'a>(
+    tab: &'static str,
     content: impl Fn() -> Element<'a, M> + 'a,
 ) -> Element<'a, M> {
-    responsive(move |size| {
-        if size.height >= PLOT_TAB_MIN_HEIGHT {
-            return content();
-        }
-        scrollable(
-            container(content())
-                .width(Length::Fill)
-                .height(PLOT_TAB_MIN_HEIGHT),
-        )
-        .fading()
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
-    })
-    .into()
+    keyed(
+        tab,
+        responsive(move |size| {
+            if size.height >= PLOT_TAB_MIN_HEIGHT {
+                return content();
+            }
+            scrollable(
+                container(content())
+                    .width(Length::Fill)
+                    .height(PLOT_TAB_MIN_HEIGHT),
+            )
+            .id(iced::widget::Id::new(tab))
+            .fading()
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
+        }),
+    )
 }
 
 /// [`plot_well`]'s look.
@@ -1842,14 +1861,24 @@ pub(crate) fn header_row<'a, M: 'a>(
 }
 
 /// `_FormantLegend`: the color key for the F0 and F1/F2/F3 tracks drawn on
-/// the spectrogram.
+/// the spectrogram, and its shaded singer's-formant band (keyed as the
+/// power spectrum keys it; it had no entry).
 fn formant_legend<'a>() -> Element<'a, Message> {
     legend(vec![
         (Swatch::Dot(F0_COLOR), "F0".to_string()),
         (Swatch::Dot(FORMANT_COLORS[0]), "F1".to_string()),
         (Swatch::Dot(FORMANT_COLORS[1]), "F2".to_string()),
         (Swatch::Dot(FORMANT_COLORS[2]), "F3".to_string()),
+        (
+            Swatch::Block(wash_key(SINGERS_FORMANT_BAND)),
+            "Singer's formant".to_string(),
+        ),
     ])
+}
+
+/// The key of a translucent `wash`, as it reads over a well.
+fn wash_key(wash: Color) -> Color {
+    lerp_color(Studio::WELL, Color { a: 1.0, ..wash }, wash.a * 2.2)
 }
 
 /// The power spectrum's key: the formant markers drawn now (of `formants`,
@@ -1859,8 +1888,6 @@ fn formant_legend<'a>() -> Element<'a, Message> {
 /// first, so the keys always there keep their place at the right as these
 /// come and go.
 fn spectrum_legend<'a>(formants: &[f64]) -> Element<'a, Message> {
-    // The keys of the washes, as they read over a well.
-    let on_well = |wash: Color| lerp_color(Studio::WELL, Color { a: 1.0, ..wash }, wash.a * 2.2);
     let mut entries: Vec<(Swatch, String)> = formants
         .iter()
         .take(3)
@@ -1870,12 +1897,12 @@ fn spectrum_legend<'a>(formants: &[f64]) -> Element<'a, Message> {
         .map(|(i, _)| (Swatch::Line(FORMANT_COLORS[i]), format!("F{}", i + 1)))
         .collect();
     entries.push((
-        Swatch::Block(on_well(SPECTRUM_FILL)),
+        Swatch::Block(wash_key(SPECTRUM_FILL)),
         "Spectrum".to_string(),
     ));
     entries.push((Swatch::Line(SPECTRUM_ENVELOPE), "Envelope".to_string()));
     entries.push((
-        Swatch::Block(on_well(SINGERS_FORMANT_BAND)),
+        Swatch::Block(wash_key(SINGERS_FORMANT_BAND)),
         "Singer's formant".to_string(),
     ));
     legend(entries)
@@ -1908,7 +1935,7 @@ fn axis_row<'a>(max_hz: f64, child: impl Into<Element<'a, Message>>) -> Element<
 /// tab, with the readouts at the playhead beside it, the pair centred
 /// across the dock; it scrolls on a short dock ([`scrolls_when_short`]).
 fn vowel_panel<'a>(f1: f64, f2: f64, live: bool) -> Element<'a, Message> {
-    scrolls_when_short(move || vowel_panel_body(f1, f2, live))
+    scrolls_when_short("dock-vowel", move || vowel_panel_body(f1, f2, live))
 }
 
 fn vowel_panel_body<'a>(f1: f64, f2: f64, live: bool) -> Element<'a, Message> {
@@ -2239,6 +2266,16 @@ fn voiced_frame(m: &VoiceMetrics, fr: usize) -> bool {
     m.active.get(fr) == Some(&1) && f0.is_finite() && f0 > 0.0
 }
 
+/// Whether frame `fr` of `m` is the first or the last of a run of voiced
+/// frames (the take's ends counting as silence): its analysis window lies
+/// partly over the silence or breath beside the note, and its timbre reads
+/// far past the rest of the note (a ring at the top of the scale at both
+/// ends of every note).
+fn voiced_run_edge(m: &VoiceMetrics, fr: usize) -> bool {
+    voiced_frame(m, fr)
+        && (fr == 0 || !voiced_frame(m, fr - 1) || fr + 1 >= m.frames || !voiced_frame(m, fr + 1))
+}
+
 /// Curve `c`'s value at frame `fr` where the frame is voiced, else NaN.
 fn voiced_value_at(m: &VoiceMetrics, c: &[f32], fr: usize) -> f64 {
     if voiced_frame(m, fr) {
@@ -2248,12 +2285,24 @@ fn voiced_value_at(m: &VoiceMetrics, c: &[f32], fr: usize) -> f64 {
     }
 }
 
+/// Curve `c`'s value at frame `fr` where the timbre curves draw it: a
+/// voiced frame inside its run ([`voiced_run_edge`]); else NaN.
+fn drawn_value_at(m: &VoiceMetrics, c: &[f32], fr: usize) -> f64 {
+    if voiced_run_edge(m, fr) {
+        f64::NAN
+    } else {
+        voiced_value_at(m, c, fr)
+    }
+}
+
 /// The polylines of curve `c` of `m` in a `size` box spanning `duration_ms`:
-/// one per run of voiced frames with finite values (an unvoiced frame or a
-/// non-finite value breaks the line: the gaps between notes drew as
-/// full-height blocks), each point at its frame's time, the curve scaled
-/// to its own range over those frames with 7% top/bottom padding so it
-/// doesn't touch the edges. Nothing for a flat or empty curve.
+/// one per run of voiced frames with finite values, less each run's first
+/// and last frame (an unvoiced frame or a non-finite value breaks the line:
+/// the gaps between notes drew as full-height blocks; a note's ends drew as
+/// spikes to the top, and set a range that squashed the note flat), each
+/// point at its frame's time, the curve scaled to its own range over those
+/// frames with 7% top/bottom padding so it doesn't touch the edges. Nothing
+/// for a flat or empty curve.
 pub fn timbre_curve(m: &VoiceMetrics, c: &[f32], duration_ms: i64, size: Size) -> Vec<Vec<Point>> {
     let frames = m.frames;
     if frames == 0 || duration_ms <= 0 {
@@ -2261,7 +2310,7 @@ pub fn timbre_curve(m: &VoiceMetrics, c: &[f32], duration_ms: i64, size: Size) -
     }
     let (mut mn, mut mx) = (f64::INFINITY, f64::NEG_INFINITY);
     for fr in 0..frames {
-        let v = voiced_value_at(m, c, fr);
+        let v = drawn_value_at(m, c, fr);
         if v.is_finite() {
             mn = mn.min(v);
             mx = mx.max(v);
@@ -2276,7 +2325,7 @@ pub fn timbre_curve(m: &VoiceMetrics, c: &[f32], duration_ms: i64, size: Size) -
     let mut runs: Vec<Vec<Point>> = Vec::new();
     let mut started = false;
     for fr in 0..frames {
-        let v = voiced_value_at(m, c, fr);
+        let v = drawn_value_at(m, c, fr);
         if !v.is_finite() {
             started = false;
             continue;

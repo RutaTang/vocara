@@ -1220,6 +1220,10 @@ impl Screen for SettingsScreen {
             .into()
         };
         let route = self.licenses_route.as_ref().map(|r| cupertino(r, self.now));
+        // Settings is the first of a stack whether a license page slides
+        // over it or not: iced keeps a widget's state only while the view
+        // keeps its place, so Settings bare once the page had slid out was
+        // a new scroll view, at the top, and the scroll put back was lost.
         let page: Element<'_, Message> = match (&self.licenses, &self.closed_licenses, route) {
             // Sliding in over Settings, which slides a third of the way out.
             (Some(licenses), _, Some((moving, covered, shadow))) => stack![
@@ -1236,7 +1240,7 @@ impl Screen for SettingsScreen {
                     .inert(),
             ]
             .into(),
-            (None, ..) => settings(),
+            (None, ..) => stack![slide(settings(), 0.0)].into(),
         };
         let mut layers = stack![container(page)
             .width(Length::Fill)
@@ -1833,13 +1837,14 @@ pub fn engine_footnote(sample_rate: f64) -> String {
 }
 
 /// The recording offset as the row shows it: whole ms, signed ("+20 ms",
-/// "0 ms", "-15 ms").
+/// "0 ms", "−15 ms"), a negative one with a true minus as every other
+/// reading in the app ("−63 dB"), not a hyphen.
 pub fn offset_label(ms: f64) -> String {
     let ms = ms.round() as i64;
-    if ms > 0 {
-        format!("+{ms} ms")
-    } else {
-        format!("{ms} ms")
+    match ms.signum() {
+        1 => format!("+{ms} ms"),
+        -1 => format!("\u{2212}{} ms", ms.unsigned_abs()),
+        _ => "0 ms".to_string(),
     }
 }
 

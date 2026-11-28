@@ -105,7 +105,7 @@ pub fn range_view<'a, M: 'a>(src: &dyn AnalysisSource) -> Element<'a, M> {
         let (Some(low), Some(high)) = (p.low_midi, p.high_midi) else {
             return studio_hint(RANGE_EMPTY_HINT).into();
         };
-        scrolls_when_short(move || range_body(&p, low, high))
+        scrolls_when_short("dock-range", move || range_body(&p, low, high))
     })
 }
 
@@ -182,7 +182,7 @@ pub fn dynamics_view<'a, M: 'a>(src: &dyn AnalysisSource) -> Element<'a, M> {
         let span_ms = src.analysis_duration_ms();
         let position_ms = i64::try_from(src.position().as_millis()).unwrap_or(i64::MAX);
         // Scrolling on a short dock, where the chart was crushed to a line.
-        scrolls_when_short(move || {
+        scrolls_when_short("dock-dynamics", move || {
             let curve = plot_well(stack![
                 LoudnessLanePainter {
                     metrics: Arc::clone(&m),
@@ -293,7 +293,7 @@ fn live_dynamics_panel<'a, M: 'a>(monitor: &MonitorService) -> Element<'a, M> {
         .height(Length::Fill)
         .into();
     }
-    scrolls_when_short(move || {
+    scrolls_when_short("dock-dynamics-live", move || {
         column![
             header_row("Loudness (live)", Some(live_badge()), 0.0),
             dynamics_stats(d.range_db, d.soft_db, d.loud_db),
