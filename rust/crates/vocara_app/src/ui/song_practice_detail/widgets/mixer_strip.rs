@@ -403,11 +403,6 @@ fn divider<'a>() -> Element<'a, Message> {
     .into()
 }
 
-// The preset lane tints and the default take tint are the context menu's
-// (`kTrackColorPalette` and `defaultTakeColor` lived in
-// `track_context_menu.dart`).
-pub use super::track_context_menu::{default_take_color, TRACK_COLOR_PALETTE};
-
 /// A take strip's colour cap: its lane's colour in the arrange
 /// (`track_row::take_color`), so the strip and the lane read as one
 /// channel.

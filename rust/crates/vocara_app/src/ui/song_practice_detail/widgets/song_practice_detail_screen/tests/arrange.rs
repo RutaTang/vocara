@@ -45,6 +45,38 @@ fn a_take_keeps_its_colour_as_takes_are_duplicated_or_reordered() {
     assert_eq!(stripe(&h, "Take 1"), one);
 }
 
+// The colour menu's Auto swatch is the colour the lane draws untinted: one
+// rule (`track_row::take_color`) for the lane, the strip, the inspector,
+// Home's card and the menu.
+#[test]
+fn the_colour_menus_auto_swatch_is_the_lanes_own_default() {
+    let mut tinted = take("t2", "Take 2");
+    tinted.color_value = Some(0xFF8FA3D9);
+    let mut p = practice(vec![take("t1", "Take 1"), tinted]);
+    p.accompaniment = Some(Arc::new(backing()));
+    let h = Harness::open(Setup {
+        practice: p,
+        ..Setup::default()
+    });
+    let auto = |id: &str| {
+        h.screen
+            .track_menu(&h.track(id), h.practice())
+            .default_color
+    };
+    let t1 = h.track("t1");
+    assert_eq!(auto("t1"), track_row::take_color(&t1));
+    assert_eq!(
+        auto("t1"),
+        crate::ui::core::theme::Studio::default_track_color("t1")
+    );
+    // A tinted take's Auto is the colour it goes back to, not its tint.
+    assert_eq!(
+        auto("t2"),
+        crate::ui::core::theme::Studio::default_track_color("t2")
+    );
+    assert_eq!(auto("acc"), crate::ui::core::theme::Studio::TRACK_BACKING);
+}
+
 /// The dialog `action` on `track`'s lane menu asks.
 fn asked(h: &mut Harness, track: &str, action: TrackAction) -> Dialog {
     h.send(Message::Row {

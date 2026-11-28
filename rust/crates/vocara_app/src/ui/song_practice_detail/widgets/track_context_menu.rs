@@ -72,17 +72,6 @@ pub fn argb(value: i64) -> Color {
     )
 }
 
-/// A stable default tint for a vocal take with no custom color: picked from
-/// [`TRACK_COLOR_PALETTE`] by a deterministic hash of the take id (the sum of
-/// its UTF-16 code units, Dart's `codeUnits`), so a take keeps the same color
-/// across sessions and takes read as distinct (vs a flat gray). (Dart fell
-/// back to `Studio.waveform` for an empty palette; the palette is a constant
-/// of five here.)
-pub fn default_take_color(id: &str) -> Color {
-    let h: i64 = id.encode_utf16().map(i64::from).sum();
-    argb(TRACK_COLOR_PALETTE[(h % TRACK_COLOR_PALETTE.len() as i64) as usize])
-}
-
 /// A brighter version of a lane's base color — used for the *border* of a
 /// selected clip (a gentle brightness lift in the same hue, not pure white):
 /// lightness +0.14, saturation +0.05, through Flutter's `HSLColor`.

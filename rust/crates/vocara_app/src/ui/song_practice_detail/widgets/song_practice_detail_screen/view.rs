@@ -76,8 +76,8 @@ use crate::ui::song_practice_detail::widgets::track_context_menu::{
 };
 use crate::ui::song_practice_detail::widgets::track_row::bus_color;
 use crate::ui::song_practice_detail::widgets::track_row::{
-    header_frame, header_name, take_color, track_menu_button, track_row, TIMELINE_H_MARGIN,
-    TRACK_HEADER_W, TRACK_ROW_HEIGHT,
+    header_frame, header_name, lane_color, take_color, track_menu_button, track_row,
+    TIMELINE_H_MARGIN, TRACK_HEADER_W, TRACK_ROW_HEIGHT,
 };
 use crate::ui::song_practice_detail::widgets::vocal_tract_engine;
 use crate::ui::song_practice_detail::widgets::vocal_tract_view::{self, VocalTract};
@@ -700,7 +700,7 @@ impl SongPracticeDetailScreen {
     }
 
     /// `_showTrackMenu`'s flags, for the take as the practice holds it now.
-    fn track_menu(&self, track: &AudioTrack, practice: &SongPractice) -> TrackMenu {
+    pub(super) fn track_menu(&self, track: &AudioTrack, practice: &SongPractice) -> TrackMenu {
         let vm = &*self.vm;
         let vocals = practice.active_vocal_tracks();
         let idx = vocals.iter().position(|t| t.id == track.id);
@@ -718,13 +718,7 @@ impl SongPracticeDetailScreen {
             current_color_value: track.color_value,
             // The lane's colour with its tint cleared, through the one rule
             // every surface draws a channel's colour by.
-            default_color: channel_color(
-                &AudioTrack {
-                    color_value: None,
-                    ..track.clone()
-                },
-                &self.shown.vocal_takes,
-            ),
+            default_color: lane_color(&track.id, None, track.is_backing()),
         }
     }
 
