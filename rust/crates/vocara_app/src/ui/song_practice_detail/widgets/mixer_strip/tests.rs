@@ -205,6 +205,28 @@ fn the_squeeze_threshold_is_the_tallest_strips_fixed_rows_plus_travel() {
 }
 
 #[test]
+fn the_dock_at_its_least_mixer_height_shows_whole_strips() {
+    use crate::ui::song_practice_detail::view_model::analysis_cache::MIXER_MIN_DOCK_HEIGHT;
+    // The dock's floor on the Mixer is exactly the squeeze threshold: the
+    // desk's padding and a strip's cap round the strip's least content.
+    let least = MIXER_MIN_DOCK_HEIGHT as f32;
+    let inner = least - DESK_PADDING.top - DESK_PADDING.bottom - 3.0;
+    assert_eq!(inner, STRIP_MIN_CONTENT_HEIGHT);
+    // There the strips are whole columns, their faders filling the room
+    // left (no strip scrolling on its own), and their dB fields show.
+    let tracks = takes(1..3);
+    let mut ui = simulator(Size::new(900.0, least), desk(&tracks, &[], false).view());
+    let fader = take_fader(&mut ui, 0);
+    assert!(fader.height >= 50.0, "{fader:?}");
+    assert!(
+        (fader.height - SQUEEZED_FADER_HEIGHT).abs() > 0.5,
+        "{fader:?}"
+    );
+    let field = text_at(&mut ui, "0.0", 1).expect("the second take's dB field");
+    assert!(field.y + field.height <= least, "{field:?}");
+}
+
+#[test]
 fn an_empty_desk_says_so() {
     let mut ui = simulator(Size::new(600.0, 300.0), MixerStrip::new(&[], &[]).view());
     assert!(text_at(&mut ui, "No tracks yet", 0).is_some());

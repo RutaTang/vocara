@@ -1006,6 +1006,25 @@ fn set_dock_height_clamps_to_the_sane_resize_range() {
 }
 
 #[test]
+fn the_mixer_holds_the_dock_tall_enough_for_its_strips() {
+    let mut cache = cache(&Stub::new(&[], 0));
+    let host = Host::default();
+    cache.set_dock_height(160.0);
+    // Switched to the Mixer, the dock shows its strips' least height...
+    let _ = cache.show_dock_tab(DockTab::Mixer, &host);
+    assert_eq!(cache.dock_height(), MIXER_MIN_DOCK_HEIGHT);
+    // ...and cannot be dragged under it there.
+    cache.set_dock_height(170.0);
+    assert_eq!(cache.dock_height(), MIXER_MIN_DOCK_HEIGHT);
+    cache.set_dock_height(400.0);
+    assert_eq!(cache.dock_height(), 400.0);
+    // Another tab keeps the usual floor.
+    let _ = cache.show_dock_tab(DockTab::Spectrogram, &host);
+    cache.set_dock_height(160.0);
+    assert_eq!(cache.dock_height(), 160.0);
+}
+
+#[test]
 fn dock_tab_names_are_darts() {
     // The DOCK_TAB demo hook names a tab as Dart's enum did.
     assert_eq!(DockTab::AnalysisSummary.name(), "analysisSummary");
