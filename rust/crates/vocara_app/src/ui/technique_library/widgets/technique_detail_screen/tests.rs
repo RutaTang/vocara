@@ -718,6 +718,47 @@ fn cancel_asks_before_discarding_typed_edits() {
     assert_eq!(h.setup.repo.st().base_saves, 0);
 }
 
+// "Keep editing" gives the keyboard back to the field the user was in: the
+// press on Cancel (or Back) had taken it, and typing after the dialog went
+// nowhere. Before any field was used, the Name field, as the form opened.
+#[test]
+fn keep_editing_gives_the_keyboard_back_to_the_field_in_use() {
+    use crate::ui::core::widgets::text_field::editor::{Action, Edit};
+    let mut h = Harness::loaded(Setup::new(twang(ID, vec![])));
+    let keep = |h: &mut Harness| {
+        let request = h.dialog.take().expect("the unsaved-changes dialog");
+        let mut step = h
+            .screen
+            .handle((request.on_result)(DialogResult::Confirmed(false)));
+        let task = std::mem::replace(&mut step.update.task, Task::none());
+        h.absorb(step);
+        crate::ui::home::testing::focused_after(h.screen.view(), h.size, task)
+    };
+    h.edit();
+    h.send(Message::Prose(
+        ProseField::Description,
+        Action::Edit(Edit::Insert('x')),
+    ));
+    h.click("Cancel");
+    assert_eq!(keep(&mut h), Some(ProseField::Description.id()));
+    assert!(h.screen.editing(), "kept editing");
+    // A line field typed in after it, then Back.
+    h.send(Message::Field(LineField::Aliases, "Edge, Belt".into()));
+    h.send(Message::Back);
+    assert_eq!(keep(&mut h), Some(LineField::Aliases.id()));
+
+    // A wheel over a field after typing in another takes no keyboard.
+    let mut h = Harness::loaded(Setup::new(twang(ID, vec![])));
+    h.edit();
+    h.send(Message::Field(LineField::Name, "Twang, edited".into()));
+    h.send(Message::Prose(
+        ProseField::Cues,
+        Action::Scroll { lines: 1 },
+    ));
+    h.click("Cancel");
+    assert_eq!(keep(&mut h), Some(NAME_FIELD));
+}
+
 // The read view's Delete: confirmed, it deletes and goes back to the
 // library (deep_link_back_test's detail part: a deep-linked page falls back
 // to the library); a failed one says so and stays.

@@ -420,10 +420,12 @@ struct Editor {
     /// back) is another, as Dart's re-created `State` was.
     instance: u64,
     /// Made under a dialog, so it did not take the keyboard: it is taken
-    /// once the page is on top again. Only then: owed for any dialog over an
-    /// editor the user had clicked away from, it took the keyboard back as
-    /// the dialog closed. (Dart also checked that nothing on the page had
-    /// taken the keyboard meanwhile; under a modal dialog nothing on it can.)
+    /// once the page is on top again. Only then, or after a dialog its own
+    /// controls opened ([`LyricsPanelState::give_focus_back`]): owed for any
+    /// dialog over an editor the user had clicked away from, it took the
+    /// keyboard back as the dialog closed. (Dart also checked that nothing
+    /// on the page had taken the keyboard meanwhile; under a modal dialog
+    /// nothing on it can.)
     focus_owed: bool,
 }
 
@@ -705,6 +707,17 @@ impl LyricsPanelState {
     /// The open editor's text, if the editor is open.
     pub fn editor_text(&self) -> Option<String> {
         self.editor.as_ref().map(|e| e.content.text())
+    }
+
+    /// A dialog the editor's own controls opened (Save's, Cancel's, an
+    /// import's into it) was answered with the editor still open: it takes
+    /// the keyboard back once the page is on top again, as its press on
+    /// the button took it away. Typing went nowhere after it, and the
+    /// page's keys took what was meant for it (Backspace deleting a clip).
+    pub fn give_focus_back(&mut self) {
+        if let Some(editor) = &mut self.editor {
+            editor.focus_owed = true;
+        }
     }
 
     /// Before `vm.importLyricsFromFile` runs for a drop or a picked file:

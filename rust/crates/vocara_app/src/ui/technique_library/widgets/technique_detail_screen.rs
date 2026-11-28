@@ -287,6 +287,10 @@ pub struct EditForm {
     exercises: text_editor::Content,
     acoustic: text_editor::Content,
     dirty: bool,
+    /// The field last typed or clicked in (the Name field, which takes the
+    /// keyboard as the form opens, until then): the one "Keep editing"
+    /// gives the keyboard back to, which the press on Cancel or Back took.
+    last_field: widget::Id,
 }
 
 impl std::fmt::Debug for EditForm {
@@ -312,6 +316,7 @@ impl EditForm {
             exercises: text_editor::Content::with_text(&t.exercises),
             acoustic: text_editor::Content::with_text(&t.acoustic_signature),
             dirty: false,
+            last_field: NAME_FIELD,
         }
     }
 
@@ -673,6 +678,8 @@ impl TechniqueDetailScreen {
             Message::BackConfirmed(confirmed) => {
                 if confirmed {
                     step.update.navigation = Some(Navigation::PopOrGo(Route::Techniques));
+                } else {
+                    self.keep_editing(&mut step);
                 }
             }
             Message::Edit => self.enter_edit(&mut step),
@@ -680,6 +687,8 @@ impl TechniqueDetailScreen {
             Message::CancelConfirmed(confirmed) => {
                 if confirmed {
                     self.discard(&mut step);
+                } else {
+                    self.keep_editing(&mut step);
                 }
             }
             Message::Save => self.save(&mut step),
@@ -699,6 +708,7 @@ impl TechniqueDetailScreen {
                 // Frozen while the save commits (the fields take no input
                 // then; a late edit is dropped too).
                 if let Some(form) = self.form.as_mut().filter(|_| !self.vm.saving()) {
+                    form.last_field = field.id();
                     match field {
                         LineField::Name => form.name = value,
                         LineField::Aliases => form.aliases = value,
@@ -709,6 +719,11 @@ impl TechniqueDetailScreen {
             }
             Message::Prose(field, action) => {
                 if let Some(form) = self.form.as_mut().filter(|_| !self.vm.saving()) {
+                    // A wheel over a field scrolls it without taking the
+                    // keyboard.
+                    if !matches!(action, text_editor::Action::Scroll { .. }) {
+                        form.last_field = field.id();
+                    }
                     form.prose(field).perform(action);
                     form.recompute_dirty();
                 }
@@ -947,6 +962,14 @@ impl TechniqueDetailScreen {
             return;
         }
         self.discard(step);
+    }
+
+    /// "Keep editing" in the unsaved-changes dialog: the field the user was
+    /// in takes the keyboard back. Typing after it went nowhere.
+    fn keep_editing(&mut self, step: &mut Step) {
+        if let Some(form) = self.form.as_deref().filter(|_| self.edit_view()) {
+            step.task(widget::operation::focus(form.last_field.clone()));
+        }
     }
 
     /// The rest of `_cancelEdit` once the user chose to discard.

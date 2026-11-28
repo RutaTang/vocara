@@ -1604,6 +1604,11 @@ impl SongPracticeDetailScreen {
     fn answered(&mut self, asked: Asked, result: DialogResult, step: &mut Step) {
         self.dialogs_open = self.dialogs_open.saturating_sub(1);
         let confirmed = result.confirmed();
+        // Asked from the lyrics editor's own controls (Save, an import into
+        // it) and cancelled: the editor, still open, takes the keyboard back.
+        if !confirmed && matches!(asked, Asked::SaveEmptyLyrics(_) | Asked::ImportLyrics(_)) {
+            self.lyrics.give_focus_back();
+        }
         let fx = match asked {
             Asked::DeleteTrack(id) if confirmed => self.vm.delete_track(&id),
             Asked::DeleteClip { track_id, clip_id } if confirmed => {

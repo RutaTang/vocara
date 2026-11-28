@@ -1258,6 +1258,18 @@ impl Harness {
         self.send((request.on_result)(result));
     }
 
+    /// Closes the open dialog with `result`, then runs the widget operations
+    /// the page asks for on it as drawn (fresh: nothing holds the keyboard
+    /// there, as nothing did under the dialog): the widget that then holds
+    /// the keyboard, if any.
+    fn answer_focusing(&mut self, result: DialogResult) -> Option<iced::widget::Id> {
+        let request = self.dialog.take().expect("a dialog is open");
+        let mut step = self.screen.handle((request.on_result)(result));
+        let task = std::mem::replace(&mut step.update.task, Task::none());
+        self.absorb(step);
+        crate::ui::home::testing::focused_after(self.screen.view(), self.size, task)
+    }
+
     fn ui(&self) -> Simulator<'_, Message> {
         Simulator::with_size(settings(), self.size, self.screen.view())
     }
@@ -2598,6 +2610,86 @@ fn saving_the_lyrics_editor_empty_asks_before_deleting_the_lyrics() {
     h.settle();
     assert!(h.vm().lyrics().iter().all(|l| l.is_blank()));
     assert_eq!(h.vm().lyrics_mode(), LyricsMode::Read, "saved, it closes");
+}
+
+// A dialog the lyrics editor's own controls asked (Save's "Delete the
+// lyrics?", an import's "Replace the current lyrics?"), cancelled, gives
+// the editor the keyboard back: the press on Save had taken it, so typing
+// went nowhere and the page's keys took what was meant for the editor
+// (Backspace asked to delete the selected clip). A dialog the user clicked
+// away to (a clip's Delete) leaves the keyboard where it was.
+#[test]
+fn a_cancelled_dialog_from_the_lyrics_editor_gives_it_the_keyboard_back() {
+    use crate::ui::song_practice_detail::view_model::song_practice_detail_view_model::LyricsMode;
+    use iced::widget::text_editor::{Action, Edit};
+    use vocara_model::models::lyric_line::LyricLine;
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let file = dir.path().join("song.txt");
+    std::fs::write(&file, "imported one\nimported two").expect("lyrics");
+    let mut t = take("t1", "Take 1");
+    t.clips = vec![
+        AudioClip {
+            id: "c1".into(),
+            audio_file_path: "/pool/c1.wav".into(),
+            duration_ms: 400,
+            start_ms: 0,
+            waveform_peaks: Vec::new(),
+        },
+        AudioClip {
+            id: "c2".into(),
+            audio_file_path: "/pool/c2.wav".into(),
+            duration_ms: 400,
+            start_ms: 500,
+            waveform_peaks: Vec::new(),
+        },
+    ];
+    let mut p = practice(vec![t]);
+    p.lyrics = vec![
+        LyricLine::new("First line", Some(1200)),
+        LyricLine::new("Second line", Some(4800)),
+    ];
+    let mut h = Harness::open(Setup {
+        practice: p,
+        ..Setup::default()
+    });
+    let panel = Message::Lyrics;
+    h.send(panel(lyrics_panel::Message::SetLyricsMode(
+        lyrics_panel::LyricsMode::Edit,
+    )));
+    let editor = h.screen.lyrics.editor_id();
+    h.send(panel(lyrics_panel::Message::EditorAction(
+        Action::SelectAll,
+    )));
+    h.send(panel(lyrics_panel::Message::EditorAction(Action::Edit(
+        Edit::Backspace,
+    ))));
+    h.send(panel(lyrics_panel::Message::ApplyEditedLyrics));
+    assert!(h.dialog.is_some(), "Delete the lyrics?");
+    assert_eq!(
+        h.answer_focusing(DialogResult::Confirmed(false)),
+        Some(editor.clone())
+    );
+    assert_eq!(h.vm().lyrics_mode(), LyricsMode::Edit, "still editing");
+
+    h.send(panel(lyrics_panel::Message::ImportLyricsFromFile(
+        file.clone(),
+    )));
+    assert!(h.dialog.is_some(), "Replace the current lyrics?");
+    assert_eq!(
+        h.answer_focusing(DialogResult::Confirmed(false)),
+        Some(editor)
+    );
+
+    h.send(Message::Row {
+        track_id: "t1".into(),
+        message: track_row::Message::ClipContextMenu("c2".into()),
+    });
+    h.click("Delete clip");
+    let Dialog::Confirm(confirm) = h.dialog() else {
+        panic!("a confirmation");
+    };
+    assert_eq!(confirm.title, "Delete this clip?");
+    assert_eq!(h.answer_focusing(DialogResult::Confirmed(false)), None);
 }
 
 // "Paste lyrics" opened an empty editor: the words still had to be pasted
