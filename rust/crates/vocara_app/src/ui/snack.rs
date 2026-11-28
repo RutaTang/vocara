@@ -291,6 +291,12 @@ impl SnackQueue {
             || self.leaving.as_ref().is_some_and(|e| is_moving(e, now))
     }
 
+    /// Whether frames are still wanted at `now`: while one moves at `now`,
+    /// or as last drawn (until a frame at or past its end is handled).
+    pub fn wants_frames(&self, now: Instant) -> bool {
+        self.is_animating(now) || self.is_animating(self.now)
+    }
+
     /// The timer of the one showing: up its time after its entrance ends.
     pub fn timer(&self) -> Option<SnackTimer> {
         let first = self.queue.front()?;
@@ -301,9 +307,13 @@ impl SnackQueue {
         })
     }
 
-    /// The timer, and the frames while one enters or leaves.
+    /// The timer, and the frames while one enters or leaves: until a frame
+    /// at or past the end has been handled, not just until the clock passed
+    /// it (the last frame can be stamped a moment before the end and the
+    /// subscription asked a moment after: no frame would then reach the end,
+    /// and a bar faded out but not gone would hold the page's clicks).
     pub fn subscription(&self) -> Subscription<SnackEvent> {
-        let frames = motion::frames(self.is_animating(Instant::now())).map(SnackEvent::Frame);
+        let frames = motion::frames(self.wants_frames(Instant::now())).map(SnackEvent::Frame);
         match self.timer() {
             Some(timer) => {
                 Subscription::batch([Subscription::run_with(timer, timer_stream), frames])

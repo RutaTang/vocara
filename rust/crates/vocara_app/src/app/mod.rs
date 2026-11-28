@@ -133,6 +133,10 @@ pub struct Boot {
     pub quit_hooks: Arc<dyn QuitHooks>,
     /// Builds the services once the library is open.
     pub services: ServicesFactory,
+    /// How long the exit may take after the quit guard before the process
+    /// is ended ([`exit_watchdog`]); `None` (the tests' boot) arms nothing,
+    /// so a test that drives the quit is not cut short.
+    pub exit_watchdog: Option<Duration>,
 }
 
 impl Boot {
@@ -146,6 +150,7 @@ impl Boot {
             open_library: library::open_library_stub,
             quit_hooks: Arc::new(quit::NoQuitHooks),
             services: Services::detached,
+            exit_watchdog: None,
         }
     }
 
@@ -161,6 +166,7 @@ impl Boot {
             open_library,
             quit_hooks,
             services: Services::new,
+            exit_watchdog: Some(EXIT_WATCHDOG),
         }
     }
 }
@@ -532,7 +538,12 @@ impl App {
                 self.quit()
             }
             Message::QuitRequested => self.quit(),
-            Message::QuitGuardDone => iced::exit(),
+            Message::QuitGuardDone => {
+                if let Some(after) = self.boot.exit_watchdog {
+                    exit_watchdog(after);
+                }
+                iced::exit()
+            }
             Message::UpdaterChanged => match &self.state {
                 // The helper swaps the bundle once this process is gone:
                 // quit through the guard, as Cmd+Q does, so the recordings
@@ -862,8 +873,12 @@ impl App {
                 subscriptions.push(page.subscription(id, id == top && !covered));
             }
             subscriptions.push(running.messenger.subscription());
-            subscriptions
-                .push(motion::frames(running.is_animating(Instant::now())).map(Message::Frame));
+            // Until a frame at or past the end is handled (see
+            // `SnackQueue::subscription`): a closing page is let go, a
+            // dialog's fade ends, only at such a frame.
+            let animating =
+                running.is_animating(Instant::now()) || running.is_animating(running.now);
+            subscriptions.push(motion::frames(animating).map(Message::Frame));
             subscriptions.push(
                 Subscription::run_with(
                     UpdaterFeed(Arc::clone(&running.services.self_update)),
@@ -1061,6 +1076,32 @@ fn forward(now: Instant) -> Controller {
     let mut controller = Controller::new(ROUTE_TRANSITION, ROUTE_TRANSITION);
     controller.forward(now);
     controller
+}
+
+/// How long the exit may take once the quit guard has saved everything
+/// (see [`exit_watchdog`]).
+const EXIT_WATCHDOG: Duration = Duration::from_secs(2);
+
+/// Ends the process [after] the quit guard finished, if it has not ended by
+/// then. `iced::exit` closes the window and drops the runtime, and the
+/// runtime's teardown waits for every blocking task still running: a queue
+/// of analysis jobs waiting on the analysis gate kept a quit app in the Dock
+/// for tens of seconds, and kept a self-update's helper (which waits for
+/// this process to end) from swapping and relaunching. The quit guard has
+/// saved the recordings by then (Dart's quit ended the process at this
+/// point too); the log is flushed before going.
+fn exit_watchdog(after: Duration) {
+    let spawned = std::thread::Builder::new()
+        .name("exit-watchdog".into())
+        .spawn(move || {
+            std::thread::sleep(after);
+            DiagnosticsLog::instance().log("quit", "the exit took too long; ending the process");
+            DiagnosticsLog::instance().flush();
+            std::process::exit(0);
+        });
+    if let Err(e) = spawned {
+        DiagnosticsLog::instance().log("quit", &format!("no exit watchdog: {e}"));
+    }
 }
 
 /// Runs the library open (`Persistence.open`) on a thread of its own and

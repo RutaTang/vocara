@@ -287,6 +287,27 @@ fn the_frames_run_only_while_one_enters_or_leaves() {
     assert_eq!(into_recipes(q.subscription()).len(), 1);
 }
 
+/// The last frame of a bar's exit stamped a moment before its end, the
+/// clock past it when the frames are asked for: they run on until a frame
+/// reaches the end, so the faded-out bar does not stay over the page.
+#[test]
+fn the_frames_run_on_until_a_frame_reaches_the_end() {
+    let mut q = SnackQueue::new();
+    let t0 = Instant::now();
+    q.show(bar("a", false, SnackStyle::Floating), t0);
+    let seq = q.timer().expect("a's timer").seq;
+    let out = t0 + TRANSITION + DURATION;
+    q.expired(seq, out);
+    q.frame(out + TRANSITION - MS);
+    assert!(q.view().is_some(), "drawn one millisecond short of the end");
+    // The clock is past the end; the drawing is not.
+    assert!(!q.is_animating(out + TRANSITION + 50 * MS));
+    assert!(q.wants_frames(out + TRANSITION + 50 * MS));
+    q.frame(out + TRANSITION + 50 * MS);
+    assert!(q.view().is_none(), "gone");
+    assert!(!q.wants_frames(out + TRANSITION + 50 * MS));
+}
+
 /// What the fixed bar draws: a 40 tall white bar at the window's bottom.
 fn white_bar(_: &str) -> Element<'_, Infallible> {
     iced::widget::container(iced::widget::Space::new().width(Length::Fill).height(40))

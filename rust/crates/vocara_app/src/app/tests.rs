@@ -554,3 +554,15 @@ fn a_library_open_that_panics_fails_the_boot() {
         "{outcome:?}"
     );
 }
+
+/// The exit watchdog is armed in the app `main` runs, never in the tests'
+/// boot (a test that drives the quit would be cut short).
+#[test]
+fn only_the_real_boot_arms_the_exit_watchdog() {
+    assert_eq!(Boot::new(AppEnvironment::Dev).exit_watchdog, None);
+    let real = Boot::from_env(
+        super::library::open_library_stub,
+        Arc::new(super::quit::NoQuitHooks),
+    );
+    assert_eq!(real.exit_watchdog, Some(super::EXIT_WATCHDOG));
+}
