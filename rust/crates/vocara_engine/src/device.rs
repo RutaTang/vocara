@@ -20,6 +20,10 @@ use crate::capture_layout::{InputChannelMix, INPUT_CHANNEL_AUTO};
 use crate::live::{RtCell, Shared};
 use crate::ring::{Consumer, Producer};
 use crate::sample::{Smp, CHANNELS, ENGINE_SR};
+use crate::sinc::{
+    build_sinc_table, InputRateConverter, MAX_FRAMES_PER_INPUT, SINC_HALF, SINC_OVERSAMPLE,
+    SINC_TAPS,
+};
 
 /// `ve_poll_device_event` bit: the active output device was lost (stream error / disconnect).
 pub const EVENT_OUTPUT_LOST: u32 = 1;
@@ -424,59 +428,6 @@ struct OutResampler {
     /// for the output clock ([`Shared::count_played`]). Kept across flushes: resetting it
     /// with `pos` lost up to a frame per seek, a bias the drift estimator read as drift.
     played_acc: f64,
-}
-
-/// Kernel width in engine frames. 64 taps at 256x table resolution yields ~70 dB stopband
-/// with a passband flat well past 20 kHz — far beyond the linear kernel — at 64 MACs per
-/// output frame (~2.8 M MAC/s at 44.1 kHz: negligible).
-const SINC_TAPS: usize = 64;
-const SINC_HALF: usize = SINC_TAPS / 2;
-const SINC_OVERSAMPLE: usize = 256;
-
-/// Builds the polyphase table for [step] (engine frames per output frame): row `r` holds
-/// the windowed-sinc weights for sub-phase `r / OVERSAMPLE`, cutoff scaled below the
-/// output Nyquist when downsampling (step > 1), each row normalized to unity DC so the
-/// converter has exactly 0 dB gain at every phase.
-fn build_sinc_table(step: f64) -> Vec<f32> {
-    let fc = if step > 1.0 { 0.92 / step } else { 0.92 };
-    let mut table = vec![0.0f32; (SINC_OVERSAMPLE + 1) * SINC_TAPS];
-    for r in 0..=SINC_OVERSAMPLE {
-        let frac = r as f64 / SINC_OVERSAMPLE as f64;
-        let mut sum = 0.0f64;
-        for k in 0..SINC_TAPS {
-            // Contribution of content index floor(pos) - (HALF-1) + k at offset x from pos.
-            let x = k as f64 - (SINC_HALF as f64 - 1.0) - frac;
-            // At x = 0 the scaled sinc's limit is `fc`, not 1: the centre tap of the phase-0
-            // row stood fc⁻¹ times too tall, and the row's unity-DC normalization then
-            // squashed every other tap under it — that row all but passed its input through
-            // unfiltered, and a downsampling device (a 16-32 kHz call-profile output) heard
-            // the engine's top octave folded down, 8-14 dB under the signal.
-            let sinc = if x.abs() < 1e-12 {
-                fc
-            } else {
-                let px = std::f64::consts::PI * fc * x;
-                px.sin() / px * fc
-            };
-            // Blackman window over the kernel span.
-            let w = {
-                let t = (x + SINC_HALF as f64) / (SINC_TAPS as f64);
-                let t = t.clamp(0.0, 1.0);
-                0.42 - 0.5 * (2.0 * std::f64::consts::PI * t).cos()
-                    + 0.08 * (4.0 * std::f64::consts::PI * t).cos()
-            };
-            let v = sinc * w;
-            table[r * SINC_TAPS + k] = v as f32;
-            sum += v;
-        }
-        // Unity DC per row: without this the gain ripples with the sub-phase.
-        if sum.abs() > 1e-12 {
-            let inv = (1.0 / sum) as f32;
-            for k in 0..SINC_TAPS {
-                table[r * SINC_TAPS + k] *= inv;
-            }
-        }
-    }
-    table
 }
 
 /// Where one device frame's kernel reads: the polyphase row pair for its sub-phase (rows
@@ -1228,9 +1179,9 @@ struct InputState {
     /// The device's channels to the ONE mono mic signal (under [`InputCell::channel_mode`]),
     /// carried on both stereo lanes, so the monitor, meter and take hear the chosen input centred.
     mix: InputChannelMix,
-    /// Push-based linear resampler: input-position advance per engine output frame
-    /// (`in_rate / ENGINE_SR`). `1.0` → identity passthrough.
-    step: f64,
+    /// The device rate to `ENGINE_SR`: identity at the engine rate, the windowed-sinc kernel
+    /// for any other (see [`InputRateConverter`]).
+    conv: InputRateConverter,
     /// CLOCK-DRIFT ratio (f64 bits; 1.0 = no correction), published by the
     /// control-side [`DriftEstimator`]: the measured input-clock rate over
     /// the output-clock rate. The effective step is `step * ratio`, so the
@@ -1239,9 +1190,6 @@ struct InputState {
     /// of the backing over a long recording. Exactly 1.0 (the estimator's
     /// deadband) keeps the 48 kHz identity fast path.
     drift_ratio_bits: Arc<AtomicU64>,
-    pos: f64,
-    prev: [Smp; CHANNELS],
-    primed: bool,
     /// Input peak (f32 bits) for the meter, held since the FFI thread last took it (see
     /// [`crate::meter`]).
     level: Arc<AtomicU32>,
@@ -1333,11 +1281,8 @@ impl InputCell {
                 rec_active,
                 in_channels: 1,
                 mix: InputChannelMix::new(ENGINE_SR),
-                step: 1.0,
+                conv: InputRateConverter::new(ENGINE_SR, ENGINE_SR),
                 drift_ratio_bits,
-                pos: 0.0,
-                prev: [0.0, 0.0],
-                primed: false,
                 level,
                 frames_in,
                 rec_dropped,
@@ -1449,6 +1394,9 @@ impl InputCell {
     /// teardown is denied instead of having its samples decoded under a format it never
     /// delivered (e.g. a 24 kHz unit's frames emitted 1:1 as 48 kHz).
     pub fn reconfigure(&self, in_rate: f64, in_channels: usize) -> u64 {
+        // The converter's kernel table is built before the cell is taken, so no callback
+        // waits on the allocation.
+        let conv = InputRateConverter::new(in_rate, ENGINE_SR);
         // Retire first: once the owner moves, no older generation can enter.
         let epoch = self.claim();
         // A retired callback may still be INSIDE `feed` (it entered before the owner moved).
@@ -1460,15 +1408,15 @@ impl InputCell {
         let st = unsafe { &mut *self.state.get() };
         st.in_channels = in_channels.max(1);
         st.mix = InputChannelMix::new(in_rate);
-        st.step = in_rate / ENGINE_SR;
-        st.pos = 0.0;
-        st.primed = false;
-        st.prev = [0.0, 0.0];
+        // The previous stream's converter (and its table) is freed after the cell is let go.
+        let old_conv = std::mem::replace(&mut st.conv, conv);
         st.nominal_acc = 0.0;
         // The meter holds the previous session's last peak until a callback overwrites it,
         // and the new stream's first callback can be hundreds of ms away (a VPIO open): the
         // next take's live waveform and the mic meter started on that stale peak.
         st.level.store(0, Ordering::Relaxed);
+        drop(_g);
+        drop(old_conv);
         epoch
     }
 
@@ -1508,69 +1456,35 @@ impl InputCell {
         // of the input crystal's nominal rate. Ratio 1.0 (the deadband)
         // preserves the identity fast path bit-for-bit.
         let ratio = f64::from_bits(st.drift_ratio_bits.load(Ordering::Relaxed));
-        let step = st.step * ratio;
-        let identity = (step - 1.0).abs() < 1e-9;
         let mut peak = 0.0f32;
         // Counted in EMITTED (post-resample, ENGINE_SR) frames, not raw device frames:
         // consumers convert this counter to time by dividing by the engine rate (take
         // pre-roll measurement), so a device-rate count would skew every derived duration
         // whenever the input's native rate is not 48 kHz.
         let mut emitted: u64 = 0;
+        let mut conv = [0.0f32; MAX_FRAMES_PER_INPUT];
         for fi in 0..frames {
             let base = fi * ch;
             // Inputs 1 and 2 used to travel as left and right, and the writer keeps the left: a
             // mic on input 2 recorded silence, monitored hard right.
             let m = st.mix.mix(mode, &data[base..base + ch]) * gain;
-            let (l, r) = (m, m);
             peak = peak.max(m.abs());
-            if identity {
-                st.emit([l, r], cap, rec);
-                emitted += 1;
-                // Keep the resampler's state coherent while the fast path owns
-                // the stream. The drift estimator publishes EXACTLY 1.0 inside
-                // its ±2 ppm deadband, so a chain hovering near that edge
-                // crosses back and forth; leaving `prev` behind meant the first
-                // interpolation after a crossing blended the current sample
-                // with one from an arbitrarily older callback — a single-sample
-                // step out of nowhere, i.e. a click.
-                //
-                // The phase left behind is 1.0, not 0.0: positions in the
-                // interpolating branch are measured from `prev`, this sample
-                // has just been emitted in full, and the next output is due one
-                // whole input later — exactly `prev + 1`. Leaving 0.0 would
-                // re-emit the sample identity just sent (a duplicate), and the
-                // stale value left before this fix was worse still.
-                st.prev = [l, r];
-                st.primed = true;
-                st.pos = 1.0;
-            } else {
-                if !st.primed {
-                    st.prev = [l, r];
-                    st.primed = true;
-                    continue;
-                }
-                let cur = [l, r];
-                while st.pos < 1.0 {
-                    let t = st.pos as f32;
-                    let f = [
-                        st.prev[0] + (cur[0] - st.prev[0]) * t,
-                        st.prev[1] + (cur[1] - st.prev[1]) * t,
-                    ];
-                    st.emit(f, cap, rec);
-                    emitted += 1;
-                    st.pos += step;
-                }
-                st.pos -= 1.0;
-                st.prev = cur;
+            let n = st.conv.convert(m, ratio, &mut conv);
+            for &y in &conv[..n] {
+                st.emit([y, y], cap, rec);
             }
+            emitted += n as u64;
         }
         st.frames_in.fetch_add(emitted, Ordering::Relaxed);
         // The estimator's signal: engine-rate frames at the NOMINAL step,
         // untouched by the published ratio (see nominal_frames_in). Carried
         // fractionally so non-integer steps lose nothing across callbacks.
-        st.nominal_acc += frames as f64 / st.step;
-        self.quantum
-            .fetch_max((frames as f64 / st.step).ceil() as u64, Ordering::Relaxed);
+        let nominal_step = st.conv.step();
+        st.nominal_acc += frames as f64 / nominal_step;
+        self.quantum.fetch_max(
+            (frames as f64 / nominal_step).ceil() as u64,
+            Ordering::Relaxed,
+        );
         let whole = st.nominal_acc as u64;
         if whole > 0 {
             st.nominal_frames_in.fetch_add(whole, Ordering::Relaxed);
@@ -7590,9 +7504,9 @@ mod cell_exclusion_tests {
             let expect_step = rate / crate::sample::ENGINE_SR;
             assert_eq!(st.in_channels, ch, "channels torn at iteration {i}");
             assert!(
-                (st.step - expect_step).abs() < 1e-12,
+                (st.conv.step() - expect_step).abs() < 1e-12,
                 "step torn at iteration {i}: {} vs {expect_step}",
-                st.step
+                st.conv.step()
             );
             drop(g);
         }

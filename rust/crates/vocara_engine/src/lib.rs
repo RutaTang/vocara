@@ -22,6 +22,7 @@ pub mod node;
 pub mod ring;
 pub mod ring_sync;
 pub mod sample;
+pub mod sinc;
 pub mod source;
 pub mod wav;
 
