@@ -1434,6 +1434,35 @@ fn with_no_lyrics_the_tab_offers_paste_and_import() {
     );
 }
 
+// The dock at its tallest left the panel about 90 px under its tabs, and
+// the empty state was cut through its two buttons.
+#[test]
+fn with_no_lyrics_a_short_panel_still_shows_both_buttons_whole() {
+    let vm = Vm::reading(Vec::new());
+    let state = LyricsPanelState::new();
+    let mut ui = PanelUi::new(Size::new(300.0, 130.0));
+    for label in ["Import lyrics file", "Paste lyrics"] {
+        let label_box = bounds_of(&mut ui, &state, &vm, label).expect(label);
+        let shown = label_box.visible_bounds().expect("in view");
+        let whole = label_box.bounds();
+        // Its whole height (the clip leaves the width's last bits to float).
+        assert!(
+            (shown.y - whole.y).abs() < 0.01 && (shown.height - whole.height).abs() < 0.01,
+            "{label} whole: {shown:?} of {whole:?}"
+        );
+        // The 28 px button around its 16 px label ends inside the panel.
+        let bottom = label_box.bounds().y + label_box.bounds().height + 6.0;
+        assert!(bottom < 130.0, "{label} ends at {bottom}");
+    }
+    assert_eq!(
+        tap_label(&mut ui, &state, &vm, "Paste lyrics"),
+        vec![Message::PasteLyrics]
+    );
+    // With room, the whole of it.
+    let mut ui = PanelUi::new(Size::new(300.0, 600.0));
+    assert!(bounds_of(&mut ui, &state, &vm, "or drop a .lrc or .txt file here").is_some());
+}
+
 #[test]
 fn the_sync_list_stamps_the_line_tapped_and_shows_its_times() {
     let mut lines = twelve_lines();
