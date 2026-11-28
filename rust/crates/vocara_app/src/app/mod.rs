@@ -802,7 +802,13 @@ impl App {
                 .height(Length::Fill)
                 .style(theme::page)
                 .into(),
-            State::Waiting(screen) | State::Fatal(screen) => screen.view().map(Message::Fatal),
+            // Movable and zoomable by its top band, as a page is by its
+            // toolbar ("Another Vocara is starting…" could not be moved).
+            State::Waiting(screen) | State::Fatal(screen) => toolbar::drag_region(
+                screen.view().map(Message::Fatal),
+                Message::DragWindow,
+                Message::ToggleMaximize,
+            ),
             State::Running(running) => {
                 // The snack bar the app shows sits over the page, where the
                 // page draws its own. The page keeps its place in the stack
@@ -818,11 +824,7 @@ impl App {
                 // drag or a double click on the toolbar's empty area into
                 // the window's. Dialogs render above, their barrier covering
                 // the whole window.
-                let chrome = toolbar::drag_region(
-                    container(content).width(Length::Fill).height(Length::Fill),
-                    Message::DragWindow,
-                    Message::ToggleMaximize,
-                );
+                let chrome = container(content).width(Length::Fill).height(Length::Fill);
                 let mut layers = stack![container(chrome)
                     .width(Length::Fill)
                     .height(Length::Fill)
@@ -831,10 +833,12 @@ impl App {
                 // on the root navigator: a video's fullscreen), over the
                 // toolbar and the snack bars, under the dialogs. Its slot
                 // stays when empty, so the dialogs keep theirs.
+                // Its part of the title-bar band stays the window's.
                 let (top, page) = running.router.top();
-                layers = layers.push(page.overlay(top).unwrap_or_else(|| {
-                    Space::new().width(Length::Fill).height(Length::Fill).into()
-                }));
+                layers = layers.push(page.overlay(top).map_or_else(
+                    || Space::new().width(Length::Fill).height(Length::Fill).into(),
+                    toolbar::window_backdrop,
+                ));
                 // A closed dialog fades out where it was (over the dialogs
                 // under it, under any opened since), taking no input (as its
                 // route went, Flutter's barrier ignored the pointer).
@@ -854,7 +858,10 @@ impl App {
                     layers = layers.push(open.state.view_at(fade).map(Message::Dialog));
                 }
                 layers = layers.extend(fading(running.dialogs.len()));
-                layers.into()
+                // Around the dialogs too: a press on the band that a
+                // dialog's barrier or a full-window view covers is the
+                // window's as well (`toolbar::window_backdrop`).
+                toolbar::drag_region(layers, Message::DragWindow, Message::ToggleMaximize)
             }
         }
     }

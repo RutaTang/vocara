@@ -577,7 +577,17 @@ fn a_fullscreen_video_covers_the_whole_window_and_takes_its_keys() {
         ],
     );
     assert!(technique(&app).1.overlay().is_some());
-    assert!(!drags(&drag_the_bar(&app)), "covered");
+    // Covered, the band is still the window's (it could not be moved while
+    // a video was fullscreen), and the page beneath takes nothing.
+    let covered = drag_the_bar(&app);
+    assert!(drags(&covered), "{covered:?}");
+    assert!(
+        covered.iter().all(|m| matches!(
+            m,
+            app::Message::DragWindow | app::Message::Technique(_, Message::Media(_))
+        )),
+        "{covered:?}"
+    );
     // Escape reaches the video, not the page under it.
     let sent: Vec<app::Message> = {
         let mut ui = ui(&app);

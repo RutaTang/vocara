@@ -665,7 +665,8 @@ fn the_rename_dialog_shows_the_caption_and_saves_or_cancels() {
         let _ = ui.tap_key(iced::keyboard::Key::Named(
             iced::keyboard::key::Named::Escape,
         ));
-        ui.point_at(Point::new(5.0, 5.0));
+        // Below the title-bar band, whose clicks are the window's.
+        ui.point_at(Point::new(5.0, 100.0));
         let _ = ui.simulate(iced_test::simulator::click());
     });
     assert_eq!(

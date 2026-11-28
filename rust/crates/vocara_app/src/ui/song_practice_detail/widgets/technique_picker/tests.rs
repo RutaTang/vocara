@@ -174,7 +174,8 @@ fn escape_and_the_barrier_cancel_it() {
     let messages: Vec<Message> = {
         let mut ui = iced_test::simulator(picker.view());
         let _ = ui.tap_key(keyboard::Key::Named(Named::Escape));
-        ui.point_at(Point::new(5.0, 5.0));
+        // Below the title-bar band, whose clicks are the window's.
+        ui.point_at(Point::new(5.0, 100.0));
         let _ = ui.simulate(iced_test::simulator::click());
         // A tap on the card is not a barrier tap.
         ui.click("Add technique at playhead").expect("the title");
