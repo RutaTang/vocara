@@ -1099,7 +1099,9 @@ impl RenameExampleDialog {
                 self.text = text;
                 None
             }
-            confirm_dialog::Message::Cancel => Some(DialogResult::Text(None)),
+            confirm_dialog::Message::Cancel | confirm_dialog::Message::Decline => {
+                Some(DialogResult::Text(None))
+            }
             // Save, or Return in the field: the trimmed text, empty or not.
             confirm_dialog::Message::Confirm => Some(DialogResult::Text(Some(
                 dart_string::trim(&self.text).to_string(),

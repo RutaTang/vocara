@@ -81,6 +81,8 @@ pub struct ConfirmDialog {
     pub cancel_label: String,
     pub icon: Option<Icon>,
     pub destructive: bool,
+    /// Only its buttons answer it ([`ConfirmDialog::answered_by_buttons`]).
+    pub buttons_only: bool,
 }
 
 impl ConfirmDialog {
@@ -92,6 +94,7 @@ impl ConfirmDialog {
             cancel_label: "Cancel".to_string(),
             icon: None,
             destructive: true,
+            buttons_only: false,
         }
     }
 
@@ -117,6 +120,15 @@ impl ConfirmDialog {
 
     pub fn destructive(mut self, destructive: bool) -> Self {
         self.destructive = destructive;
+        self
+    }
+
+    /// Only its buttons answer it: a tap on the barrier or Escape closes it
+    /// with [`DialogResult::Closed`], no answer, where otherwise they answer
+    /// "no" as its cancel button does. For a question a stray click must
+    /// not answer (the first launch's update check).
+    pub fn answered_by_buttons(mut self) -> Self {
+        self.buttons_only = true;
         self
     }
 }
@@ -227,7 +239,8 @@ pub enum DialogResult {
     /// cancelled.)
     Text(Option<String>),
     /// A dialog that answers nothing closed ([`UpdateDownloadDialog`]'s
-    /// "Later", a barrier tap or Escape).
+    /// "Later", a barrier tap or Escape; a barrier tap or Escape on a
+    /// [`ConfirmDialog::answered_by_buttons`]).
     Closed,
 }
 
@@ -251,6 +264,10 @@ impl DialogResult {
 pub enum Message {
     /// The cancel button, a barrier tap or Escape.
     Cancel,
+    /// The cancel button of a [`ConfirmDialog::answered_by_buttons`]: its
+    /// "no", where a barrier tap or Escape ([`Message::Cancel`]) closes it
+    /// unanswered. The other dialogs never send it.
+    Decline,
     /// The confirm button (or Enter in the prompt's field).
     Confirm,
     /// The prompt's text changed.
@@ -342,13 +359,18 @@ impl DialogState {
                 self.text = text;
                 DialogStep::Stay
             }
-            (Message::Cancel, Dialog::Confirm(_)) => {
+            (Message::Cancel, Dialog::Confirm(d)) if d.buttons_only => {
+                DialogStep::Closed(DialogResult::Closed)
+            }
+            (Message::Cancel | Message::Decline, Dialog::Confirm(_)) => {
                 DialogStep::Closed(DialogResult::Confirmed(false))
             }
             (Message::Confirm, Dialog::Confirm(_)) => {
                 DialogStep::Closed(DialogResult::Confirmed(true))
             }
-            (Message::Cancel, Dialog::Prompt(_)) => DialogStep::Closed(DialogResult::Text(None)),
+            (Message::Cancel | Message::Decline, Dialog::Prompt(_)) => {
+                DialogStep::Closed(DialogResult::Text(None))
+            }
             // An empty field confirms nothing: the button is disabled and
             // Return does nothing, the dialog staying open.
             (Message::Confirm, Dialog::Prompt(_)) => match prompt_text(&self.text) {
@@ -487,9 +509,14 @@ fn confirm_card(d: &ConfirmDialog) -> Element<'_, Message> {
     } else {
         DialogButton::Primary
     };
+    let on_cancel = if d.buttons_only {
+        Message::Decline
+    } else {
+        Message::Cancel
+    };
     content = content.push(Space::new().height(20)).push(buttons(
         &d.cancel_label,
-        Message::Cancel,
+        on_cancel,
         &d.confirm_label,
         Some(Message::Confirm),
         kind,
@@ -1013,6 +1040,43 @@ mod tests {
         assert_eq!(
             state.update(Message::Confirm),
             Some(DialogResult::Confirmed(true))
+        );
+    }
+
+    /// A question only its buttons answer: its cancel button is a "no", a
+    /// barrier tap or Escape closes it with no answer.
+    #[test]
+    fn a_dialog_answered_by_its_buttons_alone_takes_no_dismissal_as_a_no() {
+        let question = || {
+            ConfirmDialog::new("Check for updates automatically?")
+                .confirm_label("Check automatically")
+                .cancel_label("Don't check")
+                .destructive(false)
+                .answered_by_buttons()
+        };
+        let mut state = DialogState::new(question());
+        let messages = run(&mut state, |ui| {
+            ui.click("Don't check").expect("the cancel button");
+            let _ = ui.tap_key(keyboard::Key::Named(Named::Escape));
+            ui.point_at(Point::new(5.0, BELOW_BAND));
+            let _ = ui.simulate(iced_test::simulator::click());
+        });
+        assert_eq!(
+            messages,
+            vec![Message::Decline, Message::Cancel, Message::Cancel]
+        );
+        assert_eq!(
+            DialogState::new(question()).update(Message::Decline),
+            Some(DialogResult::Confirmed(false))
+        );
+        assert_eq!(
+            DialogState::new(question()).update(Message::Cancel),
+            Some(DialogResult::Closed)
+        );
+        // Any other confirm dialog takes them all as its cancel button.
+        assert_eq!(
+            DialogState::new(ConfirmDialog::new("Delete?")).update(Message::Cancel),
+            Some(DialogResult::Confirmed(false))
         );
     }
 
