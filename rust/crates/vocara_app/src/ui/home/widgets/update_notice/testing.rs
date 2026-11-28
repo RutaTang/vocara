@@ -134,6 +134,12 @@ pub(crate) struct Updates {
 /// A self-update that can replace "this copy" (once [`SelfUpdate::prepare`]
 /// asked), serving [`image`]; its transfer held read by read when `held`.
 pub(crate) fn updates(held: bool) -> Updates {
+    updates_waiting_on(held, Arc::new(std::sync::atomic::AtomicBool::new(false)))
+}
+
+/// [`updates`], its install waiting while `take` is set (a take being
+/// recorded or saved).
+pub(crate) fn updates_waiting_on(held: bool, take: Arc<std::sync::atomic::AtomicBool>) -> Updates {
     let dir = tempfile::tempdir().unwrap();
     let updates_dir = dir.path().join("updates");
     let (open, gate) = if held {
@@ -143,15 +149,18 @@ pub(crate) fn updates(held: bool) -> Updates {
         (None, None)
     };
     let installer = Arc::new(FakeInstaller::default());
-    let updater = Arc::new(SelfUpdate::new(
-        Box::new(move || Ok(updates_dir.clone())),
-        Arc::new(Served {
-            image: image(),
-            gate,
-        }),
-        Arc::clone(&installer) as Arc<dyn Installer>,
-        "1.0.0",
-    ));
+    let updater = Arc::new(
+        SelfUpdate::new(
+            Box::new(move || Ok(updates_dir.clone())),
+            Arc::new(Served {
+                image: image(),
+                gate,
+            }),
+            Arc::clone(&installer) as Arc<dyn Installer>,
+            "1.0.0",
+        )
+        .waiting_on_takes(move || take.load(std::sync::atomic::Ordering::SeqCst)),
+    );
     Updates {
         updater,
         installer,

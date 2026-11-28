@@ -432,6 +432,32 @@ fn the_dialog_says_vocara_will_relaunch() {
     ));
 }
 
+/// A take being recorded when the download lands: the dialog says the
+/// update waits for it, and Cancel calls the update off.
+#[test]
+fn the_dialog_says_the_update_waits_for_the_take_and_can_be_cancelled() {
+    let take = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let fake = super::testing::updates_waiting_on(false, take);
+    fake.updater.prepare();
+    let mut dialog = UpdateDownloadDialog::new(release(Some(&image())), fake.updater.clone());
+    dialog.update(DialogMessage::Confirm);
+    fake.wait_for(&Phase::WaitingForTake);
+    assert!(dialog_shows(
+        &dialog,
+        "Vocara 9.9.9 is ready. It installs once your take is saved."
+    ));
+    assert!(dialog_shows(&dialog, "Cancel update"));
+    assert_eq!(dialog.update(DialogMessage::Secondary), None);
+    fake.settle();
+    assert_eq!(fake.updater.phase(), Phase::Idle);
+    assert_eq!(
+        fake.installer
+            .installs
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+}
+
 /// A failure in the dialog: why, "Try again", and the release page beside
 /// it.
 #[test]

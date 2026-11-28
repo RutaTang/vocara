@@ -122,6 +122,12 @@ pub fn installing_line(version: &str) -> String {
     format!("Installing Vocara {version}… Vocara will relaunch.")
 }
 
+/// What they say while the downloaded update waits for a take being
+/// recorded or saved (installing quits Vocara for the relaunch).
+pub fn waiting_line(version: &str) -> String {
+    format!("Vocara {version} is ready. It installs once your take is saved.")
+}
+
 /// What they say while it downloads, before its progress.
 pub fn downloading_line(version: &str) -> String {
     format!("Downloading Vocara {version}…")
@@ -169,8 +175,11 @@ pub fn update_notice_banner<'a>(
         Phase::Downloading { done, total } => {
             downloading_banner(&updating_version(updater, offer.as_ref()), done, total)
         }
+        Phase::WaitingForTake => {
+            progress_banner(waiting_line(&updating_version(updater, offer.as_ref())))
+        }
         Phase::Installing | Phase::Relaunching => {
-            installing_banner(&updating_version(updater, offer.as_ref()))
+            progress_banner(installing_line(&updating_version(updater, offer.as_ref())))
         }
         Phase::Failed(reason) => failed_banner(reason, offer, updater),
         Phase::Idle => match offer {
@@ -291,13 +300,13 @@ fn downloading_banner<'a>(version: &str, done: u64, total: u64) -> Element<'a, M
 
 /// Installing: a spinner and the line; nothing to press (the app quits for
 /// the relaunch on its own).
-fn installing_banner<'a>(version: &str) -> Element<'a, Message> {
+fn progress_banner<'a>(line: String) -> Element<'a, Message> {
     frame(
         container(
             row![
                 spinner(12.0, 1.6, Studio::TEXT_SECONDARY),
                 Space::new().width(10),
-                banner_line(installing_line(version), 1),
+                banner_line(line, 1),
             ]
             .align_y(Vertical::Center),
         )
@@ -395,6 +404,8 @@ enum Mode {
         done: u64,
         total: u64,
     },
+    /// Downloaded, waiting for a take to be saved: Cancel calls it off.
+    Waiting,
     Installing,
     Failed(String),
 }
@@ -446,6 +457,7 @@ impl UpdateDownloadDialog {
     fn mode(&self) -> Mode {
         match self.updater.phase() {
             Phase::Downloading { done, total } => Mode::Downloading { done, total },
+            Phase::WaitingForTake => Mode::Waiting,
             Phase::Installing | Phase::Relaunching => Mode::Installing,
             phase => match self.updater.self_install(&self.info) {
                 SelfInstall::Blocked(reason) => Mode::Fallback(reason),
@@ -471,10 +483,10 @@ impl UpdateDownloadDialog {
                     self.updater.start(&self.info);
                     None
                 }
-                Mode::Downloading { .. } | Mode::Installing => None,
+                Mode::Downloading { .. } | Mode::Waiting | Mode::Installing => None,
             },
             DialogMessage::Secondary => match mode {
-                Mode::Downloading { .. } => {
+                Mode::Downloading { .. } | Mode::Waiting => {
                     self.updater.cancel();
                     None
                 }
@@ -540,6 +552,15 @@ impl UpdateDownloadDialog {
                         total,
                     ));
                 buttons(later, None, ("Update now", None))
+            }
+            Mode::Waiting => {
+                content = content
+                    .push(Space::new().height(14))
+                    .push(note(waiting_line(&updating_version(
+                        &self.updater,
+                        Some(info),
+                    ))));
+                buttons(later, Some("Cancel update"), ("Update now", None))
             }
             Mode::Installing => {
                 content = content.push(Space::new().height(14)).push(

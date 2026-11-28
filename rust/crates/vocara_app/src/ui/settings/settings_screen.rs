@@ -260,6 +260,7 @@ pub fn update_subtitle(
                 update_notice::progress_line(done, total)
             );
         }
+        Phase::WaitingForTake => return update_notice::waiting_line(&version()),
         Phase::Installing | Phase::Relaunching => {
             return update_notice::installing_line(&version());
         }

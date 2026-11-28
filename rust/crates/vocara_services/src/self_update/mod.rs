@@ -113,6 +113,10 @@ pub enum Phase {
     /// The image is downloading: `done` of `total` bytes (the size the
     /// manifest names).
     Downloading { done: u64, total: u64 },
+    /// Downloaded and its checksum matched, waiting for a take being
+    /// recorded or saved to finish: installing ends with Vocara quitting for
+    /// the relaunch, which would cut the take short. Cancellable.
+    WaitingForTake,
     /// Downloaded and its checksum matched: the installer verifies the app
     /// on it and stages the swap.
     Installing,
@@ -130,7 +134,10 @@ impl Phase {
     pub fn busy(&self) -> bool {
         matches!(
             self,
-            Phase::Downloading { .. } | Phase::Installing | Phase::Relaunching
+            Phase::Downloading { .. }
+                | Phase::WaitingForTake
+                | Phase::Installing
+                | Phase::Relaunching
         )
     }
 }
@@ -159,6 +166,10 @@ pub trait Installer: Send + Sync {
     /// must then quit. Blocking.
     fn install(&self, request: &InstallRequest<'_>) -> Result<(), String>;
 }
+
+/// How often an install waiting for a take asks again (see
+/// [`Phase::WaitingForTake`]).
+const TAKE_POLL: Duration = Duration::from_millis(250);
 
 /// What [`Installer::install`] is asked to install.
 #[derive(Debug, Clone, Copy)]
@@ -229,6 +240,9 @@ struct Inner {
     workers_done: Condvar,
     /// Whether [`SelfUpdate::startup`] ran.
     started_up: AtomicBool,
+    /// Whether a take is being recorded or saved now (the install waits for
+    /// it: see [`Phase::WaitingForTake`]).
+    take_in_flight: Box<dyn Fn() -> bool + Send + Sync>,
 }
 
 #[derive(Debug)]
@@ -273,8 +287,22 @@ impl SelfUpdate {
                 workers: Mutex::new(0),
                 workers_done: Condvar::new(),
                 started_up: AtomicBool::new(false),
+                take_in_flight: Box::new(|| false),
             }),
         }
+    }
+
+    /// The same, its installs waiting while `take_in_flight` says a take is
+    /// being recorded or saved ([`Phase::WaitingForTake`]). Called as it is
+    /// built, before it is shared.
+    pub fn waiting_on_takes(
+        mut self,
+        take_in_flight: impl Fn() -> bool + Send + Sync + 'static,
+    ) -> Self {
+        if let Some(inner) = Arc::get_mut(&mut self.inner) {
+            inner.take_in_flight = Box::new(take_in_flight);
+        }
+        self
     }
 
     /// The app's: updates under `<data root>/updates` (the application
@@ -288,6 +316,9 @@ impl SelfUpdate {
             platform_installer(),
             current_version(),
         )
+        .waiting_on_takes(|| {
+            crate::recording_finalizer::RecordingFinalizer::instance().has_active()
+        })
     }
 
     /// One that cannot update this copy, for `reason` (the app's tests).
@@ -437,7 +468,7 @@ impl SelfUpdate {
     pub fn cancel(&self) -> bool {
         {
             let mut s = self.state();
-            if !matches!(s.phase, Phase::Downloading { .. }) {
+            if !matches!(s.phase, Phase::Downloading { .. } | Phase::WaitingForTake) {
                 return false;
             }
             if let Some(cancel) = s.cancel.take() {
@@ -659,6 +690,29 @@ impl Inner {
         if !self.current(generation) {
             files::discard_download(&dest);
             return Outcome::Cancelled;
+        }
+        // Not while a take is recorded or saved: the install ends with
+        // Vocara quitting for the relaunch, which would cut the take short,
+        // and the swap helper waits for that quit only so long. The update
+        // waits for the take, still cancellable.
+        let mut waited = false;
+        while (self.take_in_flight)() {
+            if cancel.load(Ordering::SeqCst) || !self.current(generation) {
+                files::discard_download(&dest);
+                return Outcome::Cancelled;
+            }
+            if !waited {
+                waited = true;
+                {
+                    let mut s = self.state();
+                    if s.generation == generation {
+                        s.phase = Phase::WaitingForTake;
+                    }
+                }
+                DiagnosticsLog::instance().log("update", "waiting for the take to be saved");
+                self.notify();
+            }
+            std::thread::sleep(TAKE_POLL);
         }
         {
             let mut s = self.state();

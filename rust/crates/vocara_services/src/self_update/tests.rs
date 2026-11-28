@@ -128,6 +128,12 @@ struct Fixture {
 }
 
 fn fixture(transport: Arc<FakeTransport>) -> Fixture {
+    fixture_with_takes(transport, Arc::new(AtomicBool::new(false)))
+}
+
+/// A fixture whose installs wait while `take` is set (a take being
+/// recorded or saved).
+fn fixture_with_takes(transport: Arc<FakeTransport>, take: Arc<AtomicBool>) -> Fixture {
     let updates = tempfile::tempdir().unwrap();
     let dir = updates.path().join("updates");
     let installer = Arc::new(FakeInstaller::default());
@@ -136,7 +142,8 @@ fn fixture(transport: Arc<FakeTransport>) -> Fixture {
         Arc::new(Shared(transport)),
         Arc::clone(&installer) as Arc<dyn Installer>,
         "0.3.0",
-    );
+    )
+    .waiting_on_takes(move || take.load(Ordering::SeqCst));
     let changes = Arc::new(AtomicUsize::new(0));
     let counted = Arc::clone(&changes);
     service.add_listener(Box::new(move || {
@@ -193,6 +200,58 @@ fn an_update_downloads_installs_and_asks_the_app_to_quit() {
     );
     // Under way: nothing starts a second one.
     assert!(!fx.service.start(&release(b"other")));
+}
+
+/// Waits for `phase`, up to ten seconds.
+fn until_phase(fx: &Fixture, phase: Phase) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while fx.service.phase() != phase {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "never {phase:?}: {:?}",
+            fx.service.phase()
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// A take being recorded (or saved) when the download lands: the install,
+/// which ends with Vocara quitting for the relaunch, waits for it, then goes
+/// ahead.
+#[test]
+fn an_update_waits_for_the_take_before_it_installs() {
+    let image = vec![5u8; 2048];
+    let take = Arc::new(AtomicBool::new(true));
+    let fx = fixture_with_takes(FakeTransport::serving(&image), Arc::clone(&take));
+    assert!(fx.service.start(&release(&image)));
+    until_phase(&fx, Phase::WaitingForTake);
+    assert!(fx.service.phase().busy());
+    assert!(!fx.service.wants_quit(), "no quit while the take runs");
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(fx.installer.installed.lock().unwrap().is_empty());
+    take.store(false, Ordering::SeqCst);
+    fx.settle();
+    assert_eq!(fx.service.phase(), Phase::Relaunching);
+    assert_eq!(fx.installer.installed.lock().unwrap().len(), 1);
+}
+
+/// Cancel while it waits for the take: nothing installs, the download goes.
+#[test]
+fn an_update_waiting_for_the_take_can_be_cancelled() {
+    let image = vec![6u8; 2048];
+    let take = Arc::new(AtomicBool::new(true));
+    let fx = fixture_with_takes(FakeTransport::serving(&image), take);
+    assert!(fx.service.start(&release(&image)));
+    until_phase(&fx, Phase::WaitingForTake);
+    assert!(fx.service.cancel());
+    fx.settle();
+    assert_eq!(fx.service.phase(), Phase::Idle);
+    assert!(fx.installer.installed.lock().unwrap().is_empty());
+    assert!(
+        fx.left().iter().all(|n| !n.starts_with("dl-")),
+        "{:?}",
+        fx.left()
+    );
 }
 
 /// Progress is reported as the bytes arrive, of the size the manifest names.
