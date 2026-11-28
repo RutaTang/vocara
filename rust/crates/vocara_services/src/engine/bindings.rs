@@ -414,6 +414,21 @@ pub trait EngineBindings: Send + Sync {
         unexpected("ve_track_lane")
     }
 
+    /// Plays only part of staged `track`'s file (`ve_track_span`): from
+    /// `src_offset_ms` into it, `len_ms` long (a negative `len_ms`: to its
+    /// end), the edges `fades` names faded (bit 0 the start, bit 1 the end).
+    /// Before commit. A fake that does not model it takes it as a no-op.
+    fn track_span(
+        &self,
+        track: i32,
+        src_offset_ms: i64,
+        len_ms: i64,
+        fades: u32,
+    ) -> Result<(), EngineError> {
+        let _ = (track, src_offset_ms, len_ms, fades);
+        Ok(())
+    }
+
     /// Names the lane staged `track` plays by a key kept from sync to sync
     /// (`ve_track_key`): the lane's chain keeps its node ids, so its effects
     /// carry their tails and histories across the rebuild. Before commit. It

@@ -681,6 +681,52 @@ fn resync_flattens_each_lane_to_one_source_per_clip_through_the_lane_chain() {
 }
 
 #[test]
+fn a_phrase_sung_again_over_a_take_plays_alone_where_they_overlap() {
+    // The take 0-60 s, then the phrase at 20 s re-sung onto it as a clip of
+    // its own: the take plays either side of it, the second stretch from 30 s
+    // into its file, each fading where the phrase cuts in or lets go.
+    let take = AudioTrack {
+        clips: vec![
+            AudioClip::new("take", "take.wav", 60_000),
+            AudioClip {
+                start_ms: 20_000,
+                ..AudioClip::new("phrase", "phrase.wav", 10_000)
+            },
+        ],
+        ..vocal("v1")
+    };
+    let h = Host::new(Some(practice_of(vec![take], vec![], 1.0)));
+    h.mixer.resync_playback(&h.s).wait().unwrap();
+    let pushed = h.engine.pushed();
+    let tracks: Vec<_> = pushed
+        .last_tracks
+        .as_ref()
+        .unwrap()
+        .iter()
+        .filter(|t| t.lane_id.as_deref() == Some("v1"))
+        .map(|t| {
+            (
+                t.id.as_str(),
+                t.path.as_str(),
+                t.start_ms,
+                t.duration_ms,
+                t.src_offset_ms,
+                t.fade_in,
+                t.fade_out,
+            )
+        })
+        .collect();
+    assert_eq!(
+        tracks,
+        [
+            ("take", "take.wav", 0, 20_000, 0, false, true),
+            ("take#1", "take.wav", 30_000, 30_000, 30_000, true, false),
+            ("phrase", "phrase.wav", 20_000, 10_000, 0, false, false),
+        ]
+    );
+}
+
+#[test]
 fn resync_without_a_practice_does_nothing() {
     let h = Host::new(None);
     assert!(h.mixer.resync_playback(&h.s).is_done());

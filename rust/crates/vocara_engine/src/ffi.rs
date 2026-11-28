@@ -60,7 +60,13 @@ struct PendingTrack {
     /// `pcm` stays empty. False: the decoded-Arc fallback (foreign files).
     stream: bool,
     pcm: Arc<[Smp]>,
+    start_ms: i64,
     start_frame: i64,
+    /// The part of the file the track plays, and its cut edges (see [`ve_track_span`]): the
+    /// whole file from its first frame by default.
+    src_offset: i64,
+    len: Option<i64>,
+    cut: crate::source::Cut,
     gain: f32,
     muted: bool,
     /// Vocal tracks get the full EQ -> Comp insert chain + a reverb send; backing is dry.
@@ -1520,6 +1526,43 @@ pub extern "C" fn ve_track_lane(e: *mut VeEngine, track: c_int, leader: c_int) -
     })
 }
 
+/// `ve_track_span` fade bits: the span's start, its end is a cut (see [`crate::source::Cut`]).
+pub const VE_SPAN_FADE_IN: u32 = 1;
+pub const VE_SPAN_FADE_OUT: u32 = 2;
+
+/// Plays only part of staged `track`'s file: from `src_offset_ms` into it, `len_ms` long (or
+/// to its end, for a negative `len_ms`), still placed at the track's start, the edges named by
+/// `fades` ([`VE_SPAN_FADE_IN`], [`VE_SPAN_FADE_OUT`]) faded. Where clips overlap on a lane
+/// only the one stacked above plays, and the host stages each clip as the spans of it that
+/// are heard; the edges where a clip above cuts in are the ones that fade. The frames are
+/// derived from the timeline positions, so spans the host cut at one position meet at one
+/// frame. Call before [`ve_tracks_commit`]; returns 0 / -1.
+#[no_mangle]
+pub extern "C" fn ve_track_span(
+    e: *mut VeEngine,
+    track: c_int,
+    src_offset_ms: i64,
+    len_ms: i64,
+    fades: u32,
+) -> c_int {
+    with_engine(e, -1, |eng| {
+        let rate = eng.handle.sample_rate();
+        let frames = |ms: i64| (ms as f64 * rate / 1000.0) as i64;
+        match eng.pending.get_mut(track as usize) {
+            Some(pt) => {
+                pt.src_offset = pt.start_frame - frames(pt.start_ms - src_offset_ms.max(0));
+                pt.len = (len_ms >= 0).then(|| frames(pt.start_ms + len_ms) - pt.start_frame);
+                pt.cut = crate::source::Cut {
+                    fade_in: fades & VE_SPAN_FADE_IN != 0,
+                    fade_out: fades & VE_SPAN_FADE_OUT != 0,
+                };
+                0
+            }
+            None => -1,
+        }
+    })
+}
+
 /// Names the lane staged `track` plays, by a key the host keeps for it from commit to commit
 /// (a hash of the lane's id). A lane's chain keeps its node ids for as long as its key does,
 /// so its effects carry their tails and histories over the rebuild (see
@@ -1714,7 +1757,11 @@ pub extern "C" fn ve_tracks_add(
                 path: path.to_string(),
                 stream: true,
                 pcm: Arc::from(Vec::new()),
+                start_ms,
                 start_frame,
+                src_offset: 0,
+                len: None,
+                cut: crate::source::Cut::default(),
                 gain,
                 muted: muted != 0,
                 vocal: is_vocal != 0,
@@ -1741,7 +1788,11 @@ pub extern "C" fn ve_tracks_add(
             path: path.to_string(),
             stream: false,
             pcm,
+            start_ms,
             start_frame,
+            src_offset: 0,
+            len: None,
+            cut: crate::source::Cut::default(),
             gain,
             muted: muted != 0,
             vocal: is_vocal != 0,
@@ -1954,14 +2005,16 @@ pub extern "C" fn ve_tracks_commit_staged(e: *mut VeEngine) -> c_int {
                     Ok(reader) => {
                         let ctrl = crate::feed::StreamCtrl::new();
                         let (prod, cons) = crate::ring::spsc::<[Smp; CHANNELS]>(16384);
-                        let len = reader.frames;
                         new_ctrls.push(Arc::clone(&ctrl));
-                        new_feeders.push(crate::feed::TrackFeeder::new(
+                        let feeder = crate::feed::TrackFeeder::new(
                             Arc::clone(&ctrl),
                             prod,
                             reader,
                             pt.start_frame,
-                        ));
+                        )
+                        .with_span(pt.src_offset, pt.len, pt.cut);
+                        let len = feeder.len_frames();
+                        new_feeders.push(feeder);
                         Box::new(crate::source::StreamingSource::new(
                             ctrl,
                             cons,
@@ -1983,7 +2036,13 @@ pub extern "C" fn ve_tracks_commit_staged(e: *mut VeEngine) -> c_int {
                     }
                 }
             } else {
-                Box::new(BufferSource::from_arc(pt.pcm.clone(), pt.start_frame))
+                Box::new(
+                    BufferSource::from_arc(pt.pcm.clone(), pt.start_frame).with_span(
+                        pt.src_offset,
+                        pt.len,
+                        pt.cut,
+                    ),
+                )
             };
             if let Some(l) = leader {
                 // Plays through the leader's chain: its source sums in at the chain's entry.
@@ -2565,7 +2624,11 @@ pub extern "C" fn ve_tracks_add_pcm(
             path: path.to_string(),
             stream: false,
             pcm: arc,
+            start_ms,
             start_frame,
+            src_offset: 0,
+            len: None,
+            cut: crate::source::Cut::default(),
             gain,
             muted: muted != 0,
             vocal: is_vocal != 0,

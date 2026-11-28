@@ -132,7 +132,8 @@ pub struct VoiceMetricsPart {
 /// starts f·hop/sample_rate seconds after the lane start — its time_of_frame
 /// is lane-relative exactly as each part's is clip-relative. Gaps between
 /// clips become NaN frames (inactive), which every curve consumer already
-/// treats as "no voice"; where clips overlap, the later-starting clip wins.
+/// treats as "no voice"; where clips overlap, the clip stacked
+/// above wins (the lane's later one, see `audio_track::lane_stack_order`).
 ///
 /// Parts must share [hop], [fft_size] and [sample_rate] — they do when computed
 /// by the same SpectrogramService defaults; the window length matters because
@@ -169,10 +170,9 @@ pub fn merge_voice_metrics(parts: &[VoiceMetricsPart]) -> Option<Arc<VoiceMetric
         return Some(Arc::clone(&kept[0].metrics));
     }
 
-    // Place parts in ascending start order (stable on ties), so a later-starting
-    // clip's frames overwrite an earlier clip's where they overlap.
-    let mut order: Vec<usize> = (0..kept.len()).collect();
-    order.sort_by_key(|&i| kept[i].offset_ms);
+    // Place parts as the lane stacks its clips, so a clip stacked above another
+    // overwrites its frames where they overlap: what plays is what is shown.
+    let order = crate::models::audio_track::lane_stack_order(kept.len());
 
     let mut total: i64 = 0;
     for p in &kept {

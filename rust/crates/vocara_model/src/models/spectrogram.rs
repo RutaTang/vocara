@@ -173,7 +173,8 @@ pub struct SpectrogramPart {
 /// starts f·hop/sample_rate seconds after the lane start — its time_of_frame
 /// is lane-relative exactly as each part's is clip-relative. Gaps between
 /// clips become floor (merged min_db) columns, which the heat renderer draws
-/// as silence; where clips overlap, the later-starting clip wins.
+/// as silence; where clips overlap, the clip stacked
+/// above wins (the lane's later one, see `audio_track::lane_stack_order`).
 ///
 /// Parts must share [bins], [fft_size], [sample_rate] and [hop]; any part whose
 /// framing differs from the first is skipped, as are frameless parts. Returns
@@ -208,10 +209,9 @@ pub fn merge_spectrograms(parts: &[SpectrogramPart]) -> Option<Arc<Spectrogram>>
         return Some(Arc::clone(&kept[0].spectrogram));
     }
 
-    // Place parts in ascending start order (stable on ties), so a later-starting
-    // clip's frames overwrite an earlier clip's where they overlap.
-    let mut order: Vec<usize> = (0..kept.len()).collect();
-    order.sort_by_key(|&i| kept[i].offset_ms);
+    // Place parts as the lane stacks its clips, so a clip stacked above another
+    // overwrites its frames where they overlap: what plays is what is shown.
+    let order = crate::models::audio_track::lane_stack_order(kept.len());
 
     let bins = first.bins;
     let mut total: i64 = 0;

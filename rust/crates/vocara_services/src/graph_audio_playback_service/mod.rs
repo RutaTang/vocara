@@ -722,6 +722,10 @@ fn topology_sig(tracks: &[TrackPlayback], buses: &[BusPlayback]) -> String {
         // force a graph rebuild.
         b.push('@');
         b.push_str(&t.start_ms.to_string());
+        // So is the part of the file a clip cut by another plays.
+        if let Some((from, len, fades)) = span_of(t) {
+            b.push_str(&format!("[{from}+{len}/{fades}]"));
+        }
         b.push('>');
         b.push_str(t.bus_id.as_deref().unwrap_or(""));
         b.push(':');
@@ -745,6 +749,15 @@ fn topology_sig(tracks: &[TrackPlayback], buses: &[BusPlayback]) -> String {
         b.push('|');
     }
     b
+}
+
+/// The part of its file `t` plays, as `track_span` takes it (offset, length,
+/// fade bits), or `None` for the whole file: only an end that is a cut stops
+/// short of the file's end.
+fn span_of(t: &TrackPlayback) -> Option<(i64, i64, u32)> {
+    let fades = u32::from(t.fade_in) | (u32::from(t.fade_out) << 1);
+    let len = if t.fade_out { t.duration_ms } else { -1 };
+    (t.src_offset_ms != 0 || fades != 0).then_some((t.src_offset_ms, len, fades))
 }
 
 /// The key a lane's (or a bus's) engine chain keeps from rebuild to rebuild
@@ -1096,8 +1109,14 @@ fn stage_track<'a>(
     bus_idx: i32,
 ) -> (MutexGuard<'a, State>, Result<i32, MediaError>) {
     let volume = t.volume as f32;
+    let span = |idx: i32| {
+        if let Some((from, len, fades)) = span_of(t) {
+            let _ = engine.track_span(idx, from, len, fades);
+        }
+    };
     if let Ok(idx) = engine.tracks_add(&t.path, t.start_ms, volume, t.muted, t.is_vocal, bus_idx) {
         if idx >= 0 {
+            span(idx);
             push_chain(engine, idx, t.fx.as_ref(), false);
             return (st, Ok(idx));
         }
@@ -1128,6 +1147,7 @@ fn stage_track<'a>(
         )
         .unwrap_or(-1);
     if idx >= 0 {
+        span(idx);
         push_chain(engine, idx, t.fx.as_ref(), false);
     }
     // The engine copied the samples; the decoded buffer is freed here.

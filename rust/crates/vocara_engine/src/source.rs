@@ -6,14 +6,63 @@
 
 use std::sync::Arc;
 
+use crate::declick::fade_shape;
 use crate::node::{Node, ProcessIo};
 use crate::ring::Consumer;
 use crate::sample::{Smp, CHANNELS};
+
+/// A cut edge's fade: 3 ms at the engine rate (see [`Cut`]).
+pub const CUT_FADE_FRAMES: i64 = 144;
+
+/// Which edges of a placed span of a clip are cuts and fade. Where clips overlap on a lane
+/// only the one stacked above plays, so the one below plays in pieces, cut off where the
+/// clip above starts and taken up again where it ends; a cut mid-waveform clicks, so it
+/// fades over [`CUT_FADE_FRAMES`] (half the span at most). A clip's own start and end play
+/// as recorded.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Cut {
+    pub fade_in: bool,
+    pub fade_out: bool,
+}
+
+impl Cut {
+    /// Whether either edge fades.
+    #[inline]
+    pub fn any(self) -> bool {
+        self.fade_in || self.fade_out
+    }
+
+    /// The gain at frame `local` of a span `len` frames long.
+    #[inline]
+    pub fn gain(self, local: i64, len: i64) -> f32 {
+        let fade = CUT_FADE_FRAMES.min(len / 2).max(1) as f32;
+        let mut g = 1.0;
+        if self.fade_in {
+            g *= fade_shape((local as f32 + 0.5) / fade);
+        }
+        if self.fade_out {
+            g *= fade_shape(((len - local) as f32 - 0.5) / fade);
+        }
+        g
+    }
+}
+
+/// The frames of a `total`-frame file a span plays: from `src_offset` (clamped into the
+/// file), `len` frames or to the file's end (`None`), never past it.
+pub fn span_window(total: i64, src_offset: i64, len: Option<i64>) -> (i64, i64) {
+    let total = total.max(0);
+    let from = src_offset.clamp(0, total);
+    let left = total - from;
+    (from, len.map_or(left, |l| l.clamp(0, left)))
+}
 
 pub struct BufferSource {
     pcm: Arc<[Smp]>, // interleaved stereo
     start_frame: i64,
     len_frames: i64,
+    /// The first frame of `pcm` the span plays (see [`BufferSource::with_span`]).
+    src_offset: i64,
+    cut: Cut,
 }
 
 impl BufferSource {
@@ -28,7 +77,18 @@ impl BufferSource {
             pcm,
             start_frame,
             len_frames,
+            src_offset: 0,
+            cut: Cut::default(),
         }
+    }
+
+    /// Plays only the part of the clip a lane hears: from frame `src_offset` of the PCM, `len`
+    /// frames (or to its end), placed at `start_frame`, its cut edges faded (see [`Cut`]).
+    pub fn with_span(mut self, src_offset: i64, len: Option<i64>, cut: Cut) -> Self {
+        let total = (self.pcm.len() / CHANNELS) as i64;
+        (self.src_offset, self.len_frames) = span_window(total, src_offset, len);
+        self.cut = cut;
+        self
     }
 
     /// Build from a mono buffer by duplicating to both channels.
@@ -58,9 +118,14 @@ impl Node for BufferSource {
         for i in 0..io.frames {
             let local = io.tl + i as i64 - self.start_frame;
             if local >= 0 && local < self.len_frames {
-                let p = local as usize * CHANNELS;
-                out[CHANNELS * i] = self.pcm[p];
-                out[CHANNELS * i + 1] = self.pcm[p + 1];
+                let p = (local + self.src_offset) as usize * CHANNELS;
+                let g = if self.cut.any() {
+                    self.cut.gain(local, self.len_frames)
+                } else {
+                    1.0
+                };
+                out[CHANNELS * i] = self.pcm[p] * g;
+                out[CHANNELS * i + 1] = self.pcm[p + 1] * g;
             } else {
                 out[CHANNELS * i] = 0.0;
                 out[CHANNELS * i + 1] = 0.0;

@@ -47,7 +47,7 @@ use std::time::Duration;
 use vocara_model::models::audio_fx::{
     FxKind, ReverbSettings, TrackFx, TrackSend, MAX_SENDS, SEND_OFF_DB,
 };
-use vocara_model::models::audio_track::AudioTrack;
+use vocara_model::models::audio_track::{lane_visible_spans, AudioClip, AudioTrack};
 use vocara_model::models::fx_bus::FxBus;
 use vocara_model::models::song_practice::SongPractice;
 use vocara_model::util::dart_num::{clamp_f64, clamp_i64, floor_to_i64, pow_f64};
@@ -57,6 +57,16 @@ use vocara_services::graph_audio_playback_service::{
     GraphAudioPlaybackService, SyncError, SyncHandle,
 };
 use vocara_services::playback_engine::{BusPlayback, PlaybackEngine, TrackPlayback};
+
+/// One stretch of a clip that a lane plays (see `MixerController::heard_pieces`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Piece {
+    start_ms: i64,
+    duration_ms: i64,
+    src_offset_ms: i64,
+    fade_in: bool,
+    fade_out: bool,
+}
 
 /// Whether a track is heard given its mute/solo and whether any track is
 /// soloed. Mute *always* silences a track; solo only isolates which tracks
@@ -1977,18 +1987,73 @@ impl MixerController {
     /// live meter.
     pub fn gain_reduction_db(&self, host: &dyn MixerHost, track_id: &str) -> f64 {
         // Engine sources are per-clip, so the FX meter reads the take's clip
-        // under the playhead (the one sounding); in the gaps between clips
-        // nothing of the take plays, so there is no gain reduction to show.
+        // heard under the playhead (the one on top there); in the gaps between
+        // clips nothing of the take plays, so there is no gain reduction to
+        // show.
         let Some(track) = host.track_by_id(track_id) else {
             return 0.0;
         };
         let pos_ms = i64::try_from(host.position().as_millis()).unwrap_or(i64::MAX);
-        for c in &track.clips {
-            if pos_ms >= c.start_ms && pos_ms < c.end_ms() {
-                return self.playback().track_gain_reduction_db(&c.id);
+        for (piece, clip) in Self::heard_pieces(&track) {
+            if pos_ms >= piece.start_ms && pos_ms < piece.start_ms + piece.duration_ms {
+                return self.playback().track_gain_reduction_db(&clip.id);
             }
         }
         0.0
+    }
+
+    /// What of each of a lane's clips is heard, as the engine stages it: where
+    /// clips overlap only the one stacked on top plays (`lane_visible_spans`,
+    /// the rule the lane's merged analysis follows too), so the one below plays
+    /// as the stretches the one above leaves, each from its offset into the
+    /// file and faded where it is cut. Clips with no file play nothing; a clip
+    /// of unknown length (none recorded) plays whole and covers nothing, as
+    /// every clip did before the rule. Each piece comes with its clip, in the
+    /// lane's order, a clip's pieces in timeline order.
+    fn heard_pieces(t: &AudioTrack) -> Vec<(Piece, &AudioClip)> {
+        let clips: Vec<&AudioClip> = t
+            .clips
+            .iter()
+            .filter(|c| !c.audio_file_path.is_empty())
+            .collect();
+        let spans: Vec<(i64, i64)> = clips
+            .iter()
+            .map(|c| {
+                if c.duration_ms > 0 {
+                    (c.start_ms, c.end_ms())
+                } else {
+                    (0, 0)
+                }
+            })
+            .collect();
+        let mut out: Vec<(Piece, &AudioClip)> = lane_visible_spans(&spans)
+            .into_iter()
+            .map(|v| {
+                let c = clips[v.clip];
+                let piece = Piece {
+                    start_ms: v.start_ms,
+                    duration_ms: v.end_ms - v.start_ms,
+                    src_offset_ms: v.start_ms - c.start_ms,
+                    fade_in: v.start_ms > c.start_ms,
+                    fade_out: v.end_ms < c.end_ms(),
+                };
+                (v.clip, piece)
+            })
+            .map(|(i, p)| (p, clips[i]))
+            .collect();
+        for c in clips.iter().filter(|c| c.duration_ms <= 0) {
+            out.push((
+                Piece {
+                    start_ms: c.start_ms,
+                    duration_ms: c.duration_ms,
+                    src_offset_ms: 0,
+                    fade_in: false,
+                    fade_out: false,
+                },
+                c,
+            ));
+        }
+        out
     }
 
     // --- Engine graph sync ----------------------------------------------------
@@ -2006,22 +2071,32 @@ impl MixerController {
         let all_tracks = host.all_tracks();
 
         let solo = self.resolve_solo(host);
-        // Flatten lanes to one engine source per clip (id = clip id), all of
-        // a lane's clips through the lane's one chain (lane_id): its volume /
+        // Flatten lanes to one engine source per piece of a clip that is heard
+        // (see `heard_pieces`: where clips overlap only the top one sounds),
+        // the first piece of a clip under its id and the rest under `id#n`,
+        // all of a lane's through the lane's one chain (lane_id): its volume /
         // mute / FX apply to every clip, and its dynamics run across their
         // boundaries. Empty takes contribute none.
         let mut tracks = Vec::new();
         for t in &all_tracks {
             let muted = !self.audible_track(host, t, &solo);
-            for c in &t.clips {
-                if c.audio_file_path.is_empty() {
-                    continue;
-                }
+            let mut pieces_of: HashMap<&str, usize> = HashMap::new();
+            for (piece, c) in Self::heard_pieces(t) {
+                let n = pieces_of.entry(c.id.as_str()).or_insert(0);
+                let id = if *n == 0 {
+                    c.id.clone()
+                } else {
+                    format!("{}#{n}", c.id)
+                };
+                *n += 1;
                 tracks.push(TrackPlayback {
-                    id: c.id.clone(),
+                    id,
                     path: c.audio_file_path.clone(),
-                    start_ms: c.start_ms,
-                    duration_ms: c.duration_ms,
+                    start_ms: piece.start_ms,
+                    duration_ms: piece.duration_ms,
+                    src_offset_ms: piece.src_offset_ms,
+                    fade_in: piece.fade_in,
+                    fade_out: piece.fade_out,
                     volume: t.volume,
                     muted,
                     pan: t.pan,
