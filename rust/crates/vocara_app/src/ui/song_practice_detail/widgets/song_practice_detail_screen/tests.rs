@@ -2517,6 +2517,40 @@ fn saving_the_lyrics_editor_empty_asks_before_deleting_the_lyrics() {
     assert_eq!(h.vm().lyrics_mode(), LyricsMode::Read, "saved, it closes");
 }
 
+// "Paste lyrics" opened an empty editor: the words still had to be pasted
+// by hand. It opens on the clipboard's text.
+#[test]
+fn paste_lyrics_opens_the_editor_on_the_clipboards_text() {
+    use crate::ui::song_practice_detail::view_model::song_practice_detail_view_model::LyricsMode;
+    let pasted = |text: Option<&str>| {
+        Message::Lyrics(lyrics_panel::Message::PastedLyrics(text.map(String::from)))
+    };
+    let mut h = Harness::open(Setup::default());
+    h.send(Message::Lyrics(lyrics_panel::Message::PasteLyrics));
+    assert_eq!(
+        h.vm().lyrics_mode(),
+        LyricsMode::Read,
+        "the clipboard first"
+    );
+    h.send(pasted(Some("第一行 first\nsecond")));
+    assert_eq!(h.vm().lyrics_mode(), LyricsMode::Edit);
+    assert_eq!(
+        h.screen.lyrics.editor_text().as_deref(),
+        Some("第一行 first\nsecond")
+    );
+    // A clipboard answering late leaves an editor opened meanwhile alone.
+    h.send(pasted(Some("other words")));
+    assert_eq!(
+        h.screen.lyrics.editor_text().as_deref(),
+        Some("第一行 first\nsecond")
+    );
+    // Nothing on the clipboard: the editor opens empty.
+    let mut h = Harness::open(Setup::default());
+    h.send(pasted(None));
+    assert_eq!(h.vm().lyrics_mode(), LyricsMode::Edit);
+    assert_eq!(h.screen.lyrics.editor_text().as_deref(), Some(""));
+}
+
 // playhead_repaint_test: 'deleting the backing's clip asks to delete the
 // backing' — a backing lane is its one clip.
 #[test]

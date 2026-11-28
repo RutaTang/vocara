@@ -1365,9 +1365,10 @@ fn with_no_lyrics_the_tab_offers_paste_and_import() {
         bounds_of(&mut ui, &state, &vm, &tip(EDIT_TIP)).is_none(),
         "no toolbar without lyrics"
     );
+    // Paste reads the clipboard (the screen opens the editor on it).
     assert_eq!(
         tap_label(&mut ui, &state, &vm, "Paste lyrics"),
-        vec![Message::SetLyricsMode(LyricsMode::Edit)]
+        vec![Message::PasteLyrics]
     );
     assert_eq!(
         tap_label(&mut ui, &state, &vm, "Import lyrics file"),

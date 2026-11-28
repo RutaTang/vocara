@@ -934,6 +934,24 @@ impl SongPracticeDetailScreen {
                 self.vm.set_lyrics_focus(on);
                 return;
             }
+            P::PasteLyrics => {
+                let read = iced::clipboard::read();
+                step.task(read.map(|text| Message::Lyrics(P::PastedLyrics(text))));
+                return;
+            }
+            P::PastedLyrics(text) => {
+                // "Paste lyrics" opened an empty editor, and the words still
+                // had to be pasted by hand. Not over an editor opened since
+                // (by its Edit button): that is a draft of its own.
+                if self.vm.lyrics_mode() == LyricsMode::Edit {
+                    return;
+                }
+                if let Some(text) = text.filter(|t| !t.trim().is_empty()) {
+                    self.vm.set_lyrics_draft(Some(text));
+                }
+                self.vm.set_lyrics_mode(LyricsMode::Edit);
+                return;
+            }
             P::BrowseImport => {
                 step.task(lyrics_panel::browse_lyrics_file().map(Message::Lyrics));
                 return;

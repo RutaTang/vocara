@@ -302,11 +302,16 @@ pub enum Message {
     SetRightTab(RightTab),
     /// The collapse button or the rail: `vm.toggleLyricsPanel()`.
     ToggleLyricsPanel,
-    /// `vm.setLyricsMode(mode)` (the toolbar's toggles, Paste lyrics, Cancel,
-    /// Done).
+    /// `vm.setLyricsMode(mode)` (the toolbar's toggles, Cancel, Done).
     SetLyricsMode(LyricsMode),
     /// `vm.setLyricsFocus(on)` (the toolbar's Focus, the Focus view's exit).
     SetLyricsFocus(bool),
+    /// Paste lyrics (the empty tab's): read the clipboard, then answer
+    /// [`Message::PastedLyrics`] with its text.
+    PasteLyrics,
+    /// The clipboard's text for Paste lyrics: the editor opens on it (on
+    /// nothing, with no text there).
+    PastedLyrics(Option<String>),
     /// Import lyrics file (`_browseImport`): run [`browse_lyrics_file`],
     /// which answers with [`Message::ImportLyricsFromFile`].
     BrowseImport,
@@ -1231,10 +1236,7 @@ fn empty_state<'a>() -> Element<'a, Message> {
         Space::new().height(16),
         row![
             secondary_button("Import lyrics file", Some(Message::BrowseImport)),
-            primary_button(
-                "Paste lyrics",
-                Some(Message::SetLyricsMode(LyricsMode::Edit))
-            ),
+            primary_button("Paste lyrics", Some(Message::PasteLyrics)),
         ]
         .spacing(8),
         Space::new().height(12),
