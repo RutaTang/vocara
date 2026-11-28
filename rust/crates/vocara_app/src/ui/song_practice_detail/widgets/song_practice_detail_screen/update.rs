@@ -96,7 +96,11 @@ impl SongPracticeDetailScreen {
                 self.absorb(fx, &mut step);
             }
             Message::SelectBus(id) => self.vm.select_bus(Some(&id)),
-            Message::OpenBusMenu(id) => self.menu = Some(OpenMenu::Bus(id)),
+            // Selected first, as a take's lane is (`row_message`).
+            Message::OpenBusMenu(id) => {
+                self.vm.select_bus(Some(&id));
+                self.menu = Some(OpenMenu::Bus(id));
+            }
             Message::ToggleBusMute(id) => {
                 let fx = self.vm.mixer_do(|m, h| m.toggle_bus_mute(h, &id));
                 self.absorb(fx, &mut step);
@@ -448,11 +452,22 @@ impl SongPracticeDetailScreen {
                 self.moving = None;
                 self.vm.commit_track_move()
             }
+            // A right press selects what it lands on before its menu opens,
+            // as in a DAW: the menu stood over a clip or take while another
+            // stayed selected.
             track_row::Message::ClipContextMenu(clip_id) => {
+                let fx = self.vm.select_clip(id, &clip_id);
+                self.absorb(fx, step);
                 self.menu = Some(OpenMenu::Clip { track_id, clip_id });
                 return;
             }
             track_row::Message::ContextMenu => {
+                // A clip selected on the take stays so.
+                if self.vm.selected_track_id() != Some(id) || self.vm.selected_bus_id().is_some()
+                {
+                    let fx = self.vm.select_track(id);
+                    self.absorb(fx, step);
+                }
                 self.menu = Some(OpenMenu::Track(track_id));
                 return;
             }
@@ -1442,8 +1457,20 @@ impl SongPracticeDetailScreen {
         if self.refused(step) {
             return;
         }
-        let dialog = ConfirmDialog::new("Delete this clip?")
-            .body("This removes the clip, its audio file and the notes inside it.");
+        // Named by its take and start: over overlapping clips "Delete this
+        // clip?" did not say which.
+        let clip = self.vm.track_by_id(&track_id).and_then(|t| {
+            let start = t.clip_by_id(&clip_id)?.start_ms;
+            Some(format!(
+                "the clip at {} on \"{}\"",
+                format_clock_ms(start),
+                t.display_name
+            ))
+        });
+        let dialog = ConfirmDialog::new("Delete this clip?").body(format!(
+            "This removes {}, its audio file and the notes inside it.",
+            clip.as_deref().unwrap_or("the clip")
+        ));
         self.ask(dialog, Asked::DeleteClip { track_id, clip_id }, step);
     }
 

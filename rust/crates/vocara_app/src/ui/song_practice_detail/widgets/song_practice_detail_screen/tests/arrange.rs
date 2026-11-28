@@ -133,3 +133,94 @@ fn the_rows_below_the_backing_stay_put_as_the_backing_switches() {
     assert!(h.shows("Drag the original song here, or click to browse"));
     assert_eq!(takes(&h), before);
 }
+
+/// Take 1 with a clip at 0:00 and one at 0:12, overlapping it; Take 2 with
+/// one clip.
+fn two_takes() -> Harness {
+    let mut t1 = take("t1", "Take 1");
+    t1.clips = vec![
+        AudioClip {
+            start_ms: 0,
+            ..AudioClip::new("c1", "/pool/c1.wav", 15_000)
+        },
+        AudioClip {
+            start_ms: 12_000,
+            ..AudioClip::new("c2", "/pool/c2.wav", 10_000)
+        },
+    ];
+    let mut t2 = take("t2", "Take 2");
+    t2.clips[0].id = "d1".into();
+    Harness::open(Setup {
+        practice: practice(vec![t1, t2]),
+        ..Setup::default()
+    })
+}
+
+// A right press opened its menu with the selection left where it was: Take
+// 2's clip menu over Take 1 selected.
+#[test]
+fn a_right_press_selects_the_clip_or_take_before_its_menu_opens() {
+    let mut h = two_takes();
+    assert_eq!(h.vm().selected_track_id(), Some("t1"));
+    let mut ui = LiveUi::new(h.size);
+    let clip = ui
+        .find(h.screen.view(), track_row::clip_widget_id("d1"))
+        .expect("Take 2's clip")
+        .bounds();
+    ui.point_at(clip.center());
+    let messages = ui.run(h.screen.view(), live_ui::right_click());
+    h.feed(messages);
+    assert_eq!(
+        h.screen.open_menu(),
+        Some(&OpenMenu::Clip {
+            track_id: "t2".into(),
+            clip_id: "d1".into()
+        })
+    );
+    assert_eq!(h.vm().selected_track_id(), Some("t2"));
+    assert_eq!(h.vm().selected_clip_id(), Some("d1"));
+    h.send(Message::DismissMenu);
+
+    // Take 1's header: the take.
+    let header = header_label(&h, "Take 1");
+    ui.point_at(header.center());
+    let messages = ui.run(h.screen.view(), live_ui::right_click());
+    h.feed(messages);
+    assert_eq!(h.screen.open_menu(), Some(&OpenMenu::Track("t1".into())));
+    assert_eq!(h.vm().selected_track_id(), Some("t1"));
+    assert_eq!(h.vm().selected_clip_id(), None);
+    h.send(Message::DismissMenu);
+
+    // On the take already selected, its selected clip stays so.
+    h.send(Message::Row {
+        track_id: "t1".into(),
+        message: track_row::Message::SelectClip("c2".into()),
+    });
+    ui.point_at(header.center());
+    let messages = ui.run(h.screen.view(), live_ui::right_click());
+    h.feed(messages);
+    assert_eq!(h.vm().selected_clip_id(), Some("c2"));
+}
+
+// "Delete this clip?" did not say which, over overlapping clips.
+#[test]
+fn the_delete_clip_question_names_the_clip_by_its_take_and_start() {
+    let mut h = two_takes();
+    for (clip, said) in [
+        ("c1", "This removes the clip at 00:00 on \"Take 1\""),
+        ("c2", "This removes the clip at 00:12 on \"Take 1\""),
+    ] {
+        h.send(Message::Row {
+            track_id: "t1".into(),
+            message: track_row::Message::ClipContextMenu(clip.into()),
+        });
+        h.click("Delete clip");
+        let Dialog::Confirm(confirm) = h.dialog() else {
+            panic!("a confirmation");
+        };
+        assert_eq!(confirm.title, "Delete this clip?");
+        let body = confirm.body.clone().unwrap_or_default();
+        assert!(body.starts_with(said), "{body}");
+        h.answer(DialogResult::Confirmed(false));
+    }
+}
