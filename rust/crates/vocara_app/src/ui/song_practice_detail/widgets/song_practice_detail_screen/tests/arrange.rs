@@ -1,6 +1,6 @@
 //! The arrange on the page: where the interpretation menu opens, the rows
-//! keeping their places as the backing switches, and the takes keeping
-//! their colours.
+//! keeping their places as the backing switches, the takes keeping their
+//! colours, and what a lane's menu calls the take.
 
 use super::*;
 
@@ -43,6 +43,50 @@ fn a_take_keeps_its_colour_as_takes_are_duplicated_or_reordered() {
     assert!(at("t2") < at("t1"), "reordered");
     assert_eq!(stripe(&h, "Take 2"), two);
     assert_eq!(stripe(&h, "Take 1"), one);
+}
+
+/// The dialog `action` on `track`'s lane menu asks.
+fn asked(h: &mut Harness, track: &str, action: TrackAction) -> Dialog {
+    h.send(Message::Row {
+        track_id: track.into(),
+        message: track_row::Message::ContextMenu,
+    });
+    h.send(Message::TrackMenu(action));
+    h.dialog.take().expect("a dialog").dialog
+}
+
+// A take's lane menu spoke of a "track" where the rest of the page says
+// take: "Rename track", "This removes the track…".
+#[test]
+fn a_takes_rename_and_delete_say_take_and_the_backings_say_track() {
+    let mut p = practice(vec![take("t1", "Take 1")]);
+    p.accompaniment = Some(Arc::new(backing()));
+    let mut h = Harness::open(Setup {
+        practice: p,
+        ..Setup::default()
+    });
+    let Dialog::Prompt(rename) = asked(&mut h, "t1", TrackAction::Rename) else {
+        panic!("a prompt");
+    };
+    assert_eq!((rename.title.as_str(), rename.hint.as_str()), ("Rename take", "Take name"));
+    let Dialog::Confirm(delete) = asked(&mut h, "t1", TrackAction::Delete) else {
+        panic!("a confirmation");
+    };
+    assert_eq!(
+        delete.body.as_deref(),
+        Some("This removes the take, its audio and its notes.")
+    );
+    let Dialog::Prompt(rename) = asked(&mut h, "acc", TrackAction::Rename) else {
+        panic!("a prompt");
+    };
+    assert_eq!((rename.title.as_str(), rename.hint.as_str()), ("Rename track", "Track name"));
+    let Dialog::Confirm(delete) = asked(&mut h, "acc", TrackAction::Delete) else {
+        panic!("a confirmation");
+    };
+    assert_eq!(
+        delete.body.as_deref(),
+        Some("This removes the track, its audio file and its notes.")
+    );
 }
 
 // The interpretation pop-up opened at the press: clicked at the button's

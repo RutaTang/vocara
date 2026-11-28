@@ -1408,8 +1408,13 @@ impl SongPracticeDetailScreen {
         let Some(track) = self.vm.track_by_id(track_id) else {
             return;
         };
-        let dialog = ConfirmDialog::new(format!("Delete \"{}\"?", track.display_name))
-            .body("This removes the track, its audio file and its notes.");
+        // A take is a take everywhere else on the page.
+        let body = if track.is_backing() {
+            "This removes the track, its audio file and its notes."
+        } else {
+            "This removes the take, its audio and its notes."
+        };
+        let dialog = ConfirmDialog::new(format!("Delete \"{}\"?", track.display_name)).body(body);
         self.ask(dialog, Asked::DeleteTrack(track.id.clone()), step);
     }
 
@@ -1430,11 +1435,12 @@ impl SongPracticeDetailScreen {
         let Some(track) = self.vm.track_by_id(track_id) else {
             return;
         };
-        self.ask(
-            rename_dialog(&track.display_name),
-            Asked::RenameTrack(track.id.clone()),
-            step,
-        );
+        let mut prompt = rename_dialog(&track.display_name);
+        if !track.is_backing() {
+            prompt.title = "Rename take".to_string();
+            prompt.hint = "Take name".to_string();
+        }
+        self.ask(prompt, Asked::RenameTrack(track.id.clone()), step);
     }
 
     /// `_separateBacking`.

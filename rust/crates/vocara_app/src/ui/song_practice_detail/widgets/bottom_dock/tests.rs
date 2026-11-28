@@ -92,7 +92,7 @@ fn the_closed_dock_shows_its_tabs_and_the_open_toggle() {
             assert!(ui.find(label.to_uppercase().as_str()).is_err(), "{t:?}");
         }
     }
-    assert!(ui.find(toggle_label(false)).is_ok());
+    assert!(ui.find(toggle_label(false, DockTab::Spectrogram)).is_ok());
     // No Take/Live toggle and no content while closed.
     assert!(ui.find("Live").is_err());
     assert!(ui.find("CONTENT").is_err());
@@ -103,7 +103,7 @@ fn the_open_dock_shows_its_content_and_the_live_toggle_where_the_tab_has_one() {
     let mut ui = iced_test::simulator(bottom_dock(dock(true, DockTab::Spectrogram, true)));
     assert!(ui.find("CONTENT").is_ok());
     assert!(ui.find("Live").is_ok());
-    assert!(ui.find(toggle_label(true)).is_ok());
+    assert!(ui.find(toggle_label(true, DockTab::Spectrogram)).is_ok());
     let mut ui = iced_test::simulator(bottom_dock(dock(true, DockTab::Range, false)));
     assert!(ui.find("Live").is_err());
 }
@@ -112,7 +112,7 @@ fn the_open_dock_shows_its_content_and_the_live_toggle_where_the_tab_has_one() {
 fn a_tab_and_the_toggle_report_their_calls() {
     let mut ui = iced_test::simulator(bottom_dock(dock(false, DockTab::Spectrogram, false)));
     ui.click("Power").expect("the Power tab");
-    ui.click(toggle_label(false)).expect("the toggle");
+    ui.click(toggle_label(false, DockTab::Spectrogram)).expect("the toggle");
     let messages: Vec<Message> = ui.into_messages().collect();
     assert!(matches!(
         messages.as_slice(),

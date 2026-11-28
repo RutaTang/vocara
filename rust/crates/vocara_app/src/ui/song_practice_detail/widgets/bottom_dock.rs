@@ -105,12 +105,15 @@ pub const STRIP_GROUPS: [&[DockTab]; 4] = [
     ],
 ];
 
-/// The show / hide chevron's tooltip (and label), as the dock is now.
-pub fn toggle_label(open: bool) -> &'static str {
-    if open {
-        "Hide analysis panel"
-    } else {
-        "Show analysis panel"
+/// The show / hide chevron's tooltip (and label), as the dock is now: what
+/// it shows or will show again, the mixer or the analysis (it said "Hide
+/// analysis panel" over the mixer too).
+pub fn toggle_label(open: bool, tab: DockTab) -> &'static str {
+    match (open, tab) {
+        (true, DockTab::Mixer) => "Hide mixer",
+        (false, DockTab::Mixer) => "Show mixer",
+        (true, _) => "Hide analysis panel",
+        (false, _) => "Show analysis panel",
     }
 }
 
@@ -385,7 +388,7 @@ fn tab_bar<'a>(open: bool, tab: DockTab, shows_live: bool, live: bool) -> Elemen
             )
             .panel()
             .icon_size(12.0)
-            .tooltip(toggle_label(open)),
+            .tooltip(toggle_label(open, tab)),
         );
     bar.into()
 }
