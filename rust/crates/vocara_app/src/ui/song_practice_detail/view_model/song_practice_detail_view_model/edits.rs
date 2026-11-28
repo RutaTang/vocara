@@ -19,7 +19,6 @@ use vocara_model::util::dart_date_time::DateTime;
 use vocara_model::util::dart_path;
 use vocara_model::util::id::new_id;
 use vocara_services::audio_exporter::AudioExporter;
-use vocara_services::engine::media::MAX_PLAYBACK_DURATION;
 use vocara_services::source_separation_service::SeparationError;
 use vocara_services::waveform_service::{exact_duration_ms, WaveformResult};
 
@@ -518,39 +517,6 @@ impl SongPracticeDetailViewModel {
 
     // --- Importing audio ---------------------------------------------------------------
 
-    /// Import admission gate: refuses a file whose DECLARED duration exceeds
-    /// the playback cap BEFORE anything happens — the decode-time budget
-    /// alone would only reject the file at playback staging, after it was
-    /// already copied, waveform-analyzed and persisted as an unplayable clip.
-    /// Containers that declare no length (probe returns `None`) are
-    /// admitted; the native decode budget still bounds them later.
-    fn admit_import_duration(&mut self, source_path: &str) -> bool {
-        // A probe that can't run (no engine in plain unit tests, an
-        // unreadable file) must admit: the native decode budget still bounds
-        // the file at staging, this gate only improves WHERE the refusal
-        // lands.
-        let probe = Arc::clone(&self.c.probe_duration);
-        let declared =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| probe(source_path)))
-                .ok()
-                .and_then(Result::ok)
-                .flatten();
-        if let Some(declared) = declared {
-            if declared > MAX_PLAYBACK_DURATION {
-                // Rounded up, as the limit counts: rounded down, a file just
-                // over it read as exactly the limit.
-                let minutes =
-                    (i64::try_from(declared.as_millis()).unwrap_or(i64::MAX) + 59999) / 60000;
-                self.c.toast(&format!(
-                    "That file is {minutes} minutes long. The limit is {} minutes.",
-                    MAX_PLAYBACK_DURATION.as_secs() / 60
-                ));
-                return false;
-            }
-        }
-        true
-    }
-
     /// The pre-guard every import shares: `None` to go on, or the reason it
     /// stops (already said). Not for a screen already gone: a drop of
     /// several files carried on importing after Back, each file a write a
@@ -559,14 +525,11 @@ impl SongPracticeDetailViewModel {
     /// structural pre-guard: the gate must be free when the stop finalize
     /// needs it, or the finalize waits behind the edit — and the edit may
     /// delete or move the very lane the take is landing on.
-    fn import_refused(&mut self, source_path: &str) -> bool {
+    fn import_refused(&mut self) -> bool {
         if self.c.disposed || self.c.practice.is_none() {
             return true;
         }
-        if self.busy() || self.is_separating() || self.take_in_flight() {
-            return true;
-        }
-        !self.admit_import_duration(source_path)
+        self.busy() || self.is_separating() || self.take_in_flight()
     }
 
     /// Imports `source_path` as the accompaniment (replacing any existing
@@ -619,8 +582,7 @@ impl SongPracticeDetailViewModel {
                 .is_none_or(|t| t.kind != AudioTrackKind::Vocal)
             || self.busy()
             || self.is_separating()
-            || self.take_in_flight()
-            || !self.admit_import_duration(source_path);
+            || self.take_in_flight();
         if refused {
             self.c.reply(Reply::ClipAdded { call, end_ms: None });
             return self.started(call);
@@ -645,7 +607,7 @@ impl SongPracticeDetailViewModel {
 
     fn import(&mut self, kind: ImportKind, source_path: &str) -> Started {
         let call = self.next_call();
-        if self.import_refused(source_path) {
+        if self.import_refused() {
             self.c.reply(Reply::Done(call));
             return self.started(call);
         }
@@ -686,6 +648,7 @@ impl SongPracticeDetailViewModel {
         let files = Arc::clone(&self.c.audio_files);
         let edits = Arc::clone(&self.c.edits);
         let analyze = Arc::clone(&self.c.analyze);
+        let probe = Arc::clone(&self.c.probe_duration);
         let practice_id = self.c.practice_id.clone();
         self.c
             .job(JobKind::Import, Pending::Edit(Box::new(step)), move || {
@@ -693,6 +656,7 @@ impl SongPracticeDetailViewModel {
                     &*files,
                     &*edits,
                     &*analyze,
+                    &*probe,
                     &practice_id,
                     &source,
                 ))

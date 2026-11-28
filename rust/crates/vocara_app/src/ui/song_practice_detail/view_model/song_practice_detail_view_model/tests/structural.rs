@@ -159,6 +159,32 @@ fn a_file_just_over_the_length_limit_says_so() {
     assert!(s.toasts[0].starts_with(&format!("That file is {over} minutes long.")));
 }
 
+/// The length check reads the file (an iCloud placeholder blocks until it
+/// downloads): it runs on the import's worker, so the call that starts the
+/// import returns at once.
+#[test]
+fn the_length_check_runs_off_the_ui_thread() {
+    let (release, wait) = std::sync::mpsc::channel::<()>();
+    let wait = Mutex::new(wait);
+    let (_f, mut s) = Fixture::open(Setup {
+        probe: Some(Arc::new(move |_: &str| {
+            let _ = guard(&wait).recv_timeout(Duration::from_secs(10));
+            Ok(Some(MAX_PLAYBACK_DURATION + Duration::from_secs(60)))
+        })),
+        ..Setup::default()
+    });
+    let started = std::time::Instant::now();
+    let call = s.call(|vm| vm.add_vocal_take("/src/placeholder.wav"));
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "the call waited on the probe"
+    );
+    release.send(()).expect("the probe waits");
+    s.await_reply(call);
+    assert_eq!(s.toasts.len(), 1);
+    assert!(s.toasts[0].contains("minutes long"), "{:?}", s.toasts);
+}
+
 #[test]
 fn a_file_that_cannot_be_read_says_so() {
     let (f, mut s) = Fixture::open(Setup::default());
@@ -342,12 +368,14 @@ fn an_import_over_the_playback_cap_is_refused_before_anything_is_copied() {
     });
     let before = s.practice().vocal_tracks.len();
     let first = s.practice().vocal_tracks[0].id.clone();
+    // One after another, as a drop of several files imports them (the
+    // check runs on the import's worker, under the edit gate).
     let a = s.call(|vm| vm.add_vocal_take("/src/very_long.mp3"));
+    s.await_reply(a);
     let b = s.call(|vm| vm.add_accompaniment("/src/very_long.mp3"));
+    s.await_reply(b);
     let c = s.call(|vm| vm.add_clip_to_take(&first, "/src/x.mp3", None));
-    for call in [a, b, c] {
-        s.await_reply(call);
-    }
+    s.await_reply(c);
     // Refused at the admission gate: no copy, no analysis, no save.
     assert!(f.events().is_empty());
     assert_eq!(s.practice().vocal_tracks.len(), before);

@@ -1178,6 +1178,33 @@ fn a_live_start_cancelled_while_the_permission_prompt_is_up_stays_off() {
     assert!(live.driver.toasts.is_empty());
 }
 
+/// The dock closed, or a tab that cannot show the live mic chosen, while
+/// the permission prompt is up: the answer opens nothing behind it.
+#[test]
+fn a_live_start_waiting_on_the_prompt_ends_with_the_dock_or_the_tab() {
+    let mut live = live_cache();
+    let host = Host::default();
+    let e = live.cache.show_dock_tab(DockTab::Spectrogram, &host);
+    live.driver.push(e);
+    live.set(true, &host);
+    let e = live.cache.set_dock_open(false, &host);
+    live.driver.push(e);
+    live.answer(true, &host);
+    assert!(!live.cache.live_monitor());
+    assert_eq!(live.captures().0, 0);
+    assert_eq!(host.pauses.load(Ordering::SeqCst), 0);
+
+    let e = live.cache.show_dock_tab(DockTab::Spectrogram, &host);
+    live.driver.push(e);
+    live.set(true, &host);
+    let e = live.cache.show_dock_tab(DockTab::Range, &host);
+    live.driver.push(e);
+    live.answer(true, &host);
+    assert!(!live.cache.live_monitor());
+    assert_eq!(live.captures().0, 0);
+    assert_eq!(host.pauses.load(Ordering::SeqCst), 0);
+}
+
 #[test]
 fn a_live_start_cannot_begin_while_recording() {
     let mut live = live_cache();

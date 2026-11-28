@@ -124,14 +124,17 @@ pub fn exceeds_decode_cap(frames: usize, rate: u32, max_duration: Duration) -> b
 /// decoding a packet: the import gate's cheap pre-check. `Ok(None)` when the
 /// path is not a plain file, the container declares no length (the decode-time
 /// budget still bounds it later), or it cannot be probed (the import fails on
-/// its own terms). Cheap enough for the UI thread (a header read).
+/// its own terms). Blocking: it opens and reads the file, which waits on an
+/// iCloud placeholder until it downloads, or on a slow volume; run it off the
+/// UI thread (the import runs it on its worker).
 ///
 /// `Err` only when there is no engine to probe with: the Dart probe threw
 /// then, and its one caller admitted the import.
 pub fn probe_media_duration(path: &str) -> Result<Option<Duration>, MediaError> {
-    // A plain file only. This ran on the UI thread, and opening a named pipe
-    // with no writer blocks: dropped as audio, one froze the app. The import
-    // itself refuses anything else (see `AudioFileService::import_audio`).
+    // A plain file only: opening a named pipe with no writer blocks forever
+    // (dropped as audio, one froze the app when this ran on the UI thread).
+    // The import itself refuses anything else (see
+    // `AudioFileService::import_audio`).
     if !fs::metadata(path).is_ok_and(|m| m.is_file()) {
         return Ok(None);
     }

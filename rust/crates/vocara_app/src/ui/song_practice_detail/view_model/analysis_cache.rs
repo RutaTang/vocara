@@ -974,7 +974,9 @@ impl AnalysisCache {
         self.notify();
         if open && self.dock_shows_take() {
             self.ensure_dock_analysis(host);
-        } else if !open && self.live_monitor {
+        } else if !open {
+            // Also a start still waiting on the mic permission prompt: its
+            // answer must not open the mic behind a closed dock.
             self.live_off();
         }
         self.finish(host)
@@ -990,7 +992,8 @@ impl AnalysisCache {
         if self.dock_shows_take() {
             self.ensure_dock_analysis(host);
         }
-        if !self.active_tab_supports_live() && self.live_monitor {
+        if !self.active_tab_supports_live() {
+            // Also a start still waiting on the mic permission prompt.
             self.live_off();
         }
         self.finish(host)

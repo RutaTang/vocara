@@ -7,12 +7,13 @@ use std::fmt;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
 use vocara_model::models::song_practice::SongPractice;
 use vocara_model::models::technique::Technique;
 use vocara_services::audio_edit_service::{AudioEditError, AudioEdits};
 use vocara_services::audio_file_service::{AudioFileError, AudioFiles};
-use vocara_services::engine::media::MediaError;
+use vocara_services::engine::media::{MediaError, MAX_PLAYBACK_DURATION};
 use vocara_services::graph_audio_playback_service::SyncError;
 use vocara_services::source_separation_service::{SeparationError, SeparationResult};
 use vocara_services::waveform_service::WaveformResult;
@@ -252,6 +253,35 @@ impl ProgressCell {
     }
 }
 
+/// The import's admission: refuses a file whose DECLARED duration exceeds
+/// the playback cap before anything is copied (the decode-time budget alone
+/// would only reject it at playback staging, after it was copied, analyzed
+/// and persisted as an unplayable clip). Here, on the import's worker, not
+/// on the UI thread: the probe opens and reads the file, which blocks on an
+/// iCloud placeholder until it downloads, or on a slow network volume.
+/// A probe that can't run (an unreadable file, no engine in unit tests)
+/// admits: the decode budget still bounds the file at staging. Containers
+/// that declare no length are admitted too.
+fn too_long(
+    probe: &(dyn Fn(&str) -> Result<Option<Duration>, MediaError> + Send + Sync),
+    source_path: &str,
+) -> Option<Failure> {
+    let declared = catch_unwind(AssertUnwindSafe(|| probe(source_path)))
+        .ok()
+        .and_then(Result::ok)
+        .flatten()?;
+    if declared <= MAX_PLAYBACK_DURATION {
+        return None;
+    }
+    // Rounded up, as the limit counts: rounded down, a file just over it
+    // read as exactly the limit.
+    let minutes = (i64::try_from(declared.as_millis()).unwrap_or(i64::MAX) + 59999) / 60000;
+    Some(Failure::Said(format!(
+        "That file is {minutes} minutes long. The limit is {} minutes.",
+        MAX_PLAYBACK_DURATION.as_secs() / 60
+    )))
+}
+
 /// `_audioFiles.importAudio`, `_edits.ensureStreamableWav`, the redundant
 /// original's delete and the body's first `_waveforms.analyze` of
 /// `_withImportedAudio`, in order. `Err` when the import itself failed
@@ -260,9 +290,13 @@ pub(super) fn import_prepared(
     files: &dyn AudioFiles,
     edits: &dyn AudioEdits,
     analyze: &(dyn Fn(&str) -> Result<WaveformResult, String> + Send + Sync),
+    probe: &(dyn Fn(&str) -> Result<Option<Duration>, MediaError> + Send + Sync),
     practice_id: &str,
     source_path: &str,
 ) -> Result<Imported, Failure> {
+    if let Some(refused) = too_long(probe, source_path) {
+        return Err(refused);
+    }
     let imported = match files.import_audio(practice_id, source_path) {
         Ok(path) => path,
         Err(AudioFileError::Io(e)) => {
