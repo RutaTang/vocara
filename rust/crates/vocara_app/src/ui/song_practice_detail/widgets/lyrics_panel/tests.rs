@@ -1417,6 +1417,33 @@ fn a_reveal_scrolls_its_list_there_over_its_time_from_where_it_was() {
 }
 
 #[test]
+fn a_scroll_wants_frames_until_one_at_its_end_has_moved_the_list_there() {
+    // The last frame handled 5 ms before the end, the clock past it: the
+    // frames go on, or the list stayed short of the line for good.
+    use std::time::Instant;
+    let mut state = LyricsPanelState::new();
+    let list = state.list_id(List::Reader);
+    let t0 = Instant::now();
+    let start = ScrollStart {
+        scroll: RevealScroll {
+            list,
+            from: 100.0,
+            to: 420.0,
+        },
+        motion: ScrollMotion::READER,
+    };
+    let _: Task<Message> = state.start_scroll(start, t0);
+    let _: Task<Message> = state.scroll_frame(t0 + Duration::from_millis(315));
+    assert!(
+        !state.is_scrolling(t0 + Duration::from_millis(340)),
+        "the clock is past it"
+    );
+    assert!(state.wants_scroll_frames(), "but the list is not there yet");
+    let _: Task<Message> = state.scroll_frame(t0 + Duration::from_millis(340));
+    assert!(!state.wants_scroll_frames(), "there: the frames stop");
+}
+
+#[test]
 fn the_readers_ease_out_over_320_ms_and_the_sync_list_eases_over_200() {
     assert_eq!(
         (ScrollMotion::READER.duration, ScrollMotion::READER.curve),

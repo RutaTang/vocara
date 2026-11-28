@@ -290,6 +290,44 @@ fn the_loading_card_pads_its_content_inside_its_border() {
 }
 
 #[test]
+fn the_loading_cards_disc_and_label_sit_in_its_middle() {
+    // Shrunk to the label, the column sat at the card's left padding: three
+    // times the room on the right. The card is centred in the 1024 window.
+    let mut ui = iced_test::simulator(opening_dialog(Fade::SHOWN));
+    let label = ui.find("Loading practice").expect("the label").bounds();
+    let middle = label.x + label.width / 2.0;
+    assert!((middle - 512.0).abs() < 1.0, "{label:?}");
+}
+
+#[test]
+fn a_loading_dialog_whose_last_frame_came_late_still_goes() {
+    // Its last frame handled just before the end (the practice being built
+    // meanwhile), the clock past it when the frames are asked for again:
+    // they go on until one at the end lets the dialog go. Judged by the
+    // clock alone they stopped, and the faded card stayed over Home.
+    use crate::ui::core::widgets::confirm_dialog::TRANSITION;
+    let mut home = Home::over(FakePractices::with(vec![summary("a", "Song")]));
+    home.send(Message::Open("a".into()));
+    home.screen.loading = Some(crate::ui::core::widgets::confirm_dialog::DialogMotion::shown());
+    let timer = home.opening_timer();
+    // The motion starts between `before` and `after`: a frame 5 ms short of
+    // `before`'s end is short of its end, and 30 ms past `after`'s is past.
+    let before = Instant::now();
+    home.fire(timer);
+    let after = Instant::now();
+    home.send(Message::DialogFrame(
+        before + TRANSITION - Duration::from_millis(5),
+    ));
+    let late = after + TRANSITION + Duration::from_millis(30);
+    assert!(!home.screen.is_animating(late), "the clock is past the end");
+    assert!(home.screen.loading.is_some(), "still drawn");
+    assert!(home.screen.wants_frames(late), "so the frames go on");
+    home.send(Message::DialogFrame(late));
+    assert!(home.screen.loading.is_none(), "gone");
+    assert!(!home.screen.wants_frames(late), "and the frames stop");
+}
+
+#[test]
 fn the_loading_dialog_comes_in_and_goes_over_150_ms_with_frames_only_meanwhile() {
     use crate::ui::core::motion;
     use crate::ui::core::widgets::confirm_dialog::testing::{assert_comes_in, assert_goes};

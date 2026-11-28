@@ -443,6 +443,16 @@ impl HomeScreen {
         self.loading.as_ref().is_some_and(|m| m.is_animating(now))
     }
 
+    /// Whether the screen wants frames at `now`: until a frame at or past
+    /// the dialog's end has been handled, which is what lets a dialog that
+    /// went go (see `Message::DialogFrame`). Judged by `now` alone, the
+    /// frames stopped whenever the clock passed the end before the last
+    /// frame was handled (likely while the practice it opens is built): the
+    /// dialog stayed drawn, faded to a ghost, over Home for good.
+    pub fn wants_frames(&self, now: Instant) -> bool {
+        self.is_animating(now) || self.is_animating(self.now)
+    }
+
     /// Surfaces create/delete failures as a transient toast the moment the
     /// command settles (mirrors the detail screen's SnackBar pattern).
     /// Without this, a failed mutation is silently dropped and the UI
@@ -814,7 +824,7 @@ impl Screen for HomeScreen {
             .collect();
         subscriptions.push(self.snacks.subscription().map(snack_message));
         subscriptions
-            .push(motion::frames(self.is_animating(Instant::now())).map(Message::DialogFrame));
+            .push(motion::frames(self.wants_frames(Instant::now())).map(Message::DialogFrame));
         // Freshness reloads when sync applies remote rows; with no sync
         // configured the stream simply never fires.
         subscriptions.push(
@@ -1053,6 +1063,9 @@ fn opening_dialog<'a>(fade: Fade) -> Element<'a, Message> {
                 .font(font::SEMIBOLD)
                 .color(Studio::TEXT_PRIMARY),
         ]
+        // The card's width, so the disc and the label sit in its middle:
+        // shrunk to the label, the column sat at the card's left padding.
+        .width(Length::Fill)
         .align_x(Horizontal::Center),
     )
     .width(168)

@@ -2118,6 +2118,35 @@ fn the_note_editor_and_the_picker_come_in_and_go_over_150_ms() {
 }
 
 #[test]
+fn a_closed_dialog_whose_last_frame_came_late_still_goes() {
+    // Its last frame handled just before the end, the clock past it when
+    // the frames are asked for again: they go on until one at the end lets
+    // it go. Judged by the clock alone, the faded editor stayed drawn.
+    use crate::ui::core::widgets::confirm_dialog::{DialogMotion, TRANSITION};
+    let mut h = Harness::open(Setup::default());
+    h.click(track_row::ADD_NOTE);
+    h.screen.editor_motion = DialogMotion::shown();
+    // The motion starts between `before` and `after`: a frame 5 ms short of
+    // `before`'s end is short of its end, and 30 ms past `after`'s is past.
+    let before = Instant::now();
+    h.click("Cancel");
+    let after = Instant::now();
+    h.send(Message::DialogFrame(
+        before + TRANSITION - Duration::from_millis(5),
+    ));
+    let late = after + TRANSITION + Duration::from_millis(30);
+    assert!(
+        !h.screen.dialogs_animating(late),
+        "the clock is past the end"
+    );
+    assert!(h.screen.closing_editor.is_some(), "still drawn");
+    assert!(h.screen.wants_dialog_frames(late), "so the frames go on");
+    h.send(Message::DialogFrame(late));
+    assert!(h.screen.closing_editor.is_none(), "gone");
+    assert!(!h.screen.wants_dialog_frames(late), "and the frames stop");
+}
+
+#[test]
 fn the_technique_picker_lists_the_library_and_adds_the_pick() {
     let twang = Technique::new("T1", "Twang", at(), at());
     let mut h = Harness::open(Setup {

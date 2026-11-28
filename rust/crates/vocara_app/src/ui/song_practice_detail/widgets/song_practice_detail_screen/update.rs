@@ -1344,6 +1344,15 @@ impl SongPracticeDetailScreen {
                 .is_some_and(|c| c.1.is_animating(now))
     }
 
+    /// Whether the note editor's or the picker's motion wants frames at
+    /// `now`: until a frame at or past its end has been handled, as only
+    /// such a frame lets a closed one go ([`Self::dialog_frame`]). Judged by
+    /// the clock alone, a last frame handled late stopped them short, and
+    /// the dialog stayed drawn as a faded ghost.
+    pub(super) fn wants_dialog_frames(&self, now: Instant) -> bool {
+        self.dialogs_animating(now) || self.dialogs_animating(self.dialog_now)
+    }
+
     /// A frame of the note editor's or the picker's motion: a closed one
     /// that has gone is dropped.
     fn dialog_frame(&mut self, at: Instant) {

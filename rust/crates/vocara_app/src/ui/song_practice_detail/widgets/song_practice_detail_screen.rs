@@ -968,8 +968,9 @@ impl Screen for SongPracticeDetailScreen {
             );
         }
         subscriptions.push(self.snacks.subscription().map(snack_message));
-        subscriptions
-            .push(motion::frames(self.dialogs_animating(Instant::now())).map(Message::DialogFrame));
+        subscriptions.push(
+            motion::frames(self.wants_dialog_frames(Instant::now())).map(Message::DialogFrame),
+        );
         // The Vocal tract tab's figure moving to the latest estimate.
         subscriptions.push(
             motion::frames(self.vocal_tract_shown() && self.vocal_tract.animating()).map(|at| {
@@ -980,7 +981,7 @@ impl Screen for SongPracticeDetailScreen {
         );
         // A lyrics list scrolling to a revealed line.
         subscriptions.push(
-            motion::frames(self.lyrics.is_scrolling(Instant::now()))
+            motion::frames(self.lyrics.wants_scroll_frames())
                 .map(|at| Message::Lyrics(lyrics_panel::Message::ScrollFrame(at))),
         );
         Subscription::batch(subscriptions)

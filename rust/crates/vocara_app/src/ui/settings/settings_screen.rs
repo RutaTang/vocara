@@ -599,6 +599,14 @@ impl SettingsScreen {
             || self.licenses.as_ref().is_some_and(|l| l.is_animating(now))
     }
 
+    /// Whether the screen wants frames at `now`: until a frame at or past
+    /// the end has been handled, as only such a frame settles the licences
+    /// page's slide (`Message::Frame`). Judged by the clock alone, a last
+    /// frame handled late left the page part-way.
+    pub fn wants_frames(&self, now: Instant) -> bool {
+        self.is_animating(now) || self.is_animating(self.now)
+    }
+
     /// The toast on screen, if any.
     pub fn toast(&self) -> Option<&str> {
         self.toasts.current().map(|t| t.text.as_str())
@@ -1198,7 +1206,7 @@ impl Screen for SettingsScreen {
                 .map(|()| Message::SettingsChanged),
         ];
         subscriptions.push(self.toasts.subscription().map(toast_message));
-        subscriptions.push(motion::frames(self.is_animating(Instant::now())).map(Message::Frame));
+        subscriptions.push(motion::frames(self.wants_frames(Instant::now())).map(Message::Frame));
         if self.watches_update_check() {
             subscriptions.push(iced::time::every(UPDATE_WATCH).map(|_| Message::UpdateWatch));
         }

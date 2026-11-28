@@ -1521,6 +1521,34 @@ fn the_license_page_slides_in_over_settings_and_back_out() {
 }
 
 #[test]
+fn a_license_page_whose_last_frame_came_late_still_slides_all_out() {
+    // Its last frame handled just before the end, the clock past it: the
+    // frames go on until one at the end lets the page go. Judged by the
+    // clock alone, it stayed drawn part-way out over Settings.
+    use crate::ui::core::widgets::slide::PAGE_TRANSITION;
+    use std::time::{Duration, Instant};
+
+    let mut page = Setup::new().mount();
+    page.send(Message::OpenLicenses);
+    page.send(Message::Frame(Instant::now() + PAGE_TRANSITION));
+    // The motion starts between `before` and `after`: a frame 5 ms short of
+    // `before`'s end is short of its end, and 30 ms past `after`'s is past.
+    let before = Instant::now();
+    page.send(Message::Licenses(licenses::Message::Back));
+    let after = Instant::now();
+    page.send(Message::Frame(
+        before + PAGE_TRANSITION - Duration::from_millis(5),
+    ));
+    let late = after + PAGE_TRANSITION + Duration::from_millis(30);
+    assert!(!page.screen.is_animating(late), "the clock is past the end");
+    assert!(page.screen.closed_licenses.is_some(), "still drawn");
+    assert!(page.screen.wants_frames(late), "so the frames go on");
+    page.send(Message::Frame(late));
+    assert!(page.screen.closed_licenses.is_none(), "let go");
+    assert!(!page.screen.wants_frames(late), "and the frames stop");
+}
+
+#[test]
 fn the_page_hears_the_settings_notify() {
     let page = Setup::new().mount();
     let feed = SettingsFeed(page.services.app_settings.clone());

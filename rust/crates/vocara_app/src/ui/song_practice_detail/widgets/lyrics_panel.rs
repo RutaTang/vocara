@@ -555,6 +555,13 @@ impl LyricsPanelState {
         Task::batch(moves)
     }
 
+    /// Whether a scroll still wants frames: until one at or past its end
+    /// has moved the list to the line and let it go (`scroll_frame`). Judged
+    /// by the clock, a last frame handled late left the list short of it.
+    pub fn wants_scroll_frames(&self) -> bool {
+        !self.scrolls.is_empty()
+    }
+
     /// Whether a list scrolls to a revealed line at `now`.
     pub fn is_scrolling(&self, now: Instant) -> bool {
         self.scrolls
