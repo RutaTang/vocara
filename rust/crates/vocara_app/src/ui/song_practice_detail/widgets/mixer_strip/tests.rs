@@ -211,6 +211,20 @@ fn an_empty_desk_says_so() {
     assert!(text_at(&mut ui, "Master", 0).is_none());
 }
 
+/// On the native engine an empty desk keeps the input strip: the record gain
+/// and the monitor level are set there before the first take.
+#[test]
+fn an_empty_desk_on_the_effects_engine_keeps_the_input_strip() {
+    let desk = MixerStrip {
+        supports_effects: true,
+        ..MixerStrip::new(&[], &[])
+    };
+    let mut ui = simulator(Size::new(900.0, 400.0), desk.view());
+    assert!(text_at(&mut ui, "Input", 0).is_some());
+    assert!(text_at(&mut ui, "Master", 0).is_some());
+    assert!(text_at(&mut ui, "No tracks yet", 0).is_none());
+}
+
 #[test]
 fn the_effects_engine_adds_the_mic_strip_the_buses_and_plus_bus() {
     let tracks = takes(1..2);

@@ -308,7 +308,10 @@ impl<'a> MixerStrip<'a> {
     /// groups split by a 1 px divider, then the add-bus tile.
     pub fn view(self) -> Element<'a, Message> {
         let buses = self.buses;
-        if self.tracks.is_empty() && buses.is_empty() {
+        // Nothing to mix. Not on the native engine: its input strip holds
+        // the record gain and the monitor level, which want setting before
+        // the first take (a cappella, or a song with nothing imported yet).
+        if self.tracks.is_empty() && buses.is_empty() && !self.supports_effects {
             return container(center(
                 text("No tracks yet")
                     .size(type_scale::BODY)

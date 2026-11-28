@@ -505,6 +505,31 @@ impl SongPracticeDetailScreen {
         self.absorb(fx, step);
     }
 
+    /// Whether the open menu is an inspector pop-up for a channel the
+    /// inspector no longer shows: a landing changed the selection (a take
+    /// finalized, an import), or the inspector closed. Not drawn then, it
+    /// would still hold the page as a menu does, and pop open by itself
+    /// when that channel is shown again.
+    fn inspector_menu_stale(&self) -> bool {
+        use left_panel::{Channel, InspectorMenu};
+        let Some(OpenMenu::Inspector(menu)) = &self.menu else {
+            return false;
+        };
+        let (InspectorMenu::Output(channel)
+        | InspectorMenu::AddSend(channel)
+        | InspectorMenu::RetargetSend(channel, _)) = menu;
+        if !self.vm.inspector_open() {
+            return true;
+        }
+        match channel {
+            Channel::Bus(id) => self.vm.selected_bus_id() != Some(id.as_str()),
+            Channel::Track(id) => {
+                self.vm.selected_bus_id().is_some()
+                    || self.vm.selected_track_id() != Some(id.as_str())
+            }
+        }
+    }
+
     /// The inspector's messages, and the dock summary's (`source` says
     /// which: they share the left panel's messages).
     fn inspector(&mut self, m: left_panel::Message, source: fn(String) -> Source, step: &mut Step) {
@@ -1626,6 +1651,9 @@ impl SongPracticeDetailScreen {
             return;
         }
         self.settle_owed(false, step);
+        if self.inspector_menu_stale() {
+            self.menu = None;
+        }
         // The dock asks again for what its tab shows that the cache let go.
         let dock_heals = self.vm.with_analysis(|a, h| {
             bottom_dock::heals(

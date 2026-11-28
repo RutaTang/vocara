@@ -2598,6 +2598,33 @@ fn inspecting(fx: TrackFx) -> Harness {
     h
 }
 
+/// An inspector pop-up left open while a landing selects another channel is
+/// closed, not left open unseen to pop up again when its channel is shown.
+#[test]
+fn an_inspector_menu_for_a_channel_no_longer_shown_closes() {
+    use left_panel::{Channel, InspectorMenu};
+    let mut h = inspecting(TrackFx::flat());
+    let output = InspectorMenu::Output(Channel::Track("t1".into()));
+    h.send(Message::Inspector(left_panel::Message::OpenMenu(
+        output.clone(),
+    )));
+    assert_eq!(
+        h.screen.open_menu(),
+        Some(&OpenMenu::Inspector(output.clone()))
+    );
+    // A landing selects another take (not an inspector message).
+    let fx = h.screen.vm.select_track("t2");
+    drop(fx);
+    h.send(Message::Frame);
+    assert_eq!(h.screen.open_menu(), None);
+    // Back on t1: nothing pops open by itself.
+    h.send(Message::Row {
+        track_id: "t1".into(),
+        message: track_row::Message::Select,
+    });
+    assert_eq!(h.screen.open_menu(), None);
+}
+
 /// A live FX edit on `t1`, as a slider, an EQ band or a wheel's Q makes it
 /// (the panel commits on the release, or 400 ms after the wheel).
 fn live_fx_edit(h: &mut Harness, fx: &TrackFx) -> TrackFx {

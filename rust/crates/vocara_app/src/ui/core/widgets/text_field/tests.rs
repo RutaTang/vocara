@@ -990,6 +990,37 @@ fn a_keyboard_move_reveals_the_caret_at_once() {
     assert!((back - end).abs() < 0.01, "{back} {end}");
 }
 
+/// macOS's Emacs keys move the caret: ⌃A to the start, ⌃E to the end
+/// (they became Home and End, which on macOS only scroll the text).
+#[cfg(target_os = "macos")]
+#[test]
+fn control_a_and_control_e_move_the_caret_on_macos() {
+    caret::set_scale_factor(1.0);
+    let mut window = window();
+    let at = Point::new(150.0, MIDDLE);
+    let t0 = Instant::now() + 1000 * MS;
+    let text = type_past_the_end(&mut window, "WW", t0);
+    let control = Event::Keyboard(keyboard::Event::ModifiersChanged(keyboard::Modifiers::CTRL));
+    let release = Event::Keyboard(keyboard::Event::ModifiersChanged(
+        keyboard::Modifiers::empty(),
+    ));
+    let (messages, _) = window.run(
+        field(&text),
+        at,
+        &[control.clone(), typed("a"), release.clone(), typed("X")],
+        t0 + 300 * MS,
+    );
+    assert_eq!(input_of(messages), Some(format!("X{text}")));
+    let text = format!("X{text}");
+    let (messages, _) = window.run(
+        field(&text),
+        at,
+        &[control, typed("e"), release, typed("Y")],
+        t0 + 400 * MS,
+    );
+    assert_eq!(input_of(messages), Some(format!("{text}Y")));
+}
+
 #[test]
 fn a_scroll_signal_across_the_field_scrolls_it_and_one_down_is_the_pages() {
     caret::set_scale_factor(1.0);

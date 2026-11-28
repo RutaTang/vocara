@@ -955,6 +955,12 @@ impl<'a, Message: Clone + 'a> Widget<Message, Theme, Renderer> for TextInput<'a,
 
                     #[cfg(target_os = "macos")]
                     let modified_key = macos_shortcut.as_ref().unwrap_or(modified_key);
+                    // Home and End only scroll on macOS, but ⌃A and ⌃E (the
+                    // Emacs keys, converted to them above) move the caret.
+                    #[cfg(target_os = "macos")]
+                    let scroll_only = SCROLL_KEYS_ONLY_SCROLL && macos_shortcut.is_none();
+                    #[cfg(not(target_os = "macos"))]
+                    let scroll_only = SCROLL_KEYS_ONLY_SCROLL;
 
                     match modified_key.as_ref() {
                         keyboard::Key::Named(key::Named::Enter) => {
@@ -1025,7 +1031,7 @@ impl<'a, Message: Clone + 'a> Widget<Message, Theme, Renderer> for TextInput<'a,
                             update_cache(state, &self.value);
                         }
                         keyboard::Key::Named(key::Named::Home)
-                            if SCROLL_KEYS_ONLY_SCROLL && !modifiers.shift() =>
+                            if scroll_only && !modifiers.shift() =>
                         {
                             // `scrollToBeginningOfDocument:`: the text
                             // scrolls to its start; the caret stays.
@@ -1035,7 +1041,7 @@ impl<'a, Message: Clone + 'a> Widget<Message, Theme, Renderer> for TextInput<'a,
                             shell.capture_event();
                         }
                         keyboard::Key::Named(key::Named::End)
-                            if SCROLL_KEYS_ONLY_SCROLL && !modifiers.shift() =>
+                            if scroll_only && !modifiers.shift() =>
                         {
                             // `scrollToEndOfDocument:`.
                             let geometry = geometry(state, layout);
