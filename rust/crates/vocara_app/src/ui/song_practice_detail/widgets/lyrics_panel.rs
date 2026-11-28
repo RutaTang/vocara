@@ -935,7 +935,12 @@ pub fn right_panel<'a>(
 }
 
 /// The count the Notes tab shows: every take's notes (the page title's).
+/// None with the backing selected: the tab says notes are for vocal takes
+/// only, and a count over that read as notes on the backing.
 fn notes_count(data: &RightPanelData<'_>) -> usize {
+    if data.selected_track.is_some_and(AudioTrack::is_backing) {
+        return 0;
+    }
     data.all_notes.len()
 }
 

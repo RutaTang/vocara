@@ -220,6 +220,7 @@ struct Vm {
     under_dialog: bool,
     revision: u64,
     track: Option<AudioTrack>,
+    all_notes: Vec<NoteRef>,
 }
 
 impl Vm {
@@ -251,6 +252,7 @@ impl Vm {
             under_dialog: false,
             revision: 0,
             track: None,
+            all_notes: Vec::new(),
         }
     }
 
@@ -315,7 +317,7 @@ impl Vm {
             selected_track: self.track.as_ref(),
             selected_track_notes: self.track.as_ref().map_or(&[], |t| &t.notes),
             selected_track_techniques: self.track.as_ref().map_or(&[], |t| &t.technique_markers),
-            all_notes: &[],
+            all_notes: &self.all_notes,
             under_dialog: self.under_dialog,
             revision: self.revision,
         }
@@ -1277,6 +1279,29 @@ fn a_backing_track_takes_no_notes_or_techniques() {
             assert!(bounds_of(&mut ui, &state, &vm, add).is_none(), "{add}");
         }
     }
+}
+
+#[test]
+fn with_the_backing_selected_the_notes_tab_counts_nothing() {
+    // The badge read "1" over "Notes apply to vocal takes only.": a take's
+    // note, which looked like one on the backing.
+    let take = annotated_take(AudioTrackKind::Vocal);
+    let mut vm = Vm::reading(Vec::new());
+    vm.tab = RightTab::Notes;
+    vm.all_notes = vec![NoteRef {
+        track_id: take.id.clone(),
+        track_name: take.display_name.clone(),
+        note: take.notes[0].clone(),
+    }];
+    vm.track = Some(take);
+    let state = LyricsPanelState::new();
+    let mut ui = PanelUi::new(Size::new(300.0, 600.0));
+    assert!(
+        bounds_of(&mut ui, &state, &vm, "1").is_some(),
+        "a take's count"
+    );
+    vm.track = Some(annotated_take(AudioTrackKind::Accompaniment));
+    assert!(bounds_of(&mut ui, &state, &vm, "1").is_none(), "no count");
 }
 
 #[test]
