@@ -119,6 +119,13 @@ impl Drop for DeviceHandle {
 /// Engine render sub-chunk for the output-boundary resampler (matches the graph's max block).
 const RESAMPLE_BLOCK: usize = 1024;
 
+/// What the output-boundary resampler renders in multiples of: it renders only the engine frames
+/// the callback still needs, rounded up to this, never a whole [`RESAMPLE_BLOCK`] at a time.
+/// Rendering a whole block whenever the FIFO ran short made every few small device callbacks
+/// (256 frames at 44.1 kHz: a 5.8 ms deadline) render 21 ms of graph audio, a spike that missed
+/// the deadline under load where the 48 kHz path, rendering just its buffer, did not.
+const RESAMPLE_QUANTUM: usize = 64;
+
 /// A discoverable device, flattened for the FFI boundary.
 pub struct DeviceDesc {
     /// Stable identifier (CoreAudio device UID) — the persist key.
@@ -602,15 +609,19 @@ impl OutResampler {
         self.consumed_floor = 0;
     }
 
-    /// Renders one engine block into the FIFO. `false` = the cell denied this callback, and the
-    /// FIFO was NOT extended — the caller must abandon the whole callback rather than pushing
-    /// silence, because the consumed cursor is advanced from FIFO read progress: frames the
-    /// processor never rendered would push `consumed_total` past `rendered_total` and jump the
-    /// reported playhead.
+    /// Renders the `wanted` engine frames the FIFO lacks into it, rounded up to
+    /// [`RESAMPLE_QUANTUM`] and at most one engine block (see there). `false` = the cell denied
+    /// this callback, and the FIFO was NOT extended — the caller must abandon the whole callback
+    /// rather than pushing silence, because the consumed cursor is advanced from FIFO read
+    /// progress: frames the processor never rendered would push `consumed_total` past
+    /// `rendered_total` and jump the reported playhead.
     #[inline]
     #[must_use]
-    fn render_block(&mut self) -> bool {
-        let frames = self.max_block;
+    fn render_block(&mut self, wanted: usize) -> bool {
+        let frames = wanted
+            .div_ceil(RESAMPLE_QUANTUM)
+            .saturating_mul(RESAMPLE_QUANTUM)
+            .clamp(1, self.max_block);
         let n = frames * CHANNELS;
         if !self
             .rt
@@ -674,7 +685,7 @@ impl OutResampler {
             // The FIFO is sized in `new` so reaching `need_len` never reallocates.
             debug_assert!(need_len + self.max_block <= self.fifo.capacity());
             while self.fifo.len() < need_len {
-                if !self.render_block() {
+                if !self.render_block(need_len - self.fifo.len()) {
                     // Denied mid-callback (retired, or a zombie is still inside). Frames already
                     // written are real; the rest is silence, and nothing further is advanced.
                     out[done * CHANNELS..out_frames * CHANNELS].fill(0.0);
@@ -6422,12 +6433,53 @@ mod out_resampler_tests {
         (h, res)
     }
 
+    /// A small device buffer renders about what it plays, never a whole engine block when the
+    /// FIFO runs a few frames short: 256 frames at 44.1 kHz (a 5.8 ms deadline) used to render
+    /// 1024 engine frames (21 ms of graph audio) every few callbacks.
+    #[test]
+    fn a_small_callback_renders_only_what_it_still_needs() {
+        use super::{RESAMPLE_QUANTUM, SINC_HALF};
+        let desc = GraphDesc {
+            nodes: vec![NodeEntry::new(1, Box::new(MasterNode::unity()))],
+            edges: Vec::<Edge>::new(),
+            master: 1,
+        };
+        let g = desc.compile(ENGINE_SR, 1024).unwrap();
+        let (_mic_prod, mic_cons) = spsc::<[Smp; CHANNELS]>(256);
+        let (h, rt) = spawn(g, HashMap::new(), mic_cons, 256);
+        let cell = RtCell::new(rt);
+        let mut res = OutResampler::new(44_100.0, 1024, Arc::clone(&cell), cell.claim());
+        h.play();
+        let out_frames = 256;
+        let bound = (out_frames as f64 * res.step).ceil() as u64
+            + 2 * SINC_HALF as u64
+            + RESAMPLE_QUANTUM as u64;
+        let mut out = vec![0.0; out_frames * CHANNELS];
+        let mut last = cell.transport().rendered_frames_for_test();
+        for i in 0..200 {
+            res.process(&mut out, out_frames);
+            let rendered = cell.transport().rendered_frames_for_test();
+            assert!(
+                rendered - last <= bound,
+                "callback {i} rendered {} engine frames (bound {bound})",
+                rendered - last
+            );
+            last = rendered;
+        }
+        // ...and over the run it rendered what it played, give or take the FIFO.
+        let played = (200.0 * out_frames as f64 * res.step) as u64;
+        assert!(
+            last >= played && last <= played + bound,
+            "{last} vs {played}"
+        );
+    }
+
     #[test]
     fn reported_playhead_subtracts_the_unplayed_fifo_backlog() {
         let (h, mut res) = ramp_engine();
         h.play();
         // 441 device frames consume exactly 480 engine frames; rendering happens in whole
-        // 128-frame blocks, so the raw render clock lands PAST 480 with the excess parked
+        // 64-frame quanta, so the raw render clock lands PAST 480 with the excess parked
         // in the FIFO. The reported playhead must reflect the consumed 480, not the render.
         let mut out = vec![0.0; 441 * CHANNELS];
         res.process(&mut out, 441);
