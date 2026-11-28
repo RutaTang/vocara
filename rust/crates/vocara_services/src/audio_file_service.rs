@@ -51,6 +51,18 @@ pub struct WavProbe {
     pub data_bytes: u64,
 }
 
+impl WavProbe {
+    /// Whether this is the shape the recording engine writes: mono, 32-bit
+    /// float (16-bit PCM from pre-float versions), with a payload. Boot
+    /// recovery adopts nothing else as a take, and nothing of this shape is
+    /// deleted as "not a recording".
+    pub fn is_recorder_shaped(&self) -> bool {
+        self.channels == 1
+            && (self.bits_per_sample == 16 || self.bits_per_sample == 32)
+            && self.data_bytes > 0
+    }
+}
+
 /// A recording's lane and timeline start, as its file name and sidecar say
 /// (see [`recording_placement_of`]).
 #[derive(Debug, Clone, PartialEq, Eq)]

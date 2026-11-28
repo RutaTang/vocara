@@ -89,7 +89,7 @@ use vocara_model::util::dart_num::{clamp_f64, round_to_i64};
 use vocara_model::util::id::new_id;
 use vocara_services::app_settings_service::AppSettingsService;
 use vocara_services::audio_edit_service::trim_wav_head_in_place;
-use vocara_services::audio_file_service::AudioFiles;
+use vocara_services::audio_file_service::{probe_wav, AudioFiles};
 use vocara_services::graph_audio_playback_service::{GraphAudioPlaybackService, SyncError};
 use vocara_services::mic_permission;
 use vocara_services::mic_recording_controller::{
@@ -594,9 +594,13 @@ enum TakeRead {
     Clean(WaveformResult),
     /// The writer hit an IO error; the partial WAV is readable.
     Partial(WaveformResult),
-    /// The writer hit an IO error; the partial WAV was unreadable and is
-    /// deleted.
+    /// The writer hit an IO error; the partial WAV was gone or not a
+    /// recording, and is deleted.
     Unreadable,
+    /// The writer hit an IO error; the partial WAV is the recorder's shape
+    /// but could not be read now. It is left where it is, for boot recovery
+    /// to try again.
+    Held,
 }
 
 type ReadSlot = Arc<Mutex<Option<TakeRead>>>;
@@ -2099,6 +2103,14 @@ impl RecordingController {
                 self.end_finalize(Ok(()), host);
                 return self.finish();
             }
+            Some(TakeRead::Held) => {
+                host.toast(
+                    "Recording hit a disk error, and the take could not be read yet. \
+                     It was kept, and Vocara will try to recover it the next time it opens.",
+                );
+                self.end_finalize(Ok(()), host);
+                return self.finish();
+            }
             None => {
                 self.end_finalize(
                     Err(ActionError::Failed("the take was not read".to_string())),
@@ -2801,8 +2813,8 @@ fn read_take(
     }
     // The engine reported an IO error during the take (disk full, write or
     // finalize failure). Be conservative: keep the take only if the partial
-    // WAV is still present and readable; otherwise delete it so no take row
-    // points at unusable audio.
+    // WAV is still present and readable, so no take row points at unusable
+    // audio.
     let partial = catch_unwind(AssertUnwindSafe(|| {
         if Path::new(path).exists() {
             analyze(path).ok()
@@ -2812,12 +2824,22 @@ fn read_take(
     }))
     .ok()
     .flatten();
-    match partial {
-        Some(analysis) => Ok(TakeRead::Partial(analysis)),
-        None => {
-            // Best-effort cleanup of the unreadable partial file.
-            let _ = catch_unwind(AssertUnwindSafe(|| files.delete_audio(path)));
-            Ok(TakeRead::Unreadable)
-        }
+    if let Some(analysis) = partial {
+        return Ok(TakeRead::Partial(analysis));
+    }
+    // Not readable now. Deleted only when it is provably no recording: gone,
+    // or not the shape the recorder writes. An analysis can fail for reasons
+    // that say nothing about the file (over the length the decode accepts, a
+    // read the disk failed for now), and boot recovery holds such a file back
+    // to try again; deleting it here threw away the only copy of a take that
+    // a later launch could have recovered.
+    let not_a_recording = matches!(probe_wav(Path::new(path)), Ok(probe)
+        if !probe.is_some_and(|p| p.is_recorder_shaped()));
+    if not_a_recording {
+        // Best-effort cleanup of the unusable partial file.
+        let _ = catch_unwind(AssertUnwindSafe(|| files.delete_audio(path)));
+        Ok(TakeRead::Unreadable)
+    } else {
+        Ok(TakeRead::Held)
     }
 }

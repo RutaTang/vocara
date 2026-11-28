@@ -1490,9 +1490,7 @@ fn file_name(path: &Path) -> String {
 /// The shape the recording engine writes (see
 /// `Persistence::recover_orphan_take`).
 fn is_recorder_shaped(probe: Option<WavProbe>) -> bool {
-    matches!(probe, Some(p) if p.channels == 1
-        && (p.bits_per_sample == 16 || p.bits_per_sample == 32)
-        && p.data_bytes > 0)
+    probe.is_some_and(|p| p.is_recorder_shaped())
 }
 
 /// Where a held-back staged recording keeps the time of its first failed
