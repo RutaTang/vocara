@@ -1572,20 +1572,20 @@ impl MixerController {
         Some(SaveRequest)
     }
 
-    /// Sets a bus's lane tint (ARGB). Purely visual; persisting it goes
-    /// through the shared save path (which resyncs the graph, harmlessly)
-    /// like the track-color edit.
+    /// Sets a bus's lane tint (ARGB); `None` clears it, back to the default.
+    /// Purely visual; persisting it goes through the shared save path (which
+    /// resyncs the graph, harmlessly) like the track-color edit.
     #[must_use = "the view model saves the edited model when it is Some"]
     pub fn set_bus_color(
         &mut self,
         host: &mut dyn MixerHost,
         bus_id: &str,
-        value: i64,
+        value: Option<i64>,
     ) -> Option<SaveRequest> {
         let practice = host.practice()?;
         let next = SongPractice {
             fx_buses: with_bus(&practice.fx_buses, bus_id, |b| FxBus {
-                color_value: Some(value),
+                color_value: value,
                 ..b.clone()
             }),
             ..practice.clone()

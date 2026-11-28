@@ -225,19 +225,21 @@ fn menu_ui(menu: &TrackMenu) -> iced_test::Simulator<'static, TrackAction> {
 }
 
 #[test]
-fn the_color_grid_is_two_rows_of_eight_and_a_swatch_picks_its_tint() {
-    // The grid's first swatch sits under the caption, the menu's padding
-    // and the grid's own in; each next one a swatch and its gap on, and the
-    // ninth starts the second row.
+fn the_color_grid_is_auto_then_the_palette_and_a_swatch_picks_its_tint() {
+    // The grid's first swatch, the automatic pill, sits under the caption,
+    // the menu's padding and the grid's own in; each palette swatch after
+    // it a swatch and its gap on.
     let mut ui = menu_ui(&vocal());
     let caption = ui.find("Color").expect("the caption").bounds();
     let top = caption.y + caption.height + 8.0;
-    let step = SWATCH + SWATCH_GAP;
+    let left = MENU_PADDING + COLOR_GRID_PADDING.left;
+    let row = top + SWATCH / 2.0;
+    let auto = ui.find(AUTO).expect("the automatic swatch").bounds();
+    assert!((auto.center_x() - (left + AUTO_SWATCH_WIDTH / 2.0)).abs() < 1.0);
+    assert!((auto.center_y() - row).abs() < 1.0);
     let swatch = |i: usize| {
-        Point::new(
-            MENU_PADDING + COLOR_GRID_PADDING.left + SWATCH / 2.0 + (i % 8) as f32 * step,
-            top + (i / 8) as f32 * step + SWATCH / 2.0,
-        )
+        let x = left + AUTO_SWATCH_WIDTH + SWATCH_GAP + i as f32 * (SWATCH + SWATCH_GAP);
+        Point::new(x + SWATCH / 2.0, row)
     };
     for (i, &value) in TRACK_COLOR_PALETTE.iter().enumerate() {
         let mut ui = menu_ui(&vocal());
@@ -246,10 +248,65 @@ fn the_color_grid_is_two_rows_of_eight_and_a_swatch_picks_its_tint() {
         let _ = ui.simulate(iced_test::simulator::click());
         assert_eq!(
             ui.into_messages().collect::<Vec<_>>(),
-            vec![TrackAction::PickColor(value)],
+            vec![TrackAction::PickColor(Some(value))],
             "swatch {i}"
         );
     }
+    // The automatic swatch clears the tint.
+    let mut ui = menu_ui(&TrackMenu {
+        current_color_value: Some(TRACK_COLOR_PALETTE[2]),
+        ..vocal()
+    });
+    ui.click(AUTO).expect("the automatic swatch");
+    assert_eq!(
+        ui.into_messages().collect::<Vec<_>>(),
+        vec![TrackAction::PickColor(None)]
+    );
+    let mut ui = simulator(bus_context_menu(&BusMenu::default()));
+    ui.click(AUTO).expect("the bus's automatic swatch");
+    assert_eq!(
+        ui.into_messages().collect::<Vec<_>>(),
+        vec![BusAction::PickColor(None)]
+    );
+}
+
+#[test]
+fn the_palette_is_the_designs_track_colours() {
+    let palette: Vec<Color> = TRACK_COLOR_PALETTE.iter().map(|&v| argb(v)).collect();
+    assert_eq!(palette, Studio::TRACK_COLORS);
+}
+
+#[test]
+fn the_lanes_colour_is_ringed_whether_stored_or_the_default() {
+    let selected = |s: &[Swatch]| -> Vec<usize> {
+        s.iter()
+            .enumerate()
+            .filter(|(_, s)| s.selected)
+            .map(|(i, _)| i)
+            .collect()
+    };
+    // No tint: the automatic swatch, in the lane's default colour.
+    let s = swatches(None, Studio::TRACK_SAGE);
+    assert_eq!(selected(&s), [0]);
+    assert_eq!((s[0].color, s[0].value), (Studio::TRACK_SAGE, None));
+    assert_eq!(s.len(), 1 + TRACK_COLOR_PALETTE.len());
+    // A palette tint: its swatch.
+    let s = swatches(Some(TRACK_COLOR_PALETTE[3]), Studio::TRACK_SAGE);
+    assert_eq!(selected(&s), [4]);
+    // A tint an earlier palette stored: shown, ringed, after the palette.
+    let s = swatches(Some(0xFF5B8DEF), Studio::TRACK_SAGE);
+    assert_eq!(selected(&s), [1 + TRACK_COLOR_PALETTE.len()]);
+    assert_eq!(s.last().map(|s| s.value), Some(Some(0xFF5B8DEF)));
+}
+
+#[test]
+fn a_swatch_answers_the_pointer() {
+    let rest = swatch_outline(false, false);
+    let hover = swatch_outline(false, true);
+    let ring = swatch_outline(true, false);
+    assert_ne!(hover, rest, "a hovered swatch shows it");
+    assert_ne!(hover, ring, "and is not taken for the current one");
+    assert_eq!(swatch_outline(true, true), ring);
 }
 
 #[test]
@@ -358,13 +415,14 @@ fn argb_reads_dart_color_ints() {
 
 #[test]
 fn a_take_keeps_its_default_tint_by_the_sum_of_its_code_units() {
-    // Indices Dart computed (`codeUnits.fold(0, +) % 16`).
+    // The sum of the UTF-16 code units, as Dart's `codeUnits.fold(0, +)`,
+    // modulo the five colours (Dart's sixteen gave 5, 13, 6, 0 and 11).
     for (id, index) in [
-        ("t1", 5),
-        ("take-01HZX", 13),
-        ("abc", 6),
+        ("t1", 0),
+        ("take-01HZX", 3),
+        ("abc", 4),
         ("", 0),
-        ("é漢", 11),
+        ("é漢", 3),
     ] {
         assert_eq!(
             default_take_color(id),

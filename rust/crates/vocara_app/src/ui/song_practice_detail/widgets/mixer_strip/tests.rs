@@ -954,8 +954,8 @@ fn the_record_gain_maps_onto_the_rec_fader() {
 
 #[test]
 fn a_take_without_a_tint_keeps_a_stable_color_from_its_id() {
-    // "t1": 't' (116) + '1' (49) = 165; 165 % 16 = 5 → teal.
-    assert_eq!(default_take_color("t1"), argb(0xFF49_B6A8));
+    // "t1": 't' (116) + '1' (49) = 165; 165 % 5 = 0 → coral.
+    assert_eq!(default_take_color("t1"), argb(0xFFD9_8C7E));
     assert_eq!(default_take_color("t1"), default_take_color("t1"));
     let mut tinted = (*take(1)).clone();
     tinted.color_value = Some(0xFF22_CC44);
