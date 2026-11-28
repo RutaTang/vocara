@@ -431,7 +431,7 @@ pub fn power_tab<'a>(src: &'a dyn AnalysisSource) -> Element<'a, Message> {
         };
         return padded(
             column![
-                tab_header("Power spectrum", Some(spectrum_legend(true))),
+                tab_header("Power spectrum", Some(spectrum_legend(&strip.formants))),
                 spectrum_strip(strip),
             ],
             TAB_PADDING,
@@ -454,7 +454,7 @@ pub fn power_tab<'a>(src: &'a dyn AnalysisSource) -> Element<'a, Message> {
         };
         padded(
             column![
-                tab_header("Power spectrum", Some(spectrum_legend(true))),
+                tab_header("Power spectrum", Some(spectrum_legend(&strip.formants))),
                 spectrum_strip(strip),
             ],
             TAB_PADDING,
@@ -640,12 +640,12 @@ fn ltas_body<'a>(ltas: &Ltas, live: bool) -> Element<'a, Message> {
         min_ceil_db: None,
     };
     let trailing: Element<'a, Message> = if live {
-        row![live_dot(), spectrum_legend(false)]
+        row![live_dot(), spectrum_legend(&[])]
             .spacing(14)
             .align_y(Vertical::Center)
             .into()
     } else {
-        spectrum_legend(false)
+        spectrum_legend(&[])
     };
     column![
         tab_header(
@@ -814,12 +814,12 @@ pub fn register_tab<'a>(src: &'a dyn AnalysisSource) -> Element<'a, Message> {
 /// register colours.
 fn register_legend<'a>(chest: i64, mix: i64, head: i64) -> Element<'a, Message> {
     legend(vec![
-        (Swatch::Dot(CHEST_COLOR), format!("chest {chest}%")),
+        (Swatch::Dot(CHEST_COLOR), format!("Chest {chest}%")),
         (
             Swatch::Dot(lerp_color(CHEST_COLOR, HEAD_COLOR, 0.5)),
-            format!("mix {mix}%"),
+            format!("Mix {mix}%"),
         ),
-        (Swatch::Dot(HEAD_COLOR), format!("head {head}%")),
+        (Swatch::Dot(HEAD_COLOR), format!("Head {head}%")),
     ])
 }
 
@@ -1809,23 +1809,28 @@ fn formant_legend<'a>() -> Element<'a, Message> {
     ])
 }
 
-/// The power spectrum's key: the spectrum, its envelope (and the formant
-/// markers where `formants`), the singer's-formant band.
-fn spectrum_legend<'a>(formants: bool) -> Element<'a, Message> {
+/// The power spectrum's key: the formant markers drawn now (of `formants`,
+/// Hz: those found), the spectrum, its envelope and the singer's-formant
+/// band. A formant not found draws no marker, and listed all the same it
+/// read as missing from the chart ("F3", with no F3 line). The markers come
+/// first, so the keys always there keep their place at the right as these
+/// come and go.
+fn spectrum_legend<'a>(formants: &[f64]) -> Element<'a, Message> {
     // The keys of the washes, as they read over a well.
     let on_well = |wash: Color| lerp_color(Studio::WELL, Color { a: 1.0, ..wash }, wash.a * 2.2);
-    let mut entries = vec![
-        (
-            Swatch::Block(on_well(SPECTRUM_FILL)),
-            "Spectrum".to_string(),
-        ),
-        (Swatch::Line(SPECTRUM_ENVELOPE), "Envelope".to_string()),
-    ];
-    if formants {
-        entries.push((Swatch::Line(FORMANT_COLORS[0]), "F1".to_string()));
-        entries.push((Swatch::Line(FORMANT_COLORS[1]), "F2".to_string()));
-        entries.push((Swatch::Line(FORMANT_COLORS[2]), "F3".to_string()));
-    }
+    let mut entries: Vec<(Swatch, String)> = formants
+        .iter()
+        .take(3)
+        .enumerate()
+        // The painter's own test for a marker.
+        .filter(|(_, hz)| !hz.is_nan() && **hz > 0.0)
+        .map(|(i, _)| (Swatch::Line(FORMANT_COLORS[i]), format!("F{}", i + 1)))
+        .collect();
+    entries.push((
+        Swatch::Block(on_well(SPECTRUM_FILL)),
+        "Spectrum".to_string(),
+    ));
+    entries.push((Swatch::Line(SPECTRUM_ENVELOPE), "Envelope".to_string()));
     entries.push((
         Swatch::Block(on_well(SINGERS_FORMANT_BAND)),
         "Singer's formant".to_string(),

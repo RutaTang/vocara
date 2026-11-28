@@ -978,8 +978,8 @@ fn an_in_tune_straight_take_reads_as_such() {
         vec![
             ("In tune", "100%", "of notes"),
             ("Vibrato", "straight", "no vibrato"),
-            ("Clarity", "12.3", "CPP"),
-            ("Ring", "8 dB", "singer's formant"),
+            ("Clarity", "12.3 dB", "avg CPP"),
+            ("Ring", "8 dB", "avg singer's formant"),
             ("Dynamics", "20 dB", "soft → loud"),
             ("Brightness", "-13 dB", "α ratio"),
         ]

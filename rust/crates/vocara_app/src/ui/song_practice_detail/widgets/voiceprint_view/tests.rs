@@ -590,7 +590,7 @@ fn a_held_live_note_tunes_and_maps_its_register() {
     assert!(
         shown
             .iter()
-            .any(|t| t.starts_with("chest ") && t.ends_with('%')),
+            .any(|t| t.starts_with("Chest ") && t.ends_with('%')),
         "{shown:?}"
     );
 }
@@ -965,6 +965,24 @@ fn a_timbre_curve_breaks_where_there_is_no_voice_and_scales_to_the_voice() {
     // An audible frame with no pitch (breath) is no voice either.
     m.active = vec![1; 40];
     assert_eq!(timbre_curve(&m, &m.ring, 500, size).len(), 2);
+}
+
+#[test]
+fn the_power_legend_lists_the_formants_it_marks() {
+    // F3 was listed while no F3 line was drawn: the analysis found none
+    // at that frame (step_metrics has F1 and F2 only).
+    let src = Source {
+        metrics: Some(step_metrics()),
+        duration_ms: 500,
+        position: Duration::from_millis(100),
+        ..analyzed(&sine(24000, 220.0, SR as f64))
+    };
+    let state = VoiceprintState::new();
+    let shown = texts(&mut simulator(power, &src, &state, DOCK));
+    for label in ["F1", "F2", "Spectrum", "Envelope", "Singer's formant"] {
+        assert!(shown.iter().any(|t| t == label), "{label} in {shown:?}");
+    }
+    assert!(!shown.iter().any(|t| t == "F3"), "{shown:?}");
 }
 
 #[test]
