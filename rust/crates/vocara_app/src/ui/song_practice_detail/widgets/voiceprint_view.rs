@@ -2239,6 +2239,16 @@ fn voiced_frame(m: &VoiceMetrics, fr: usize) -> bool {
     m.active.get(fr) == Some(&1) && f0.is_finite() && f0 > 0.0
 }
 
+/// Whether frame `fr` of `m` is the first or the last of a run of voiced
+/// frames (the take's ends counting as silence): its analysis window lies
+/// partly over the silence or breath beside the note, and its timbre reads
+/// far past the rest of the note (a ring at the top of the scale at both
+/// ends of every note).
+fn voiced_run_edge(m: &VoiceMetrics, fr: usize) -> bool {
+    voiced_frame(m, fr)
+        && (fr == 0 || !voiced_frame(m, fr - 1) || fr + 1 >= m.frames || !voiced_frame(m, fr + 1))
+}
+
 /// Curve `c`'s value at frame `fr` where the frame is voiced, else NaN.
 fn voiced_value_at(m: &VoiceMetrics, c: &[f32], fr: usize) -> f64 {
     if voiced_frame(m, fr) {
@@ -2248,12 +2258,24 @@ fn voiced_value_at(m: &VoiceMetrics, c: &[f32], fr: usize) -> f64 {
     }
 }
 
+/// Curve `c`'s value at frame `fr` where the timbre curves draw it: a
+/// voiced frame inside its run ([`voiced_run_edge`]); else NaN.
+fn drawn_value_at(m: &VoiceMetrics, c: &[f32], fr: usize) -> f64 {
+    if voiced_run_edge(m, fr) {
+        f64::NAN
+    } else {
+        voiced_value_at(m, c, fr)
+    }
+}
+
 /// The polylines of curve `c` of `m` in a `size` box spanning `duration_ms`:
-/// one per run of voiced frames with finite values (an unvoiced frame or a
-/// non-finite value breaks the line: the gaps between notes drew as
-/// full-height blocks), each point at its frame's time, the curve scaled
-/// to its own range over those frames with 7% top/bottom padding so it
-/// doesn't touch the edges. Nothing for a flat or empty curve.
+/// one per run of voiced frames with finite values, less each run's first
+/// and last frame (an unvoiced frame or a non-finite value breaks the line:
+/// the gaps between notes drew as full-height blocks; a note's ends drew as
+/// spikes to the top, and set a range that squashed the note flat), each
+/// point at its frame's time, the curve scaled to its own range over those
+/// frames with 7% top/bottom padding so it doesn't touch the edges. Nothing
+/// for a flat or empty curve.
 pub fn timbre_curve(m: &VoiceMetrics, c: &[f32], duration_ms: i64, size: Size) -> Vec<Vec<Point>> {
     let frames = m.frames;
     if frames == 0 || duration_ms <= 0 {
@@ -2261,7 +2283,7 @@ pub fn timbre_curve(m: &VoiceMetrics, c: &[f32], duration_ms: i64, size: Size) -
     }
     let (mut mn, mut mx) = (f64::INFINITY, f64::NEG_INFINITY);
     for fr in 0..frames {
-        let v = voiced_value_at(m, c, fr);
+        let v = drawn_value_at(m, c, fr);
         if v.is_finite() {
             mn = mn.min(v);
             mx = mx.max(v);
@@ -2276,7 +2298,7 @@ pub fn timbre_curve(m: &VoiceMetrics, c: &[f32], duration_ms: i64, size: Size) -
     let mut runs: Vec<Vec<Point>> = Vec::new();
     let mut started = false;
     for fr in 0..frames {
-        let v = voiced_value_at(m, c, fr);
+        let v = drawn_value_at(m, c, fr);
         if !v.is_finite() {
             started = false;
             continue;
