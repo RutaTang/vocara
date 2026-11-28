@@ -1137,6 +1137,19 @@ fn body<'a, M>(r: &TrackRow<'a, M>, accent: Color) -> Element<'a, Message> {
             );
             layers.push(pin(region).x(v.left as f32).y(CLIP_INSET).into());
         }
+        // The selected clip's outline again, over the clips after it: one
+        // overlapping it hid all but its own part of the selection.
+        let selected = selected_clip_id
+            .as_deref()
+            .filter(|_| lane_selected)
+            .and_then(|id| track.clips.iter().find(|c| c.id == id))
+            .and_then(|clip| clip_box(clip, false, dur, view_start, width));
+        if let Some(v) = selected {
+            let outline = container(border_overlay(Studio::CLIP_SELECTED_OUTLINE))
+                .width(v.width as f32)
+                .height(block_height);
+            layers.push(pin(outline).x(v.left as f32).y(CLIP_INSET).into());
+        }
         // The forming clip while this lane is the armed recording target.
         if let Some((peaks, start_ms)) = recording {
             if let Some(v) = recording_span(dur, view_start, width, start_ms, peaks.len()) {
@@ -1255,7 +1268,8 @@ pub const CLIP_NAME: Color = Color::from_rgb8(0xD4, 0xD4, 0xDC);
 /// the track's `color` at 10 % (16 % selected), outlined at 32 %
 /// (`CLIP_SELECTED_OUTLINE` selected), a 13 px header band at 22 % (34 %
 /// selected) with the take's `name`, and the waveform under it (or
-/// "Analyzing…" until its peaks are in); a muted take's at 60 %.
+/// "Analyzing…" until its peaks are in); a muted take's at 60 %. All of it
+/// over the arrange's background, so the clip is opaque.
 fn clip_region<'a>(
     clip: &AudioClip,
     name: &str,
@@ -1316,11 +1330,17 @@ fn clip_region<'a>(
         .id(clip_widget_id(&clip.id))
         .width(v.width as f32)
         .height(height);
-    if muted {
+    let region: Element<'a, Message> = if muted {
         opacity_layer(clip::MUTED_OPACITY, region).into()
     } else {
         region.into()
-    }
+    };
+    // On the arrange's background, opaque: a later clip over an earlier one
+    // (the one heard there) hides it, where the two showed through each
+    // other as a third clip.
+    container(region)
+        .style(|_| boxed(Some(Studio::BACKGROUND), 4.0, None))
+        .into()
 }
 
 /// `_FormingClip`: the clip forming while recording, in `RECORD`. Draws its

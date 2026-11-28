@@ -695,6 +695,62 @@ fn a_takes_default_colour_is_its_own_wherever_it_is_listed() {
     assert!(distinct.len() >= 3, "{distinct:?}");
 }
 
+/// A take with clip "a" over 1–5 s and clip "b" over 4–8 s, on top of it.
+fn overlapping() -> &'static AudioTrack {
+    leaked(AudioTrack {
+        clips: vec![
+            AudioClip {
+                start_ms: 1000,
+                ..AudioClip::new("a", "/a.wav", 4000)
+            },
+            AudioClip {
+                start_ms: 4000,
+                ..AudioClip::new("b", "/b.wav", 4000)
+            },
+        ],
+        ..AudioTrack::new("t1", AudioTrackKind::Vocal, "Take 1", created())
+    })
+}
+
+/// The window's x at `ms` of the 10 s viewport.
+fn lane_x(ms: f32) -> f32 {
+    TRACK_HEADER_W + ms / VIEWPORT_MS as f32 * LANE_W
+}
+
+/// Low in the clips' bodies: under their "Analyzing…", inside their
+/// outlines.
+const BODY_Y: f32 = TRACK_ROW_HEIGHT - CLIP_INSET - 6.0;
+
+// Overlapping clips were translucent: where "b" lay over "a" the two showed
+// through each other, reading as a third clip.
+#[test]
+fn the_top_clip_hides_the_one_under_it() {
+    let track = overlapping();
+    let mut ui = LiveUi::new(WINDOW);
+    let frame = ui.snapshot(row_of(track));
+    let over_a = frame.pixel(lane_x(4500.0) as usize, BODY_Y as usize);
+    let b_alone = frame.pixel(lane_x(7500.0) as usize, BODY_Y as usize);
+    let a_alone = frame.pixel(lane_x(1500.0) as usize, BODY_Y as usize);
+    assert_eq!(over_a, b_alone, "b, opaque, over a");
+    assert_eq!(a_alone, b_alone, "the same fill either way");
+}
+
+// Selected, the lower clip's outline was hidden where the upper one lay
+// over it.
+#[test]
+fn the_selected_clips_outline_shows_over_the_clip_on_top() {
+    let track = overlapping();
+    let mut ui = LiveUi::new(WINDOW);
+    let frame = ui.snapshot(row_of(track).selected(true).selected_clip_id(Some("a")));
+    let near = |p: [u8; 4], c: Color| {
+        let c = c.into_rgba8();
+        (0..3).all(|i| (i32::from(p[i]) - i32::from(c[i])).abs() <= 2)
+    };
+    // "a"'s right edge, inside "b".
+    let edge = frame.pixel(lane_x(5000.0) as usize - 1, BODY_Y as usize);
+    assert!(near(edge, Studio::CLIP_SELECTED_OUTLINE), "{edge:?}");
+}
+
 #[test]
 fn a_fader_tick_leaves_the_clips_waveforms_cached() {
     // A fader tick copies the take and its clips; the clip's waveform cache
