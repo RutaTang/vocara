@@ -938,17 +938,7 @@ impl SongPracticeDetailScreen {
                 step.task(lyrics_panel::browse_lyrics_file().map(Message::Lyrics));
                 return;
             }
-            P::ImportLyricsFromFile(path) => {
-                let ticket = {
-                    let vm = &*self.vm;
-                    let as_text = || vm.lyrics_as_text();
-                    let data = panel_data(vm, &self.shown, &as_text, false);
-                    self.lyrics.begin_import(&data)
-                };
-                let started = self.vm.import_lyrics_from_file(&path.to_string_lossy());
-                self.await_call(started, Awaited::LyricsImport(ticket), step);
-                return;
-            }
+            P::ImportLyricsFromFile(path) => return self.import_lyrics_file(path, step),
             P::EditorAction(action) => {
                 if let Some(text) = self.lyrics.perform(action) {
                     self.vm.set_lyrics_draft(Some(text));
@@ -1492,6 +1482,31 @@ impl SongPracticeDetailScreen {
         self.ask(dialog, Asked::ClearLyricTimes, step);
     }
 
+    /// A lyrics file dropped or picked: asked first over the lyrics there
+    /// are, as Clear is. The import took every line and its tap time at
+    /// once, saved, with nothing to go back to. With no lyrics there is
+    /// nothing to lose.
+    fn import_lyrics_file(&mut self, path: PathBuf, step: &mut Step) {
+        if self.vm.lyrics().iter().any(|l| !l.is_blank()) {
+            let dialog = ConfirmDialog::new("Replace the current lyrics?")
+                .body("The file's lyrics replace every line here, and their times.")
+                .confirm_label("Replace");
+            return self.ask(dialog, Asked::ImportLyrics(path), step);
+        }
+        self.import_lyrics_now(path, step);
+    }
+
+    fn import_lyrics_now(&mut self, path: PathBuf, step: &mut Step) {
+        let ticket = {
+            let vm = &*self.vm;
+            let as_text = || vm.lyrics_as_text();
+            let data = panel_data(vm, &self.shown, &as_text, false);
+            self.lyrics.begin_import(&data)
+        };
+        let started = self.vm.import_lyrics_from_file(&path.to_string_lossy());
+        self.await_call(started, Awaited::LyricsImport(ticket), step);
+    }
+
     fn rename_bus(&mut self, bus_id: String, current: &str, step: &mut Step) {
         let mut prompt = rename_dialog(current);
         prompt.title = "Rename bus".to_string();
@@ -1533,6 +1548,7 @@ impl SongPracticeDetailScreen {
                 self.vm.versions_do(|v, h| v.delete(&id, h))
             }
             Asked::ClearLyricTimes if confirmed => self.vm.clear_lyric_times(),
+            Asked::ImportLyrics(path) if confirmed => return self.import_lyrics_now(path, step),
             _ => return,
         };
         self.absorb(fx, step);

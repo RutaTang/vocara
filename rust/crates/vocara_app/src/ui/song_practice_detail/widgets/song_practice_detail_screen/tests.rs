@@ -2426,6 +2426,53 @@ fn clearing_the_lyric_times_asks_first() {
     assert!(h.dialog.is_none());
 }
 
+// A lyrics file imported over lyrics asks first, as Clear does: it replaced
+// every line and its tap time at once, with nothing to go back to.
+#[test]
+fn importing_a_lyrics_file_over_lyrics_asks_first() {
+    use vocara_model::models::lyric_line::LyricLine;
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let file = dir.path().join("song.txt");
+    std::fs::write(&file, "imported one\nimported two").expect("lyrics");
+    let import = || Message::Lyrics(lyrics_panel::Message::ImportLyricsFromFile(file.clone()));
+    let mut p = practice(vec![take("t1", "Take 1")]);
+    p.lyrics = vec![
+        LyricLine::new("First line", Some(1200)),
+        LyricLine::new("Second line", Some(4800)),
+    ];
+    let mut h = Harness::open(Setup {
+        practice: p,
+        ..Setup::default()
+    });
+    let stored = |h: &Harness| -> Vec<(String, Option<i64>)> {
+        let lyrics = h.repo.stored().lyrics;
+        lyrics.into_iter().map(|l| (l.text, l.time_ms)).collect()
+    };
+    let before = stored(&h);
+    h.send(import());
+    let Dialog::Confirm(confirm) = h.dialog() else {
+        panic!("a confirmation");
+    };
+    assert_eq!(confirm.title, "Replace the current lyrics?");
+    h.answer(DialogResult::Confirmed(false));
+    h.settle();
+    assert_eq!(stored(&h), before, "cancelled");
+
+    h.send(import());
+    h.answer(DialogResult::Confirmed(true));
+    h.settle();
+    let words: Vec<String> = h.vm().lyrics().iter().map(|l| l.text.clone()).collect();
+    assert_eq!(words, ["imported one", "imported two"]);
+
+    // With no lyrics there is nothing to replace: it imports at once.
+    let mut h = Harness::open(Setup::default());
+    assert!(h.vm().lyrics().is_empty());
+    h.send(import());
+    assert!(h.dialog.is_none());
+    h.settle();
+    assert_eq!(h.vm().lyrics().len(), 2);
+}
+
 // playhead_repaint_test: 'deleting the backing's clip asks to delete the
 // backing' — a backing lane is its one clip.
 #[test]

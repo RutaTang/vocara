@@ -260,6 +260,7 @@ pub enum Asked {
     RenameInterpretation(String),
     DeleteInterpretation(String),
     ClearLyricTimes,
+    ImportLyrics(PathBuf),
 }
 
 /// A result that is cloneable (the screen's messages are) but landed once:
