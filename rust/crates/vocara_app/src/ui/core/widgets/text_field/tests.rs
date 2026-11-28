@@ -990,6 +990,33 @@ fn a_keyboard_move_reveals_the_caret_at_once() {
     assert!((back - end).abs() < 0.01, "{back} {end}");
 }
 
+/// ↑ and ↓ in a one-line field move its caret to the start and the end, as
+/// a macOS field's do, and go no further: passed on, they reached a video's
+/// controls holding the keyboard, which turned its volume.
+#[test]
+fn up_and_down_move_the_caret_to_the_ends_and_go_no_further() {
+    let mut window = window();
+    let at = Point::new(TEXT_X + width("hel"), MIDDLE);
+    let t0 = Instant::now();
+    window.run(field("hello"), at, &click(), t0);
+    let (messages, statuses) = window.run(
+        field("hello"),
+        at,
+        &[key(Named::ArrowUp), typed("X")],
+        t0 + 100 * MS,
+    );
+    assert_eq!(input_of(messages), Some("Xhello".to_string()));
+    assert_eq!(statuses[0], event::Status::Captured);
+    let (messages, statuses) = window.run(
+        field("Xhello"),
+        at,
+        &[key(Named::ArrowDown), typed("Y")],
+        t0 + 200 * MS,
+    );
+    assert_eq!(input_of(messages), Some("XhelloY".to_string()));
+    assert_eq!(statuses[0], event::Status::Captured);
+}
+
 /// macOS's Emacs keys move the caret: ⌃A to the start, ⌃E to the end
 /// (they became Home and End, which on macOS only scroll the text).
 #[cfg(target_os = "macos")]

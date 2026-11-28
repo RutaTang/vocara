@@ -1168,6 +1168,41 @@ impl<'a, Message: Clone + 'a> Widget<Message, Theme, Renderer> for TextInput<'a,
 
                             shell.capture_event();
                         }
+                        // One line has no line above or below it: ↑ moves the
+                        // caret to the start and ↓ to the end (⇧ selecting),
+                        // as a macOS field does, and the field keeps the key.
+                        // Passed on, it reached a video's controls on a
+                        // technique page, which turned its volume.
+                        keyboard::Key::Named(
+                            named @ (key::Named::ArrowUp | key::Named::ArrowDown),
+                        ) => {
+                            let cursor_before = state.cursor;
+                            let to = if named == key::Named::ArrowUp {
+                                0
+                            } else {
+                                self.value.len()
+                            };
+
+                            if modifiers.shift() {
+                                state
+                                    .cursor
+                                    .select_range(state.cursor.start(&self.value), to);
+                            } else {
+                                state.cursor.move_to(to);
+                            }
+
+                            if cursor_before != state.cursor {
+                                focus.updated_at = Instant::now();
+
+                                shell.request_redraw();
+                            }
+
+                            let geometry = geometry(state, layout);
+                            let x = extent_x(state, &self.value);
+                            bring_into_view(state, &geometry, x);
+
+                            shell.capture_event();
+                        }
                         keyboard::Key::Named(key::Named::Escape) => {
                             state.is_focused = None;
                             state.is_dragging = None;
