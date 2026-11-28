@@ -84,6 +84,7 @@ use crate::ui::core::theme::{self, boxed, fill, font, type_scale, Studio};
 use crate::ui::core::widgets::cap_label::cap_label;
 use crate::ui::core::widgets::controls::{labelled, meter_color};
 use crate::ui::core::widgets::fading_scrollbar::{scrollable, Fading};
+use crate::ui::core::widgets::keyed::keyed;
 use crate::ui::core::widgets::material_tooltip::material_tooltip;
 use crate::ui::core::widgets::painter::{KeyedCache, Same};
 use crate::ui::core::widgets::spectrogram_painter::{
@@ -1614,25 +1615,31 @@ pub(crate) const PLOT_TAB_MIN_HEIGHT: f32 = 224.0;
 /// A tab `content` laid out at least [`PLOT_TAB_MIN_HEIGHT`] tall: on a
 /// dock shorter than that it scrolls, as the Summary does. At the dock's
 /// least height these tabs cut their readouts off or crushed their chart
-/// to a line.
+/// to a line. `tab` names the tab: its scroll view's id, and the key its
+/// state is kept by, so each tab opens at its top (drawn in the same place,
+/// one tab opened scrolled where the last was left).
 pub(crate) fn scrolls_when_short<'a, M: 'a>(
+    tab: &'static str,
     content: impl Fn() -> Element<'a, M> + 'a,
 ) -> Element<'a, M> {
-    responsive(move |size| {
-        if size.height >= PLOT_TAB_MIN_HEIGHT {
-            return content();
-        }
-        scrollable(
-            container(content())
-                .width(Length::Fill)
-                .height(PLOT_TAB_MIN_HEIGHT),
-        )
-        .fading()
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
-    })
-    .into()
+    keyed(
+        tab,
+        responsive(move |size| {
+            if size.height >= PLOT_TAB_MIN_HEIGHT {
+                return content();
+            }
+            scrollable(
+                container(content())
+                    .width(Length::Fill)
+                    .height(PLOT_TAB_MIN_HEIGHT),
+            )
+            .id(iced::widget::Id::new(tab))
+            .fading()
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
+        }),
+    )
 }
 
 /// [`plot_well`]'s look.
@@ -1908,7 +1915,7 @@ fn axis_row<'a>(max_hz: f64, child: impl Into<Element<'a, Message>>) -> Element<
 /// tab, with the readouts at the playhead beside it, the pair centred
 /// across the dock; it scrolls on a short dock ([`scrolls_when_short`]).
 fn vowel_panel<'a>(f1: f64, f2: f64, live: bool) -> Element<'a, Message> {
-    scrolls_when_short(move || vowel_panel_body(f1, f2, live))
+    scrolls_when_short("dock-vowel", move || vowel_panel_body(f1, f2, live))
 }
 
 fn vowel_panel_body<'a>(f1: f64, f2: f64, live: bool) -> Element<'a, Message> {

@@ -202,6 +202,67 @@ fn both_views_render_a_normal_take() {
 }
 
 #[test]
+fn on_a_short_dock_each_tab_opens_at_its_top() {
+    // Drawn in the same place, Dynamics opened scrolled where Range had
+    // been left, its title out of view.
+    use iced::advanced::widget::operation::{self, Operation};
+    use iced::widget::scrollable::AbsoluteOffset;
+    use iced::{Rectangle, Vector};
+    use iced_test::runtime::user_interface::{Cache, UserInterface};
+
+    /// Scrolls every scroll view down by `Some` offset, and reads how far
+    /// the last one is.
+    struct Scrolls(Option<f32>, f32);
+    impl Operation for Scrolls {
+        fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+            operate(self);
+        }
+        fn scrollable(
+            &mut self,
+            _id: Option<&iced::widget::Id>,
+            _bounds: Rectangle,
+            _content_bounds: Rectangle,
+            translation: Vector,
+            state: &mut dyn operation::Scrollable,
+        ) {
+            if let Some(y) = self.0 {
+                state.scroll_to(AbsoluteOffset {
+                    x: None,
+                    y: Some(y),
+                });
+            }
+            self.1 = translation.y;
+        }
+    }
+
+    let src = analyzed(&sine(48000, 220.0, SR as f64));
+    let short = Size::new(1100.0, 121.0);
+    let mut renderer = iced::futures::executor::block_on(
+        <iced::Renderer as iced::advanced::renderer::Headless>::new(
+            iced::Font::DEFAULT,
+            iced::Pixels(16.0),
+            None,
+        ),
+    )
+    .expect("a headless renderer");
+    let mut cache = Cache::default();
+    let mut frame = |view: View, scroll: Option<f32>| {
+        let mut ui =
+            UserInterface::build(view(&src), short, std::mem::take(&mut cache), &mut renderer);
+        let mut scrolls = Scrolls(scroll, f32::NAN);
+        ui.operate(&renderer, &mut scrolls);
+        let mut read = Scrolls(None, f32::NAN);
+        ui.operate(&renderer, &mut read);
+        cache = ui.into_cache();
+        read.1
+    };
+    assert_eq!(frame(range, None), 0.0);
+    assert_eq!(frame(range, Some(60.0)), 60.0, "Range scrolled down");
+    assert_eq!(frame(dynamics, None), 0.0, "Dynamics opens at its top");
+    assert_eq!(frame(range, None), 0.0, "and so does Range again");
+}
+
+#[test]
 fn both_views_render_a_silent_take() {
     // The muted-input case: metrics exist, but nothing is voiced or audible.
     let src = analyzed(&[0.0; 48000]);

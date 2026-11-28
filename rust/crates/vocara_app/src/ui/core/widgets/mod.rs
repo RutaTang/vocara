@@ -13,6 +13,7 @@ pub mod fading_scrollbar;
 pub mod fatal_open_screen;
 pub mod focus_traversal;
 pub mod holds_keyboard;
+pub mod keyed;
 pub mod line_icon;
 pub mod material_slider;
 pub mod material_switch;
