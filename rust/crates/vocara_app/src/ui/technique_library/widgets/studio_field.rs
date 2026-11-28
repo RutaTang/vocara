@@ -6,9 +6,10 @@
 //! Drawn as `DESIGN.md`'s text fields: the caption 11 px `TEXT_SECONDARY`,
 //! 6 px over the field; the field its own well (`Studio::WELL`, radius 6,
 //! an inset `BORDER_STRONG` outline, the accent at 60 % while focused). A
-//! single-line field is 28 px with 12 px text; a prose field writes at the
-//! read view's 13 px on 20 px lines, so its text keeps its size and its
-//! breaks between reading and editing.
+//! single-line field is 28 px with 12 px text, and a prose field writes at
+//! the same 12 px on 16 px lines (`DESIGN.md`'s text fields), one line of
+//! it as tall as a single-line field; the read view sets the text at
+//! 13 px.
 //!
 //! Flutter's one `TextField` was single-line by default and multi-line with
 //! `minLines`/`maxLines`; the app's text fields (`widgets::text_field`) are
@@ -29,18 +30,19 @@ use crate::ui::core::widgets::studio_text::studio_text;
 use crate::ui::core::widgets::text_field::editor::{self as text_editor, text_editor};
 use crate::ui::core::widgets::text_field::text_input;
 
-/// A prose field's text size and line height (the read view's prose).
+/// The read view's prose: its text size and line height.
 pub const PROSE_SIZE: f32 = type_scale::TITLE;
 pub const PROSE_LINE: f32 = 20.0;
 
-/// A prose field's padding inside its well: 4 above and below a line (one
-/// line makes a 28 px field, as a single-line one), 10 at the sides.
-pub const PROSE_PADDING: Padding = Padding {
-    top: 4.0,
-    right: 10.0,
-    bottom: 4.0,
-    left: 10.0,
-};
+/// A prose field's text size and line height: a text field's 12 px on
+/// 16 px lines (`DESIGN.md`), as the single-line fields beside it.
+pub const PROSE_FIELD_SIZE: f32 = theme::FIELD_TEXT_SIZE;
+pub const PROSE_FIELD_LINE: f32 = type_scale::LINE;
+
+/// A prose field's padding inside its well: a text field's, 6 above and
+/// below a line (one line makes a 28 px field, as a single-line one), 10
+/// at the sides.
+pub const PROSE_PADDING: Padding = theme::FIELD_PADDING;
 
 /// The space between the caption and the field.
 pub const CAPTION_GAP: f32 = 6.0;
@@ -49,7 +51,12 @@ pub const CAPTION_GAP: f32 = 6.0;
 /// `RenderEditable` held a field to `minLines` and `maxLines` of its
 /// `preferredLineHeight`.
 fn field_line() -> f32 {
-    crate::ui::core::text::line_box(font::REGULAR, PROSE_SIZE, Pixels(PROSE_LINE).into()).height
+    crate::ui::core::text::line_box(
+        font::REGULAR,
+        PROSE_FIELD_SIZE,
+        Pixels(PROSE_FIELD_LINE).into(),
+    )
+    .height
 }
 
 enum Input<'a, M> {
@@ -233,10 +240,12 @@ impl<'a, M: Clone + 'a> From<StudioField<'a, M>> for Element<'a, M> {
                 // `min_height`..`max_height` but lays its text out in
                 // `max_height` less its padding: the padding goes on the
                 // maximum so the text may fill `max_lines`.
+                // In Inter, whose lines `field_line` counts.
                 let mut editor = text_editor(content)
                     .placeholder(f.hint)
-                    .size(PROSE_SIZE)
-                    .line_height(Pixels(PROSE_LINE))
+                    .font(font::REGULAR)
+                    .size(PROSE_FIELD_SIZE)
+                    .line_height(Pixels(PROSE_FIELD_LINE))
                     .padding(PROSE_PADDING)
                     .min_height(line * f32::from(min_lines.max(1)))
                     .max_height(
@@ -351,10 +360,15 @@ mod tests {
             "{field:?}"
         );
 
-        // A prose field: three 20 px lines and 8 at least, eight and 8 at
-        // most.
+        // A prose field: 12 px text, as the single-line fields' (it was
+        // 13 px), three 16 px lines and 12 at least, eight and 12 at most,
+        // in Inter, whose lines the field counts.
+        crate::ui::core::widgets::studio_text::testing::load_fonts();
+        assert_eq!(PROSE_FIELD_SIZE, theme::FIELD_TEXT_SIZE);
+        assert_eq!(PROSE_FIELD_SIZE, 12.0);
         let line = field_line();
-        assert_eq!(line, PROSE_LINE);
+        assert_eq!(line, type_scale::LINE);
+        assert_eq!(line + PROSE_PADDING.y(), theme::FIELD_HEIGHT);
         let short = text_editor::Content::with_text("One line");
         let long = text_editor::Content::with_text(&"A line\n".repeat(20));
         for (content, lines) in [(&short, 3.0), (&long, 8.0)] {

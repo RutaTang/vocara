@@ -196,6 +196,15 @@ impl LicenseParagraph {
 /// For each paragraph, a rough heuristic guesses how indented it is (a third
 /// of its first line's indentation, a tab counting 8), or whether it is
 /// centred (indented more than 10).
+///
+/// Unlike Flutter's, a list item's hanging indent continues its paragraph:
+/// a line indented to where the text after the first line's marker starts
+/// ("2. ", "(a) ", "* ") goes on with the item, unless it starts an item of
+/// its own, and the next item after it starts a paragraph whatever its
+/// indent. Flutter broke the Apache License's numbered sections and the
+/// BSD licenses' bullets after their first line, mid-sentence ("Subject to
+/// the terms and conditions of" / "this License, ..."), and ran a bullet
+/// on into the next.
 pub fn license_paragraphs(text: &str) -> Vec<LicenseParagraph> {
     let chars: Vec<char> = text.chars().collect();
     let mut line_start = 0usize;
@@ -203,6 +212,9 @@ pub fn license_paragraphs(text: &str) -> Vec<LicenseParagraph> {
     let mut last_line_indent = 0i32;
     let mut current_line_indent = 0i32;
     let mut paragraph_indentation: Option<i32> = None;
+    // Where a list item's text after its marker starts: its lines' hanging
+    // indent.
+    let mut hang: Option<i32> = None;
     let mut in_paragraph = false;
     let mut lines: Vec<String> = Vec::new();
     let mut result = Vec::new();
@@ -234,6 +246,7 @@ pub fn license_paragraphs(text: &str) -> Vec<LicenseParagraph> {
                     last_line_indent = 0;
                     current_line_indent = 0;
                     paragraph_indentation = None;
+                    hang = None;
                     line_start = position + 1;
                 }
                 _ => {
@@ -247,9 +260,20 @@ pub fn license_paragraphs(text: &str) -> Vec<LicenseParagraph> {
                     if c == '[' {
                         current_line_indent += 1;
                     }
-                    if !lines.is_empty() && current_line_indent > last_line_indent {
+                    let marker = list_marker(&chars[position..]);
+                    let hanging =
+                        lines.len() == 1 && hang == Some(current_line_indent) && marker.is_none();
+                    // The next item of a list starts a paragraph of its own,
+                    // at whatever indent.
+                    let next_item = hang.is_some() && marker.is_some();
+                    if !lines.is_empty()
+                        && ((current_line_indent > last_line_indent && !hanging) || next_item)
+                    {
                         result.push(take_paragraph(&mut lines, paragraph_indentation));
                         paragraph_indentation = None;
+                    }
+                    if lines.is_empty() {
+                        hang = marker.map(|width| current_line_indent + width);
                     }
                     // The following is a wild heuristic for guessing the
                     // indentation level. It happens to work for common
@@ -279,6 +303,7 @@ pub fn license_paragraphs(text: &str) -> Vec<LicenseParagraph> {
                     last_line_indent = 0;
                     current_line_indent = 0;
                     paragraph_indentation = None;
+                    hang = None;
                     line_start = position + 1;
                     in_paragraph = false;
                 }
@@ -296,8 +321,36 @@ pub fn license_paragraphs(text: &str) -> Vec<LicenseParagraph> {
     result
 }
 
+/// The width of the list marker `line` starts with ("2.", "(a)", "iv)",
+/// "*", "-") and the spaces after it, when it starts with one followed by a
+/// space.
+fn list_marker(line: &[char]) -> Option<i32> {
+    let word: usize = line.iter().take_while(|c| !c.is_whitespace()).count();
+    let marker: String = line[..word].iter().collect();
+    let is_marker = match marker.as_str() {
+        "*" | "-" | "\u{2022}" => true,
+        m => {
+            let inner = m
+                .strip_prefix('(')
+                .and_then(|m| m.strip_suffix(')'))
+                .or_else(|| m.strip_suffix('.'))
+                .or_else(|| m.strip_suffix(')'));
+            inner.is_some_and(|i| {
+                !i.is_empty()
+                    && i.len() <= 4
+                    && (i.chars().all(|c| c.is_ascii_digit())
+                        || i.chars().all(|c| c.is_ascii_alphabetic()))
+            })
+        }
+    };
+    let spaces = line[word..].iter().take_while(|&&c| c == ' ').count();
+    (is_marker && spaces > 0).then(|| (word + spaces) as i32)
+}
+
 /// `_entry(...)`: a component, its license, where the full text lives, how
-/// it ships, and an optional note.
+/// it ships, and an optional note. Each of the license, the full text and
+/// how it ships is a paragraph of its own (on one line apiece: a single
+/// line break would join them into one paragraph).
 fn entry(
     component: &str,
     license: &str,
@@ -305,9 +358,9 @@ fn entry(
     ships: Option<&str>,
     note: Option<&str>,
 ) -> String {
-    let mut b = format!("{component}\n\nLicense: {license}\nFull text: {full_text}\n");
+    let mut b = format!("{component}\n\nLicense: {license}\n\nFull text: {full_text}\n");
     if let Some(ships) = ships {
-        b.push_str(&format!("Ships as: {ships}\n"));
+        b.push_str(&format!("\nShips as: {ships}\n"));
     }
     if let Some(note) = note {
         b.push_str(note);
@@ -1244,6 +1297,62 @@ mod tests {
         );
     }
 
+    /// A list item's lines hang under its text, and go on with the item:
+    /// the Apache License's numbered sections and lettered conditions and
+    /// the BSD licenses' bullets read as one paragraph each, where Flutter
+    /// broke them after their first line, mid-sentence.
+    #[test]
+    fn a_list_items_hanging_lines_go_on_with_it() {
+        let apache = "   2. Grant of Copyright License. Subject to the terms and conditions of\n      this License, each Contributor hereby grants to You a perpetual,\n      worldwide license.\n\n      (a) You must give any other recipients of the Work or\n          Derivative Works a copy of this License; and\n\n      (b) You must cause any modified files to carry prominent notices\n          stating that You changed the files; and\n";
+        assert_eq!(
+            license_paragraphs(apache),
+            vec![
+                para(
+                    "2. Grant of Copyright License. Subject to the terms and conditions of \
+                     this License, each Contributor hereby grants to You a perpetual, \
+                     worldwide license.",
+                    1
+                ),
+                para(
+                    "(a) You must give any other recipients of the Work or Derivative \
+                     Works a copy of this License; and",
+                    2
+                ),
+                para(
+                    "(b) You must cause any modified files to carry prominent notices \
+                     stating that You changed the files; and",
+                    2
+                ),
+            ]
+        );
+        let bsd = "    * Redistributions of source code must retain the above copyright\n      notice, this list of conditions and the following disclaimer.\n    * Neither the name of the copyright holder nor the names of its\n      contributors may be used.\n";
+        assert_eq!(
+            license_paragraphs(bsd),
+            vec![
+                para(
+                    "* Redistributions of source code must retain the above copyright \
+                     notice, this list of conditions and the following disclaimer.",
+                    1
+                ),
+                para(
+                    "* Neither the name of the copyright holder nor the names of its \
+                     contributors may be used.",
+                    1
+                ),
+            ]
+        );
+        // A nested item at the hang starts a paragraph of its own; a line
+        // indented past the text of a line that is no item still does.
+        assert_eq!(
+            license_paragraphs("   1. Terms\n      (a) first\n"),
+            vec![para("1. Terms", 1), para("(a) first", 2)]
+        );
+        assert_eq!(
+            license_paragraphs("Title\n   more\n"),
+            vec![para("Title", 0), para("more", 1)]
+        );
+    }
+
     // "LicenseEntryWithLineBreaks - leading and trailing whitespace".
     #[test]
     fn leading_and_trailing_whitespace_makes_no_paragraph() {
@@ -1355,7 +1464,23 @@ mod tests {
         assert_eq!(entries.len(), 3);
         assert_eq!(
             entries[0].text,
-            "a 1.0.0 (Rust crate)\n\nLicense: MIT\nFull text: below\nShips as: statically linked into the Vocara app\n\nCopyright A\n\nPermission is hereby granted"
+            "a 1.0.0 (Rust crate)\n\nLicense: MIT\n\nFull text: below\n\nShips as: statically linked into the Vocara app\n\nCopyright A\n\nPermission is hereby granted"
+        );
+        // The header's lines are paragraphs of their own, each on its own
+        // line (they ran together: "License: MIT Full text: below ...").
+        let paragraphs: Vec<String> = entries[0]
+            .paragraphs()
+            .into_iter()
+            .map(|p| p.text)
+            .collect();
+        assert_eq!(
+            paragraphs[..4],
+            [
+                "a 1.0.0 (Rust crate)",
+                "License: MIT",
+                "Full text: below",
+                "Ships as: statically linked into the Vocara app",
+            ]
         );
         assert!(entries[1]
             .text

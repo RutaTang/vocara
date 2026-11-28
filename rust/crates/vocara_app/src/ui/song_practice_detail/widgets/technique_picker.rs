@@ -21,11 +21,23 @@
 //! Escape cancels, and nothing beneath sees a key. It comes in and goes as
 //! they do, drawn at a fade ([`TechniquePicker::view_at`]) by the screen,
 //! which keeps its `DialogMotion`.
+//!
+//! The keyboard picks too, as a macOS search list does: one row is
+//! highlighted (the first match, while the search changes), Up and Down
+//! move the highlight, and Return picks it. The card's top stays put while
+//! the list grows and shrinks under the search, so the field does not move
+//! under the caret as the user types.
 
 use crate::ui::core::text;
+use iced::advanced::layout::{self, Layout};
+use iced::advanced::widget::{Operation, Tree};
+use iced::advanced::{overlay, renderer, Clipboard, Shell, Widget};
 use iced::alignment::{Horizontal, Vertical};
 use iced::widget::{button, center, column, container, opaque, row, stack, Column, Space};
-use iced::{keyboard, widget, Element, Event, Length, Padding, Pixels, Task};
+use iced::{
+    keyboard, mouse, widget, Element, Event, Length, Padding, Pixels, Rectangle, Renderer, Size,
+    Task, Theme, Vector,
+};
 use vocara_model::models::technique::Technique;
 use vocara_model::util::dart_string;
 
@@ -55,6 +67,12 @@ pub enum Message {
     Query(String),
     /// A technique (its id) was tapped.
     Pick(String),
+    /// Up: the highlight moves to the row above.
+    Previous,
+    /// Down: the highlight moves to the row below.
+    Next,
+    /// Return: the highlighted technique is picked.
+    PickHighlighted,
     /// A tap on the barrier, or Escape.
     Cancel,
 }
@@ -69,6 +87,8 @@ pub struct TechniquePicker {
     all: Option<Vec<Technique>>,
     /// The library could not be read: said so, not "no techniques yet".
     failed: bool,
+    /// The highlighted row, in the list as filtered (Return picks it).
+    highlight: usize,
     search: widget::Id,
 }
 
@@ -80,6 +100,7 @@ impl TechniquePicker {
             query: String::new(),
             all: None,
             failed: false,
+            highlight: 0,
             search: widget::Id::unique(),
         }
     }
@@ -102,6 +123,7 @@ impl TechniquePicker {
     pub fn loaded(&mut self, list: Option<Vec<Technique>>) {
         self.failed = list.is_none();
         self.all = Some(list.unwrap_or_default());
+        self.highlight = 0;
     }
 
     /// Whether the library is still loading.
@@ -132,14 +154,34 @@ impl TechniquePicker {
         all.iter().filter(|t| matches(t)).collect()
     }
 
+    /// The highlighted technique: the first match until Up or Down moves
+    /// the highlight.
+    pub fn highlighted(&self) -> Option<&Technique> {
+        let filtered = self.filtered();
+        let last = filtered.len().checked_sub(1)?;
+        filtered.get(self.highlight.min(last)).copied()
+    }
+
     /// Handles `message`; `Some` when the picker closes: `Some(technique)`
     /// picked, `None` cancelled.
     pub fn update(&mut self, message: Message) -> Option<Option<Technique>> {
         match message {
             Message::Query(query) => {
+                // A new search highlights its first match.
                 self.query = query;
+                self.highlight = 0;
                 None
             }
+            Message::Previous => {
+                self.highlight = self.highlight.saturating_sub(1);
+                None
+            }
+            Message::Next => {
+                let last = self.filtered().len().saturating_sub(1);
+                self.highlight = (self.highlight + 1).min(last);
+                None
+            }
+            Message::PickHighlighted => self.highlighted().map(|t| Some(t.clone())),
             Message::Cancel => Some(None),
             Message::Pick(id) => self
                 .all
@@ -183,7 +225,7 @@ impl TechniquePicker {
         .style(theme::dialog_card)
         // The rows' hover keeps inside the card's rounded corners.
         .clip(true);
-        modal(container(card).padding(24).into(), fade)
+        modal(container(card).padding(CARD_MARGIN).into(), fade)
     }
 
     fn body(&self) -> Element<'_, Message> {
@@ -205,9 +247,15 @@ impl TechniquePicker {
         if filtered.is_empty() {
             return hint("No techniques match.");
         }
-        let rows = Column::with_children(filtered.into_iter().map(technique_row))
-            .width(Length::Fill)
-            .padding(LIST_PADDING);
+        let highlight = self.highlight.min(filtered.len() - 1);
+        let rows = Column::with_children(
+            filtered
+                .into_iter()
+                .enumerate()
+                .map(|(i, t)| technique_row(t, i == highlight)),
+        )
+        .width(Length::Fill)
+        .padding(LIST_PADDING);
         container(scrollable(rows).fading())
             .width(Length::Fill)
             .max_height(LIST_MAX_HEIGHT)
@@ -217,6 +265,13 @@ impl TechniquePicker {
 
 /// The list's inset inside the card, under the search.
 const LIST_PADDING: f32 = 6.0;
+
+/// The card at its tallest: the header (the padding, an 18 px title, 12,
+/// the field, 12), the rule and the list at its cap. The card hangs from
+/// the top of a box this tall centred in the window, where a full list's
+/// card is centred, and keeps its top there however short the list.
+const CARD_MAX_HEIGHT: f32 =
+    confirm_dialog::CARD_PADDING + 18.0 + 12.0 + theme::FIELD_HEIGHT + 12.0 + 1.0 + LIST_MAX_HEIGHT;
 
 /// `_SearchField`: `DESIGN.md`'s text field (28 px, `WELL`, radius 6, an
 /// inset outline, the accent at 60 % while focused, 12 px text) with a
@@ -251,11 +306,11 @@ fn search_field(query: &str, id: widget::Id) -> Element<'_, Message> {
 /// 14 px glyph and a 7 px gap.
 pub const SEARCH_TEXT_INSET: f32 = 9.0 + 14.0 + 7.0;
 
-/// `_TechniqueRow`: a list row (`HOVER` under the pointer, radius 4), 10 px
-/// in: a 14 px `TEXT_SECONDARY` waypoints glyph, the name (12 px medium)
-/// and, when it has tags, them joined by " · " under it (11 px
-/// `TEXT_FAINT`) — one line each.
-fn technique_row(t: &Technique) -> Element<'_, Message> {
+/// `_TechniqueRow`: a list row (`HOVER` under the pointer and while
+/// `highlighted`, radius 4), 10 px in: a 14 px `TEXT_SECONDARY` waypoints
+/// glyph, the name (12 px medium) and, when it has tags, them joined by
+/// " · " under it (11 px `TEXT_FAINT`) — one line each.
+fn technique_row(t: &Technique, highlighted: bool) -> Element<'_, Message> {
     let mut labels = column![studio_text(t.name.as_str())
         .size(theme::type_scale::BODY)
         .line_height(Pixels(theme::type_scale::LINE))
@@ -282,16 +337,17 @@ fn technique_row(t: &Technique) -> Element<'_, Message> {
     )
     .width(Length::Fill)
     .padding([6, 10])
-    .style(row_style)
+    .style(move |theme, status| row_style(theme, status, highlighted))
     .on_press(Message::Pick(t.id.clone()))
     .into()
 }
 
-/// A list row's face: `HOVER` under the pointer at once, radius 4.
-fn row_style(_: &iced::Theme, status: button::Status) -> button::Style {
+/// A list row's face: `HOVER` under the pointer at once, and while it is
+/// the highlighted row, radius 4.
+fn row_style(_: &iced::Theme, status: button::Status, highlighted: bool) -> button::Style {
     let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
     button::Style {
-        background: hovered.then_some(Studio::HOVER.into()),
+        background: (hovered || highlighted).then_some(Studio::HOVER.into()),
         text_color: Studio::TEXT_PRIMARY,
         border: iced::Border {
             radius: theme::radius::SMALL.into(),
@@ -317,32 +373,194 @@ fn hint(label: &str) -> Element<'_, Message> {
     .into()
 }
 
-/// `content` centred over the studio dialogs' dismissible barrier
+/// `content` over the studio dialogs' dismissible barrier
 /// (`Color(0xB0000000)`), as `confirm_dialog::modal` draws it: a tap on the
 /// barrier cancels, the card takes its own taps, Escape cancels and no key
 /// reaches what lies beneath. Both at `fade` (the card as one layer).
+/// Centred across; down, hung from the top of a box as tall as the card at
+/// its tallest ([`CARD_MAX_HEIGHT`]), centred, so it keeps its place as the
+/// list filters. Up and Down move the highlight ([`ArrowKeys`]) and Return
+/// picks it.
 fn modal(content: Element<'_, Message>, fade: Fade) -> Element<'_, Message> {
     let barrier = barrier(theme::DIALOG_BARRIER, fade.barrier, Some(Message::Cancel));
-    let layers = stack![barrier, center(opaque(fade.card(content)))];
-    Wrap::<Message, ()>::new(
+    let card = container(opaque(fade.card(content)))
+        .height(CARD_MAX_HEIGHT + 2.0 * CARD_MARGIN)
+        .align_y(Vertical::Top);
+    let layers = stack![barrier, center(card)];
+    let modal = Wrap::<Message, ()>::new(
         // A dialog route's scope: Tab goes round its fields.
         focus_scope(layers),
         Box::new(|_, event, _, _, shell| {
-            if let Event::Keyboard(event) = event {
-                if let keyboard::Event::KeyPressed {
-                    key: keyboard::Key::Named(keyboard::key::Named::Escape),
-                    ..
-                } = event
-                {
-                    shell.publish(Message::Cancel);
+            if let Event::Keyboard(keyboard::Event::KeyPressed {
+                key: keyboard::Key::Named(named),
+                ..
+            }) = event
+            {
+                match named {
+                    keyboard::key::Named::Escape => shell.publish(Message::Cancel),
+                    keyboard::key::Named::Enter if !shell.is_event_captured() => {
+                        shell.publish(Message::PickHighlighted);
+                    }
+                    _ => {}
                 }
+            }
+            if let Event::Keyboard(_) = event {
                 // The picker holds the keyboard (its search field has
                 // already had its turn).
                 shell.capture_event();
             }
         }),
-    )
-    .into()
+    );
+    Element::new(ArrowKeys {
+        content: modal.into(),
+    })
+}
+
+/// The space around the card ([`TechniquePicker::view_at`]'s padding).
+const CARD_MARGIN: f32 = 24.0;
+
+/// Takes Up and Down (with no modifier) before its content sees them, as
+/// [`Message::Previous`] and [`Message::Next`]: the search field's own Up
+/// and Down move its caret to the ends of the text, under the typing. With
+/// Shift they are still the field's, selecting.
+struct ArrowKeys<'a> {
+    content: Element<'a, Message>,
+}
+
+impl Widget<Message, Theme, Renderer> for ArrowKeys<'_> {
+    fn size(&self) -> Size<Length> {
+        self.content.as_widget().size()
+    }
+
+    fn size_hint(&self) -> Size<Length> {
+        self.content.as_widget().size_hint()
+    }
+
+    fn layout(
+        &mut self,
+        tree: &mut Tree,
+        renderer: &Renderer,
+        limits: &layout::Limits,
+    ) -> layout::Node {
+        self.content
+            .as_widget_mut()
+            .layout(&mut tree.children[0], renderer, limits)
+    }
+
+    fn draw(
+        &self,
+        tree: &Tree,
+        renderer: &mut Renderer,
+        theme: &Theme,
+        style: &renderer::Style,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        viewport: &Rectangle,
+    ) {
+        self.content.as_widget().draw(
+            &tree.children[0],
+            renderer,
+            theme,
+            style,
+            layout,
+            cursor,
+            viewport,
+        );
+    }
+
+    fn children(&self) -> Vec<Tree> {
+        vec![Tree::new(&self.content)]
+    }
+
+    fn diff(&self, tree: &mut Tree) {
+        tree.diff_children(std::slice::from_ref(&self.content));
+    }
+
+    fn operate(
+        &mut self,
+        tree: &mut Tree,
+        layout: Layout<'_>,
+        renderer: &Renderer,
+        operation: &mut dyn Operation,
+    ) {
+        self.content
+            .as_widget_mut()
+            .operate(&mut tree.children[0], layout, renderer, operation);
+    }
+
+    fn update(
+        &mut self,
+        tree: &mut Tree,
+        event: &Event,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        renderer: &Renderer,
+        clipboard: &mut dyn Clipboard,
+        shell: &mut Shell<'_, Message>,
+        viewport: &Rectangle,
+    ) {
+        if let Event::Keyboard(keyboard::Event::KeyPressed {
+            key: keyboard::Key::Named(named),
+            modifiers,
+            ..
+        }) = event
+        {
+            let step = match named {
+                keyboard::key::Named::ArrowUp => Some(Message::Previous),
+                keyboard::key::Named::ArrowDown => Some(Message::Next),
+                _ => None,
+            };
+            if let Some(step) = step.filter(|_| modifiers.is_empty()) {
+                shell.publish(step);
+                shell.capture_event();
+                return;
+            }
+        }
+        self.content.as_widget_mut().update(
+            &mut tree.children[0],
+            event,
+            layout,
+            cursor,
+            renderer,
+            clipboard,
+            shell,
+            viewport,
+        );
+    }
+
+    fn mouse_interaction(
+        &self,
+        tree: &Tree,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        viewport: &Rectangle,
+        renderer: &Renderer,
+    ) -> mouse::Interaction {
+        self.content.as_widget().mouse_interaction(
+            &tree.children[0],
+            layout,
+            cursor,
+            viewport,
+            renderer,
+        )
+    }
+
+    fn overlay<'b>(
+        &'b mut self,
+        tree: &'b mut Tree,
+        layout: Layout<'b>,
+        renderer: &Renderer,
+        viewport: &Rectangle,
+        translation: Vector,
+    ) -> Option<overlay::Element<'b, Message, Theme, Renderer>> {
+        self.content.as_widget_mut().overlay(
+            &mut tree.children[0],
+            layout,
+            renderer,
+            viewport,
+            translation,
+        )
+    }
 }
 
 #[cfg(test)]

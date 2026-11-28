@@ -80,7 +80,9 @@ use crate::services::Services;
 use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::motion;
 use crate::ui::core::theme::{self, alpha, boxed, font, type_scale, Studio};
-use crate::ui::core::widgets::confirm_dialog::{barrier, ConfirmDialog, DialogMotion, Fade};
+use crate::ui::core::widgets::confirm_dialog::{
+    barrier, ConfirmDialog, DialogMotion, DialogResult, Fade,
+};
 use crate::ui::core::widgets::controls::icon_button;
 use crate::ui::core::widgets::fading_scrollbar::{scrollable, Fading};
 use crate::ui::core::widgets::line_icon::glyphs;
@@ -233,6 +235,9 @@ pub enum Message {
     ConsentDue,
     /// The question was answered: whether to check automatically.
     ConsentAnswered(bool),
+    /// The question was closed unanswered (a barrier tap, Escape): nothing
+    /// is kept.
+    ConsentDismissed,
     /// The answer was written, or why it could not be.
     ConsentSaved(Result<(), String>),
     /// The self-update's start-up work is done (a failed swap reported,
@@ -730,14 +735,20 @@ impl Screen for HomeScreen {
                 {
                     return Update::none();
                 }
+                // Only the two buttons answer: a stray click on the barrier,
+                // or Escape, leaves the question for the next launch.
                 Update::dialog(
                     ConfirmDialog::new(CONSENT_TITLE)
                         .body(CONSENT_BODY)
                         .confirm_label(CONSENT_YES)
                         .cancel_label(CONSENT_NO)
                         .destructive(false)
-                        .icon(Icon::RefreshCw),
-                    |result| Message::ConsentAnswered(result.confirmed()),
+                        .icon(Icon::RefreshCw)
+                        .answered_by_buttons(),
+                    |result| match result {
+                        DialogResult::Closed => Message::ConsentDismissed,
+                        answer => Message::ConsentAnswered(answer.confirmed()),
+                    },
                 )
             }
             Message::ConsentAnswered(enabled) => {
@@ -759,6 +770,8 @@ impl Screen for HomeScreen {
                 };
                 Task::batch([save, check]).into()
             }
+            // Nothing kept: the next launch asks again.
+            Message::ConsentDismissed => Update::none(),
             Message::ConsentSaved(saved) => {
                 if saved.is_err() {
                     self.show_error(CONSENT_NOT_SAVED);

@@ -72,7 +72,7 @@ use iced::alignment::{Horizontal, Vertical};
 use iced::futures::channel::mpsc;
 use iced::futures::{Stream, StreamExt};
 use iced::widget::{button, column, container, row, stack, Column, Space};
-use iced::{Color, Element, Length, Padding, Pixels, Subscription, Task, Theme};
+use iced::{mouse, Color, Element, Event, Length, Padding, Pixels, Subscription, Task, Theme};
 use vocara_model::diagnostics::DiagnosticsLog;
 use vocara_model::models::audio_device::AudioDevice;
 use vocara_model::util::export_copy::{export_copy, exports_into};
@@ -98,6 +98,7 @@ use crate::ui::core::widgets::slide::{cupertino, slide, PAGE_TRANSITION};
 use crate::ui::core::widgets::studio_hint::spinner;
 use crate::ui::core::widgets::studio_text::studio_text;
 use crate::ui::core::widgets::toolbar;
+use crate::ui::core::widgets::wrap::Wrap;
 use crate::ui::home::widgets::update_notice::{self, UpdateDownloadDialog};
 use crate::ui::snack::{SnackEvent, SnackQueue, SnackStyle, SnackTimer};
 use crate::ui::{Screen, SnackBar, Update};
@@ -125,6 +126,9 @@ pub const REVERB_SLIDER: iced::widget::Id = iced::widget::Id::new("settings-reve
 /// The recording offset slider.
 pub const OFFSET_SLIDER: iced::widget::Id = iced::widget::Id::new("settings-offset-slider");
 
+/// The page's scroll view.
+pub const SCROLL: iced::widget::Id = iced::widget::Id::new("settings-scroll");
+
 /// The toasts.
 pub const REPAIR_FAILED: &str = "The repair did not finish. It is safe to try again later.";
 pub const SAVE_PANEL_FAILED: &str = "Could not open the save dialog.";
@@ -133,6 +137,7 @@ pub const DIAGNOSTICS_INTO_APP_STORAGE: &str =
 pub const DIAGNOSTICS_SAVED: &str =
     "Diagnostics saved. The file holds technical logs only, never your audio.";
 pub const DIAGNOSTICS_FAILED: &str = "Could not save the diagnostics file.";
+pub const DEVICES_REFRESHED: &str = "Device lists refreshed.";
 pub const AUTO_CHECK_NOT_SAVED: &str =
     "Could not save the update setting. It applies until Vocara quits.";
 
@@ -227,6 +232,16 @@ fn count(n: usize, noun: &str) -> String {
     } else {
         format!("{n} {noun}s")
     }
+}
+
+/// The version this binary was built as and its build number ("0.4.1
+/// (5)"), as the diagnostics bundle writes it when no bundle says.
+pub fn built_version() -> String {
+    format!(
+        "{} ({})",
+        UpdateCheckService::APP_VERSION,
+        UpdateCheckService::APP_BUILD_NUMBER
+    )
 }
 
 /// The About block's version line (the license page shows the same).
@@ -340,7 +355,11 @@ impl SettingsHooks {
         let storage = services.local_storage.clone();
         Self {
             pick_save_path: Arc::new(save_panel),
-            export_diagnostics: Arc::new(|| DiagnosticsLog::instance().export_archive()),
+            // Outside a bundle (no Info.plist to read), the version this
+            // binary was built as, which About shows.
+            export_diagnostics: Arc::new(|| {
+                DiagnosticsLog::instance().export_archive_with_version(&built_version())
+            }),
             app_storage_root: Arc::new(move || {
                 storage
                     .root_dir()
@@ -438,6 +457,9 @@ pub enum Message {
     RefreshDevices,
     /// A device refresh finished.
     Refreshed,
+    /// The page scrolled to this offset (kept, to put it back where it was
+    /// when the license page, which takes its widgets, goes).
+    Scrolled(f32),
     /// The settings notified a change.
     SettingsChanged,
     /// A device row, the input channel, the reverb slider or the headphones
@@ -506,6 +528,10 @@ pub struct SettingsScreen {
     /// A device refresh is in flight; another was asked for meanwhile.
     refreshing: bool,
     refresh_owed: bool,
+    /// "Refresh devices" was pressed: its refresh ends with a toast.
+    refresh_asked: bool,
+    /// How far down the page is scrolled.
+    scroll: f32,
 
     /// The choice being applied, and those waiting their turn.
     applying: Option<Choice>,
@@ -571,6 +597,8 @@ impl SettingsScreen {
             hooks,
             refreshing: false,
             refresh_owed: false,
+            refresh_asked: false,
+            scroll: 0.0,
             applying: None,
             queued: VecDeque::new(),
             turns: turn_line(&services.app_settings),
@@ -1005,12 +1033,25 @@ impl Screen for SettingsScreen {
     fn update(&mut self, message: Message, _services: &Services) -> Update<Message> {
         match message {
             Message::Back => Update::pop_or_go(Route::Home),
-            Message::Poll | Message::RefreshDevices => self.refresh().into(),
+            Message::Poll => self.refresh().into(),
+            Message::RefreshDevices => {
+                self.refresh_asked = true;
+                self.refresh().into()
+            }
             Message::Refreshed => {
                 self.refreshing = false;
                 if std::mem::take(&mut self.refresh_owed) {
                     return self.refresh().into();
                 }
+                // The button's refresh says it ran: an unchanged list
+                // otherwise looks like a press that did nothing.
+                if std::mem::take(&mut self.refresh_asked) {
+                    self.show_toast(DEVICES_REFRESHED);
+                }
+                Update::none()
+            }
+            Message::Scrolled(y) => {
+                self.scroll = y;
                 Update::none()
             }
             // The state changed; iced redraws.
@@ -1088,6 +1129,15 @@ impl Screen for SettingsScreen {
                         route.reverse(now);
                         self.licenses_route = Some(Box::new(route));
                         self.closed_licenses = self.licenses.take();
+                        // Settings comes back where it was: the license
+                        // page took its widgets, its scroll with them.
+                        return Update::task(iced::widget::operation::scroll_to(
+                            SCROLL,
+                            iced::widget::scrollable::AbsoluteOffset {
+                                x: None,
+                                y: Some(self.scroll),
+                            },
+                        ));
                     }
                 }
                 Update::none()
@@ -1161,6 +1211,8 @@ impl Screen for SettingsScreen {
             column![
                 header(),
                 scrollable(self.body())
+                    .id(SCROLL)
+                    .on_scroll(|viewport| Message::Scrolled(viewport.absolute_offset().y))
                     .width(Length::Fill)
                     .height(Length::Fill)
                     .fading(),
@@ -1313,6 +1365,9 @@ impl SettingsScreen {
                 .push(Space::new().height(GROUP_INNER_GAP))
                 .push(notice(BLUETOOTH_CONFLICT));
         }
+        // Under the device lists, which it is about (it sat under the
+        // reverb).
+        content = content.push(footnote(engine_footnote(s.engine_sample_rate())));
 
         // Recording.
         content = content
@@ -1325,12 +1380,7 @@ impl SettingsScreen {
         content = content
             .push(Space::new().height(GROUP_GAP))
             .push(group_title("Monitoring"))
-            .push(group(vec![reverb_row(self.reverb_shown())]))
-            .push(footnote(format!(
-                "The engine runs at {} kHz; devices are resampled to/from this rate \
-                 automatically. The input device is used for recording and live monitoring.",
-                to_string_as_fixed(s.engine_sample_rate() / 1000.0, 1)
-            )));
+            .push(group(vec![reverb_row(self.reverb_shown())]));
 
         // Maintenance.
         content = content
@@ -1716,14 +1766,33 @@ fn offset_row<'a>(ms: f64) -> Element<'a, Message> {
         AppSettingsService::RECORDING_OFFSET_MAX_MS,
     );
     let ms = ms.clamp(lo, hi);
-    let slider = container(thin_slider(
-        ((ms - lo) / (hi - lo)) as f32,
+    let at = |ms: f64| ((ms - lo) / (hi - lo)) as f32;
+    // Bipolar: filled from no offset, either way; a double click puts it
+    // back there.
+    let slider = thin_slider(
+        at(ms),
         move |v| {
             Message::Choose(Choice::RecordingOffset(
                 (lo + f64::from(v) * (hi - lo)).round(),
             ))
         },
         Message::OffsetReleased,
+    )
+    .origin(at(0.0));
+    let slider = container(Wrap::<Message, Option<iced::advanced::mouse::Click>>::new(
+        slider,
+        Box::new(|last, event, bounds, cursor, shell| {
+            if let Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) = event {
+                let Some(at) = cursor.position_over(bounds) else {
+                    return;
+                };
+                let click = iced::advanced::mouse::Click::new(at, mouse::Button::Left, *last);
+                if click.kind() == iced::advanced::mouse::click::Kind::Double {
+                    shell.publish(Message::Choose(Choice::RecordingOffset(0.0)));
+                }
+                *last = Some(click);
+            }
+        }),
     ))
     .id(OFFSET_SLIDER)
     .width(Length::Fill);
@@ -1751,6 +1820,16 @@ fn offset_row<'a>(ms: f64) -> Element<'a, Message> {
     .width(Length::Fill)
     .padding(ROW_PADDING)
     .into()
+}
+
+/// The footnote under the device lists: the engine's rate (in kHz, one
+/// decimal), and what the input device is for.
+pub fn engine_footnote(sample_rate: f64) -> String {
+    format!(
+        "The engine runs at {} kHz; devices are resampled to/from this rate \
+         automatically. The input device is used for recording and live monitoring.",
+        to_string_as_fixed(sample_rate / 1000.0, 1)
+    )
 }
 
 /// The recording offset as the row shows it: whole ms, signed ("+20 ms",
