@@ -1608,7 +1608,7 @@ impl SongPracticeDetailScreen {
             return;
         };
         let fx = match action {
-            TrackAction::PickColor(value) => self.vm.set_track_color(&id, Some(value)),
+            TrackAction::PickColor(value) => self.vm.set_track_color(&id, value),
             TrackAction::Rename => return self.rename_track(&id, step),
             TrackAction::Separate => return self.separate(&id, step),
             TrackAction::Export => self.vm.export_track_audio(&id),

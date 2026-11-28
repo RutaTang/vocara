@@ -61,6 +61,7 @@ mod tests;
 
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
+use std::time::Instant;
 
 use crate::ui::core::text;
 use iced::alignment::Horizontal;
@@ -79,6 +80,7 @@ use vocara_model::models::audio_track::AudioTrack;
 use vocara_model::models::fx_bus::FxBus;
 use vocara_services::app_settings_service::AppSettingsService;
 
+use super::left_panel::MASTER;
 use super::mixer_shared::{keyed_row, tap, MenuItem, Opens, PopupMenu};
 use super::track_row::{bus_color, channel_color};
 use crate::ui::core::theme::{self, alpha, font, radius, type_scale, Studio};
@@ -88,6 +90,7 @@ use crate::ui::core::widgets::controls::{
     METER_GAP, METER_WIDTH,
 };
 use crate::ui::core::widgets::fading_scrollbar::{scrollable, Fading};
+use crate::ui::core::widgets::gesture::{DOUBLE_TAP_SLOP, DOUBLE_TAP_TIMEOUT, PRECISE_PAN_SLOP};
 use crate::ui::core::widgets::line_icon::{glyphs, line_icon_inherit};
 use crate::ui::core::widgets::material_tooltip::material_tooltip;
 use crate::ui::core::widgets::opacity_layer::opacity_layer;
@@ -426,11 +429,11 @@ pub fn bus_accent(bus: &FxBus) -> Color {
     bus_color(bus)
 }
 
-/// Display name of the bus `id` routes to, or "Master" when it's
+/// Display name of the bus `id` routes to, or [`MASTER`] when it's
 /// none/missing.
 pub fn bus_name<'b>(buses: &'b [Arc<FxBus>], id: Option<&str>) -> &'b str {
     id.and_then(|id| buses.iter().find(|b| b.id == id))
-        .map_or("Master", |b| b.name.as_str())
+        .map_or(MASTER, |b| b.name.as_str())
 }
 
 /// A strip's frame (`DESIGN.md`, Mixer strip): `width` wide, radius 6,
@@ -724,7 +727,7 @@ fn track_channel<'a>(
         let output = if !t.is_backing() && !buses.is_empty() {
             let routed = t.bus_id.as_deref();
             let mut options = vec![MenuItem::new(
-                "Master",
+                MASTER,
                 vec![Message::SetTrackBus {
                     id: id.to_string(),
                     bus_id: None,
@@ -745,7 +748,7 @@ fn track_channel<'a>(
             }
             route_popup(bus_name(buses, routed), options)
         } else {
-            fixed_output("Master")
+            fixed_output(MASTER)
         };
         vec![
             title(&t.display_name, selected),
@@ -785,6 +788,7 @@ fn track_channel<'a>(
                             volume,
                         }),
                         on_change_end: Message::CommitTrackVolume,
+                        unity: 1.0,
                     }),
                 ),
             ),
@@ -823,7 +827,7 @@ fn bus_channel<'a>(b: &'a FxBus, selected: bool, buses: &'a [Arc<FxBus>]) -> Ele
     let id = b.id.as_str();
     let body = strip_body(move |squeezed| {
         let mut options = vec![MenuItem::new(
-            "Master",
+            MASTER,
             vec![Message::SetBusOutput {
                 id: id.to_string(),
                 output_bus_id: None,
@@ -880,6 +884,7 @@ fn bus_channel<'a>(b: &'a FxBus, selected: bool, buses: &'a [Arc<FxBus>]) -> Ele
                             volume,
                         }),
                         on_change_end: Message::CommitFx,
+                        unity: 1.0,
                     }),
                 ),
             ),
@@ -1013,6 +1018,7 @@ fn master_channel<'a>(value: f64) -> Element<'a, Message> {
                     Some(FaderInput {
                         on_changed: Box::new(|gain| Message::SetMasterVolumeLive { gain }),
                         on_change_end: Message::CommitMasterVolume,
+                        unity: 1.0,
                     }),
                 ),
             ),
@@ -1131,6 +1137,7 @@ fn input_channel<'a>(mic: MicInput) -> Element<'a, Message> {
                             db: record_gain_at(p),
                         }),
                         on_change_end: Message::CommitAudioGains,
+                        unity: record_gain_position(0.0),
                     }),
                 ),
             ),
@@ -1326,14 +1333,37 @@ pub fn vertical_fader_value(dy: f32, height: f32) -> f64 {
     (1.0 - (f64::from(dy) - pad) / span).clamp(0.0, 1.0)
 }
 
+/// Where a vertical fader `height` tall draws its cap's centre for `value`,
+/// from its top: the inverse of [`vertical_fader_value`].
+pub fn vertical_fader_y(value: f64, height: f32) -> f32 {
+    let span = (height - 2.0 * FADER_PAD).max(1.0);
+    FADER_PAD + (1.0 - value.clamp(0.0, 1.0) as f32) * span
+}
+
+/// How far past the cap's edge a press still takes the cap.
+const CAP_GRAB_SLACK: f32 = 2.0;
+
+/// Where a press at `dy` from the top of a fader `height` tall, at `value`,
+/// takes hold: on the cap, how far below its centre (so the level follows
+/// the pointer's moves from there, and the press alone moves nothing);
+/// elsewhere `None`, and the press sets the level where it lands. (A press
+/// anywhere on the cap jumped the level by the press's distance from its
+/// centre: −7.1 dB read −6.8, then −7.4.)
+pub fn cap_grab(dy: f32, value: f64, height: f32) -> Option<f32> {
+    let off = dy - vertical_fader_y(value, height);
+    (off.abs() <= FADER_CAP.height / 2.0 + CAP_GRAB_SLACK).then_some(off)
+}
+
 /// A console-style vertical volume fader (`controls::draw_fader`: a 3 px
 /// slot, scale ticks, the 21 × 12 cap) and its meters
 /// (`controls::draw_meter`). Drag up for louder, down for quieter; the
 /// whole column, meters included, takes the pointer.
 ///
-/// It takes its pointer on contact: a press sets the level at once; every
-/// move while held sets it from the pointer's y; the release saves it, once,
-/// whether the press was a click or turned into a drag.
+/// It takes its pointer on contact. A press on the cap holds it where it
+/// was grabbed ([`cap_grab`]); a press elsewhere sets the level there at
+/// once. Every move while held sets the level from the pointer's y; the
+/// release saves it, once, if the press moved it. A double click resets it
+/// to 0 dB, as the pan knob's re-centers the pan.
 struct VerticalFader<'a> {
     value: f64,
     /// Each meter's level (0 to 1), left to right.
@@ -1345,12 +1375,28 @@ struct VerticalFader<'a> {
 struct FaderInput<'a> {
     on_changed: Box<dyn Fn(f64) -> Message + 'a>,
     on_change_end: Message,
+    /// The position that reads 0 dB, which a double click resets to.
+    unity: f64,
 }
 
-/// A drag in flight: it has moved the level and owes its save.
+/// A press in flight.
+#[derive(Debug, Clone, Copy)]
+struct Held {
+    /// Where it went down.
+    at: Point,
+    /// How far below the cap's centre it holds the cap (0 off the cap).
+    grab: f32,
+    /// Whether it has moved the level, and so owes the save.
+    changed: bool,
+    /// Whether it has travelled, so it is no click.
+    dragged: bool,
+}
+
 #[derive(Default)]
 struct FaderState {
-    active: bool,
+    held: Option<Held>,
+    /// The last click's release: where and when (for a double click).
+    last_click: Option<(Point, Instant)>,
     cache: KeyedCache<(u64, Vec<u32>, u32, u32)>,
 }
 
@@ -1376,25 +1422,59 @@ impl canvas::Program<Message> for VerticalFader<'_> {
         cursor: mouse::Cursor,
     ) -> Option<canvas::Action<Message>> {
         let input = self.input.as_ref()?;
-        let level_at = |p: Point| vertical_fader_value(p.y - bounds.y, bounds.height);
+        let h = bounds.height;
         match event {
             canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
                 let p = cursor.position_over(bounds)?;
-                state.active = true;
-                Some(canvas::Action::publish((input.on_changed)(level_at(p))).and_capture())
+                let dy = p.y - bounds.y;
+                let now = Instant::now();
+                let double = state.last_click.take().is_some_and(|(at, up)| {
+                    now.duration_since(up) <= DOUBLE_TAP_TIMEOUT
+                        && at.distance(p) <= DOUBLE_TAP_SLOP
+                });
+                let (level, grab) = if double {
+                    // Back to 0 dB, held there: a drag on goes on from it.
+                    (Some(input.unity), dy - vertical_fader_y(input.unity, h))
+                } else {
+                    match cap_grab(dy, self.value, h) {
+                        Some(grab) => (None, grab),
+                        None => (Some(vertical_fader_value(dy, h)), 0.0),
+                    }
+                };
+                state.held = Some(Held {
+                    at: p,
+                    grab,
+                    changed: level.is_some(),
+                    dragged: double,
+                });
+                Some(match level {
+                    Some(level) => canvas::Action::publish((input.on_changed)(level)).and_capture(),
+                    None => canvas::Action::capture(),
+                })
             }
-            canvas::Event::Mouse(mouse::Event::CursorMoved { .. }) if state.active => {
+            canvas::Event::Mouse(mouse::Event::CursorMoved { .. }) => {
+                let held = state.held.as_mut()?;
                 let p = match cursor {
                     mouse::Cursor::Available(p) | mouse::Cursor::Levitating(p) => p,
                     mouse::Cursor::Unavailable => return None,
                 };
-                Some(canvas::Action::publish((input.on_changed)(level_at(p))).and_capture())
+                held.dragged |= held.at.distance(p) > PRECISE_PAN_SLOP;
+                if !held.changed && p.y == held.at.y {
+                    // Across the cap only: the level stays.
+                    return Some(canvas::Action::capture());
+                }
+                held.changed = true;
+                let level = vertical_fader_value(p.y - bounds.y - held.grab, h);
+                Some(canvas::Action::publish((input.on_changed)(level)).and_capture())
             }
-            canvas::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left))
-                if state.active =>
-            {
-                state.active = false;
-                Some(canvas::Action::publish(input.on_change_end.clone()).and_capture())
+            canvas::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
+                let held = state.held.take()?;
+                state.last_click = (!held.dragged).then(|| (held.at, Instant::now()));
+                Some(if held.changed {
+                    canvas::Action::publish(input.on_change_end.clone()).and_capture()
+                } else {
+                    canvas::Action::capture()
+                })
             }
             _ => None,
         }

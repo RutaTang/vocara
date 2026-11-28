@@ -246,6 +246,26 @@ fn bus_insert(
 }
 
 /// Resolves an output routing (Some(bus) → that bus's input, None → master).
+/// A channel's aux sends as built, slot for slot: a send into the bus its
+/// `output` feeds, or into one an earlier slot already feeds, is left out
+/// (`None`, its slot kept), so no route feeds a bus twice. Built, the bus
+/// heard the sum (the output at the fader plus the send at its level), and
+/// neither control read what was heard. The app refuses both edits; this
+/// keeps a stored or synced practice from building one.
+fn single_feed(
+    output: Option<NodeId>,
+    sends: &[Option<(NodeId, f32)>],
+) -> Vec<Option<(NodeId, f32)>> {
+    let mut fed: Vec<NodeId> = output.into_iter().collect();
+    sends
+        .iter()
+        .map(|send| {
+            send.filter(|(target, _)| !fed.contains(target))
+                .inspect(|(target, _)| fed.push(*target))
+        })
+        .collect()
+}
+
 fn output_target(output: Option<NodeId>) -> NodeId {
     match output {
         Some(b) => bus_sum_id(b),
@@ -414,8 +434,8 @@ pub fn build(spec: ProjectSpec) -> GraphDesc {
         // Post-fader aux sends from this bus into other buses. Node ids come
         // from the MODEL slot, so an unresolvable slot is skipped WITHOUT
         // renumbering its siblings (the control plane addresses by slot).
-        for (i, send) in b.sends.iter().enumerate() {
-            let Some((target, level)) = *send else {
+        for (i, send) in single_feed(b.output, &b.sends).into_iter().enumerate() {
+            let Some((target, level)) = send else {
                 continue;
             };
             let s = bus_aux_send_id(b.id, i);
@@ -480,8 +500,8 @@ pub fn build(spec: ProjectSpec) -> GraphDesc {
         // ids come from the MODEL slot, so an unresolvable slot is skipped
         // WITHOUT renumbering its siblings (the control plane addresses by
         // slot).
-        for (i, send) in t.sends.iter().enumerate() {
-            let Some((target, level)) = *send else {
+        for (i, send) in single_feed(t.bus, &t.sends).into_iter().enumerate() {
+            let Some((target, level)) = send else {
                 continue;
             };
             let s = track_send_id(tid, i);
@@ -523,5 +543,59 @@ mod tests {
         let prev: HashMap<u64, NodeId> = [(7, 1)].into();
         let ids = assign_track_ids(&[Some(7), Some(7)], &prev, &[1].into());
         assert_eq!(ids, [1, 2]);
+    }
+
+    fn bus(id: NodeId, output: Option<NodeId>, sends: Vec<Option<(NodeId, f32)>>) -> BusSpec {
+        BusSpec {
+            id,
+            gain: 1.0,
+            send_db: -120.0,
+            output,
+            chain: vec![0, 1],
+            sends,
+            comp_meter: None,
+        }
+    }
+
+    #[test]
+    fn no_route_feeds_a_bus_twice() {
+        use crate::source::BufferSource;
+        // A take out to bus 0 that also sends to 0, to 1, and to 1 again;
+        // bus 2 out to bus 0 that also sends to 0.
+        let take = TrackSpec {
+            bus: Some(0),
+            sends: vec![Some((0, 1.0)), Some((1, 0.5)), Some((1, 1.0))],
+            ..TrackSpec::vocal(1, Box::new(BufferSource::new(Vec::new(), 0)))
+        };
+        let spec = ProjectSpec {
+            buses: vec![
+                bus(0, None, Vec::new()),
+                bus(1, None, Vec::new()),
+                bus(2, Some(0), vec![Some((0, 1.0))]),
+            ],
+            ..ProjectSpec::new(vec![take])
+        };
+        let graph = build(spec);
+        let into = |to: NodeId| -> Vec<NodeId> {
+            graph
+                .edges
+                .iter()
+                .filter(|e| e.to == to)
+                .map(|e| e.from)
+                .collect()
+        };
+        // Bus 0 hears the take's output and bus 2's, once each.
+        let mut feeding_0 = into(bus_sum_id(0));
+        feeding_0.sort_unstable();
+        let mut expected = vec![pan_id(1), bus_pan_id(2)];
+        expected.sort_unstable();
+        assert_eq!(feeding_0, expected);
+        // Bus 1 hears the take's first send to it, at its own slot.
+        assert_eq!(into(bus_sum_id(1)), vec![track_send_id(1, 1)]);
+        // The dropped sends build no node at all.
+        let ids: HashSet<NodeId> = graph.nodes.iter().map(|n| n.id).collect();
+        assert!(!ids.contains(&track_send_id(1, 0)));
+        assert!(!ids.contains(&track_send_id(1, 2)));
+        assert!(!ids.contains(&bus_aux_send_id(2, 0)));
     }
 }

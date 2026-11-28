@@ -319,6 +319,12 @@ fn tract_failure_key(body: BodyMix, key: &str) -> String {
 const MIN_DOCK_HEIGHT: f64 = 160.0;
 const MAX_DOCK_HEIGHT: f64 = 760.0;
 
+/// The dock's least height while it shows the Mixer: what a strip's fixed
+/// rows and some fader travel need (`mixer_strip::STRIP_MIN_CONTENT_HEIGHT`)
+/// inside the desk's padding and the strip's colour cap. Dragged lower, each
+/// strip was clipped and scrolled on its own, out of line with the rest.
+pub const MIXER_MIN_DOCK_HEIGHT: f64 = 238.0;
+
 /// How many heals in a row (each within [`LANE_HEAL_QUIET`] of the one
 /// before) earn a retry of their own (see [`AnalysisCache::heal_lane`]).
 const LANE_HEAL_RETRIES: u32 = 3;
@@ -945,13 +951,27 @@ impl AnalysisCache {
         Self::tab_supports_live(self.dock_tab)
     }
 
+    /// The dock's height for the tab it shows: as dragged, but never under
+    /// the tab's least ([`Self::min_dock_height`]). The dragged height is
+    /// kept, so a dock dragged low on another tab is that low again there.
     pub fn dock_height(&self) -> f64 {
-        self.dock_height
+        self.dock_height.max(self.min_dock_height())
     }
 
-    /// Resizes the dock by dragging its top edge (clamped to a sane range).
+    /// The least the dock may be dragged to on its tab: the Mixer's
+    /// [`MIXER_MIN_DOCK_HEIGHT`], every other tab's [`MIN_DOCK_HEIGHT`].
+    fn min_dock_height(&self) -> f64 {
+        if self.dock_tab == DockTab::Mixer {
+            MIXER_MIN_DOCK_HEIGHT
+        } else {
+            MIN_DOCK_HEIGHT
+        }
+    }
+
+    /// Resizes the dock by dragging its top edge (clamped to a sane range,
+    /// whose floor is the tab's).
     pub fn set_dock_height(&mut self, height: f64) {
-        let clamped = clamp_f64(height, MIN_DOCK_HEIGHT, MAX_DOCK_HEIGHT);
+        let clamped = clamp_f64(height, self.min_dock_height(), MAX_DOCK_HEIGHT);
         if clamped == self.dock_height {
             return;
         }

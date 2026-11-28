@@ -908,6 +908,66 @@ fn sends_are_capped_and_never_doubled() {
     assert_eq!(h.saves, 4);
 }
 
+// --- the output and a send never feed one bus -------------------------------------
+//
+// A take out to a bus that also sends to it feeds the bus twice: the bus
+// hears the sum, at the fader plus the send level, and neither reads what
+// you hear.
+
+#[test]
+fn no_send_goes_to_the_bus_the_output_feeds() {
+    let mut h = host(
+        vec![routed(vocal("t1"), Some("a"), vec![send("b")])],
+        vec![bus("a"), bus("b")],
+    );
+    h.edit(|m, s| m.add_track_send(s, "t1", "a"));
+    h.edit(|m, s| m.set_track_send_target(s, "t1", 0, "a"));
+    assert_eq!(h.sends("t1"), ["b"]);
+    assert_eq!(h.saves, 0);
+
+    let mut h = host(
+        vec![],
+        vec![
+            bus_routed("a", Some("b"), vec![send("c")]),
+            bus("b"),
+            bus("c"),
+        ],
+    );
+    h.edit(|m, s| m.add_bus_send(s, "a", "b"));
+    h.edit(|m, s| m.set_bus_send_target(s, "a", 0, "b"));
+    let targets: Vec<String> = h.bus("a").sends.iter().map(|s| s.bus_id.clone()).collect();
+    assert_eq!(targets, ["c"]);
+    assert_eq!(h.saves, 0);
+}
+
+#[test]
+fn routing_the_output_to_a_bus_takes_the_send_into_it_away() {
+    let mut h = host(
+        vec![routed(vocal("t1"), None, vec![send("a"), send("b")])],
+        vec![bus("a"), bus("b")],
+    );
+    h.edit(|m, s| Some(m.set_track_bus(s, "t1", Some("a"))));
+    assert_eq!(h.track("t1").bus_id.as_deref(), Some("a"));
+    assert_eq!(h.sends("t1"), ["b"]);
+    // Back to the master: the remaining send stays.
+    h.edit(|m, s| Some(m.set_track_bus(s, "t1", None)));
+    assert_eq!(h.sends("t1"), ["b"]);
+
+    let mut h = host(
+        vec![],
+        vec![
+            bus_routed("a", None, vec![send("b"), send("c")]),
+            bus("b"),
+            bus("c"),
+        ],
+    );
+    h.edit(|m, s| m.set_bus_output(s, "a", Some("c")));
+    let a = h.bus("a");
+    assert_eq!(a.output_bus_id.as_deref(), Some("c"));
+    let targets: Vec<String> = a.sends.iter().map(|s| s.bus_id.clone()).collect();
+    assert_eq!(targets, ["b"]);
+}
+
 // --- delete_bus ------------------------------------------------------------------
 
 #[test]
