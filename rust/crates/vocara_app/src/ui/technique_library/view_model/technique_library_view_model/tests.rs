@@ -265,6 +265,32 @@ fn tag_facets_fold_case_count_each_technique_once_and_sort() {
     assert_eq!(vm.untagged_count(), 1);
 }
 
+/// A tag spelled two ways reads as its most common spelling, not the first
+/// technique's; on a tie, the first of them alphabetically.
+#[test]
+fn a_tag_facet_reads_as_its_most_common_spelling() {
+    let repo = FakeRepo::with(vec![
+        technique("1", "Twang", &["evt", "belt"]),
+        technique("2", "Curbing", &["EVT", "Belt"]),
+        technique("3", "Mixed voice", &["EVT"]),
+    ]);
+    let (mut vm, load) = vm_over(&repo);
+    settle(&mut vm, load);
+    assert_eq!(
+        vm.tag_facets(),
+        vec![
+            TagFacet {
+                tag: "Belt".into(),
+                count: 2
+            },
+            TagFacet {
+                tag: "EVT".into(),
+                count: 3
+            },
+        ]
+    );
+}
+
 #[test]
 fn the_filter_matches_tags_case_insensitively_and_untagged_alone() {
     let repo = FakeRepo::with(vec![

@@ -371,8 +371,17 @@ impl DiagnosticsLog {
     /// that path: app version + library schema `user_version` + the rotated log
     /// files, oldest first. NO user content and NO audio ever goes in — the log
     /// itself only carries what [`DiagnosticsLog::log`] callers wrote (areas,
-    /// counts, error types).
+    /// counts, error types). Outside an app bundle the version reads
+    /// "unknown"; see [`DiagnosticsLog::export_archive_with_version`].
     pub fn export_archive(&self) -> io::Result<PathBuf> {
+        self.export_archive_with_version("unknown")
+    }
+
+    /// [`DiagnosticsLog::export_archive`], the version `built` (the version
+    /// the binary was built as, which this crate cannot know) where no app
+    /// bundle's Info.plist says one: a build run outside a bundle wrote
+    /// "app version: unknown" while its About showed the version.
+    pub fn export_archive_with_version(&self, built: &str) -> io::Result<PathBuf> {
         self.flush(); // the bundle reflects everything logged so far
         let (dir, pending) = {
             let s = lock(&self.inner.state);
@@ -384,7 +393,7 @@ impl DiagnosticsLog {
             "generated: {}\n",
             DateTime::now_utc().to_iso8601_string()
         ));
-        buffer.push_str(&format!("app version: {}\n", app_version()));
+        buffer.push_str(&format!("app version: {}\n", app_version(built)));
         buffer.push_str(&format!(
             "schema user_version: {}\n",
             schema_user_version(dir.as_deref())
@@ -645,10 +654,10 @@ fn describe_panic(info: &std::panic::PanicHookInfo<'_>) -> String {
 }
 
 /// The running bundle's version (CFBundleShortVersionString + build +
-/// bundle id), read from the app bundle's own Info.plist. 'unknown' outside
-/// a bundled build (tests).
-fn app_version() -> String {
-    read_app_version().unwrap_or_else(|| "unknown".to_string())
+/// bundle id), read from the app bundle's own Info.plist; `built` outside a
+/// bundled build (tests, `cargo run`).
+fn app_version(built: &str) -> String {
+    read_app_version().unwrap_or_else(|| built.to_string())
 }
 
 fn read_app_version() -> Option<String> {

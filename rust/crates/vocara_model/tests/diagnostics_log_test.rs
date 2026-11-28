@@ -440,6 +440,18 @@ fn export_archive_bundles_both_log_files_with_version_metadata() {
     );
 }
 
+/// Outside an app bundle the bundle says the version the caller built,
+/// not "unknown".
+#[test]
+fn export_archive_names_the_built_version_outside_a_bundle() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = log_in(dir.path());
+    let path = log.export_archive_with_version("0.4.1 (5)").unwrap();
+    let content = fs::read_to_string(&path).unwrap();
+    fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    assert!(content.contains("app version: 0.4.1 (5)\n"), "{content}");
+}
+
 #[test]
 fn export_archive_reads_the_schema_version_and_the_unbound_buffer() {
     let dir = tempfile::tempdir().unwrap();

@@ -769,9 +769,8 @@ fn an_answer_given_in_settings_meanwhile_is_not_asked_over() {
     assert_eq!(updates.auto_check_preference_now(), Some(true));
 }
 
-/// A no (the "Don't check" button, Escape or a click on the barrier, as
-/// macOS's own updaters take it) is kept, and contacts nobody; the question
-/// is not asked again this run, however often Home mounts.
+/// A no (the "Don't check" button) is kept, and contacts nobody; the
+/// question is not asked again this run, however often Home mounts.
 #[test]
 fn a_no_is_kept_and_contacts_nobody() {
     let fetches = Arc::new(AtomicUsize::new(0));
@@ -788,6 +787,30 @@ fn a_no_is_kept_and_contacts_nobody() {
     again.fire(Timer::UpdateCheck);
     assert!(!again.screen.timers().contains(&Timer::Consent));
     assert_eq!(fetches.load(Ordering::SeqCst), 0);
+}
+
+/// Only the buttons answer: closed by a stray click on the barrier or by
+/// Escape, the question keeps nothing (it is asked again at the next
+/// launch) and contacts nobody.
+#[test]
+fn a_dismissed_question_keeps_no_answer() {
+    let fetches = Arc::new(AtomicUsize::new(0));
+    let updates = advertising(&fetches, None, false);
+    let mut home = home_with_updates(updates.clone());
+    home.fire(Timer::UpdateCheck);
+    home.fire(Timer::Consent);
+    let Some(DialogRequest {
+        dialog: Dialog::Confirm(question),
+        ..
+    }) = &home.dialog
+    else {
+        panic!("the question")
+    };
+    assert!(question.buttons_only, "only its buttons answer it");
+    home.answer(DialogResult::Closed);
+    assert_eq!(updates.auto_check_preference_now(), None);
+    assert_eq!(fetches.load(Ordering::SeqCst), 0);
+    assert!(home.screen.snack().is_none());
 }
 
 /// The question waits while a practice opens (it would land over the take

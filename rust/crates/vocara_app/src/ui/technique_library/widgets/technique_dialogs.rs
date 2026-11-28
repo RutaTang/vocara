@@ -76,7 +76,7 @@ impl NewTechniqueDialog {
                 self.name = name;
                 None
             }
-            Message::Cancel => Some(DialogResult::Text(None)),
+            Message::Cancel | Message::Decline => Some(DialogResult::Text(None)),
             // A blank name keeps it open: closed, it created nothing and said
             // nothing.
             Message::Confirm => self
