@@ -8,7 +8,6 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use iced::Task;
-use vocara_model::util::format::format_clock_ms;
 
 use super::{
     backing_set_toast, is_audio_path, ms, panel_data, Asked, Awaited, DropRun, DropZone,
@@ -934,21 +933,30 @@ impl SongPracticeDetailScreen {
                 self.vm.set_lyrics_focus(on);
                 return;
             }
+            P::TogglePlay => return self.transport(transport::Message::TogglePlay, step),
+            P::PasteLyrics => {
+                let read = iced::clipboard::read();
+                step.task(read.map(|text| Message::Lyrics(P::PastedLyrics(text))));
+                return;
+            }
+            P::PastedLyrics(text) => {
+                // "Paste lyrics" opened an empty editor, and the words still
+                // had to be pasted by hand. Not over an editor opened since
+                // (by its Edit button): that is a draft of its own.
+                if self.vm.lyrics_mode() == LyricsMode::Edit {
+                    return;
+                }
+                if let Some(text) = text.filter(|t| !t.trim().is_empty()) {
+                    self.vm.set_lyrics_draft(Some(text));
+                }
+                self.vm.set_lyrics_mode(LyricsMode::Edit);
+                return;
+            }
             P::BrowseImport => {
                 step.task(lyrics_panel::browse_lyrics_file().map(Message::Lyrics));
                 return;
             }
-            P::ImportLyricsFromFile(path) => {
-                let ticket = {
-                    let vm = &*self.vm;
-                    let as_text = || vm.lyrics_as_text();
-                    let data = panel_data(vm, &self.shown, &as_text, false);
-                    self.lyrics.begin_import(&data)
-                };
-                let started = self.vm.import_lyrics_from_file(&path.to_string_lossy());
-                self.await_call(started, Awaited::LyricsImport(ticket), step);
-                return;
-            }
+            P::ImportLyricsFromFile(path) => return self.import_lyrics_file(path, step),
             P::EditorAction(action) => {
                 if let Some(text) = self.lyrics.perform(action) {
                     self.vm.set_lyrics_draft(Some(text));
@@ -962,11 +970,19 @@ impl SongPracticeDetailScreen {
                     let data = panel_data(vm, &self.shown, &as_text, false);
                     self.lyrics.save_ticket(&data)
                 };
-                if let Some(ticket) = ticket {
-                    let started = self.vm.apply_edited_lyrics(ticket.text());
-                    self.await_call(started, Awaited::LyricsSave(ticket), step);
+                let Some(ticket) = ticket else {
+                    return;
+                };
+                // Saved empty, the editor deleted every line and its time at
+                // once, with nothing to go back to: asked first, as Clear is.
+                if ticket.text().trim().is_empty() && self.vm.lyrics().iter().any(|l| !l.is_blank())
+                {
+                    let dialog = ConfirmDialog::new("Delete the lyrics?")
+                        .body("The editor is empty: saving it deletes every line and its time.")
+                        .confirm_label("Delete lyrics");
+                    return self.ask(dialog, Asked::SaveEmptyLyrics(ticket), step);
                 }
-                return;
+                return self.save_lyrics(ticket, step);
             }
             P::StampNextLyric => self.vm.stamp_next_lyric(),
             P::StampLyricAt(index) => self.vm.stamp_lyric_at(index),
@@ -1249,7 +1265,11 @@ impl SongPracticeDetailScreen {
             },
             NoteTarget::Edit { track_id, note_id } => {
                 if result.deleted {
-                    self.vm.delete_note(&track_id, &note_id)
+                    // Asked first, as removing a technique marker is: the
+                    // note went at once, with nothing to go back to.
+                    let dialog = ConfirmDialog::new("Delete this note?")
+                        .body("This removes the note from this take. This cannot be undone.");
+                    return self.ask(dialog, Asked::DeleteNote { track_id, note_id }, step);
                 } else if let Some(content) = result.content {
                     self.vm.update_note_content(&track_id, &note_id, &content)
                 } else {
@@ -1274,10 +1294,10 @@ impl SongPracticeDetailScreen {
         let title = match e {
             Some(e) => format!(
                 "Add technique across {} → {}",
-                format_clock_ms(s),
-                format_clock_ms(e)
+                lyrics_panel::lyric_time(s),
+                lyrics_panel::lyric_time(e)
             ),
-            None => format!("Add technique at {}", format_clock_ms(s)),
+            None => format!("Add technique at {}", lyrics_panel::lyric_time(s)),
         };
         self.picker_seq += 1;
         let seq = self.picker_seq;
@@ -1492,6 +1512,37 @@ impl SongPracticeDetailScreen {
         self.ask(dialog, Asked::ClearLyricTimes, step);
     }
 
+    /// A lyrics file dropped or picked: asked first over the lyrics there
+    /// are, as Clear is. The import took every line and its tap time at
+    /// once, saved, with nothing to go back to. With no lyrics there is
+    /// nothing to lose.
+    fn import_lyrics_file(&mut self, path: PathBuf, step: &mut Step) {
+        if self.vm.lyrics().iter().any(|l| !l.is_blank()) {
+            let dialog = ConfirmDialog::new("Replace the current lyrics?")
+                .body("The file's lyrics replace every line here, and their times.")
+                .confirm_label("Replace");
+            return self.ask(dialog, Asked::ImportLyrics(path), step);
+        }
+        self.import_lyrics_now(path, step);
+    }
+
+    /// The editor's Save: its text applied, the editor told when it lands.
+    fn save_lyrics(&mut self, ticket: lyrics_panel::SaveTicket, step: &mut Step) {
+        let started = self.vm.apply_edited_lyrics(ticket.text());
+        self.await_call(started, Awaited::LyricsSave(ticket), step);
+    }
+
+    fn import_lyrics_now(&mut self, path: PathBuf, step: &mut Step) {
+        let ticket = {
+            let vm = &*self.vm;
+            let as_text = || vm.lyrics_as_text();
+            let data = panel_data(vm, &self.shown, &as_text, false);
+            self.lyrics.begin_import(&data)
+        };
+        let started = self.vm.import_lyrics_from_file(&path.to_string_lossy());
+        self.await_call(started, Awaited::LyricsImport(ticket), step);
+    }
+
     fn rename_bus(&mut self, bus_id: String, current: &str, step: &mut Step) {
         let mut prompt = rename_dialog(current);
         prompt.title = "Rename bus".to_string();
@@ -1533,6 +1584,11 @@ impl SongPracticeDetailScreen {
                 self.vm.versions_do(|v, h| v.delete(&id, h))
             }
             Asked::ClearLyricTimes if confirmed => self.vm.clear_lyric_times(),
+            Asked::ImportLyrics(path) if confirmed => return self.import_lyrics_now(path, step),
+            Asked::SaveEmptyLyrics(ticket) if confirmed => return self.save_lyrics(ticket, step),
+            Asked::DeleteNote { track_id, note_id } if confirmed => {
+                self.vm.delete_note(&track_id, &note_id)
+            }
             _ => return,
         };
         self.absorb(fx, step);

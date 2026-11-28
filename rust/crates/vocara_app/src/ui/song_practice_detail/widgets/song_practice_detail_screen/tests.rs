@@ -2036,7 +2036,7 @@ fn adding_a_note_via_the_take_header_saves_it_on_the_take() {
     let mut h = Harness::open(Setup::default());
     h.click(track_row::ADD_NOTE);
     let editor = h.screen.note_editor().expect("the note editor opened");
-    assert_eq!(editor.title(), "Note at 00:00");
+    assert_eq!(editor.title(), "Note at 0:00");
     h.send(Message::NoteEditor(note_editor::Message::Edit(
         iced::widget::text_editor::Action::Edit(iced::widget::text_editor::Edit::Paste(Arc::new(
             "breath runs out here".into(),
@@ -2053,6 +2053,47 @@ fn adding_a_note_via_the_take_header_saves_it_on_the_take() {
         .flat_map(|t| t.notes.iter().map(|n| n.content.clone()))
         .collect();
     assert_eq!(notes, ["breath runs out here"]);
+}
+
+// A note's Delete removed it at once, with no undo, where removing a
+// technique marker asks first.
+#[test]
+fn deleting_a_note_asks_first() {
+    let mut t = take("t1", "Take 1");
+    t.notes = vec![PracticeNote {
+        id: "n1".into(),
+        position_ms: 3_000,
+        end_ms: None,
+        content: "flat here".into(),
+        created_at: at(),
+        updated_at: at(),
+    }];
+    let mut h = Harness::open(Setup {
+        practice: practice(vec![t]),
+        ..Setup::default()
+    });
+    let notes = |h: &Harness| h.repo.stored().vocal_tracks[0].notes.len();
+    let delete = |h: &mut Harness| {
+        h.send(Message::Lyrics(lyrics_panel::Message::EditNote {
+            track_id: "t1".into(),
+            note_id: "n1".into(),
+        }));
+        assert!(h.screen.note_editor().is_some(), "the note editor opened");
+        h.send(Message::NoteEditor(note_editor::Message::Delete));
+    };
+    delete(&mut h);
+    let Dialog::Confirm(confirm) = h.dialog() else {
+        panic!("a confirmation");
+    };
+    assert_eq!(confirm.title, "Delete this note?");
+    h.answer(DialogResult::Confirmed(false));
+    h.settle();
+    assert_eq!(notes(&h), 1, "cancelled");
+
+    delete(&mut h);
+    h.answer(DialogResult::Confirmed(true));
+    h.settle();
+    assert_eq!(notes(&h), 0);
 }
 
 #[test]
@@ -2156,7 +2197,7 @@ fn the_technique_picker_lists_the_library_and_adds_the_pick() {
     h.at_ms(2000);
     h.click(track_row::ADD_TECHNIQUE);
     let picker = h.screen.technique_picker().expect("the picker opened");
-    assert_eq!(picker.title(), "Add technique at 00:02");
+    assert_eq!(picker.title(), "Add technique at 0:02");
     assert!(picker.is_loading());
     h.settle();
     assert!(!h.screen.technique_picker().expect("open").is_loading());
@@ -2210,7 +2251,7 @@ fn the_note_editor_keeps_the_keyboard_as_a_snack_bar_comes_and_goes() {
         track_id: "t1".into(),
         message: track_row::Message::AddNote,
     });
-    let title = h.find("Note at 00:00").expect("the editor").bounds();
+    let title = h.find("Note at 0:00").expect("the editor").bounds();
     let mut ui = LiveUi::new(h.size);
     // Into the field, under the title, and typing.
     let mut events = vec![
@@ -2391,6 +2432,30 @@ fn escape_leaves_the_lyrics_focus_view_on_the_page() {
     assert!(!h.vm().lyrics_focus());
 }
 
+// The Focus view has no transport and holds the keyboard: Space plays and
+// pauses there, as the transport's button does.
+#[test]
+fn space_plays_and_pauses_in_the_lyrics_focus_view() {
+    let mut h = Harness::open(Setup::default());
+    h.send(Message::Lyrics(lyrics_panel::Message::SetLyricsFocus(true)));
+    let mut space = || {
+        let key = iced_test::simulator::press_key(
+            iced::keyboard::Key::Named(iced::keyboard::key::Named::Space),
+            Some(" ".into()),
+        );
+        let messages: Vec<Message> = {
+            let mut ui = h.ui();
+            let _ = ui.simulate([key]);
+            ui.into_messages().collect()
+        };
+        h.feed(messages);
+        h.vm().playback().is_playing()
+    };
+    assert!(space(), "plays");
+    assert!(!space(), "pauses");
+    assert!(h.vm().lyrics_focus(), "still in focus");
+}
+
 // Sync's Clear asks first, as Delete clip does: one click took a whole
 // song's tap timing at once, saved, with nothing to go back to.
 #[test]
@@ -2424,6 +2489,131 @@ fn clearing_the_lyric_times_asks_first() {
     // With nothing timed there is nothing to ask about.
     h.send(Message::Lyrics(lyrics_panel::Message::ClearLyricTimes));
     assert!(h.dialog.is_none());
+}
+
+// A lyrics file imported over lyrics asks first, as Clear does: it replaced
+// every line and its tap time at once, with nothing to go back to.
+#[test]
+fn importing_a_lyrics_file_over_lyrics_asks_first() {
+    use vocara_model::models::lyric_line::LyricLine;
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let file = dir.path().join("song.txt");
+    std::fs::write(&file, "imported one\nimported two").expect("lyrics");
+    let import = || Message::Lyrics(lyrics_panel::Message::ImportLyricsFromFile(file.clone()));
+    let mut p = practice(vec![take("t1", "Take 1")]);
+    p.lyrics = vec![
+        LyricLine::new("First line", Some(1200)),
+        LyricLine::new("Second line", Some(4800)),
+    ];
+    let mut h = Harness::open(Setup {
+        practice: p,
+        ..Setup::default()
+    });
+    let stored = |h: &Harness| -> Vec<(String, Option<i64>)> {
+        let lyrics = h.repo.stored().lyrics;
+        lyrics.into_iter().map(|l| (l.text, l.time_ms)).collect()
+    };
+    let before = stored(&h);
+    h.send(import());
+    let Dialog::Confirm(confirm) = h.dialog() else {
+        panic!("a confirmation");
+    };
+    assert_eq!(confirm.title, "Replace the current lyrics?");
+    h.answer(DialogResult::Confirmed(false));
+    h.settle();
+    assert_eq!(stored(&h), before, "cancelled");
+
+    h.send(import());
+    h.answer(DialogResult::Confirmed(true));
+    h.settle();
+    let words: Vec<String> = h.vm().lyrics().iter().map(|l| l.text.clone()).collect();
+    assert_eq!(words, ["imported one", "imported two"]);
+
+    // With no lyrics there is nothing to replace: it imports at once.
+    let mut h = Harness::open(Setup::default());
+    assert!(h.vm().lyrics().is_empty());
+    h.send(import());
+    assert!(h.dialog.is_none());
+    h.settle();
+    assert_eq!(h.vm().lyrics().len(), 2);
+}
+
+// Saving the lyrics editor empty deleted every line and its time with no
+// word: it asks first, as Clear does.
+#[test]
+fn saving_the_lyrics_editor_empty_asks_before_deleting_the_lyrics() {
+    use crate::ui::song_practice_detail::view_model::song_practice_detail_view_model::LyricsMode;
+    use iced::widget::text_editor::{Action, Edit};
+    use vocara_model::models::lyric_line::LyricLine;
+    let mut p = practice(vec![take("t1", "Take 1")]);
+    p.lyrics = vec![
+        LyricLine::new("First line", Some(1200)),
+        LyricLine::new("Second line", Some(4800)),
+    ];
+    let mut h = Harness::open(Setup {
+        practice: p,
+        ..Setup::default()
+    });
+    let panel = Message::Lyrics;
+    h.send(panel(lyrics_panel::Message::SetLyricsMode(
+        lyrics_panel::LyricsMode::Edit,
+    )));
+    h.send(panel(lyrics_panel::Message::EditorAction(
+        Action::SelectAll,
+    )));
+    h.send(panel(lyrics_panel::Message::EditorAction(Action::Edit(
+        Edit::Backspace,
+    ))));
+    assert_eq!(h.screen.lyrics.editor_text().as_deref(), Some(""));
+    h.send(panel(lyrics_panel::Message::ApplyEditedLyrics));
+    let Dialog::Confirm(confirm) = h.dialog() else {
+        panic!("a confirmation");
+    };
+    assert_eq!(confirm.title, "Delete the lyrics?");
+    h.answer(DialogResult::Confirmed(false));
+    h.settle();
+    assert_eq!(h.repo.stored().lyrics.len(), 2, "cancelled");
+    assert_eq!(h.vm().lyrics_mode(), LyricsMode::Edit, "still editing");
+
+    h.send(panel(lyrics_panel::Message::ApplyEditedLyrics));
+    h.answer(DialogResult::Confirmed(true));
+    h.settle();
+    assert!(h.vm().lyrics().iter().all(|l| l.is_blank()));
+    assert_eq!(h.vm().lyrics_mode(), LyricsMode::Read, "saved, it closes");
+}
+
+// "Paste lyrics" opened an empty editor: the words still had to be pasted
+// by hand. It opens on the clipboard's text.
+#[test]
+fn paste_lyrics_opens_the_editor_on_the_clipboards_text() {
+    use crate::ui::song_practice_detail::view_model::song_practice_detail_view_model::LyricsMode;
+    let pasted = |text: Option<&str>| {
+        Message::Lyrics(lyrics_panel::Message::PastedLyrics(text.map(String::from)))
+    };
+    let mut h = Harness::open(Setup::default());
+    h.send(Message::Lyrics(lyrics_panel::Message::PasteLyrics));
+    assert_eq!(
+        h.vm().lyrics_mode(),
+        LyricsMode::Read,
+        "the clipboard first"
+    );
+    h.send(pasted(Some("第一行 first\nsecond")));
+    assert_eq!(h.vm().lyrics_mode(), LyricsMode::Edit);
+    assert_eq!(
+        h.screen.lyrics.editor_text().as_deref(),
+        Some("第一行 first\nsecond")
+    );
+    // A clipboard answering late leaves an editor opened meanwhile alone.
+    h.send(pasted(Some("other words")));
+    assert_eq!(
+        h.screen.lyrics.editor_text().as_deref(),
+        Some("第一行 first\nsecond")
+    );
+    // Nothing on the clipboard: the editor opens empty.
+    let mut h = Harness::open(Setup::default());
+    h.send(pasted(None));
+    assert_eq!(h.vm().lyrics_mode(), LyricsMode::Edit);
+    assert_eq!(h.screen.lyrics.editor_text().as_deref(), Some(""));
 }
 
 // playhead_repaint_test: 'deleting the backing's clip asks to delete the

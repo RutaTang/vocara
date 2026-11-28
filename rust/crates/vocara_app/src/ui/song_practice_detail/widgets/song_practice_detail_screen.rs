@@ -260,6 +260,9 @@ pub enum Asked {
     RenameInterpretation(String),
     DeleteInterpretation(String),
     ClearLyricTimes,
+    ImportLyrics(PathBuf),
+    SaveEmptyLyrics(lyrics_panel::SaveTicket),
+    DeleteNote { track_id: String, note_id: String },
 }
 
 /// A result that is cloneable (the screen's messages are) but landed once:

@@ -1100,10 +1100,11 @@ fn header<'a, M: 'a>(lane: &PitchLane, notes: &[PitchNote], in_tune: f64) -> Ele
         if let Some(summary) = pitch_summary(notes) {
             content = content.push(line(summary, Studio::TEXT_FAINT));
         }
-        // Live readout of the note under the playhead.
+        // Live readout of the note under the playhead: its median, which
+        // the label says (the Timbre tab reads the pitch of the frame).
         content = content.push(
             row![
-                line("At playhead".to_string(), Studio::TEXT_FAINT),
+                line("Note at playhead".to_string(), Studio::TEXT_FAINT),
                 line(
                     playhead_note_text(m, notes, lane.track_start_ms, lane.position_ms),
                     Studio::TEXT_SECONDARY,

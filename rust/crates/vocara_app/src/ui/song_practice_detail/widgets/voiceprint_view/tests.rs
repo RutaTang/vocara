@@ -580,6 +580,36 @@ fn live_renders_a_monitor_started_but_never_fed() {
 }
 
 #[test]
+fn every_live_tab_waits_titled_with_its_badge_and_a_word() {
+    // Power waited on an empty plot with no word and no Live badge; LTAS
+    // and Register on a bare hint with no title. Pitch, Timbre and Vowel
+    // show their title and badge.
+    let monitor = MonitorService::default();
+    monitor.start();
+    let src = Source {
+        monitor: Some(Arc::new(monitor)),
+        ..Source::default()
+    };
+    let state = VoiceprintState::new();
+    for (tab, title, hint) in [
+        (power as Tab, "Power spectrum", Some(POWER_LIVE_HINT)),
+        (ltas as Tab, "LTAS · running average", Some(LTAS_LIVE_HINT)),
+        (register as Tab, "Register", Some(REGISTER_LIVE_HINT)),
+        (pitch as Tab, "Tuner", None),
+        (timbre as Tab, "Timbre", None),
+        (vowel as Tab, "Vowel space · F1 × F2", None),
+    ] {
+        let shown = texts(&mut simulator(tab, &src, &state, DOCK));
+        for label in [Some(title), Some("Live"), hint].into_iter().flatten() {
+            assert!(
+                shown.iter().any(|t| t == label),
+                "{title}: {label} in {shown:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn a_held_live_note_tunes_and_maps_its_register() {
     let src = live(&sine(48000, 220.0, SR as f64));
     let state = VoiceprintState::new();
@@ -590,7 +620,7 @@ fn a_held_live_note_tunes_and_maps_its_register() {
     assert!(
         shown
             .iter()
-            .any(|t| t.starts_with("chest ") && t.ends_with('%')),
+            .any(|t| t.starts_with("Chest ") && t.ends_with('%')),
         "{shown:?}"
     );
 }
@@ -933,6 +963,104 @@ fn a_timbre_curve_breaks_at_gaps_and_a_flat_one_draws_nothing() {
     assert!(timbre_curve(&m, &m.cpp, 500, size).is_empty());
     assert!(timbre_curve(&m, &m.f3, 500, size).is_empty());
     assert!(timbre_curve(&m, &m.ring, 0, size).is_empty());
+}
+
+#[test]
+fn a_timbre_curve_breaks_where_there_is_no_voice_and_scales_to_the_voice() {
+    // Between notes the analysis still measures ring and CPP, as finite
+    // extremes: the curves drew them as full-height blocks, and squashed
+    // the voiced part flat.
+    let mut m = VoiceMetrics::clone(&step_metrics());
+    let silent = |f: usize| (15..25).contains(&f);
+    m.active = (0..40).map(|f| u8::from(!silent(f))).collect();
+    m.f0 = (0..40)
+        .map(|f| if silent(f) { f32::NAN } else { 220.0 })
+        .collect();
+    m.ring = (0..40)
+        .map(|f| {
+            if silent(f) {
+                -100.0
+            } else {
+                -10.0 + f as f32 * 0.1
+            }
+        })
+        .collect();
+    let size = Size::new(500.0, 100.0);
+    let runs = timbre_curve(&m, &m.ring, 500, size);
+    assert_eq!(runs.iter().map(Vec::len).collect::<Vec<_>>(), [15, 15]);
+    // The voiced extremes fill the plot, 7% in from its edges.
+    let ys: Vec<f32> = runs.iter().flatten().map(|p| p.y).collect();
+    assert!((ys[0] - 93.0).abs() < 1e-3, "{}", ys[0]);
+    assert!((ys.last().unwrap() - 7.0).abs() < 1e-3);
+    // An audible frame with no pitch (breath) is no voice either.
+    m.active = vec![1; 40];
+    assert_eq!(timbre_curve(&m, &m.ring, 500, size).len(), 2);
+}
+
+#[test]
+fn the_power_legend_lists_the_formants_it_marks() {
+    // F3 was listed while no F3 line was drawn: the analysis found none
+    // at that frame (step_metrics has F1 and F2 only).
+    let src = Source {
+        metrics: Some(step_metrics()),
+        duration_ms: 500,
+        position: Duration::from_millis(100),
+        ..analyzed(&sine(24000, 220.0, SR as f64))
+    };
+    let state = VoiceprintState::new();
+    let shown = texts(&mut simulator(power, &src, &state, DOCK));
+    for label in ["F1", "F2", "Spectrum", "Envelope", "Singer's formant"] {
+        assert!(shown.iter().any(|t| t == label), "{label} in {shown:?}");
+    }
+    assert!(!shown.iter().any(|t| t == "F3"), "{shown:?}");
+}
+
+#[test]
+fn on_the_shortest_dock_the_vowel_tab_scrolls_to_its_readouts() {
+    // At the dock's least height (160, less its handle and tabs) the F2
+    // readout was cut off, with no way to reach it.
+    let src = Source {
+        track: Some(track(500)),
+        metrics: Some(step_metrics()),
+        duration_ms: 500,
+        position: Duration::from_millis(100),
+        ..Source::default()
+    };
+    let state = VoiceprintState::new();
+    let mut ui = simulator(vowel, &src, &state, Size::new(1100.0, 121.0));
+    let visible = |ui: &mut Simulator<'_, Message>, label: &str| {
+        ui.find(label)
+            .ok()
+            .and_then(|t| t.visible_bounds())
+            .is_some_and(|v| v.height > 1.0)
+    };
+    assert!(!visible(&mut ui, "frontness"), "F2's line lies below");
+    ui.point_at(Point::new(500.0, 60.0));
+    let _ = ui.simulate([iced::Event::Mouse(mouse::Event::WheelScrolled {
+        delta: mouse::ScrollDelta::Pixels { x: 0.0, y: -400.0 },
+    })]);
+    assert!(visible(&mut ui, "frontness"), "scrolled into view");
+    assert!(visible(&mut ui, "Reference"));
+}
+
+#[test]
+fn the_timbre_readouts_read_a_dash_where_there_is_no_voice() {
+    let mut m = VoiceMetrics::clone(&step_metrics());
+    m.active = (0..40).map(|f| u8::from(f >= 20)).collect();
+    m.f0 = (0..40)
+        .map(|f| if f < 20 { f32::NAN } else { 261.6 })
+        .collect();
+    m.ring = vec![-100.8; 40];
+    let src = Source {
+        track: Some(track(500)),
+        metrics: Some(Arc::new(m)),
+        duration_ms: 500,
+        position: Duration::from_millis(100),
+        ..Source::default()
+    };
+    let state = VoiceprintState::new();
+    let shown = texts(&mut simulator(timbre, &src, &state, DOCK));
+    assert!(!shown.iter().any(|t| t.contains("100.8")), "{shown:?}");
 }
 
 #[test]

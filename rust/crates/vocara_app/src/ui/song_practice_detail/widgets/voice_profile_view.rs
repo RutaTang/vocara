@@ -19,7 +19,7 @@ use crate::ui::core::text;
 use iced::alignment::Vertical;
 use iced::widget::canvas::{self, gradient, Frame, Geometry, LineCap, Path, Stroke, Style};
 use iced::widget::text::Alignment;
-use iced::widget::{canvas as canvas_widget, column, container, row, stack, Space};
+use iced::widget::{canvas as canvas_widget, center, column, container, row, stack, Space};
 use iced::{mouse, Color, Element, Length, Pixels, Point, Rectangle, Renderer, Size, Theme};
 use vocara_model::models::audio_track::AudioTrack;
 use vocara_model::models::voice_metrics::{note_name_for_midi, VoiceMetrics, VoiceProfile};
@@ -28,7 +28,7 @@ use vocara_services::monitor_service::MonitorService;
 
 use super::analysis_lanes::LoudnessLanePainter;
 use super::voiceprint_view::{
-    header_row, plot_well, readout, Readout, Swatch, READOUT_GAP, TAB_PADDING,
+    header_row, plot_well, readout, scrolls_when_short, Readout, Swatch, READOUT_GAP, TAB_PADDING,
 };
 use crate::ui::core::theme::{alpha, boxed, font, type_scale, Studio};
 use crate::ui::core::widgets::studio_hint::studio_hint;
@@ -89,56 +89,61 @@ fn profile_guard<'a, M: 'a>(
 
 /// `RangeView`: the sung range, comfortable tessitura and estimated register
 /// break (passaggio) for the selected take: their readouts, then the range
-/// on a pitch axis filling the tab.
+/// on a pitch axis filling the tab (scrolling on a short dock:
+/// [`scrolls_when_short`]).
 pub fn range_view<'a, M: 'a>(src: &dyn AnalysisSource) -> Element<'a, M> {
     profile_guard(src, RANGE_LIVE_HINT, RANGE_EMPTY_HINT, |p, _, _| {
         let (Some(low), Some(high)) = (p.low_midi, p.high_midi) else {
             return studio_hint(RANGE_EMPTY_HINT).into();
         };
-        let mut stats = row![readout(
+        scrolls_when_short(move || range_body(&p, low, high))
+    })
+}
+
+fn range_body<'a, M: 'a>(p: &Arc<VoiceProfile>, low: i64, high: i64) -> Element<'a, M> {
+    let mut stats = row![readout(
+        Readout::new(
+            "Range",
+            format!("{} – {}", note_name_for_midi(low), note_name_for_midi(high)),
+        )
+        .whole()
+        .swatch(Swatch::Block(RANGE_BAND))
+        .sub(format!("{} semitones", high - low)),
+    )]
+    .spacing(READOUT_GAP);
+    if let (Some(lo), Some(hi)) = (p.tess_lo_midi, p.tess_hi_midi) {
+        stats = stats.push(readout(
             Readout::new(
-                "Range",
-                format!("{} – {}", note_name_for_midi(low), note_name_for_midi(high)),
+                "Tessitura",
+                format!("{} – {}", note_name_for_midi(lo), note_name_for_midi(hi)),
             )
             .whole()
-            .swatch(Swatch::Block(RANGE_BAND))
-            .sub(format!("{} semitones", high - low)),
-        )]
-        .spacing(READOUT_GAP);
-        if let (Some(lo), Some(hi)) = (p.tess_lo_midi, p.tess_hi_midi) {
-            stats = stats.push(readout(
-                Readout::new(
-                    "Tessitura",
-                    format!("{} – {}", note_name_for_midi(lo), note_name_for_midi(hi)),
-                )
+            .swatch(Swatch::Block(TESSITURA_BAND))
+            .sub("comfortable zone"),
+        ));
+    }
+    if let Some(passaggio) = p.passaggio_midi {
+        stats = stats.push(readout(
+            Readout::new("Passaggio", note_name_for_midi(passaggio))
                 .whole()
-                .swatch(Swatch::Block(TESSITURA_BAND))
-                .sub("comfortable zone"),
-            ));
-        }
-        if let Some(passaggio) = p.passaggio_midi {
-            stats = stats.push(readout(
-                Readout::new("Passaggio", note_name_for_midi(passaggio))
-                    .whole()
-                    .swatch(Swatch::Line(PASSAGGIO))
-                    .sub(passaggio_shift(p.passaggio_jump_db)),
-            ));
-        }
-        column![
-            header_row("Sung range on a pitch axis", None, 0.0),
-            stats.wrap().vertical_spacing(8),
-            Space::new().height(12),
-            plot_well(
-                canvas_widget(RangeBarPainter { p })
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-            ),
-        ]
-        .padding(TAB_PADDING)
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
-    })
+                .swatch(Swatch::Line(PASSAGGIO))
+                .sub(passaggio_shift(p.passaggio_jump_db)),
+        ));
+    }
+    column![
+        header_row("Sung range on a pitch axis", None, 0.0),
+        stats.wrap().vertical_spacing(8),
+        Space::new().height(12),
+        plot_well(
+            canvas_widget(RangeBarPainter { p: Arc::clone(p) })
+                .width(Length::Fill)
+                .height(Length::Fill)
+        ),
+    ]
+    .padding(TAB_PADDING)
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .into()
 }
 
 /// How abrupt a register break of `jump_db` (the H1−H2 jump at it) reads.
@@ -167,36 +172,39 @@ pub fn dynamics_view<'a, M: 'a>(src: &dyn AnalysisSource) -> Element<'a, M> {
         let start_ms = src.analysis_start_ms();
         let span_ms = src.analysis_duration_ms();
         let position_ms = i64::try_from(src.position().as_millis()).unwrap_or(i64::MAX);
-        let curve = plot_well(stack![
-            LoudnessLanePainter {
-                metrics: m,
-                timeline_duration_ms: span_ms,
-                start_ms: 0,
-                view_start_ms: 0,
-            }
-            .view(),
-            canvas_widget(PlayheadPainter {
-                position_ms,
-                timeline_duration_ms: span_ms,
-                color: Studio::PLAYHEAD,
-                show_head: false,
-                start_ms,
-            })
+        // Scrolling on a short dock, where the chart was crushed to a line.
+        scrolls_when_short(move || {
+            let curve = plot_well(stack![
+                LoudnessLanePainter {
+                    metrics: Arc::clone(&m),
+                    timeline_duration_ms: span_ms,
+                    start_ms: 0,
+                    view_start_ms: 0,
+                }
+                .view(),
+                canvas_widget(PlayheadPainter {
+                    position_ms,
+                    timeline_duration_ms: span_ms,
+                    color: Studio::PLAYHEAD,
+                    show_head: false,
+                    start_ms,
+                })
+                .width(Length::Fill)
+                .height(Length::Fill),
+            ]);
+            column![
+                header_row("Loudness over time", None, 0.0),
+                dynamics_stats(p.dynamic_range_db(), p.soft_db, p.loud_db),
+                Space::new().height(12),
+                curve,
+                Space::new().height(10),
+                span_row(p.soft_db, p.loud_db),
+            ]
+            .padding(TAB_PADDING)
             .width(Length::Fill)
-            .height(Length::Fill),
-        ]);
-        column![
-            header_row("Loudness over time", None, 0.0),
-            dynamics_stats(p.dynamic_range_db(), p.soft_db, p.loud_db),
-            Space::new().height(12),
-            curve,
-            Space::new().height(10),
-            span_row(p.soft_db, p.loud_db),
-        ]
-        .padding(TAB_PADDING)
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
+            .height(Length::Fill)
+            .into()
+        })
     })
 }
 
@@ -261,22 +269,37 @@ fn live_dynamics_panel<'a, M: 'a>(monitor: &MonitorService) -> Element<'a, M> {
         (m.live_dynamics(), m.loudness_history().to_vec())
     };
     if d.range_db.is_nan() {
-        return studio_hint(LIVE_DYNAMICS_HINT).into();
+        // Titled and marked Live as it will be, the hint in its well, as
+        // the other live tabs wait (a bare hint read as another state).
+        return column![
+            header_row("Loudness (live)", Some(live_badge()), 0.0),
+            plot_well(center(
+                text(LIVE_DYNAMICS_HINT)
+                    .size(type_scale::BODY)
+                    .color(Studio::TEXT_FAINT),
+            )),
+        ]
+        .padding(TAB_PADDING)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into();
     }
-    column![
-        header_row("Loudness (live)", Some(live_badge()), 0.0),
-        dynamics_stats(d.range_db, d.soft_db, d.loud_db),
-        Space::new().height(12),
-        plot_well(
-            canvas_widget(LiveLoudnessPainter { loud })
-                .width(Length::Fill)
-                .height(Length::Fill),
-        ),
-    ]
-    .padding(TAB_PADDING)
-    .width(Length::Fill)
-    .height(Length::Fill)
-    .into()
+    scrolls_when_short(move || {
+        column![
+            header_row("Loudness (live)", Some(live_badge()), 0.0),
+            dynamics_stats(d.range_db, d.soft_db, d.loud_db),
+            Space::new().height(12),
+            plot_well(
+                canvas_widget(LiveLoudnessPainter { loud: loud.clone() })
+                    .width(Length::Fill)
+                    .height(Length::Fill),
+            ),
+        ]
+        .padding(TAB_PADDING)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
+    })
 }
 
 // ----------------------------------------------------------- the pieces
@@ -335,8 +358,10 @@ fn profile_text(
 pub struct RangeBar {
     /// The bar's y (half the height).
     pub bar_y: f64,
-    /// A C-octave gridline's x, for each C on the axis.
-    pub grid: Vec<f64>,
+    /// A C-octave gridline's x for each C on the axis, and the note named
+    /// under it: none where a range end's label names that note already
+    /// (C5 read twice).
+    pub grid: Vec<(f64, Option<i64>)>,
     /// The full sung range.
     pub range: (f64, f64),
     /// The tessitura band, when known.
@@ -346,20 +371,21 @@ pub struct RangeBar {
 }
 
 /// The geometry of `p`'s range bar in a `width` × `height` box, or `None`
-/// without a range: an axis from two semitones under the low note to two
-/// over the high one, every x clamped to the box (never off-panel).
+/// without a range: an axis of whole octaves, from the C at or under two
+/// semitones below the low note to the C at or over two above the high
+/// one, so the range shows where it sits between at least two named Cs
+/// (two semitones each side gave a narrow range an axis of one gridline);
+/// every x clamped to the box (never off-panel).
 pub fn range_bar(p: &VoiceProfile, width: f64, height: f64) -> Option<RangeBar> {
     let (low, high) = (p.low_midi?, p.high_midi?);
-    let (min_midi, max_midi) = (low - 2, high + 2);
+    let min_midi = (low - 2).div_euclid(12) * 12;
+    let max_midi = (high + 2 + 11).div_euclid(12) * 12;
     let span = (max_midi - min_midi).clamp(1, 1 << 30) as f64;
     let x = |midi: i64| clamp_f64((midi - min_midi) as f64 / span * width, 0.0, width.max(0.0));
-    // `(minMidi / 12).ceil() * 12`.
-    let mut grid = Vec::new();
-    let mut mm = (min_midi as f64 / 12.0).ceil() as i64 * 12;
-    while mm <= max_midi {
-        grid.push(x(mm));
-        mm += 12;
-    }
+    let grid = (min_midi..=max_midi)
+        .step_by(12)
+        .map(|c| (x(c), (c != low && c != high).then_some(c)))
+        .collect();
     Some(RangeBar {
         bar_y: height * 0.5,
         grid,
@@ -415,9 +441,7 @@ impl<M> canvas::Program<M> for RangeBarPainter {
         };
         // C-octave gridlines and their names along the foot.
         let grid = Stroke::default().with_color(Studio::GRID).with_width(1.0);
-        // The first C on the axis, as `range_bar` finds its gridlines.
-        let first_c = ((low - 2) as f64 / 12.0).ceil() as i64 * 12;
-        for (i, &gx) in bar.grid.iter().enumerate() {
+        for &(gx, name) in &bar.grid {
             let gx = (gx as f32).round() + 0.5;
             line(
                 &mut frame,
@@ -427,15 +451,17 @@ impl<M> canvas::Program<M> for RangeBarPainter {
                 h - 22.0,
                 grid,
             );
-            frame.fill_text(profile_text(
-                note_name_for_midi(first_c + 12 * i as i64),
-                gx,
-                h - 18.0,
-                Studio::TEXT_DISABLED,
-                type_scale::AXIS,
-                font::REGULAR,
-                Alignment::Center,
-            ));
+            if let Some(c) = name {
+                frame.fill_text(profile_text(
+                    note_name_for_midi(c),
+                    gx,
+                    h - 18.0,
+                    Studio::TEXT_DISABLED,
+                    type_scale::AXIS,
+                    font::REGULAR,
+                    Alignment::Center,
+                ));
+            }
         }
         // Full sung range, then the tessitura over it.
         let band = |color: Color| {

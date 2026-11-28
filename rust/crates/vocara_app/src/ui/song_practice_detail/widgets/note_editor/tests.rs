@@ -96,9 +96,9 @@ fn a_note_with_no_text_cannot_be_added_or_saved() {
 #[test]
 fn a_drag_too_short_for_a_range_is_titled_as_the_point_it_is_saved_as() {
     let editor = NoteEditor::new(None, ms(12_000), Some(ms(12_050)), normalize);
-    assert_eq!(editor.title(), "Note at 00:12");
+    assert_eq!(editor.title(), "Note at 0:12");
     assert!(iced_test::simulator(editor.view())
-        .find("Note at 00:12")
+        .find("Note at 0:12")
         .is_ok());
 }
 
@@ -107,20 +107,20 @@ fn a_drag_too_short_for_a_range_is_titled_as_the_point_it_is_saved_as() {
 #[test]
 fn a_range_is_titled_by_its_span_earlier_edge_first() {
     let forward = NoteEditor::new(None, ms(12_000), Some(ms(20_000)), normalize);
-    assert_eq!(forward.title(), "Note across 00:12 → 00:20");
+    assert_eq!(forward.title(), "Note across 0:12 → 0:20");
     // A drag drawn right to left.
     let backward = NoteEditor::new(None, ms(20_000), Some(ms(12_000)), normalize);
-    assert_eq!(backward.title(), "Note across 00:12 → 00:20");
+    assert_eq!(backward.title(), "Note across 0:12 → 0:20");
 }
 
 #[test]
 fn an_existing_note_is_titled_by_its_own_range() {
     let existing = note(65_000, Some(70_000), "flat");
     let editor = NoteEditor::new(Some(&existing), ms(3_000), None, normalize);
-    assert_eq!(editor.title(), "Note across 01:05 → 01:10");
+    assert_eq!(editor.title(), "Note across 1:05 → 1:10");
     let point = note(65_000, None, "flat");
     let editor = NoteEditor::new(Some(&point), ms(3_000), Some(ms(9_000)), normalize);
-    assert_eq!(editor.title(), "Note at 01:05");
+    assert_eq!(editor.title(), "Note at 1:05");
 }
 
 #[test]
@@ -172,6 +172,80 @@ fn cancel_escape_and_the_barrier_close_it_with_nothing() {
     assert_eq!(steps, vec![Step::Closed(None); 3]);
 }
 
+/// A click on the barrier, below the title-bar band.
+fn click_barrier(ui: &mut Simulator<'_, Message>) {
+    ui.point_at(iced::Point::new(5.0, 100.0));
+    let _ = ui.simulate(iced_test::simulator::click());
+}
+
+#[test]
+fn the_barrier_keeps_a_note_with_unsaved_text_open() {
+    // A stray click outside the card threw the typed text away silently.
+    let mut editor = NoteEditor::new(None, Duration::ZERO, None, normalize);
+    enter_text(&mut editor, "breath runs out");
+    let steps = drive(&mut editor, click_barrier);
+    assert_eq!(steps, vec![Step::Stay]);
+    assert_eq!(editor.text(), "breath runs out");
+    // An existing note edited: the same.
+    let existing = note(0, None, "breath");
+    let mut editing = NoteEditor::new(Some(&existing), Duration::ZERO, None, normalize);
+    enter_text(&mut editing, "breath, then flat");
+    assert_eq!(drive(&mut editing, click_barrier), vec![Step::Stay]);
+    // Changed back, nothing is lost: the barrier dismisses it.
+    enter_text(&mut editing, "breath ");
+    assert_eq!(drive(&mut editing, click_barrier), vec![Step::Closed(None)]);
+    // Escape is a deliberate cancel.
+    let steps = drive(&mut editor, |ui| {
+        let _ = ui.tap_key(keyboard::Key::Named(Named::Escape));
+    });
+    assert_eq!(steps, vec![Step::Closed(None)]);
+}
+
+/// Cmd+Return (Ctrl+Return off macOS).
+fn command_return() -> iced::Event {
+    iced::Event::Keyboard(keyboard::Event::KeyPressed {
+        key: keyboard::Key::Named(Named::Enter),
+        modified_key: keyboard::Key::Named(Named::Enter),
+        physical_key: keyboard::key::Physical::Code(keyboard::key::Code::Enter),
+        location: keyboard::Location::Standard,
+        modifiers: keyboard::Modifiers::COMMAND,
+        text: None,
+        repeat: false,
+    })
+}
+
+#[test]
+fn command_return_saves_without_breaking_the_line() {
+    let mut editor = NoteEditor::new(None, Duration::ZERO, None, normalize);
+    let id = editor.input_id();
+    let steps = drive(&mut editor, |ui| {
+        ui.click(id).expect("the field");
+        let _ = ui.typewrite("pitchflat");
+        // The caret between the words, where Return breaks the line.
+        for _ in 0..4 {
+            let _ = ui.tap_key(keyboard::Key::Named(Named::ArrowLeft));
+        }
+        let _ = ui.simulate([command_return()]);
+    });
+    assert_eq!(
+        steps.last(),
+        Some(&Step::Closed(Some(NoteEditorResult {
+            content: Some("pitchflat".into()),
+            deleted: false,
+        }))),
+        "{steps:?}"
+    );
+    // With nothing to save it does nothing, as the dead Add button.
+    let mut empty = NoteEditor::new(None, Duration::ZERO, None, normalize);
+    let id = empty.input_id();
+    let steps = drive(&mut empty, |ui| {
+        ui.click(id).expect("the field");
+        let _ = ui.simulate([command_return()]);
+    });
+    assert!(steps.iter().all(|s| *s == Step::Stay), "{steps:?}");
+    assert_eq!(empty.text(), "");
+}
+
 #[test]
 fn typing_goes_through_the_field_and_return_breaks_the_line() {
     let mut editor = NoteEditor::new(None, Duration::ZERO, None, normalize);
@@ -199,7 +273,7 @@ fn the_card_is_at_most_460_wide_and_centred() {
     // The default 1024 px window: the title inside the card's 20 px
     // padding (its outline is inset).
     let mut ui = iced_test::simulator(editor.view());
-    let title = ui.find("Note at 00:12").expect("the title").bounds();
+    let title = ui.find("Note at 0:12").expect("the title").bounds();
     let card_left = (1024.0 - CARD_MAX_WIDTH) / 2.0;
     assert!((title.x - (card_left + 20.0)).abs() < 0.5, "{title:?}");
 }

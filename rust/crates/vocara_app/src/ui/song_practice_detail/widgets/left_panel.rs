@@ -693,12 +693,14 @@ pub fn summary_cells(
         },
         SummaryCell {
             label: "Clarity",
+            // In dB, as the Timbre tab reads it; the take's average, which
+            // that tab reads under the value at the playhead.
             value: if m.cpp_avg.is_nan() {
                 "—".to_string()
             } else {
-                to_string_as_fixed(m.cpp_avg, 1)
+                format!("{} dB", to_string_as_fixed(m.cpp_avg, 1))
             },
-            sub: "CPP".to_string(),
+            sub: "avg CPP".to_string(),
             dot: None,
             level: metric_level(m.cpp_avg, METRIC_RANGES[2]),
             tab: DockTab::Timbre,
@@ -706,7 +708,9 @@ pub fn summary_cells(
         SummaryCell {
             label: "Ring",
             value: ltas.map_or_else(|| "—".to_string(), |l| whole_db(l.singers_formant_db)),
-            sub: "singer's formant".to_string(),
+            // The average spectrum's, not the Timbre tab's Ring at the
+            // playhead: another measure under the same name.
+            sub: "avg singer's formant".to_string(),
             dot: None,
             level: ltas.and_then(|l| metric_level(l.singers_formant_db, METRIC_RANGES[3])),
             tab: DockTab::Ltas,

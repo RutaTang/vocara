@@ -287,6 +287,10 @@ pub fn panel<'a>(r: &Readouts, height: f32) -> Element<'a, Message> {
     )
 }
 
+/// A component row's value column: room for the widest reading, the
+/// voice's note and quality ("A♯4 · pressed").
+const VALUE_WIDTH: f32 = 92.0;
+
 fn component_row<'a>(row: &Row, height: f32, rule: bool, rest: f32) -> Element<'a, Message> {
     let label = studio_text(row.label)
         .size(type_scale::BODY)
@@ -304,7 +308,10 @@ fn component_row<'a>(row: &Row, height: f32, rule: bool, rest: f32) -> Element<'
             Studio::TEXT_PRIMARY
         })
         .align_x(Alignment::Right)
-        .width(68);
+        // On one line: at 68 px the voice's "A4 · breathy" wrapped to two
+        // and spilled out of the card.
+        .width(VALUE_WIDTH)
+        .ellipsis(1);
     let track = canvas_widget(Track {
         lo: row.lo,
         hi: row.hi,
@@ -333,6 +340,30 @@ fn component_row<'a>(row: &Row, height: f32, rule: bool, rest: f32) -> Element<'
     .into()
 }
 
+/// The track marker's solid knob's radius.
+pub const KNOB_RADIUS: f32 = 5.0;
+
+/// The range ends' text size.
+pub const END_SIZE: f32 = 9.0;
+
+/// Where a `w` × `h` track puts its marker for `position` (0 to 1) and the
+/// middle of its range ends' labels (y). The marker travels between the
+/// knob's radius from either end, so at an end it shows whole (it was cut
+/// in half by the track's edge); the labels sit as high as the track
+/// allows, clear of the knob's top at the full row height, and are drawn
+/// over the marker: at an end the knob hid them ("Back", "Closed").
+pub fn track_marks(w: f32, h: f32, position: f32) -> (Point, f32) {
+    let mid = (h / 2.0).round();
+    let travel = (w - 2.0 * KNOB_RADIUS).max(0.0);
+    let knob = Point::new(
+        KNOB_RADIUS.min(w / 2.0) + position.clamp(0.0, 1.0) * travel,
+        mid,
+    );
+    // Half the label's height above its middle stays inside the track.
+    let label = (mid - KNOB_RADIUS - END_SIZE / 2.0).max(END_SIZE * 0.6);
+    (knob, label)
+}
+
 /// A component's track: the 2 px line, the band over its recent range, the
 /// marker with its glow, and the range's ends above the line.
 struct Track {
@@ -356,14 +387,17 @@ impl canvas::Program<Message> for Track {
     ) -> Vec<Geometry> {
         let mut frame = Frame::new(renderer, bounds.size());
         let w = bounds.width;
-        let mid = (bounds.height / 2.0).round();
+        let (knob, label_y) = track_marks(w, bounds.height, self.position);
+        let mid = knob.y;
         let live = 1.0 - 0.55 * self.rest;
         frame.fill(
             &Path::rounded_rectangle(Point::new(0.0, mid - 1.0), Size::new(w, 2.0), 1.0.into()),
             TRACK,
         );
         if let Some((a, b)) = self.band {
-            let (a, b) = (a.min(b) * w, a.max(b) * w);
+            // Along the marker's travel, so the band lies under it.
+            let at = |p: f32| track_marks(w, bounds.height, p).0.x;
+            let (a, b) = (at(a.min(b)), at(a.max(b)));
             let width = (b - a).max(6.0);
             let left = ((a + b) / 2.0 - width / 2.0).clamp(0.0, (w - width).max(0.0));
             frame.fill(
@@ -375,15 +409,13 @@ impl canvas::Program<Message> for Track {
                 alpha(BAND, BAND.a * live),
             );
         }
-        let x = self.position.clamp(0.0, 1.0) * w;
-        let knob = Point::new(x, mid);
         // The glow (`0 0 10px`), the ring (`0 0 0 3px` at 20 %), the knob.
         for (r, a) in [(10.0, 0.07), (8.0, 0.10), (6.5, 0.14)] {
             frame.fill(&Path::circle(knob, r), alpha(GLOW, a * live * live));
         }
         frame.fill(&Path::circle(knob, 8.0), alpha(GLOW, 0.20 * live));
         frame.fill(
-            &Path::circle(knob, 5.0),
+            &Path::circle(knob, KNOB_RADIUS),
             if self.rest > 0.0 {
                 mix(KNOB, Studio::TEXT_FAINT, self.rest * 0.6)
             } else {
@@ -392,15 +424,16 @@ impl canvas::Program<Message> for Track {
         );
         let end = |content: &str, x: f32, align: Alignment| canvas::Text {
             content: content.to_string(),
-            position: Point::new(x, mid - 8.0),
+            position: Point::new(x, label_y),
             color: RANGE_END,
-            size: Pixels(9.0),
+            size: Pixels(END_SIZE),
             line_height: text::NATURAL,
             font: font::REGULAR,
             align_x: align,
             align_y: Vertical::Center,
             ..canvas::Text::default()
         };
+        // Last, over the marker.
         if bounds.height >= 22.0 {
             frame.fill_text(end(self.lo, 0.0, Alignment::Left));
             frame.fill_text(end(self.hi, w, Alignment::Right));

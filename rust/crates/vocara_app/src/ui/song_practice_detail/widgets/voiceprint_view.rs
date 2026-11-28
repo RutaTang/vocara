@@ -83,6 +83,7 @@ use super::pitch_lane::{note_vibrato_of, pitch_lane, pitch_notes_of, pitch_range
 use crate::ui::core::theme::{self, boxed, fill, font, type_scale, Studio};
 use crate::ui::core::widgets::cap_label::cap_label;
 use crate::ui::core::widgets::controls::{labelled, meter_color};
+use crate::ui::core::widgets::fading_scrollbar::{scrollable, Fading};
 use crate::ui::core::widgets::material_tooltip::material_tooltip;
 use crate::ui::core::widgets::painter::{KeyedCache, Same};
 use crate::ui::core::widgets::spectrogram_painter::{
@@ -428,11 +429,18 @@ pub fn power_tab<'a>(src: &'a dyn AnalysisSource) -> Element<'a, Message> {
                 min_ceil_db: Some(48.0),
             }
         };
+        // Live, as the other tabs mark it, and with a word until the mic
+        // has given a spectrum (an empty plot said nothing).
+        let trailing = row![live_dot(), spectrum_legend(&strip.formants)]
+            .spacing(14)
+            .align_y(Vertical::Center);
+        let body = if strip.column.is_empty() {
+            well_hint(POWER_LIVE_HINT)
+        } else {
+            spectrum_strip(strip)
+        };
         return padded(
-            column![
-                tab_header("Power spectrum", Some(spectrum_legend(true))),
-                spectrum_strip(strip),
-            ],
+            column![tab_header("Power spectrum", Some(trailing.into())), body],
             TAB_PADDING,
         );
     }
@@ -453,7 +461,7 @@ pub fn power_tab<'a>(src: &'a dyn AnalysisSource) -> Element<'a, Message> {
         };
         padded(
             column![
-                tab_header("Power spectrum", Some(spectrum_legend(true))),
+                tab_header("Power spectrum", Some(spectrum_legend(&strip.formants))),
                 spectrum_strip(strip),
             ],
             TAB_PADDING,
@@ -547,11 +555,7 @@ pub fn timbre_tab<'a>(src: &'a dyn AnalysisSource) -> Element<'a, Message> {
                 plain_header("Timbre", Some(live_dot())),
                 bar,
                 Space::new().height(12),
-                plot_well(center(
-                    text("Timbre curves are available for recorded takes.")
-                        .size(type_scale::BODY)
-                        .color(Studio::TEXT_FAINT),
-                )),
+                well_hint("Timbre curves are available for recorded takes."),
             ],
             TAB_PADDING,
         );
@@ -593,7 +597,23 @@ pub fn ltas_tab<'a>(src: &'a dyn AnalysisSource) -> Element<'a, Message> {
         let ltas = src.monitor().read().live_ltas();
         return match ltas {
             Some(ltas) if ltas.has_data() => ltas_body(&ltas, true),
-            _ => studio_hint("Sing into the mic to build your live average spectrum.").into(),
+            // Titled and marked Live as it will be, the hint in its well (a
+            // bare hint, untitled, read as another state).
+            _ => padded(
+                column![
+                    tab_header(
+                        LTAS_LIVE_TITLE,
+                        Some(
+                            row![live_dot(), spectrum_legend(&[])]
+                                .spacing(14)
+                                .align_y(Vertical::Center)
+                                .into()
+                        ),
+                    ),
+                    well_hint(LTAS_LIVE_HINT),
+                ],
+                TAB_PADDING,
+            ),
         };
     }
     with_spectrogram(src, |_, _| {
@@ -639,17 +659,17 @@ fn ltas_body<'a>(ltas: &Ltas, live: bool) -> Element<'a, Message> {
         min_ceil_db: None,
     };
     let trailing: Element<'a, Message> = if live {
-        row![live_dot(), spectrum_legend(false)]
+        row![live_dot(), spectrum_legend(&[])]
             .spacing(14)
             .align_y(Vertical::Center)
             .into()
     } else {
-        spectrum_legend(false)
+        spectrum_legend(&[])
     };
     column![
         tab_header(
             if live {
-                "LTAS · running average"
+                LTAS_LIVE_TITLE
             } else {
                 "LTAS · average spectrum"
             },
@@ -813,12 +833,12 @@ pub fn register_tab<'a>(src: &'a dyn AnalysisSource) -> Element<'a, Message> {
 /// register colours.
 fn register_legend<'a>(chest: i64, mix: i64, head: i64) -> Element<'a, Message> {
     legend(vec![
-        (Swatch::Dot(CHEST_COLOR), format!("chest {chest}%")),
+        (Swatch::Dot(CHEST_COLOR), format!("Chest {chest}%")),
         (
             Swatch::Dot(lerp_color(CHEST_COLOR, HEAD_COLOR, 0.5)),
-            format!("mix {mix}%"),
+            format!("Mix {mix}%"),
         ),
-        (Swatch::Dot(HEAD_COLOR), format!("head {head}%")),
+        (Swatch::Dot(HEAD_COLOR), format!("Head {head}%")),
     ])
 }
 
@@ -1215,7 +1235,14 @@ fn live_register_panel<'a>(m: &MonitorState) -> Element<'a, Message> {
         "Head"
     };
     if total == 0 && !has_now {
-        return studio_hint("Sing into the mic to map your registers live.").into();
+        // Titled and marked Live as it will be, the hint in its well.
+        return padded(
+            column![
+                plain_header("Register", Some(live_dot())),
+                well_hint(REGISTER_LIVE_HINT),
+            ],
+            TAB_PADDING,
+        );
     }
     let pct = |n: usize| round_to_i64(n as f64 * inv);
     let swatches = row![
@@ -1395,8 +1422,13 @@ fn metrics_bar<'a>(
     start_ms: i64,
 ) -> Element<'a, Message> {
     let t = local_seconds(position, duration_ms, start_ms);
-    // Outside the subject's span every readout reads "—" (NaN).
-    let at = |series: &[f32]| t.map_or(f64::NAN, |t| m.sample_at(series, t));
+    // Outside the subject's span every readout reads "—" (NaN), and on an
+    // unvoiced frame too, as the curves break there: it read silence's
+    // placeholder ("Ring −100.8 dB").
+    let at = |series: &[f32]| {
+        t.filter(|_| m.frames > 0)
+            .map_or(f64::NAN, |t| voiced_value_at(m, series, m.frame_at_time(t)))
+    };
     row![
         f0_chip(at(&m.f0)),
         metric_chip(
@@ -1556,6 +1588,51 @@ pub(crate) fn plot_well<'a, M: 'a>(content: impl Into<Element<'a, M>>) -> Elemen
         .height(Length::Fill)
         .style(well_style)
         .into()
+}
+
+/// A live tab's word before the mic has given it anything, centred in its
+/// plot well under the tab's title and Live badge (as Timbre's and the
+/// tuner's).
+fn well_hint<'a>(hint: &'static str) -> Element<'a, Message> {
+    plot_well(center(
+        text(hint).size(type_scale::BODY).color(Studio::TEXT_FAINT),
+    ))
+}
+
+/// The live tabs' words while the mic has given them nothing yet.
+pub const POWER_LIVE_HINT: &str = "Sing into the mic to see your power spectrum.";
+pub const LTAS_LIVE_HINT: &str = "Sing into the mic to build your live average spectrum.";
+pub const REGISTER_LIVE_HINT: &str = "Sing into the mic to map your registers live.";
+
+/// The LTAS tab's title on Live.
+const LTAS_LIVE_TITLE: &str = "LTAS · running average";
+
+/// The least height the Vowel, Range and Dynamics tabs lay out in, their
+/// padding included: their readouts and a usable chart.
+pub(crate) const PLOT_TAB_MIN_HEIGHT: f32 = 224.0;
+
+/// A tab `content` laid out at least [`PLOT_TAB_MIN_HEIGHT`] tall: on a
+/// dock shorter than that it scrolls, as the Summary does. At the dock's
+/// least height these tabs cut their readouts off or crushed their chart
+/// to a line.
+pub(crate) fn scrolls_when_short<'a, M: 'a>(
+    content: impl Fn() -> Element<'a, M> + 'a,
+) -> Element<'a, M> {
+    responsive(move |size| {
+        if size.height >= PLOT_TAB_MIN_HEIGHT {
+            return content();
+        }
+        scrollable(
+            container(content())
+                .width(Length::Fill)
+                .height(PLOT_TAB_MIN_HEIGHT),
+        )
+        .fading()
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
+    })
+    .into()
 }
 
 /// [`plot_well`]'s look.
@@ -1775,23 +1852,28 @@ fn formant_legend<'a>() -> Element<'a, Message> {
     ])
 }
 
-/// The power spectrum's key: the spectrum, its envelope (and the formant
-/// markers where `formants`), the singer's-formant band.
-fn spectrum_legend<'a>(formants: bool) -> Element<'a, Message> {
+/// The power spectrum's key: the formant markers drawn now (of `formants`,
+/// Hz: those found), the spectrum, its envelope and the singer's-formant
+/// band. A formant not found draws no marker, and listed all the same it
+/// read as missing from the chart ("F3", with no F3 line). The markers come
+/// first, so the keys always there keep their place at the right as these
+/// come and go.
+fn spectrum_legend<'a>(formants: &[f64]) -> Element<'a, Message> {
     // The keys of the washes, as they read over a well.
     let on_well = |wash: Color| lerp_color(Studio::WELL, Color { a: 1.0, ..wash }, wash.a * 2.2);
-    let mut entries = vec![
-        (
-            Swatch::Block(on_well(SPECTRUM_FILL)),
-            "Spectrum".to_string(),
-        ),
-        (Swatch::Line(SPECTRUM_ENVELOPE), "Envelope".to_string()),
-    ];
-    if formants {
-        entries.push((Swatch::Line(FORMANT_COLORS[0]), "F1".to_string()));
-        entries.push((Swatch::Line(FORMANT_COLORS[1]), "F2".to_string()));
-        entries.push((Swatch::Line(FORMANT_COLORS[2]), "F3".to_string()));
-    }
+    let mut entries: Vec<(Swatch, String)> = formants
+        .iter()
+        .take(3)
+        .enumerate()
+        // The painter's own test for a marker.
+        .filter(|(_, hz)| !hz.is_nan() && **hz > 0.0)
+        .map(|(i, _)| (Swatch::Line(FORMANT_COLORS[i]), format!("F{}", i + 1)))
+        .collect();
+    entries.push((
+        Swatch::Block(on_well(SPECTRUM_FILL)),
+        "Spectrum".to_string(),
+    ));
+    entries.push((Swatch::Line(SPECTRUM_ENVELOPE), "Envelope".to_string()));
     entries.push((
         Swatch::Block(on_well(SINGERS_FORMANT_BAND)),
         "Singer's formant".to_string(),
@@ -1824,8 +1906,12 @@ fn axis_row<'a>(max_hz: f64, child: impl Into<Element<'a, Message>>) -> Element<
 
 /// `_vowelPanel`: the F1×F2 vowel chart (1.3 wide for 1 tall) as tall as the
 /// tab, with the readouts at the playhead beside it, the pair centred
-/// across the dock.
+/// across the dock; it scrolls on a short dock ([`scrolls_when_short`]).
 fn vowel_panel<'a>(f1: f64, f2: f64, live: bool) -> Element<'a, Message> {
+    scrolls_when_short(move || vowel_panel_body(f1, f2, live))
+}
+
+fn vowel_panel_body<'a>(f1: f64, f2: f64, live: bool) -> Element<'a, Message> {
     let body = responsive(move |size| {
         let room = Size::new(
             (size.width - VOWEL_READOUTS_WIDTH - VOWEL_GAP).max(0.0),
@@ -2144,19 +2230,38 @@ struct TimbreCurvesPainter {
     timeline_duration_ms: i64,
 }
 
+/// Whether frame `fr` of `m` is voiced (audible, with a pitch): the frames
+/// the take's timbre averages are taken over. The analysis measures ring,
+/// tilt and CPP on every frame, silence and breath included, where they
+/// read as finite extremes (a ring of −100 dB, a CPP at the floor).
+fn voiced_frame(m: &VoiceMetrics, fr: usize) -> bool {
+    let f0 = value_at(&m.f0, fr);
+    m.active.get(fr) == Some(&1) && f0.is_finite() && f0 > 0.0
+}
+
+/// Curve `c`'s value at frame `fr` where the frame is voiced, else NaN.
+fn voiced_value_at(m: &VoiceMetrics, c: &[f32], fr: usize) -> f64 {
+    if voiced_frame(m, fr) {
+        value_at(c, fr)
+    } else {
+        f64::NAN
+    }
+}
+
 /// The polylines of curve `c` of `m` in a `size` box spanning `duration_ms`:
-/// one per run of finite values (a non-finite value breaks the line), each
-/// point at its frame's time, the curve scaled to its own finite range with
-/// 7% top/bottom padding so it doesn't touch the edges. Nothing for a flat
-/// or empty curve.
+/// one per run of voiced frames with finite values (an unvoiced frame or a
+/// non-finite value breaks the line: the gaps between notes drew as
+/// full-height blocks), each point at its frame's time, the curve scaled
+/// to its own range over those frames with 7% top/bottom padding so it
+/// doesn't touch the edges. Nothing for a flat or empty curve.
 pub fn timbre_curve(m: &VoiceMetrics, c: &[f32], duration_ms: i64, size: Size) -> Vec<Vec<Point>> {
     let frames = m.frames;
     if frames == 0 || duration_ms <= 0 {
         return Vec::new();
     }
     let (mut mn, mut mx) = (f64::INFINITY, f64::NEG_INFINITY);
-    for &v in c {
-        let v = f64::from(v);
+    for fr in 0..frames {
+        let v = voiced_value_at(m, c, fr);
         if v.is_finite() {
             mn = mn.min(v);
             mx = mx.max(v);
@@ -2171,7 +2276,7 @@ pub fn timbre_curve(m: &VoiceMetrics, c: &[f32], duration_ms: i64, size: Size) -
     let mut runs: Vec<Vec<Point>> = Vec::new();
     let mut started = false;
     for fr in 0..frames {
-        let v = value_at(c, fr);
+        let v = voiced_value_at(m, c, fr);
         if !v.is_finite() {
             started = false;
             continue;

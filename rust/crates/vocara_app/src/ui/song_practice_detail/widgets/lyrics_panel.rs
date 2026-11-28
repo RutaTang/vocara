@@ -302,11 +302,18 @@ pub enum Message {
     SetRightTab(RightTab),
     /// The collapse button or the rail: `vm.toggleLyricsPanel()`.
     ToggleLyricsPanel,
-    /// `vm.setLyricsMode(mode)` (the toolbar's toggles, Paste lyrics, Cancel,
-    /// Done).
+    /// `vm.setLyricsMode(mode)` (the toolbar's toggles, Cancel, Done).
     SetLyricsMode(LyricsMode),
     /// `vm.setLyricsFocus(on)` (the toolbar's Focus, the Focus view's exit).
     SetLyricsFocus(bool),
+    /// Space in the Focus view: play or pause, as the transport's button.
+    TogglePlay,
+    /// Paste lyrics (the empty tab's): read the clipboard, then answer
+    /// [`Message::PastedLyrics`] with its text.
+    PasteLyrics,
+    /// The clipboard's text for Paste lyrics: the editor opens on it (on
+    /// nothing, with no text there).
+    PastedLyrics(Option<String>),
     /// Import lyrics file (`_browseImport`): run [`browse_lyrics_file`],
     /// which answers with [`Message::ImportLyricsFromFile`].
     BrowseImport,
@@ -928,7 +935,12 @@ pub fn right_panel<'a>(
 }
 
 /// The count the Notes tab shows: every take's notes (the page title's).
+/// None with the backing selected: the tab says notes are for vocal takes
+/// only, and a count over that read as notes on the backing.
 fn notes_count(data: &RightPanelData<'_>) -> usize {
+    if data.selected_track.is_some_and(AudioTrack::is_backing) {
+        return 0;
+    }
     data.all_notes.len()
 }
 
@@ -1108,7 +1120,10 @@ fn lyrics_tab<'a>(state: &'a LyricsPanelState, data: RightPanelData<'a>) -> Elem
 fn lyrics_body<'a>(state: &'a LyricsPanelState, data: RightPanelData<'a>) -> Element<'a, Message> {
     match data.lyrics_mode {
         LyricsMode::Edit => match &state.editor {
-            Some(editor) => lyrics_editor(state, editor),
+            Some(editor) => {
+                let can_save = can_save_lyrics(&editor.content.text(), data.lyrics);
+                lyrics_editor(state, editor, can_save)
+            }
             // Not made yet (the next sync makes it).
             None => Space::new().width(Length::Fill).height(Length::Fill).into(),
         },
@@ -1228,10 +1243,7 @@ fn empty_state<'a>() -> Element<'a, Message> {
         Space::new().height(16),
         row![
             secondary_button("Import lyrics file", Some(Message::BrowseImport)),
-            primary_button(
-                "Paste lyrics",
-                Some(Message::SetLyricsMode(LyricsMode::Edit))
-            ),
+            primary_button("Paste lyrics", Some(Message::PasteLyrics)),
         ]
         .spacing(8),
         Space::new().height(12),
@@ -1330,12 +1342,14 @@ pub fn lyric_time(ms: i64) -> String {
 /// [`TIME_COLUMN`] of 10 px tabular time and the line at 13 px on a 20 px
 /// line; the `active` line on a [`CURRENT_LINE`] pill, white and medium,
 /// its time `ACCENT_BRIGHT`; the lines before it `TEXT_FAINT`, the ones to
-/// come [`UPCOMING_LINE`]. A synced line seeks to itself.
+/// come [`UPCOMING_LINE`]. A synced line seeks to itself. With no line
+/// timed there is no time column: the empty one indented every line.
 fn panel_reader<'a>(
     state: &'a LyricsPanelState,
     data: RightPanelData<'a>,
     active: i64,
 ) -> Element<'a, Message> {
+    let timed = data.lyrics.iter().any(LyricLine::is_synced);
     let mut lines = Column::new().spacing(1);
     for (i, l) in data.lyrics.iter().enumerate() {
         let id = state.line_id(List::Reader, i);
@@ -1372,11 +1386,13 @@ fn panel_reader<'a>(
                 UPCOMING_LINE
             })
             .width(Length::Fill);
-        let face = container(
+        let face = container(if timed {
             row![container(time).width(TIME_COLUMN), words]
                 .spacing(6)
-                .align_y(Vertical::Top),
-        )
+                .align_y(Vertical::Top)
+        } else {
+            row![words]
+        })
         .padding([6, 8])
         .width(Length::Fill)
         .style(move |_| {
@@ -1417,8 +1433,20 @@ fn panel_reader<'a>(
 
 // -------------------------------------------------------------- the editor
 
-/// `_LyricsEditor`: the lyrics as text, with Cancel and Save.
-fn lyrics_editor<'a>(state: &'a LyricsPanelState, editor: &'a Editor) -> Element<'a, Message> {
+/// Whether the editor's Save has anything to do with `text` over `lyrics`:
+/// an empty editor over no lyrics saves nothing (over lyrics, it deletes
+/// them, which the screen asks about first).
+pub fn can_save_lyrics(text: &str, lyrics: &[LyricLine]) -> bool {
+    !text.trim().is_empty() || lyrics.iter().any(|l| !l.is_blank())
+}
+
+/// `_LyricsEditor`: the lyrics as text, with Cancel and Save (dead while
+/// it has nothing to save: [`can_save_lyrics`]).
+fn lyrics_editor<'a>(
+    state: &'a LyricsPanelState,
+    editor: &'a Editor,
+    can_save: bool,
+) -> Element<'a, Message> {
     let id = state.editor_id();
     responsive(move |size| {
         let compact = size.height < EDITOR_COMPACT_BELOW;
@@ -1453,7 +1481,7 @@ fn lyrics_editor<'a>(state: &'a LyricsPanelState, editor: &'a Editor) -> Element
                     row![
                         Space::new().width(Length::Fill),
                         secondary_button("Cancel", Some(Message::SetLyricsMode(LyricsMode::Read))),
-                        primary_button("Save", Some(Message::ApplyEditedLyrics)),
+                        primary_button("Save", can_save.then_some(Message::ApplyEditedLyrics)),
                     ]
                     .spacing(8),
                 ]
@@ -1486,11 +1514,13 @@ fn editor_style(_: &Theme, _: text_editor::Status) -> text_editor::Style {
 
 // ------------------------------------------------------------ the sync view
 
-/// `_LyricsSync._fmt`: `mm:ss.cc`.
+/// A sync time: `m:ss.cc`, the app's `m:ss` (the reader's, the notes')
+/// to the hundredth a tap is timed to. (`_LyricsSync._fmt` padded the
+/// minutes, "00:01.00", where the panel beside it read "0:01".)
 pub fn sync_time(ms: i64) -> String {
     let s = ms.div_euclid(1000);
     format!(
-        "{:02}:{:02}.{:02}",
+        "{}:{:02}.{:02}",
         s.div_euclid(60),
         s.rem_euclid(60),
         ms.rem_euclid(1000) / 10
@@ -1558,7 +1588,15 @@ fn lyrics_sync<'a>(state: &'a LyricsPanelState, data: RightPanelData<'a>) -> Ele
                 list,
                 hrule(),
                 container(row![
-                    secondary_button("Clear", Some(Message::ClearLyricTimes)),
+                    // Dead with no time to clear (it looked live and did
+                    // nothing).
+                    secondary_button(
+                        "Clear",
+                        data.lyrics
+                            .iter()
+                            .any(LyricLine::is_synced)
+                            .then_some(Message::ClearLyricTimes),
+                    ),
                     Space::new().width(Length::Fill),
                     secondary_button("Done", Some(Message::SetLyricsMode(LyricsMode::Read))),
                     Space::new().width(8),
@@ -1954,7 +1992,8 @@ fn tap_area<'a>(content: Element<'a, Message>, messages: Vec<Message>) -> Elemen
 /// [`visible_drop_target`]), so the overlay takes it: a lyrics file dropped
 /// on the lyrics in focus did nothing at all. Nor the keyboard
 /// ([`holds_keyboard`]), but for Escape, which leaves the view, as it leaves
-/// a video's fullscreen: the corner's 28 px button was the only way out.
+/// a video's fullscreen (the corner's 28 px button was the only way out),
+/// and Space, which plays or pauses ([`Message::TogglePlay`]).
 pub fn lyrics_focus_overlay<'a>(
     state: &'a LyricsPanelState,
     data: RightPanelData<'a>,
@@ -1998,17 +2037,24 @@ pub fn lyrics_focus_overlay<'a>(
     let leaves_on_escape = Wrap::<Message, ()>::new(
         crate::ui::core::widgets::toolbar::window_backdrop(target),
         Box::new(|_, event, _, _, shell| {
-            let escape = matches!(
-                event,
-                Event::Keyboard(keyboard::Event::KeyPressed {
-                    key: keyboard::Key::Named(keyboard::key::Named::Escape),
-                    ..
-                })
-            );
-            if escape && !shell.is_event_captured() {
-                shell.publish(Message::SetLyricsFocus(false));
-                shell.capture_event();
+            if shell.is_event_captured() {
+                return;
             }
+            let Event::Keyboard(keyboard::Event::KeyPressed { key, repeat, .. }) = event else {
+                return;
+            };
+            let message = match key {
+                keyboard::Key::Named(keyboard::key::Named::Escape) => {
+                    Message::SetLyricsFocus(false)
+                }
+                // The view has no transport of its own, and it holds the
+                // keyboard: singing along, there was no way to start or
+                // pause the song without leaving it.
+                keyboard::Key::Named(keyboard::key::Named::Space) if !repeat => Message::TogglePlay,
+                _ => return,
+            };
+            shell.publish(message);
+            shell.capture_event();
         }),
     );
     holds_keyboard(leaves_on_escape)

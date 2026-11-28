@@ -347,7 +347,7 @@ fn the_lanes_show_their_labels_and_chips() {
         "Notes",
         "Techniques",
         // The header cells' own.
-        "At playhead",
+        "Note at playhead",
         "Power spectrum",
         "At the playhead",
         "2 notes",
