@@ -125,6 +125,7 @@ use super::vocal_tract_view::{self, VocalTractState};
 use super::voiceprint_view::VoiceprintState;
 use crate::app::library::RemoteAppliedBroadcast;
 use crate::services::Services;
+use vocara_services::self_update::SelfUpdate;
 use crate::ui::core::motion;
 use crate::ui::core::widgets::confirm_dialog::{DialogMotion, DialogResult};
 use crate::ui::core::widgets::spectrogram_painter::{release_spectrogram_images, RenderRequest};
@@ -175,6 +176,10 @@ pub const WAIT_FOR_SAVE: &str = "Wait for your last save to finish.";
 
 /// A drop on the separation overlay.
 pub const WAIT_FOR_SEPARATION: &str = "Wait for the separation to finish.";
+
+/// REC while an update installs: Vocara relaunches in seconds.
+pub const RECORD_AFTER_THE_UPDATE: &str =
+    "Vocara is installing an update and will relaunch. Record once it's back.";
 
 /// Over the workspace while it catches up on a save.
 pub const FINISHING_SAVE: &str = "Finishing your last save…";
@@ -703,6 +708,9 @@ pub struct SongPracticeDetailScreen {
     quit_feed: Arc<WakeFeed>,
     /// The playback engine, whose events wake the page while it is paused.
     engine: Arc<dyn PlaybackEngine>,
+    /// The app's self-update: REC is refused while it installs (see
+    /// `RECORD_AFTER_THE_UPDATE`).
+    self_update: Arc<SelfUpdate>,
     /// Set once the page left the stack.
     disposed: bool,
     /// The work the page's teardown started (the saves of the commits it
@@ -808,6 +816,7 @@ impl SongPracticeDetailScreen {
             remote_applied: Arc::clone(&services.library.remote_applied),
             quit_feed,
             engine,
+            self_update: Arc::clone(&services.self_update),
             disposed: false,
             teardown: Vec::new(),
             shown: Shown::default(),

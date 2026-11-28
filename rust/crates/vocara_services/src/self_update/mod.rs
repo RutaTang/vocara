@@ -31,6 +31,14 @@
 //!    quit path (the quit guard: the separation sidecars stopped, the
 //!    recordings finalized), which is what the helper waits for.
 //!
+//! The quit cuts short whatever is still under way — a take is stopped
+//! where it is, a separation killed, an import dropped — so the install
+//! waits while any of it is ([`Phase::WaitingForWork`]): before it starts,
+//! and again right before the helper is started, the last moment it can
+//! still step back (the install takes seconds, and work started meanwhile
+//! is waited for too). While it installs, REC is not started at all
+//! ([`SelfUpdate::unless_installing`]).
+//!
 //! A swap that fails after Vocara quit puts the previous version back,
 //! relaunches it, and leaves the reason in a marker file, which the
 //! relaunched Vocara reports once ([`SelfUpdate::startup`]).
@@ -55,6 +63,8 @@ use std::time::{Duration, Instant};
 use vocara_model::diagnostics::DiagnosticsLog;
 
 use crate::local_storage_service::LocalStorageService;
+use crate::recording_finalizer::RecordingFinalizer;
+use crate::source_separation_service::SeparationQuitGuard;
 use crate::update_check_service::{is_release_asset_url, UpdateCheckService, UpdateInfo};
 
 pub use download::{HttpsTransport, Transport};
@@ -113,10 +123,12 @@ pub enum Phase {
     /// The image is downloading: `done` of `total` bytes (the size the
     /// manifest names).
     Downloading { done: u64, total: u64 },
-    /// Downloaded and its checksum matched, waiting for a take being
-    /// recorded or saved to finish: installing ends with Vocara quitting for
-    /// the relaunch, which would cut the take short. Cancellable.
-    WaitingForTake,
+    /// Downloaded and its checksum matched, waiting for work the
+    /// relaunch's quit would cut short to finish: a take being recorded or
+    /// saved, an import, a separation (see [`work_in_flight`]). Before the
+    /// install, and again before the swap helper starts if work began while
+    /// it installed. Cancellable.
+    WaitingForWork,
     /// Downloaded and its checksum matched: the installer verifies the app
     /// on it and stages the swap.
     Installing,
@@ -135,7 +147,7 @@ impl Phase {
         matches!(
             self,
             Phase::Downloading { .. }
-                | Phase::WaitingForTake
+                | Phase::WaitingForWork
                 | Phase::Installing
                 | Phase::Relaunching
         )
@@ -162,17 +174,18 @@ pub trait Installer: Send + Sync {
     fn blocker(&self) -> Option<String>;
 
     /// Verifies the image, stages its app and starts the helper that swaps
-    /// it in once Vocara exits. Returns once the helper is running; the app
-    /// must then quit. Blocking.
+    /// it in once Vocara exits, asking [`InstallRequest::clear_to_swap`]
+    /// right before it starts the helper. Returns once the helper is
+    /// running; the app must then quit. Blocking.
     fn install(&self, request: &InstallRequest<'_>) -> Result<(), String>;
 }
 
-/// How often an install waiting for a take asks again (see
-/// [`Phase::WaitingForTake`]).
-const TAKE_POLL: Duration = Duration::from_millis(250);
+/// How often an install waiting for work asks again (see
+/// [`Phase::WaitingForWork`]).
+const WORK_POLL: Duration = Duration::from_millis(250);
 
 /// What [`Installer::install`] is asked to install.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 pub struct InstallRequest<'a> {
     /// The downloaded image, its size and checksum verified.
     pub dmg: &'a Path,
@@ -183,6 +196,13 @@ pub struct InstallRequest<'a> {
     /// The private directory updates live in (staging, the helper's log, the
     /// failure marker).
     pub updates_dir: &'a Path,
+    /// Asked right before the swap helper is started, the last moment the
+    /// update can step back: once the helper runs, its wait for Vocara to
+    /// quit has begun. Blocks while work the quit would cut short is in
+    /// flight (started while the install verified and staged), then says
+    /// whether to go on: `false` when the update was cancelled meanwhile,
+    /// and then nothing may be started.
+    pub clear_to_swap: &'a dyn Fn() -> bool,
 }
 
 /// The installer off macOS, where Vocara does not update itself.
@@ -240,9 +260,9 @@ struct Inner {
     workers_done: Condvar,
     /// Whether [`SelfUpdate::startup`] ran.
     started_up: AtomicBool,
-    /// Whether a take is being recorded or saved now (the install waits for
-    /// it: see [`Phase::WaitingForTake`]).
-    take_in_flight: Box<dyn Fn() -> bool + Send + Sync>,
+    /// Whether work the relaunch's quit would cut short is in flight now
+    /// (the install waits for it: see [`Phase::WaitingForWork`]).
+    work_in_flight: Box<dyn Fn() -> bool + Send + Sync>,
 }
 
 #[derive(Debug)]
@@ -287,20 +307,22 @@ impl SelfUpdate {
                 workers: Mutex::new(0),
                 workers_done: Condvar::new(),
                 started_up: AtomicBool::new(false),
-                take_in_flight: Box::new(|| false),
+                work_in_flight: Box::new(|| false),
             }),
         }
     }
 
-    /// The same, its installs waiting while `take_in_flight` says a take is
-    /// being recorded or saved ([`Phase::WaitingForTake`]). Called as it is
-    /// built, before it is shared.
-    pub fn waiting_on_takes(
+    /// The same, its installs waiting while `work_in_flight` says work the
+    /// relaunch's quit would cut short is under way
+    /// ([`Phase::WaitingForWork`]). Called as it is built, before it is
+    /// shared. It is asked under the update's lock: it must not call back
+    /// into the update.
+    pub fn waiting_on_work(
         mut self,
-        take_in_flight: impl Fn() -> bool + Send + Sync + 'static,
+        work_in_flight: impl Fn() -> bool + Send + Sync + 'static,
     ) -> Self {
         if let Some(inner) = Arc::get_mut(&mut self.inner) {
-            inner.take_in_flight = Box::new(take_in_flight);
+            inner.work_in_flight = Box::new(work_in_flight);
         }
         self
     }
@@ -308,7 +330,8 @@ impl SelfUpdate {
     /// The app's: updates under `<data root>/updates` (the application
     /// support directory `storage` is rooted at — never the shared temp
     /// directory, see [`files`]), images over HTTPS, this platform's
-    /// installer, the running bundle's version.
+    /// installer, the running bundle's version, its installs waiting on the
+    /// app's work in flight ([`work_in_flight`]).
     pub fn production(storage: Arc<LocalStorageService>) -> Self {
         Self::new(
             Box::new(move || Ok(storage.root_dir()?.join(files::UPDATES_DIR))),
@@ -316,8 +339,11 @@ impl SelfUpdate {
             platform_installer(),
             current_version(),
         )
-        .waiting_on_takes(|| {
-            crate::recording_finalizer::RecordingFinalizer::instance().has_active()
+        .waiting_on_work(|| {
+            work_in_flight(
+                &RecordingFinalizer::instance(),
+                &SeparationQuitGuard::instance(),
+            )
         })
     }
 
@@ -363,6 +389,26 @@ impl SelfUpdate {
     /// Whether the app should quit now: the swap helper is waiting for it.
     pub fn wants_quit(&self) -> bool {
         self.state().phase == Phase::Relaunching
+    }
+
+    /// Runs `start` unless the update is installing or relaunching: `None`
+    /// then, and nothing ran. For work that would hold the install from then
+    /// on and is better started after the relaunch (REC: a take lasts as
+    /// long as the user sings).
+    ///
+    /// `start` runs under the update's lock, so it never slips in between
+    /// the install's last look at the work in flight and the swap: what
+    /// `start` lists as it starts (a take registered with the recording
+    /// finalizer) is seen by that look, or `start` sees the install. It
+    /// must not call back into the update.
+    pub fn unless_installing<T>(&self, start: impl FnOnce() -> T) -> Option<T> {
+        let s = self.state();
+        if matches!(s.phase, Phase::Installing | Phase::Relaunching) {
+            return None;
+        }
+        let started = start();
+        drop(s);
+        Some(started)
     }
 
     /// Whether Vocara can replace itself with `release`, as far as is known
@@ -468,7 +514,7 @@ impl SelfUpdate {
     pub fn cancel(&self) -> bool {
         {
             let mut s = self.state();
-            if !matches!(s.phase, Phase::Downloading { .. } | Phase::WaitingForTake) {
+            if !matches!(s.phase, Phase::Downloading { .. } | Phase::WaitingForWork) {
                 return false;
             }
             if let Some(cancel) = s.cancel.take() {
@@ -538,6 +584,22 @@ impl SelfUpdate {
         }
         true
     }
+}
+
+/// Whether work the relaunch's quit would cut short is in flight (what the
+/// app's installs wait on, [`SelfUpdate::production`]):
+///
+/// - a take being armed, recorded or saved, or any save the quit holds for
+///   ([`RecordingFinalizer::has_active`], its holds included): the quit
+///   stops the take where it is, and waits for a save only so long;
+/// - anything landing on a practice ([`RecordingFinalizer::any_landing`]):
+///   an import being copied, transcoded, analyzed and saved, and every other
+///   edit behind a song page's busy gate, which the quit does not wait for
+///   at all;
+/// - a source separation running ([`SeparationQuitGuard::has_active`]),
+///   which the quit kills, its minutes of work lost.
+pub fn work_in_flight(finalizer: &RecordingFinalizer, separations: &SeparationQuitGuard) -> bool {
+    finalizer.has_active() || finalizer.any_landing() || separations.has_active()
 }
 
 /// Counts an update thread out however it ends.
@@ -691,52 +753,69 @@ impl Inner {
             files::discard_download(&dest);
             return Outcome::Cancelled;
         }
-        // Not while a take is recorded or saved: the install ends with
-        // Vocara quitting for the relaunch, which would cut the take short,
-        // and the swap helper waits for that quit only so long. The update
-        // waits for the take, still cancellable.
-        let mut waited = false;
-        while (self.take_in_flight)() {
-            if cancel.load(Ordering::SeqCst) || !self.current(generation) {
-                files::discard_download(&dest);
-                return Outcome::Cancelled;
-            }
-            if !waited {
-                waited = true;
-                {
-                    let mut s = self.state();
-                    if s.generation == generation {
-                        s.phase = Phase::WaitingForTake;
-                    }
-                }
-                DiagnosticsLog::instance().log("update", "waiting for the take to be saved");
-                self.notify();
-            }
-            std::thread::sleep(TAKE_POLL);
+        // Not while work the quit would cut short is under way: the
+        // install ends with Vocara quitting for the relaunch, and the swap
+        // helper waits for that quit only so long.
+        if !self.wait_for_work(generation, cancel) {
+            files::discard_download(&dest);
+            return Outcome::Cancelled;
         }
-        {
-            let mut s = self.state();
-            if s.generation != generation {
-                drop(s);
-                files::discard_download(&dest);
-                return Outcome::Cancelled;
-            }
-            s.cancel = None;
-            s.phase = Phase::Installing;
-        }
-        self.notify();
+        // And again right before the helper starts: verifying and staging
+        // take seconds, and a take or an import started meanwhile would be
+        // cut short all the same.
+        let clear_to_swap = || self.wait_for_work(generation, cancel);
         let installed = self.installer.install(&InstallRequest {
             dmg: &dest,
             expected: &release.version,
             running: &self.running,
             updates_dir: &updates,
+            clear_to_swap: &clear_to_swap,
         });
         // The image has done its job either way: a success copied the
         // verified app out of it, and a retry downloads afresh.
         files::discard_download(&dest);
         match installed {
             Ok(()) => Outcome::Installed,
+            // Cancelled while it waited before the swap: nothing started.
+            Err(_) if !self.current(generation) => Outcome::Cancelled,
             Err(e) => Outcome::Failed(e),
+        }
+    }
+
+    /// Waits while work the relaunch's quit would cut short is in flight
+    /// ([`Phase::WaitingForWork`], still cancellable), then moves attempt
+    /// `generation` on to [`Phase::Installing`]; `false`, with nothing
+    /// moved on, once it was cancelled.
+    ///
+    /// The look that lets it go on is taken under the state's lock, in the
+    /// same step that moves the phase on: work started only unless the
+    /// update is installing ([`SelfUpdate::unless_installing`]) has listed
+    /// itself by then, or sees the install and does not start.
+    fn wait_for_work(&self, generation: u64, cancel: &AtomicBool) -> bool {
+        let mut waiting = false;
+        loop {
+            {
+                let mut s = self.state();
+                if s.generation != generation || cancel.load(Ordering::SeqCst) {
+                    return false;
+                }
+                if !(self.work_in_flight)() {
+                    let moved = s.phase != Phase::Installing;
+                    s.phase = Phase::Installing;
+                    drop(s);
+                    if moved {
+                        self.notify();
+                    }
+                    return true;
+                }
+                s.phase = Phase::WaitingForWork;
+            }
+            if !waiting {
+                waiting = true;
+                DiagnosticsLog::instance().log("update", "waiting for the work under way");
+                self.notify();
+            }
+            std::thread::sleep(WORK_POLL);
         }
     }
 

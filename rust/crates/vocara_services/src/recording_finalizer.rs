@@ -439,6 +439,14 @@ impl RecordingFinalizer {
         self.lock().landing.contains_key(practice_id)
     }
 
+    /// Whether anything of any practice is landing right now: a stopped
+    /// take's finalize, a queued save, or an edit behind a song page's busy
+    /// gate (an import being copied, transcoded and saved among them), which
+    /// the gate lists as landing for as long as it is held.
+    pub fn any_landing(&self) -> bool {
+        !self.lock().landing.is_empty()
+    }
+
     /// Returns once every take of [practice_id] landing now has settled,
     /// whatever its outcome (the finalize reports its own) — or after
     /// [`RecordingFinalizer::per_finalizer_budget`], like a quit's wait: a

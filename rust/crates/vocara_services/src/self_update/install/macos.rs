@@ -152,9 +152,10 @@ fn bundle_short_version(app: &Path) -> Result<String, String> {
     .map_err(|e| format!("the update does not state its version: {e}"))
 }
 
-/// Verifies the downloaded image's app, stages it, then hands off to a
-/// detached helper that swaps it in and relaunches once this process
-/// exits. Returns as soon as the helper runs; the app then quits. Blocking.
+/// Verifies the downloaded image's app, stages it, then — once
+/// [`InstallRequest::clear_to_swap`] lets it — hands off to a detached
+/// helper that swaps it in and relaunches once this process exits. Returns
+/// as soon as the helper runs; the app then quits. Blocking.
 pub fn install_dmg(request: &InstallRequest<'_>) -> Result<(), String> {
     let target = installed_bundle()
         .ok_or("Vocara is not running from an installed app, so it can't update itself")?;
@@ -180,6 +181,13 @@ pub fn install_dmg(request: &InstallRequest<'_>) -> Result<(), String> {
     // signature check passed.
     let staging = files::create_private_dir(request.updates_dir, STAGING_PREFIX)?;
     let launched = stage_from_image(request, &identity, &staging).and_then(|staged_app| {
+        // The last moment the update can step back: once the helper runs,
+        // its wait for Vocara to quit has begun. A take or an import started
+        // while this verified and staged is waited for here, and a cancel
+        // meanwhile starts nothing.
+        if !(request.clear_to_swap)() {
+            return Err("the update was cancelled before the swap".to_string());
+        }
         spawn_swap_helper(&SwapPlan {
             pid: std::process::id(),
             staged_app: &staged_app,

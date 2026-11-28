@@ -13,7 +13,7 @@ use vocara_model::util::format::format_clock_ms;
 use super::{
     backing_set_toast, is_audio_path, ms, panel_data, Asked, Awaited, DropRun, DropZone,
     InterpretationAction, Message, NoteTarget, OpenMenu, OpenPicker, Owed, Render, RunKind,
-    SongPracticeDetailScreen, Source, Step, NO_AUDIO_IN_DROP,
+    SongPracticeDetailScreen, Source, Step, NO_AUDIO_IN_DROP, RECORD_AFTER_THE_UPDATE,
 };
 use crate::router::{Navigation, Route};
 use crate::ui::core::widgets::confirm_dialog::{ConfirmDialog, Dialog, DialogMotion, DialogResult};
@@ -372,7 +372,21 @@ impl SongPracticeDetailScreen {
             transport::Message::ToggleInputMonitor => {
                 self.vm.recording_do(|r, h| r.toggle_input_monitor(h))
             }
-            transport::Message::StartRecording => self.vm.recording_do(|r, h| r.start_recording(h)),
+            transport::Message::StartRecording => {
+                // Not once an update installs: it relaunches Vocara in
+                // seconds, and the quit would stop the take where it is (a
+                // take started earlier is waited for, and holds the update).
+                // Asked under the update's lock, so the install's last look
+                // before its swap sees this take, or this sees the install.
+                let vm = &mut self.vm;
+                let started = self
+                    .self_update
+                    .unless_installing(|| vm.recording_do(|r, h| r.start_recording(h)));
+                match started {
+                    Some(fx) => fx,
+                    None => return self.toast(RECORD_AFTER_THE_UPDATE.to_string()),
+                }
+            }
             transport::Message::ZoomTimeline(factor) => {
                 self.vm.playback_do(|p, h| p.zoom_timeline(h, factor))
             }

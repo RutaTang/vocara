@@ -492,6 +492,26 @@ fn the_quit_guard_kills_the_in_flight_sidecar() {
     assert_eq!(sep.join().unwrap(), Err(SeparationError::Cancelled));
 }
 
+/// A run counts as running with its quit guard from its registration until
+/// it has wound down (what an update's relaunch waits for), and a ticket
+/// dropped unused lists nothing.
+#[test]
+fn the_quit_guard_lists_a_run_until_it_winds_down() {
+    let rig = Rig::new();
+    let stub = rig.write_stub(SLEEP_BODY);
+    assert!(!rig.guard.has_active());
+    drop(rig.service(&stub).begin());
+    assert!(!rig.guard.has_active(), "a ticket dropped unused");
+    let svc = rig.service(&stub);
+    let sep = spawn_separate(&svc, &rig.write_source());
+    assert!(rig.guard.has_active(), "registered");
+    wait_for(|| rig.starts() >= 1, "sidecar start");
+    assert!(rig.guard.has_active(), "separating");
+    svc.cancel();
+    assert_eq!(sep.join().unwrap(), Err(SeparationError::Cancelled));
+    assert!(!rig.guard.has_active(), "wound down");
+}
+
 fn pid_alive(pid: i32) -> bool {
     std::process::Command::new("kill")
         .args(["-0", &pid.to_string()])

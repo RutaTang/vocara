@@ -105,6 +105,7 @@ fn a_test_binary_cannot_update_itself() {
             expected: "9.9.9",
             running: "0.3.0",
             updates_dir: Path::new("/nonexistent"),
+            clear_to_swap: &|| true,
         })
         .unwrap_err();
     assert!(err.contains("not running from an installed app"), "{err}");
@@ -243,6 +244,7 @@ fn an_image_is_staged_only_past_the_signature_check_and_always_detached() {
             running: "0.3.0",
             // Not the staging half's: it stages where it is told.
             updates_dir: Path::new("/nonexistent"),
+            clear_to_swap: &|| true,
         }
     }
     for (n, fs) in [Some("HFS+"), None].into_iter().enumerate() {

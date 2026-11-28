@@ -98,6 +98,24 @@ struct FakeInstaller {
     /// running one.
     installed: Mutex<Vec<(Vec<u8>, String, String)>>,
     blocker_asked: AtomicUsize,
+    /// When set, each install holds (as verifying and staging take seconds)
+    /// until the test lets it through, before it asks to swap.
+    held: Mutex<Option<mpsc::Receiver<()>>>,
+    /// How many swap helpers it started: installs that were cleared to swap.
+    swaps: AtomicUsize,
+}
+
+impl FakeInstaller {
+    /// Holds the next installs until the returned sender lets each through.
+    fn hold(&self) -> mpsc::Sender<()> {
+        let (go, held) = mpsc::channel();
+        *self.held.lock().unwrap() = Some(held);
+        go
+    }
+
+    fn swaps(&self) -> usize {
+        self.swaps.load(Ordering::SeqCst)
+    }
 }
 
 impl Installer for FakeInstaller {
@@ -113,10 +131,18 @@ impl Installer for FakeInstaller {
             request.expected.to_string(),
             request.running.to_string(),
         ));
-        match self.fails_with.lock().unwrap().clone() {
-            Some(e) => Err(e),
-            None => Ok(()),
+        if let Some(held) = &*self.held.lock().unwrap() {
+            held.recv().unwrap();
         }
+        if let Some(e) = self.fails_with.lock().unwrap().clone() {
+            return Err(e);
+        }
+        // As the Mac's installer does, right before it starts the helper.
+        if !(request.clear_to_swap)() {
+            return Err("the update was cancelled before the swap".into());
+        }
+        self.swaps.fetch_add(1, Ordering::SeqCst);
+        Ok(())
     }
 }
 
@@ -132,7 +158,7 @@ fn fixture(transport: Arc<FakeTransport>) -> Fixture {
 }
 
 /// A fixture whose installs wait while `take` is set (a take being
-/// recorded or saved).
+/// recorded or saved, or other work the relaunch's quit would cut short).
 fn fixture_with_takes(transport: Arc<FakeTransport>, take: Arc<AtomicBool>) -> Fixture {
     let updates = tempfile::tempdir().unwrap();
     let dir = updates.path().join("updates");
@@ -143,7 +169,7 @@ fn fixture_with_takes(transport: Arc<FakeTransport>, take: Arc<AtomicBool>) -> F
         Arc::clone(&installer) as Arc<dyn Installer>,
         "0.3.0",
     )
-    .waiting_on_takes(move || take.load(Ordering::SeqCst));
+    .waiting_on_work(move || take.load(Ordering::SeqCst));
     let changes = Arc::new(AtomicUsize::new(0));
     let counted = Arc::clone(&changes);
     service.add_listener(Box::new(move || {
@@ -224,7 +250,7 @@ fn an_update_waits_for_the_take_before_it_installs() {
     let take = Arc::new(AtomicBool::new(true));
     let fx = fixture_with_takes(FakeTransport::serving(&image), Arc::clone(&take));
     assert!(fx.service.start(&release(&image)));
-    until_phase(&fx, Phase::WaitingForTake);
+    until_phase(&fx, Phase::WaitingForWork);
     assert!(fx.service.phase().busy());
     assert!(!fx.service.wants_quit(), "no quit while the take runs");
     std::thread::sleep(Duration::from_millis(300));
@@ -242,7 +268,7 @@ fn an_update_waiting_for_the_take_can_be_cancelled() {
     let take = Arc::new(AtomicBool::new(true));
     let fx = fixture_with_takes(FakeTransport::serving(&image), take);
     assert!(fx.service.start(&release(&image)));
-    until_phase(&fx, Phase::WaitingForTake);
+    until_phase(&fx, Phase::WaitingForWork);
     assert!(fx.service.cancel());
     fx.settle();
     assert_eq!(fx.service.phase(), Phase::Idle);
@@ -252,6 +278,76 @@ fn an_update_waiting_for_the_take_can_be_cancelled() {
         "{:?}",
         fx.left()
     );
+}
+
+/// A take started while the update installs (verifying and staging take
+/// seconds) would be cut short by the relaunch's quit all the same: right
+/// before the swap helper starts, the update goes back to waiting, and
+/// swaps only once the take is saved.
+#[test]
+fn a_take_started_while_installing_is_waited_for_before_the_swap() {
+    let image = vec![5u8; 2048];
+    let take = Arc::new(AtomicBool::new(false));
+    let fx = fixture_with_takes(FakeTransport::serving(&image), Arc::clone(&take));
+    let verified = fx.installer.hold();
+    assert!(fx.service.start(&release(&image)));
+    until_phase(&fx, Phase::Installing);
+    take.store(true, Ordering::SeqCst);
+    verified.send(()).unwrap();
+    until_phase(&fx, Phase::WaitingForWork);
+    assert!(!fx.service.wants_quit(), "no quit while the take runs");
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(fx.installer.swaps(), 0, "no helper while the take runs");
+    take.store(false, Ordering::SeqCst);
+    fx.settle();
+    assert_eq!(fx.service.phase(), Phase::Relaunching);
+    assert_eq!(fx.installer.swaps(), 1);
+    assert_eq!(fx.installer.installed.lock().unwrap().len(), 1);
+}
+
+/// Cancel while it waits right before the swap: no helper starts, nothing
+/// quits, and the download is gone.
+#[test]
+fn an_update_waiting_before_the_swap_can_be_cancelled() {
+    let image = vec![6u8; 2048];
+    let take = Arc::new(AtomicBool::new(false));
+    let fx = fixture_with_takes(FakeTransport::serving(&image), Arc::clone(&take));
+    let verified = fx.installer.hold();
+    assert!(fx.service.start(&release(&image)));
+    until_phase(&fx, Phase::Installing);
+    assert!(!fx.service.cancel(), "an install is not stopped half way");
+    take.store(true, Ordering::SeqCst);
+    verified.send(()).unwrap();
+    until_phase(&fx, Phase::WaitingForWork);
+    assert!(fx.service.cancel());
+    fx.settle();
+    assert_eq!(fx.service.phase(), Phase::Idle);
+    assert!(!fx.service.wants_quit());
+    assert_eq!(fx.installer.swaps(), 0);
+    assert!(fx.left().is_empty(), "{:?}", fx.left());
+}
+
+/// REC is not started while the update installs or relaunches, and is while
+/// it downloads or waits (a take then holds the install).
+#[test]
+fn work_is_started_unless_the_update_installs() {
+    let image = vec![7u8; 2048];
+    let take = Arc::new(AtomicBool::new(true));
+    let fx = fixture_with_takes(FakeTransport::serving(&image), Arc::clone(&take));
+    let verified = fx.installer.hold();
+    assert_eq!(fx.service.unless_installing(|| 1), Some(1), "idle");
+    assert!(fx.service.start(&release(&image)));
+    until_phase(&fx, Phase::WaitingForWork);
+    assert_eq!(fx.service.unless_installing(|| 2), Some(2), "waiting");
+    take.store(false, Ordering::SeqCst);
+    until_phase(&fx, Phase::Installing);
+    let mut ran = false;
+    assert_eq!(fx.service.unless_installing(|| ran = true), None);
+    assert!(!ran, "nothing started while it installs");
+    verified.send(()).unwrap();
+    fx.settle();
+    assert_eq!(fx.service.phase(), Phase::Relaunching);
+    assert_eq!(fx.service.unless_installing(|| 3), None, "relaunching");
 }
 
 /// Progress is reported as the bytes arrive, of the size the manifest names.
@@ -516,4 +612,24 @@ fn an_unavailable_self_update_says_why() {
     );
     service.startup();
     assert_eq!(service.phase(), Phase::Idle);
+}
+
+/// What the app's installs wait on: a take or a save the quit holds for, an
+/// edit landing on a practice (an import being copied, transcoded and
+/// saved), and a separation running.
+#[test]
+fn the_app_s_installs_wait_on_takes_imports_and_separations() {
+    let finalizer = Arc::new(RecordingFinalizer::for_testing());
+    let separations = Arc::new(SeparationQuitGuard::new());
+    assert!(!work_in_flight(&finalizer, &separations));
+    let hold = finalizer.begin_hold();
+    assert!(work_in_flight(&finalizer, &separations), "a take or a save");
+    drop(hold);
+    let import = finalizer.begin_landing("practice");
+    assert!(work_in_flight(&finalizer, &separations), "an import");
+    drop(import);
+    let separating = separations.begin_run();
+    assert!(work_in_flight(&finalizer, &separations), "a separation");
+    drop(separating);
+    assert!(!work_in_flight(&finalizer, &separations));
 }

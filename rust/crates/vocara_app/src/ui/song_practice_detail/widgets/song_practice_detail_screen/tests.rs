@@ -2546,6 +2546,29 @@ fn a_second_back_while_the_take_lands_leaves_the_page_once() {
     assert_eq!(h.repo.stored().vocal_tracks.len(), 2, "the take landed");
 }
 
+// REC once an update installs, or relaunches: the relaunch's quit would stop
+// the take seconds in, so it is not started at all, and the page says why.
+#[test]
+fn rec_is_refused_once_an_update_installs() {
+    use crate::ui::home::widgets::update_notice::testing::{image, release, updates};
+    use vocara_services::self_update::Phase;
+    let (mut h, _mic) = take_flow(None, ok_analyze());
+    let fake = updates(false);
+    fake.updater.prepare();
+    assert!(fake.updater.start(&release(Some(&image()))));
+    fake.settle();
+    assert_eq!(fake.updater.phase(), Phase::Relaunching);
+    h.screen.self_update = Arc::clone(&fake.updater);
+    h.send(Message::Transport(
+        detail_transport_bar::Message::StartRecording,
+    ));
+    h.settle();
+    assert!(!h.vm().is_recording());
+    assert!(!h.vm().recording().is_starting_take());
+    assert_eq!(h.screen.snack(), Some(RECORD_AFTER_THE_UPDATE));
+    assert_eq!(take_ids(&h.repo.stored()), ["take1"], "no take made");
+}
+
 // The quit hook: a quit while a take records asks the page (on the quit's
 // thread, through the waker) to stop it, and returns once it has landed.
 #[test]
