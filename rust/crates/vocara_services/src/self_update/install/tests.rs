@@ -742,6 +742,58 @@ fn a_failed_copy_restores_and_relaunches_the_previous_version() {
     );
 }
 
+/// The copy fails halfway and leaves a half copy `rm` cannot fully remove
+/// (a folder it may not write): the half is moved aside, not restored INTO
+/// — `mv` onto a directory that still exists moves inside it, which used to
+/// bury the previous version in the half copy and report it restored.
+#[test]
+fn a_half_copy_that_cannot_be_removed_is_moved_aside_before_the_restore() {
+    use std::os::unix::fs::PermissionsExt;
+    if root() {
+        eprintln!("skipped: root removes what a read-only folder holds");
+        return;
+    }
+    let mut fx = SwapFixture::new("half");
+    let copier = fx.root.join("half-ditto.sh");
+    write_script(
+        &copier,
+        "/bin/mkdir -p \"$2/Contents/locked\" && : > \"$2/Contents/locked/half\" \
+         && /bin/chmod 555 \"$2/Contents/locked\"\nexit 1",
+    );
+    fx.copier = copier;
+    assert!(!fx.run(None, 50).success());
+    let apps = fx.target.parent().unwrap().to_path_buf();
+    let halves: Vec<PathBuf> = std::fs::read_dir(&apps)
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.to_string_lossy().contains(".incomplete-"))
+        .collect();
+    for half in &halves {
+        let _ = std::fs::set_permissions(
+            half.join("Contents/locked"),
+            std::fs::Permissions::from_mode(0o755),
+        );
+    }
+    assert_eq!(fx.version().as_deref(), Some("old"), "{}", fx.log());
+    assert!(!fx.target.join("Contents/locked").exists());
+    assert_eq!(fx.backups(), 0);
+    assert_eq!(halves.len(), 1, "the half copy is set aside: {halves:?}");
+    assert!(!fx.staging.exists());
+    assert_eq!(fx.opened(), format!("{}\n", fx.target.display()));
+    assert!(
+        fx.failure()
+            .is_some_and(|f| f.contains("previous version was restored")),
+        "{:?}",
+        fx.failure()
+    );
+    assert!(
+        fx.log().contains("left the incomplete copy at"),
+        "{}",
+        fx.log()
+    );
+}
+
 /// The installed app cannot even be moved aside: nothing changes, the old
 /// app is relaunched and the reason is recorded.
 #[test]
