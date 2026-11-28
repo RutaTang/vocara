@@ -1339,3 +1339,73 @@ fn without_an_engine_every_call_is_a_silent_no_op() {
     assert_eq!(svc.record_latency_ms(), 0.0);
     assert_eq!(svc.track_gain_reduction_db("a"), 0.0);
 }
+
+/// The mic recovery's service calls: the reopen reaches the engine with the
+/// generation it names (and not a disposed one), the engine's diagnostics
+/// lines come out once, oldest first, and every device poll drains them into
+/// the app's log; the input-failed mark is the service's own.
+#[test]
+fn the_mic_recovery_calls_reach_the_engine_and_its_diagnostics_are_drained() {
+    #[derive(Default)]
+    struct Mic {
+        reopens: Mutex<Vec<u64>>,
+        lines: Mutex<VecDeque<String>>,
+    }
+    impl EngineBindings for Mic {
+        fn sample_rate(&self) -> f64 {
+            48_000.0
+        }
+        fn destroy(&self) {}
+        fn poll_device_event(&self, _mask: u32) -> u32 {
+            0
+        }
+        fn reopen_input(&self, generation: u64) -> Result<(), EngineError> {
+            self.reopens.lock().unwrap().push(generation);
+            Ok(())
+        }
+        fn take_diagnostics(&self) -> Vec<String> {
+            self.lines.lock().unwrap().drain(..).collect()
+        }
+    }
+    let mic = Arc::new(Mic::default());
+    let svc = GraphAudioPlaybackService::with_bindings(mic.clone(), None);
+
+    svc.reopen_input(7);
+    assert_eq!(*mic.reopens.lock().unwrap(), [7]);
+
+    mic.lines.lock().unwrap().extend([
+        "engine 1: input sync seq 3 want on stream none -> opened gen 2".to_string(),
+        "engine 1: input stream gen 2 stalled: no new frames for 500 ms".to_string(),
+    ]);
+    assert_eq!(
+        svc.take_engine_diagnostics(),
+        [
+            "engine 1: input sync seq 3 want on stream none -> opened gen 2",
+            "engine 1: input stream gen 2 stalled: no new frames for 500 ms",
+        ]
+    );
+    assert!(svc.take_engine_diagnostics().is_empty(), "taken once");
+    mic.lines
+        .lock()
+        .unwrap()
+        .push_back("engine 1: created".into());
+    assert_eq!(svc.poll_device_events(u32::MAX), 0);
+    assert!(
+        mic.lines.lock().unwrap().is_empty(),
+        "the poll copied them into the log"
+    );
+
+    assert!(!svc.input_failed());
+    svc.mark_input_failed(true);
+    assert!(svc.input_failed());
+    svc.mark_input_failed(false);
+    assert!(!svc.input_failed());
+
+    PlaybackEngine::dispose(&svc);
+    svc.reopen_input(8);
+    assert_eq!(
+        *mic.reopens.lock().unwrap(),
+        [7],
+        "a disposed engine is not asked"
+    );
+}

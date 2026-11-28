@@ -146,6 +146,8 @@ struct Shared {
     playing: Broadcast<bool>,
     /// Reusable buffer for pulling captured frames (interleaved stereo).
     input_pull: Mutex<Vec<f32>>,
+    /// See [`GraphAudioPlaybackService::input_failed`].
+    input_failed: AtomicBool,
 }
 
 /// What the Dart object owned (see the module doc).
@@ -1223,6 +1225,7 @@ impl GraphAudioPlaybackService {
                 position: Broadcast::new(),
                 playing: Broadcast::new(),
                 input_pull: Mutex::new(Vec::new()),
+                input_failed: AtomicBool::new(false),
             }),
         }
     }
@@ -1294,7 +1297,44 @@ impl GraphAudioPlaybackService {
     /// the song page's 1 s watch and the technique page's 50 ms level tick no
     /// longer steal each other's events. 0 when the engine is down.
     pub fn poll_device_events(&self, mask: u32) -> u32 {
-        self.live().map_or(0, |e| e.poll_device_event(mask))
+        let events = self.live().map_or(0, |e| e.poll_device_event(mask));
+        // Every page polls on its own tick while it has a device to watch, so this is where the
+        // engine's own diagnostics lines reach the app's log.
+        self.log_engine_diagnostics();
+        events
+    }
+
+    /// The engine's queued diagnostics lines, oldest first: what its audio host and mic unit
+    /// decided (input syncs, the mic's negotiated format, failed stops), each naming its
+    /// engine. Process-wide, so lines of an engine already destroyed come out of the next one
+    /// asked. Empty without an engine.
+    pub fn take_engine_diagnostics(&self) -> Vec<String> {
+        self.shared
+            .engine
+            .as_ref()
+            .map_or_else(Vec::new, |e| e.take_diagnostics())
+    }
+
+    /// Copies [`GraphAudioPlaybackService::take_engine_diagnostics`] into the app's
+    /// diagnostics log, under `engine`.
+    pub fn log_engine_diagnostics(&self) {
+        for line in self.take_engine_diagnostics() {
+            DiagnosticsLog::instance().log("engine", &line);
+        }
+    }
+
+    /// Whether a take's microphone never delivered on this engine: set when a recording start
+    /// failed as not delivering (after its reopen too), cleared by the next start that armed. An
+    /// owner that can build itself a new engine (the technique page) replaces this one rather
+    /// than retry on it: a fresh engine is a fresh audio host and mic unit.
+    pub fn input_failed(&self) -> bool {
+        self.shared.input_failed.load(Ordering::SeqCst)
+    }
+
+    /// Sets [`GraphAudioPlaybackService::input_failed`] (the recording controller does, at the
+    /// end of each start).
+    pub fn mark_input_failed(&self, failed: bool) {
+        self.shared.input_failed.store(failed, Ordering::SeqCst);
     }
 
     /// Total streaming-source underruns (frames a disk-streamed track rendered
@@ -1425,6 +1465,18 @@ impl GraphAudioPlaybackService {
     /// [`GraphAudioPlaybackService::applied_seq_of`].
     pub fn input_intent_seq(&self) -> u64 {
         self.live().map_or(0, |e| e.input_intent_seq())
+    }
+
+    /// Asks the engine to reopen the input stream if it is still generation `generation`
+    /// ([`GraphAudioPlaybackService::state_gen_of`] of a state word read now): a take's ready
+    /// check that saw no frames from the stream it armed on. A newer stream (a slow open that
+    /// finished meanwhile) is kept; with none open and the input wanted, one is opened. The
+    /// applied state and the stream state say when the new stream is up. No-op when the engine
+    /// is down.
+    pub fn reopen_input(&self, generation: u64) {
+        if let Some(e) = self.live() {
+            let _ = e.reopen_input(generation);
+        }
     }
 
     /// The host's last SUCCESSFUL convergence, packed as

@@ -4,6 +4,8 @@
 //! `OutResampler`) reads the same table. Dependency-free, so both build and test without the
 //! `device` feature.
 
+use crate::sample::CHANNELS;
+
 /// Kernel width in source frames. 64 taps at 256x table resolution yields ~70 dB stopband
 /// with a passband flat well past 20 kHz at 64 MACs per output frame.
 pub(crate) const SINC_TAPS: usize = 64;
@@ -70,8 +72,9 @@ pub const MAX_FRAMES_PER_INPUT: usize = 8;
 /// rate passes through the kernel, so a 48 kHz mic carries none of it.
 pub const INPUT_SINC_DELAY_FRAMES: usize = SINC_HALF;
 
-/// The input path's push-based rate converter: one mono mic sample in, the engine-rate frames
-/// it completes out (the mic is carried as one signal on both lanes, so one channel is enough).
+/// The input path's push-based rate converter: one frame of the mic's two lanes in (the take
+/// and the monitor, see the device module's `InputCell`), the engine-rate frames it completes
+/// out, both lanes read at the same positions.
 ///
 /// At the engine rate it passes samples through (the identity fast path, bit for bit), and a
 /// clock-drift ratio off 1 (tens of ppm) is followed with the two-point interpolator, which is
@@ -86,8 +89,8 @@ pub struct InputRateConverter {
     step: f64,
     /// The next output's position past the interpolation's left sample, in input frames.
     pos: f64,
-    /// The two-point interpolator's left sample, and whether one has arrived.
-    prev: f32,
+    /// The two-point interpolator's left frame, and whether one has arrived.
+    prev: [f32; CHANNELS],
     primed: bool,
     /// The kernel and its history, for a rate other than the engine's.
     sinc: Option<SincHistory>,
@@ -96,16 +99,16 @@ pub struct InputRateConverter {
 /// The windowed-sinc kernel's table and the input history it reads.
 struct SincHistory {
     table: Vec<f32>,
-    /// The last [`SINC_TAPS`] input samples, each written twice (at `i` and `i + TAPS`), so the
+    /// The last [`SINC_TAPS`] input frames, each written twice (at `i` and `i + TAPS`), so the
     /// newest `TAPS` are one contiguous slice, oldest first, wherever the write index stands.
-    hist: [f32; 2 * SINC_TAPS],
+    hist: [[f32; CHANNELS]; 2 * SINC_TAPS],
     /// Where the next sample goes; also the start of the newest `TAPS`.
     at: usize,
 }
 
 impl SincHistory {
     #[inline]
-    fn push(&mut self, x: f32) {
+    fn push(&mut self, x: [f32; CHANNELS]) {
         self.hist[self.at] = x;
         self.hist[self.at + SINC_TAPS] = x;
         self.at = (self.at + 1) % SINC_TAPS;
@@ -114,18 +117,20 @@ impl SincHistory {
     /// The kernel at `frac` past the history's sample `HALF` back from the newest: its taps
     /// span exactly the newest `TAPS` samples.
     #[inline]
-    fn read(&self, frac: f64) -> f32 {
+    fn read(&self, frac: f64) -> [f32; CHANNELS] {
         let rf = frac * SINC_OVERSAMPLE as f64;
         let r0 = (rf.floor() as usize).min(SINC_OVERSAMPLE - 1);
         let rw = (rf - r0 as f64) as f32;
         let row0 = &self.table[r0 * SINC_TAPS..(r0 + 1) * SINC_TAPS];
         let row1 = &self.table[(r0 + 1) * SINC_TAPS..(r0 + 2) * SINC_TAPS];
         let win = &self.hist[self.at..self.at + SINC_TAPS];
-        let mut y = 0.0f32;
+        let (mut l, mut r) = (0.0f32, 0.0f32);
         for t in 0..SINC_TAPS {
-            y += win[t] * (row0[t] + (row1[t] - row0[t]) * rw);
+            let w = row0[t] + (row1[t] - row0[t]) * rw;
+            l += win[t][0] * w;
+            r += win[t][1] * w;
         }
-        y
+        [l, r]
     }
 }
 
@@ -138,11 +143,11 @@ impl InputRateConverter {
         InputRateConverter {
             step,
             pos: 0.0,
-            prev: 0.0,
+            prev: [0.0; CHANNELS],
             primed: false,
             sinc: converts.then(|| SincHistory {
                 table: build_sinc_table(step),
-                hist: [0.0; 2 * SINC_TAPS],
+                hist: [[0.0; CHANNELS]; 2 * SINC_TAPS],
                 at: 0,
             }),
         }
@@ -153,11 +158,16 @@ impl InputRateConverter {
         self.step
     }
 
-    /// Takes one input sample and writes the engine-rate frames it completes to `out`,
+    /// Takes one input frame and writes the engine-rate frames it completes to `out`,
     /// returning how many. `ratio` is the drift estimator's correction (exactly 1.0 inside its
     /// deadband). RT-safe: no allocation, at most [`MAX_FRAMES_PER_INPUT`] frames.
     #[inline]
-    pub fn convert(&mut self, x: f32, ratio: f64, out: &mut [f32; MAX_FRAMES_PER_INPUT]) -> usize {
+    pub fn convert(
+        &mut self,
+        x: [f32; CHANNELS],
+        ratio: f64,
+        out: &mut [[f32; CHANNELS]; MAX_FRAMES_PER_INPUT],
+    ) -> usize {
         let step = self.step * ratio;
         if let Some(sinc) = self.sinc.as_mut() {
             sinc.push(x);
@@ -195,7 +205,10 @@ impl InputRateConverter {
         let mut n = 0;
         while self.pos < 1.0 && n < MAX_FRAMES_PER_INPUT {
             let t = self.pos as f32;
-            out[n] = self.prev + (x - self.prev) * t;
+            out[n] = [
+                self.prev[0] + (x[0] - self.prev[0]) * t,
+                self.prev[1] + (x[1] - self.prev[1]) * t,
+            ];
             n += 1;
             self.pos += step;
         }
@@ -210,14 +223,18 @@ mod tests {
     use super::*;
     use crate::sample::ENGINE_SR;
 
-    /// Every engine-rate frame `samples` (at `in_rate`) becomes.
+    /// Every engine-rate frame `samples` (at `in_rate`) becomes, on the take lane (the monitor
+    /// lane carries the same signal inverted, and must come out as the take's inverse).
     fn convert_all(in_rate: f64, ratio: f64, samples: &[f32]) -> Vec<f32> {
         let mut c = InputRateConverter::new(in_rate, ENGINE_SR);
         let mut out = Vec::new();
-        let mut buf = [0.0f32; MAX_FRAMES_PER_INPUT];
+        let mut buf = [[0.0f32; CHANNELS]; MAX_FRAMES_PER_INPUT];
         for &x in samples {
-            let n = c.convert(x, ratio, &mut buf);
-            out.extend_from_slice(&buf[..n]);
+            let n = c.convert([x, -x], ratio, &mut buf);
+            for f in &buf[..n] {
+                assert_eq!(f[1], -f[0], "the lanes are read apart");
+                out.push(f[0]);
+            }
         }
         out
     }
@@ -300,23 +317,23 @@ mod tests {
         assert_eq!(convert_all(48_000.0, 1.0, &input), input);
         // A trim is the two-point interpolator, continuous across the deadband crossing.
         let mut c = InputRateConverter::new(48_000.0, ENGINE_SR);
-        let mut buf = [0.0f32; MAX_FRAMES_PER_INPUT];
-        assert_eq!(c.convert(0.5, 1.0, &mut buf), 1);
+        let mut buf = [[0.0f32; CHANNELS]; MAX_FRAMES_PER_INPUT];
+        assert_eq!(c.convert([0.5, 0.25], 1.0, &mut buf), 1);
         assert_eq!(
-            c.convert(-1.0, 1.0 + 1e-3, &mut buf),
+            c.convert([-1.0, 0.5], 1.0 + 1e-3, &mut buf),
             0,
             "phase 1.0: the next is due"
         );
-        let n = c.convert(-1.0, 1.0 + 1e-3, &mut buf);
-        assert_eq!((n, buf[0]), (1, -1.0));
+        let n = c.convert([-1.0, 0.5], 1.0 + 1e-3, &mut buf);
+        assert_eq!((n, buf[0]), (1, [-1.0, 0.5]));
     }
 
     #[test]
     fn no_rate_runs_the_audio_thread_past_its_bound() {
         let mut c = InputRateConverter::new(0.0, ENGINE_SR);
-        let mut buf = [0.0f32; MAX_FRAMES_PER_INPUT];
+        let mut buf = [[0.0f32; CHANNELS]; MAX_FRAMES_PER_INPUT];
         for _ in 0..4 {
-            assert!(c.convert(0.1, 1.0, &mut buf) <= MAX_FRAMES_PER_INPUT);
+            assert!(c.convert([0.1, 0.1], 1.0, &mut buf) <= MAX_FRAMES_PER_INPUT);
         }
     }
 }

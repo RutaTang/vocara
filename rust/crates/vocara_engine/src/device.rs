@@ -13,11 +13,14 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
+use std::time::Instant;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
 use crate::capture_layout::{InputChannelMix, INPUT_CHANNEL_AUTO};
 use crate::declick::{Declick, DECLICK_FRAMES};
+use crate::diag::{self, SyncOutcome};
+use crate::input_health::{Change, InputHealth, HEALTH_TICK};
 use crate::live::{RtCell, Shared};
 use crate::ring::{Consumer, Producer};
 use crate::sample::{Smp, CHANNELS, ENGINE_SR};
@@ -1159,6 +1162,12 @@ pub struct InputCell {
     /// The largest callback's share of the nominal input counter since the drift estimator
     /// last took it (see [`Self::take_quantum`]).
     quantum: AtomicU64,
+    /// The emitted-frame counter (the state's `frames_in`), outside the single-accessor state
+    /// so the host can sample it (see [`Self::frames_in`]).
+    frames_in: Arc<AtomicU64>,
+    /// The generation whose callback declared its capture dead (see [`Self::mark_dead`]);
+    /// 0 = none.
+    dead_epoch: AtomicU64,
 }
 
 // SAFETY: see the type doc — the owner epoch plus the `busy` compare-exchange admit at most one
@@ -1241,8 +1250,11 @@ impl InputState {
     /// but a drop on the RECORDING ring is counted: monitor/capture drops only cost a live
     /// view a frame, a recording drop is a permanent hole in the take on disk.
     #[inline]
-    fn emit(&mut self, f: [Smp; CHANNELS], cap: bool, rec: bool) {
-        self.mic.push(f);
+    fn emit(&mut self, lanes: [Smp; CHANNELS], cap: bool, rec: bool) {
+        // Lane 0 is the take, lane 1 the monitor (see `InputCell::feed`); each ring carries its
+        // lane on both channels.
+        self.mic.push([lanes[1], lanes[1]]);
+        let f = [lanes[0], lanes[0]];
         if cap {
             self.cap.push(f);
         }
@@ -1296,7 +1308,7 @@ impl InputCell {
                 conv: InputRateConverter::new(ENGINE_SR, ENGINE_SR),
                 drift_ratio_bits,
                 level,
-                frames_in,
+                frames_in: Arc::clone(&frames_in),
                 rec_dropped,
                 rec_written,
                 nominal_frames_in,
@@ -1309,7 +1321,37 @@ impl InputCell {
             busy: AtomicBool::new(false),
             channel_mode: AtomicU32::new(INPUT_CHANNEL_AUTO),
             quantum: AtomicU64::new(0),
+            frames_in,
+            dead_epoch: AtomicU64::new(0),
         })
+    }
+
+    /// Total engine-rate frames the input callbacks have emitted (`ve_input_frames_received`):
+    /// what the host samples to tell a delivering stream from a stalled one. Any thread.
+    pub fn frames_in(&self) -> u64 {
+        self.frames_in.load(Ordering::Relaxed)
+    }
+
+    /// The input callback of generation `epoch` declares its capture dead (the streak that raises
+    /// [`EVENT_INPUT_LOST`]). RT-safe: one atomic store. The host reads it with
+    /// [`Self::take_dead`] before it keeps the stream for an arm.
+    #[inline]
+    pub fn mark_dead(&self, epoch: u64) {
+        self.dead_epoch.store(epoch, Ordering::Release);
+    }
+
+    /// Whether the CURRENT generation's callback declared its capture dead; clears the mark. A
+    /// retired generation's mark (a zombie still calling back after a failed stop) is not the
+    /// current stream's and reads false. Host thread.
+    pub fn take_dead(&self) -> bool {
+        let dead = self.dead_epoch.swap(0, Ordering::AcqRel);
+        dead != 0 && dead == self.generation()
+    }
+
+    /// [`take_dead`](Self::take_dead) without clearing the mark (the host's health tick).
+    pub fn is_dead(&self) -> bool {
+        let dead = self.dead_epoch.load(Ordering::Acquire);
+        dead != 0 && dead == self.generation()
     }
 
     /// Choose which input(s) make the mono capture: [`INPUT_CHANNEL_AUTO`], or
@@ -1381,7 +1423,23 @@ impl InputCell {
             return false;
         };
         // SAFETY: the guard is the cell's single-accessor proof for this call.
-        unsafe { self.feed(data, gain) };
+        unsafe { self.feed(data, None, gain) };
+        true
+    }
+
+    /// [`try_feed_gained`](Self::try_feed_gained) for a mono cell with a separate MONITOR
+    /// signal: `take` feeds the capture and recording rings and the meter, `monitor` (the same
+    /// samples' time, as long as `take`) feeds the hear-yourself ring. The VoiceProcessingIO
+    /// callback hands the echo-cancelled voice as the take and the mic before the canceller as
+    /// the monitor, which spares the monitor the canceller's block of latency (see
+    /// `dsp::capture_cleanup::VoicePath`). Both are scaled by `gain` and resampled in lockstep.
+    #[inline]
+    pub fn try_feed_split(&self, epoch: u64, take: &[f32], monitor: &[f32], gain: f32) -> bool {
+        let Some(_g) = self.try_enter(epoch) else {
+            return false;
+        };
+        // SAFETY: the guard is the cell's single-accessor proof for this call.
+        unsafe { self.feed(take, Some(monitor), gain) };
         true
     }
 
@@ -1447,18 +1505,38 @@ impl InputCell {
         );
     }
 
+    /// Test-only [`try_feed_split`](Self::try_feed_split), admitted as [`feed_test`](Self::feed_test) is.
+    #[cfg(test)]
+    pub(crate) fn feed_split_test(&self, take: &[f32], monitor: &[f32]) {
+        let mut epoch = self.owner.load(Ordering::Acquire);
+        if epoch == 0 {
+            epoch = self.claim();
+        }
+        assert!(
+            self.try_feed_split(epoch, take, monitor, 1.0),
+            "the cell must admit its only accessor"
+        );
+    }
+
     /// Feed one input callback's interleaved samples: mix the device's channels down to the mono
-    /// mic signal (carried as L = R) and scale it by `gain`, resample to `ENGINE_SR`, fan out to
-    /// the mic / capture / recording rings, and update the peak meter.
+    /// mic signal and scale it by `gain`, resample to `ENGINE_SR`, fan out to the mic / capture /
+    /// recording rings, and update the peak meter.
+    ///
+    /// The resampler runs two lanes, as a stereo frame: the take (fanned out to the capture and
+    /// recording rings, and metered) and the monitor (the mic ring). Without a `monitor` signal
+    /// both lanes carry the mixed mic; with one (a mono cell only, as long as `data`), the
+    /// monitor lane carries it instead. Each ring still receives L = R.
     ///
     /// # Safety
     /// Only the single active input callback may call this.
-    unsafe fn feed(&self, data: &[f32], gain: f32) {
+    unsafe fn feed(&self, data: &[f32], monitor: Option<&[f32]>, gain: f32) {
         let st = &mut *self.state.get();
         let ch = st.in_channels;
         if ch == 0 {
             return;
         }
+        // A separate monitor lane only for what it can describe: one sample per mono frame.
+        let monitor = monitor.filter(|m| ch == 1 && m.len() == data.len());
         let cap = st.cap_active.load(Ordering::Relaxed);
         let rec = st.rec_active.load(Ordering::Relaxed);
         let mode = self.channel_mode();
@@ -1474,16 +1552,20 @@ impl InputCell {
         // pre-roll measurement), so a device-rate count would skew every derived duration
         // whenever the input's native rate is not 48 kHz.
         let mut emitted: u64 = 0;
-        let mut conv = [0.0f32; MAX_FRAMES_PER_INPUT];
+        let mut conv = [[0.0f32; CHANNELS]; MAX_FRAMES_PER_INPUT];
         for fi in 0..frames {
             let base = fi * ch;
             // Inputs 1 and 2 used to travel as left and right, and the writer keeps the left: a
             // mic on input 2 recorded silence, monitored hard right.
             let m = st.mix.mix(mode, &data[base..base + ch]) * gain;
+            // Lane 0 the take, lane 1 the monitor. A one-sample frame is the mix's garbage guard
+            // alone (it keeps no state for one channel), so the monitor is guarded alike.
+            let mon = monitor.map_or(m, |mo| st.mix.mix(mode, &mo[fi..fi + 1]) * gain);
             peak = peak.max(m.abs());
-            let n = st.conv.convert(m, ratio, &mut conv);
-            for &y in &conv[..n] {
-                st.emit([y, y], cap, rec);
+            // Both lanes through the one converter, at the same positions.
+            let n = st.conv.convert([m, mon], ratio, &mut conv);
+            for &f in &conv[..n] {
+                st.emit(f, cap, rec);
             }
             emitted += n as u64;
         }
@@ -2938,6 +3020,78 @@ mod drift_tests {
         );
     }
 
+    /// The VoiceProcessingIO callback hands the cell two signals: the echo-cancelled take and the
+    /// mic ahead of the canceller for the monitor. Each ring must carry its own lane — the
+    /// monitor ring the monitor, the capture and recording rings the take — through the identity
+    /// path and through the resampler alike; the meter reads the take. The impulse that the
+    /// canceller would have held back a block reaches the monitor ring at once.
+    #[test]
+    fn the_monitor_ring_carries_the_monitor_lane_and_the_take_rings_the_take() {
+        use crate::ring::spsc;
+        use crate::sample::{Smp, CHANNELS};
+        use std::sync::atomic::{AtomicBool, AtomicU32};
+        for rate in [crate::sample::ENGINE_SR, 44_100.0] {
+            let (mic_prod, mut mic_cons) = spsc::<[Smp; CHANNELS]>(1 << 14);
+            let (cap_prod, mut cap_cons) = spsc::<[Smp; CHANNELS]>(1 << 14);
+            let (rec_prod, mut rec_cons) = spsc::<[Smp; CHANNELS]>(1 << 14);
+            let level = Arc::new(AtomicU32::new(0));
+            let cell = super::InputCell::new(
+                mic_prod,
+                cap_prod,
+                rec_prod,
+                Arc::new(AtomicBool::new(true)),
+                Arc::new(AtomicBool::new(true)),
+                Arc::clone(&level),
+                Arc::new(AtomicU64::new(0)),
+                Arc::new(AtomicU64::new(0)),
+                Arc::new(AtomicU64::new(0)),
+                Arc::new(AtomicU64::new(1.0f64.to_bits())),
+                Arc::new(AtomicU64::new(0)),
+                Arc::new(AtomicU32::new(0)),
+            );
+            let _ = cell.reconfigure(rate, 1);
+            // The monitor: an impulse at frame 10. The take: the same impulse a canceller
+            // block (256 frames) later, at half the level.
+            let mut monitor = vec![0.0f32; 1024];
+            monitor[10] = 0.8;
+            let mut take = vec![0.0f32; 1024];
+            take[266] = 0.4;
+            cell.feed_split_test(&take, &monitor);
+            let drain = |c: &mut crate::ring::Consumer<[Smp; CHANNELS]>| {
+                std::iter::from_fn(|| c.pop()).collect::<Vec<_>>()
+            };
+            let (mon, cap, rec) = (
+                drain(&mut mic_cons),
+                drain(&mut cap_cons),
+                drain(&mut rec_cons),
+            );
+            assert_eq!(mon.len(), cap.len());
+            assert_eq!(cap.len(), rec.len());
+            let peak = |f: &[[Smp; CHANNELS]]| {
+                (0..f.len())
+                    .max_by(|&a, &b| f[a][0].abs().total_cmp(&f[b][0].abs()))
+                    .unwrap()
+            };
+            assert!(mon.iter().all(|f| f[0] == f[1]) && cap.iter().all(|f| f[0] == f[1]));
+            assert_eq!(cap, rec, "the capture and the take carry the same signal");
+            let lag = peak(&cap) as f64 - peak(&mon) as f64;
+            let block = 256.0 * crate::sample::ENGINE_SR / rate;
+            assert!(
+                (lag - block).abs() <= 1.0,
+                "at {rate} Hz the monitor leads the take by {lag} frames, not {block}"
+            );
+            assert!(
+                mon[peak(&mon)][0] > 0.3,
+                "the monitor ring hears the monitor"
+            );
+            let metered = f32::from_bits(level.load(Ordering::Relaxed));
+            assert!(
+                (metered - 0.4).abs() < 1e-6,
+                "the meter reads the take: {metered}"
+            );
+        }
+    }
+
     #[test]
     fn the_input_resampler_applies_the_ratio_to_its_emission_rate() {
         // A 48 kHz-nominal mic whose crystal is 1000 ppm fast (exaggerated
@@ -3089,6 +3243,28 @@ impl RecordWriter {
     /// Stop recording and block until the WAV is fully written + finalized (so the caller can
     /// read the file immediately). Returns `false` when any IO error occurred since start —
     /// the take on disk is missing, damaged, or incomplete.
+    pub fn stop(&self) -> bool {
+        self.stopper().stop()
+    }
+
+    /// A handle that stops the recording later, from any thread, without the writer itself:
+    /// the engine's stop waits for the take's tail and the finalize outside the engine's lock
+    /// (see `ffi::ve_stop_input_recording_begin`).
+    pub fn stopper(&self) -> RecordStopper {
+        RecordStopper {
+            tx: self.tx.clone(),
+        }
+    }
+}
+
+/// See [`RecordWriter::stopper`].
+pub struct RecordStopper {
+    tx: mpsc::Sender<WriterCmd>,
+}
+
+impl RecordStopper {
+    /// [`RecordWriter::stop`]: stop and finalize, blocking until the WAV is written; `false`
+    /// when an IO error damaged the take (or the writer is gone).
     pub fn stop(&self) -> bool {
         let (ack, rx) = mpsc::channel();
         if self.tx.send(WriterCmd::Stop(ack)).is_err() {
@@ -3267,10 +3443,13 @@ fn build_input_stream(
     epoch: u64,
     event: Arc<AtomicU32>,
 ) -> Result<DeviceHandle, String> {
+    let dead_cell = Arc::clone(&cell);
     let err_cb = move |err: cpal::Error| {
         // A missed deadline leaves the stream running (see `stream_error_is_transient`).
         if !stream_error_is_transient(err.kind()) {
             event.fetch_or(EVENT_INPUT_LOST, Ordering::Release);
+            // The host reopens a dead stream at the next arm instead of keeping it.
+            dead_cell.mark_dead(epoch);
         }
     };
     // `epoch` is the generation `reconfigure` minted with this stream's format: every older
@@ -3329,10 +3508,15 @@ enum HostCmd {
         reply: mpsc::Sender<i32>,
     },
     /// Nudge: converge the input stream to the CURRENT desired-state cell (see
-    /// `audio_host_run`'s `input_intent`). Carries no payload on purpose — the payload is
+    /// `audio_host_run`'s `input_intent`). Carries no desired state on purpose — that is
     /// whatever the cell says at CONVERGENCE time, which is what makes stale nudges
-    /// harmless. Replies 0 (fire-and-forget on the FFI side).
-    SyncInput { reply: mpsc::Sender<i32> },
+    /// harmless. `reopen_gen`: tear the open stream down and reopen it, but only if it is
+    /// still generation `reopen_gen` — a request that a newer stream overtook (a slow open
+    /// finished meanwhile) is stale and keeps it. Replies 0 (fire-and-forget on the FFI side).
+    SyncInput {
+        reopen_gen: Option<u64>,
+        reply: mpsc::Sender<i32>,
+    },
     /// Set the input device UID (reopens the stream live if capture is active). Replies 0 / -1.
     SetInput {
         uid: String,
@@ -3354,10 +3538,21 @@ impl AudioHost {
     /// on the default when it could not be opened, or — while the mic unit owns the output — the
     /// pick is recorded for when the mic closes. Negative = nothing could be opened.
     pub fn set_output_device(&self, uid: &str) -> i32 {
-        self.request(|reply| HostCmd::SetOutput {
+        self.begin_set_output_device(uid).recv().unwrap_or(-2)
+    }
+
+    /// [`set_output_device`](Self::set_output_device) without the wait: the command is sent and
+    /// its reply comes on the returned channel (-2 if the host thread is gone, as the channel
+    /// then closes unanswered). The switch waits behind every command queued ahead of it — a
+    /// slow mic open among them — so the engine's caller waits on this outside the engine's
+    /// lock, where the playhead poll and the transport calls are not stuck behind it.
+    pub fn begin_set_output_device(&self, uid: &str) -> mpsc::Receiver<i32> {
+        let (reply, rx) = mpsc::channel();
+        let _ = self.tx.send(HostCmd::SetOutput {
             uid: uid.to_string(),
             reply,
-        })
+        });
+        rx
     }
 
     // The input nudge is FIRE-AND-FORGET: VoiceProcessingIO setup (create/initialize/start a
@@ -3367,7 +3562,20 @@ impl AudioHost {
 
     /// Ask the host to converge the input stream to the desired-state cell. Fire-and-forget.
     pub fn sync_input_nudge(&self) {
-        self.send(|reply| HostCmd::SyncInput { reply });
+        self.send(|reply| HostCmd::SyncInput {
+            reopen_gen: None,
+            reply,
+        });
+    }
+
+    /// Ask the host to reopen the input stream if it is still generation `generation` (a take's
+    /// ready check that saw no frames), then converge as [`sync_input_nudge`] does.
+    /// Fire-and-forget.
+    pub fn reopen_input(&self, generation: u64) {
+        self.send(|reply| HostCmd::SyncInput {
+            reopen_gen: Some(generation),
+            reply,
+        });
     }
 
     /// Set the input device by UID (reopens live if capture is active). Fire-and-forget.
@@ -3377,15 +3585,6 @@ impl AudioHost {
             reply,
         });
         0
-    }
-
-    /// Send a command and block for its i32 reply (-2 if the host thread is gone).
-    fn request(&self, make: impl FnOnce(mpsc::Sender<i32>) -> HostCmd) -> i32 {
-        let (reply, rx) = mpsc::channel();
-        if self.tx.send(make(reply)).is_err() {
-            return -2;
-        }
-        rx.recv().unwrap_or(-2)
     }
 
     /// Send a command without waiting for the reply (the reply channel is dropped).
@@ -3430,6 +3629,17 @@ type MicHandle = crate::vpio::Vpio;
 #[cfg(not(target_vendor = "apple"))]
 type MicHandle = DeviceHandle;
 
+/// Whether another engine's mic open asked the open unit to let go (see `vpio::make_room`).
+#[cfg(target_vendor = "apple")]
+fn mic_release_requested(h: Option<&MicHandle>) -> bool {
+    h.is_some_and(|v| v.release_requested())
+}
+/// The cpal input stream shares nothing with another engine's.
+#[cfg(not(target_vendor = "apple"))]
+fn mic_release_requested(_h: Option<&MicHandle>) -> bool {
+    false
+}
+
 /// Open the mic input on the host thread. macOS uses VoiceProcessingIO (captures + optional AEC,
 /// and works where a second cpal input AUHAL was fed silence); other targets use cpal input.
 #[cfg(target_vendor = "apple")]
@@ -3438,6 +3648,7 @@ fn open_mic(
     rt: &Arc<RtCell>,
     input_cell: &Arc<InputCell>,
     event: &Arc<AtomicU32>,
+    tag: u64,
 ) -> Result<MicHandle, String> {
     // Safe default; `Vpio::start` re-reconfigures the input cell from VPIO's *negotiated* format
     // (mono/stereo, native rate) after the unit initializes, which is what actually governs
@@ -3455,6 +3666,7 @@ fn open_mic(
         Arc::clone(rt),
         VPIO_DUPLEX_AEC,
         Arc::clone(event),
+        tag,
     )
 }
 #[cfg(not(target_vendor = "apple"))]
@@ -3463,8 +3675,37 @@ fn open_mic(
     _rt: &Arc<RtCell>,
     input_cell: &Arc<InputCell>,
     event: &Arc<AtomicU32>,
+    _tag: u64,
 ) -> Result<MicHandle, String> {
     build_input(uid, input_cell, event).map(|(h, _)| h)
+}
+
+/// Open the mic on `uid`, falling back to the system default when the selected device cannot
+/// be opened. `Ok((handle, fell_back))`; on failure the error, with the selected device's own
+/// failure in front when the fallback failed too. The selected device's error on a fallback
+/// that worked is the third value. Errors are scrubbed of the UID (see [`diag::scrub_uid`]).
+fn open_mic_or_default(
+    uid: Option<&str>,
+    rt: &Arc<RtCell>,
+    input_cell: &Arc<InputCell>,
+    event: &Arc<AtomicU32>,
+    tag: u64,
+) -> (Result<MicHandle, String>, bool, Option<String>) {
+    match open_mic(uid, rt, input_cell, event, tag) {
+        Ok(h) => (Ok(h), false, None),
+        Err(e) if uid.is_some() => {
+            let selected = diag::scrub_uid(&e, uid);
+            match open_mic(None, rt, input_cell, event, tag) {
+                Ok(h) => (Ok(h), true, Some(selected)),
+                Err(d) => (
+                    Err(format!("selected input: {selected}; system default: {d}")),
+                    true,
+                    None,
+                ),
+            }
+        }
+        Err(e) => (Err(e), false, None),
+    }
 }
 
 #[allow(unused_assignments)]
@@ -3472,6 +3713,7 @@ fn open_mic(
 // life; a params struct would only restate this list.
 #[allow(clippy::too_many_arguments)]
 fn audio_host_run(
+    tag: u64,
     rt: Arc<RtCell>,
     input_cell: Arc<InputCell>,
     event: Arc<AtomicU32>,
@@ -3513,6 +3755,34 @@ fn audio_host_run(
             mutate(&mut b);
         }
         reconcile_output_safety(rt.transport(), &output_binding, &event);
+    };
+    // Hand playback back to cpal after the mic unit went (duplex): the user's last chosen
+    // output, the system default only if that cannot be opened.
+    let restore_cpal_output = |cur_out_uid: Option<&str>| -> Option<DeviceHandle> {
+        let (built, resolved) =
+            restore_output_or_flag(cur_out_uid, &event, |uid| build_output(uid, &rt, &event));
+        let follows = built.as_ref().is_some_and(|h| h.follows_default);
+        let rate = built.as_ref().map_or(0, |h| h.rate);
+        rebind_output(&|b| {
+            b.cpal_uid = resolved.clone();
+            b.cpal_follows_default = follows;
+            b.cpal_rate = rate;
+            b.vpio = VpioOutput::Off;
+        });
+        built
+    };
+    // A change in the open stream's delivery, logged once (see `input_health`).
+    let log_health = |gen: u64, change: Option<Change>, open_for: Option<std::time::Duration>| {
+        let line = match change {
+            Some(Change::FirstFrames) => format!(
+                "input stream gen {gen} delivering (first frames within {} ms of its open)",
+                open_for.map_or(0, |d| d.as_millis())
+            ),
+            Some(Change::Stalled(s)) => format!("input stream gen {gen} stalled: {}", s.describe()),
+            Some(Change::Recovered) => format!("input stream gen {gen} delivers again"),
+            None => return,
+        };
+        diag::note(tag, &line);
     };
     // Input-stream state word: (generation << 1) | running. One atomic so a consumer can
     // SNAPSHOT "which stream, and is it up" in a single read: the ready handshake reads it,
@@ -3568,8 +3838,53 @@ fn audio_host_run(
     // The user's last explicit output choice (None = system default). Tracked so it can be
     // restored when duplex VPIO releases the output, instead of always falling back to default.
     let mut cur_out_uid: Option<String> = None;
+    // Whether the open input stream still delivers (see `input_health`): sampled on a slow tick
+    // while one is open, and at every input sync, which reopens a stalled stream rather than
+    // keeping it for an arm.
+    let mut health = InputHealth::new();
 
-    while let Ok(cmd) = rx.recv() {
+    loop {
+        let cmd = if in_stream.is_some() {
+            match rx.recv_timeout(HEALTH_TICK) {
+                Ok(cmd) => cmd,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    // The tick only watches: a stall is reopened by the next input sync (an
+                    // arm), never under a running take, which must not splice two streams.
+                    let gen = input_state.load(Ordering::Acquire) >> 1;
+                    let now = Instant::now();
+                    let change = health.observe(input_cell.frames_in(), input_cell.is_dead(), now);
+                    log_health(gen, change, health.open_for(now));
+                    // Another engine opened the mic and asked for it: VoiceProcessingIO is one
+                    // per process, so keeping it would keep that one from delivering. Release it
+                    // as a lost input (this engine's owners tear their consumers down); the next
+                    // input sync here opens it again.
+                    if mic_release_requested(in_stream.as_ref()) {
+                        input_stopped(&input_state);
+                        in_stream = None;
+                        health.closed();
+                        set_actual("");
+                        if VPIO_DUPLEX_AEC && out_stream.is_none() {
+                            out_stream = restore_cpal_output(cur_out_uid.as_deref());
+                        }
+                        event.fetch_or(EVENT_INPUT_LOST, Ordering::Release);
+                        diag::note(
+                            tag,
+                            &format!(
+                                "input stream gen {gen} released: another engine opened the mic"
+                            ),
+                        );
+                        set_gate(out_stream.is_some());
+                    }
+                    continue;
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        } else {
+            match rx.recv() {
+                Ok(cmd) => cmd,
+                Err(_) => break,
+            }
+        };
         // Raise the gate BEFORE any command that may build a stream, then settle it to the
         // real stream state after the command completes (Shutdown breaks out and settles to
         // false after the loop). Conservative: a raised gate only means retirees wait for
@@ -3632,7 +3947,7 @@ fn audio_host_run(
                     }
                 }
             }
-            HostCmd::SyncInput { reply } => {
+            HostCmd::SyncInput { reopen_gen, reply } => {
                 // LINEARIZED desired-state convergence: act on what the cell says NOW,
                 // never on what the state was when this nudge was queued. A stale
                 // teardown can no longer execute after the arm that superseded it —
@@ -3649,6 +3964,42 @@ fn audio_host_run(
                 // applied, and two true-but-unrelated conditions assembled a false
                 // ready).
                 let mut converged = true;
+                let stream_gen = in_stream
+                    .as_ref()
+                    .map(|_| input_state.load(Ordering::Acquire) >> 1);
+                let mut outcome = SyncOutcome::Idle;
+                // An open stream counts as the desired state only while it DELIVERS. Kept
+                // regardless, a unit that stopped (a route or device change, a Bluetooth
+                // profile switch) or never came alive passed every ready fact but progress, for
+                // every later take, and nothing ever restarted it. A stalled one — or the one a
+                // take's ready check asked to reopen — is torn down here and reopened below.
+                let mut reopening: Option<(u64, String)> = None;
+                if let (true, Some(gen)) = (want, stream_gen) {
+                    let now = Instant::now();
+                    let dead = input_cell.take_dead();
+                    let change = health.observe(input_cell.frames_in(), dead, now);
+                    log_health(gen, change, health.open_for(now));
+                    // Compared as the state word's consumers read it: 24 bits, like the
+                    // generation the applied pair carries.
+                    let asked = reopen_gen.is_some_and(|g| g & 0xFF_FFFF == gen & 0xFF_FFFF);
+                    let why = if asked {
+                        Some("the take's ready check saw no frames".to_string())
+                    } else {
+                        health.stall(dead, now).map(|s| s.describe())
+                    };
+                    match why {
+                        Some(why) => {
+                            // Not running for the whole swap (see StopInput on why the store
+                            // precedes the drop). The cpal output stays off: the reopen below
+                            // takes the output again.
+                            input_stopped(&input_state);
+                            in_stream = None;
+                            health.closed();
+                            reopening = Some((gen, why));
+                        }
+                        None => outcome = SyncOutcome::Kept { gen },
+                    }
+                }
                 if want && in_stream.is_none() {
                     // Duplex VPIO renders the engine through its own output element, so
                     // drop the cpal output FIRST (only one path may touch RtCell). Fall
@@ -3659,20 +4010,21 @@ fn audio_host_run(
                         out_stream = None;
                         rebind_output(&begin_vpio_open);
                     }
-                    let mut fell_back = false;
-                    let built =
-                        open_mic(cur_in_uid.as_deref(), &rt, &input_cell, &event).or_else(|e| {
-                            if cur_in_uid.is_some() {
-                                fell_back = true;
-                                open_mic(None, &rt, &input_cell, &event)
-                            } else {
-                                Err(e)
-                            }
-                        });
+                    let (built, fell_back, selected_err) =
+                        open_mic_or_default(cur_in_uid.as_deref(), &rt, &input_cell, &event, tag);
+                    if let Some(e) = selected_err {
+                        diag::note(tag, &format!("input sync: the selected input failed: {e}"));
+                    }
                     match built {
                         Ok(handle) => {
                             in_stream = Some(handle);
                             input_started(&input_state);
+                            let gen = input_state.load(Ordering::Acquire) >> 1;
+                            health.opened(input_cell.frames_in(), Instant::now());
+                            outcome = match reopening.take() {
+                                Some((from, why)) => SyncOutcome::Reopened { from, to: gen, why },
+                                None => SyncOutcome::Opened { gen, fell_back },
+                            };
                             let bound = if fell_back {
                                 set_actual("");
                                 event.fetch_or(EVENT_INPUT_FELL_BACK, Ordering::Release);
@@ -3695,10 +4047,19 @@ fn audio_host_run(
                                 });
                             }
                         }
-                        Err(_) => {
+                        Err(e) => {
                             set_actual("");
                             converged = false;
                             input_stopped(&input_state);
+                            let err = diag::scrub_uid(&e, cur_in_uid.as_deref());
+                            outcome = SyncOutcome::OpenFailed {
+                                err: match reopening.take() {
+                                    Some((from, why)) => {
+                                        format!("{err} (after closing gen {from}: {why})")
+                                    }
+                                    None => err,
+                                },
+                            };
                             // Mic failed to come up → restore cpal output so playback
                             // survives. Restore the user's chosen output (not the system
                             // default); fall back to default only if it can't open.
@@ -3727,6 +4088,10 @@ fn audio_host_run(
                     // stream's final frames as evidence that a NEW stream is delivering.
                     input_stopped(&input_state);
                     in_stream = None;
+                    health.closed();
+                    outcome = SyncOutcome::Closed {
+                        gen: stream_gen.unwrap_or_default(),
+                    };
                     set_actual("");
                     // VPIO was rendering the output in duplex; hand playback back to
                     // cpal, restoring the user's last chosen output device (a SetOutput
@@ -3765,6 +4130,9 @@ fn audio_host_run(
                         Ordering::Release,
                     );
                 }
+                if let Some(line) = diag::sync_line(intent >> 1, want, stream_gen, &outcome) {
+                    diag::note(tag, &line);
+                }
                 let _ = reply.send(0);
             }
             HostCmd::SetInput { uid, reply } => {
@@ -3776,23 +4144,38 @@ fn audio_host_run(
                     // Reopen on the new device (drop old first → single-accessor; cpal output is
                     // already off in duplex). Not-running for the whole swap window (see
                     // StopInput on why the store precedes the drop).
+                    let from = input_state.load(Ordering::Acquire) >> 1;
                     input_stopped(&input_state);
                     in_stream = None;
+                    health.closed();
                     if VPIO_DUPLEX_AEC {
                         rebind_output(&begin_vpio_open);
                     }
-                    let mut fell_back = false;
-                    match open_mic(cur_in_uid.as_deref(), &rt, &input_cell, &event).or_else(|e| {
-                        if cur_in_uid.is_some() {
-                            fell_back = true;
-                            open_mic(None, &rt, &input_cell, &event)
-                        } else {
-                            Err(e)
-                        }
-                    }) {
+                    let (built, fell_back, selected_err) =
+                        open_mic_or_default(cur_in_uid.as_deref(), &rt, &input_cell, &event, tag);
+                    if let Some(e) = selected_err {
+                        diag::note(
+                            tag,
+                            &format!("input device set: the selected input failed: {e}"),
+                        );
+                    }
+                    match built {
                         Ok(handle) => {
                             in_stream = Some(handle);
                             input_started(&input_state);
+                            let to = input_state.load(Ordering::Acquire) >> 1;
+                            health.opened(input_cell.frames_in(), Instant::now());
+                            diag::note(
+                                tag,
+                                &format!(
+                                    "input device set: reopened gen {from} as gen {to}{}",
+                                    if fell_back {
+                                        " (selected input unavailable; on the system default)"
+                                    } else {
+                                        ""
+                                    }
+                                ),
+                            );
                             let bound = if fell_back {
                                 set_actual("");
                                 event.fetch_or(EVENT_INPUT_FELL_BACK, Ordering::Release);
@@ -3827,8 +4210,15 @@ fn audio_host_run(
                                 .store((seq << 24) | (generation & 0xFF_FFFF), Ordering::Release);
                             let _ = reply.send(0);
                         }
-                        Err(_) => {
+                        Err(e) => {
                             set_actual("");
+                            diag::note(
+                                tag,
+                                &format!(
+                                    "input device set: closed gen {from}, open failed: {}",
+                                    diag::scrub_uid(&e, cur_in_uid.as_deref())
+                                ),
+                            );
                             if VPIO_DUPLEX_AEC && out_stream.is_none() {
                                 // Restore the user's chosen output (not the system default),
                                 // matching StopInput; fall back to default only if it can't open.
@@ -3858,6 +4248,7 @@ fn audio_host_run(
             HostCmd::Shutdown => {
                 input_stopped(&input_state);
                 in_stream = None;
+                health.closed();
                 set_actual("");
                 out_stream = None;
                 rebind_output(&|b| {
@@ -3883,6 +4274,7 @@ fn audio_host_run(
 /// callback may be running, so the control thread can free retired graphs when none is.
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_audio_host(
+    tag: u64,
     rt: Arc<RtCell>,
     input_cell: Arc<InputCell>,
     event: Arc<AtomicU32>,
@@ -3899,6 +4291,7 @@ pub fn spawn_audio_host(
         .name("vocara-audio-host".to_string())
         .spawn(move || {
             audio_host_run(
+                tag,
                 rt,
                 input_cell,
                 event,
