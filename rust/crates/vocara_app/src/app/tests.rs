@@ -655,7 +655,10 @@ fn a_window_too_big_for_its_monitor_opens_on_it_and_shrinks_to_fit() {
 
     assert_eq!(fitted_size(WINDOW_SIZE, small, MIN_WINDOW_SIZE), small);
     let roomy = Size::new(1920.0, 1080.0);
-    assert_eq!(fitted_size(WINDOW_SIZE, roomy, MIN_WINDOW_SIZE), WINDOW_SIZE);
+    assert_eq!(
+        fitted_size(WINDOW_SIZE, roomy, MIN_WINDOW_SIZE),
+        WINDOW_SIZE
+    );
     assert_eq!(
         fitted_size(WINDOW_SIZE, Size::new(1280.0, 1000.0), MIN_WINDOW_SIZE),
         Size::new(1280.0, 900.0)
@@ -670,9 +673,18 @@ fn a_window_too_big_for_its_monitor_opens_on_it_and_shrinks_to_fit() {
     // window to fit it, only when it does not.
     let mut app = boot(None);
     let id = window::Id::unique();
-    assert_eq!(window_actions(app.update(Message::MonitorSize(id, Some(small)))), 1);
-    assert_eq!(window_actions(app.update(Message::MonitorSize(id, Some(roomy)))), 0);
-    assert_eq!(window_actions(app.update(Message::MonitorSize(id, None))), 0);
+    assert_eq!(
+        window_actions(app.update(Message::MonitorSize(id, Some(small)))),
+        1
+    );
+    assert_eq!(
+        window_actions(app.update(Message::MonitorSize(id, Some(roomy)))),
+        0
+    );
+    assert_eq!(
+        window_actions(app.update(Message::MonitorSize(id, None))),
+        0
+    );
 }
 
 /// The app over `library`, on the detached services, every task its boot
@@ -682,9 +694,9 @@ fn boot_over(library: Arc<Library>) -> App {
     b.services = Services::detached;
     let (mut app, _open) = App::new(b);
     let mut queue: std::collections::VecDeque<Message> =
-        crate::ui::home::testing::run_task(app.update(Message::Library(
-            LibraryEvent::Finished(LibraryOpen::Opened(library)),
-        )))
+        crate::ui::home::testing::run_task(app.update(Message::Library(LibraryEvent::Finished(
+            LibraryOpen::Opened(library),
+        ))))
         .into();
     while let Some(message) = queue.pop_front() {
         let task = app.update(message);

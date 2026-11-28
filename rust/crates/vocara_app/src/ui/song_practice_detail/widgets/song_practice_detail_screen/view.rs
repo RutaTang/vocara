@@ -23,6 +23,7 @@ use vocara_model::models::fx_bus::FxBus;
 use vocara_model::models::song_practice::SongPractice;
 use vocara_model::util::dart_num::round_to_i64;
 
+use super::shortcuts::{page_shortcuts, Shortcut};
 use super::{
     ms, selected_track_ref, DropZone, InterpretationAction, Message, OpenMenu, Shown,
     SongPracticeDetailScreen, DROP_ON_A_LANE, FINISHING_SAVE, MIN_TIMELINE_HEIGHT, NOT_LOADED,
@@ -55,7 +56,6 @@ use crate::ui::song_practice_detail::view_model::song_practice_detail_view_model
 };
 use crate::ui::song_practice_detail::widgets::analysis_lanes::{analysis_lanes, LaneImage};
 use crate::ui::song_practice_detail::widgets::bottom_dock::{self, bottom_dock, BottomDock};
-use super::shortcuts::{page_shortcuts, Shortcut};
 use crate::ui::song_practice_detail::widgets::detail_transport_bar::{
     controls, detail_transport_bar, TransportBar,
 };
@@ -417,10 +417,7 @@ impl SongPracticeDetailScreen {
                 source: match selected {
                     _ if a.live_monitor() => vocal_tract_view::Source::Live,
                     Some(t) if vocal_tract_engine::readable_take(t) => {
-                        vocal_tract_view::Source::Take(
-                            &t.display_name,
-                            take_color(t),
-                        )
+                        vocal_tract_view::Source::Take(&t.display_name, take_color(t))
                     }
                     _ => vocal_tract_view::Source::NoTake,
                 },

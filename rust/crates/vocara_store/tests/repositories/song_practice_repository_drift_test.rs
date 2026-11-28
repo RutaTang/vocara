@@ -439,7 +439,10 @@ fn previews_draw_the_first_take_else_the_backing_from_the_cache() {
     assert!((pa.peaks[PracticePreview::BUCKETS - 1] - 1.0).abs() < 1e-6);
     let pb = of(&b.id);
     assert_eq!(pb.source, Some(PreviewSource::Backing));
-    assert_eq!(pb.track_id, b.accompaniment.as_ref().expect("its backing").id);
+    assert_eq!(
+        pb.track_id,
+        b.accompaniment.as_ref().expect("its backing").id
+    );
     assert_eq!(pb.color_value, None);
     assert!(pb.peaks.iter().any(|v| (v - 0.25).abs() < 1e-6));
     let pc = of(&c.id);

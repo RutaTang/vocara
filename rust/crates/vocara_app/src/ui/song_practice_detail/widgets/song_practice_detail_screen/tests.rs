@@ -1474,7 +1474,10 @@ fn the_transport_toggles_play_and_pause_and_stop_resets_it() {
 #[test]
 fn the_bottom_dock_opens_and_closes() {
     let mut h = Harness::open(Setup::default());
-    assert!(h.shows(bottom_dock::toggle_label(false, DockTab::AnalysisSummary)), "starts closed");
+    assert!(
+        h.shows(bottom_dock::toggle_label(false, DockTab::AnalysisSummary)),
+        "starts closed"
+    );
     h.click(bottom_dock::toggle_label(false, DockTab::AnalysisSummary));
     assert!(h.vm().analysis().dock_open());
     assert!(h.shows(bottom_dock::toggle_label(true, DockTab::AnalysisSummary)));

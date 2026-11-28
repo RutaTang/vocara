@@ -332,12 +332,7 @@ impl<'a> MixerStrip<'a> {
             let routes: &[Arc<FxBus>] = if t.is_backing() { &[] } else { buses };
             desk = desk.push(
                 StripKey::Track(id_key(&t.id)),
-                gap_after(track_channel(
-                    t,
-                    track_accent(t),
-                    selected,
-                    routes,
-                )),
+                gap_after(track_channel(t, track_accent(t), selected, routes)),
             );
         }
         // FX buses (DAW groups). Only meaningful on the native effects

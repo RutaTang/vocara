@@ -68,7 +68,10 @@ fn a_takes_rename_and_delete_say_take_and_the_backings_say_track() {
     let Dialog::Prompt(rename) = asked(&mut h, "t1", TrackAction::Rename) else {
         panic!("a prompt");
     };
-    assert_eq!((rename.title.as_str(), rename.hint.as_str()), ("Rename take", "Take name"));
+    assert_eq!(
+        (rename.title.as_str(), rename.hint.as_str()),
+        ("Rename take", "Take name")
+    );
     let Dialog::Confirm(delete) = asked(&mut h, "t1", TrackAction::Delete) else {
         panic!("a confirmation");
     };
@@ -79,7 +82,10 @@ fn a_takes_rename_and_delete_say_take_and_the_backings_say_track() {
     let Dialog::Prompt(rename) = asked(&mut h, "acc", TrackAction::Rename) else {
         panic!("a prompt");
     };
-    assert_eq!((rename.title.as_str(), rename.hint.as_str()), ("Rename track", "Track name"));
+    assert_eq!(
+        (rename.title.as_str(), rename.hint.as_str()),
+        ("Rename track", "Track name")
+    );
     let Dialog::Confirm(delete) = asked(&mut h, "acc", TrackAction::Delete) else {
         panic!("a confirmation");
     };

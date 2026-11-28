@@ -172,7 +172,10 @@ fn delete_and_backspace_ask_to_delete_the_selected_clip_as_its_menu_does() {
     tap(&mut h, &mut ui, Named::Backspace);
     h.answer(DialogResult::Confirmed(true));
     h.settle();
-    assert!(h.vm().track_by_id("t1").is_none_or(|t| t.clip_by_id(&clip).is_none()));
+    assert!(h
+        .vm()
+        .track_by_id("t1")
+        .is_none_or(|t| t.clip_by_id(&clip).is_none()));
 }
 
 #[test]
@@ -207,7 +210,10 @@ fn escape_with_a_menu_open_closes_the_menu_alone() {
     assert!(h.dialog.is_none());
     tap(&mut h, &mut ui, Named::Escape);
     assert!(h.screen.open_menu().is_none());
-    assert!(h.vm().selected_clip_id().is_some(), "the clip stays selected");
+    assert!(
+        h.vm().selected_clip_id().is_some(),
+        "the clip stays selected"
+    );
 }
 
 #[test]
@@ -252,5 +258,8 @@ fn the_lyrics_editor_keeps_its_keys() {
     tap(&mut h, &mut ui, Named::Backspace);
     assert!(h.dialog.is_none(), "no delete asked");
     tap(&mut h, &mut ui, Named::Escape);
-    assert!(h.vm().selected_clip_id().is_some(), "the clip stays selected");
+    assert!(
+        h.vm().selected_clip_id().is_some(),
+        "the clip stays selected"
+    );
 }

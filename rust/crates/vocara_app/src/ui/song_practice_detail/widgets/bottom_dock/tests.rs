@@ -112,7 +112,8 @@ fn the_open_dock_shows_its_content_and_the_live_toggle_where_the_tab_has_one() {
 fn a_tab_and_the_toggle_report_their_calls() {
     let mut ui = iced_test::simulator(bottom_dock(dock(false, DockTab::Spectrogram, false)));
     ui.click("Power").expect("the Power tab");
-    ui.click(toggle_label(false, DockTab::Spectrogram)).expect("the toggle");
+    ui.click(toggle_label(false, DockTab::Spectrogram))
+        .expect("the toggle");
     let messages: Vec<Message> = ui.into_messages().collect();
     assert!(matches!(
         messages.as_slice(),

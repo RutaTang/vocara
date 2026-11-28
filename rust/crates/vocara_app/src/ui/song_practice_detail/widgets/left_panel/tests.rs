@@ -1146,10 +1146,16 @@ fn a_takes_subtitle_is_its_interpretation_length_and_date_with_no_number() {
     assert!(take_subtitle(&original, None).starts_with("Accompaniment · "));
     let mut take = vocal("t1");
     take.display_name = "Take 2".into();
-    assert_eq!(take_subtitle(&take, Some("Tender")), "Tender · 0:05 · Jan 1");
+    assert_eq!(
+        take_subtitle(&take, Some("Tender")),
+        "Tender · 0:05 · Jan 1"
+    );
     assert_eq!(take_subtitle(&take, None), "0:05 · Jan 1");
     take.display_name = "Chorus only".into();
-    assert_eq!(take_subtitle(&take, Some("Tender")), "Tender · 0:05 · Jan 1");
+    assert_eq!(
+        take_subtitle(&take, Some("Tender")),
+        "Tender · 0:05 · Jan 1"
+    );
     assert_eq!(short_clock(754_000), "12:34");
     assert_eq!(fmt_date(&DateTime::utc_ymd(2026, 11, 23)), "Nov 23");
 }

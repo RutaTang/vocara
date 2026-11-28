@@ -468,7 +468,10 @@ mod tests {
         use vocara_model::models::audio_track::{AudioTrack, AudioTrackKind};
         let wave = preview("P1");
         let take = AudioTrack::new("P1-take", AudioTrackKind::Vocal, "Take 1", now());
-        assert_eq!(waveform_color(&wave, PreviewSource::Take), take_color(&take));
+        assert_eq!(
+            waveform_color(&wave, PreviewSource::Take),
+            take_color(&take)
+        );
         let tinted = wave.clone().of_track("P1-take", Some(0xFF5B8DEF));
         assert_eq!(
             waveform_color(&tinted, PreviewSource::Take),
@@ -627,7 +630,10 @@ mod tests {
         window.frame(view(), &[], t0 + Duration::from_secs(1));
         assert!(!near(window.pixel(band), BACKGROUND), "scrolled up to it");
         // The card's left edge, under the toolbar and in the list.
-        assert!(near(window.pixel(Point::new(20.0, 30.0)), BAR), "over the bar");
+        assert!(
+            near(window.pixel(Point::new(20.0, 30.0)), BAR),
+            "over the bar"
+        );
         assert!(near(window.pixel(Point::new(20.0, 100.0)), Studio::BORDER));
     }
 

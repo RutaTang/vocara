@@ -1783,7 +1783,8 @@ impl SongPracticeRepository for SongPracticeRepositoryDrift {
         )?;
         // (track, practice, vocal, interpretation), in the tracks' order,
         // and each track's tint (the card draws the track in its colour).
-        let tracks: Vec<(String, String, bool, Option<String>, Option<i64>)> = self.db.query(
+        type TrackRow = (String, String, bool, Option<String>, Option<i64>);
+        let tracks: Vec<TrackRow> = self.db.query(
             "SELECT id, practice_id, kind = 'vocal', interpretation_id, color_value FROM tracks \
              WHERE deleted_at IS NULL AND kind IN ('vocal', 'accompaniment') \
              ORDER BY practice_id, order_index, created_at, id",

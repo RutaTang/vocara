@@ -970,7 +970,10 @@ fn a_take_without_a_tint_keeps_a_stable_color_from_its_id() {
     // its own, by its id.
     assert_eq!(track_accent(&backing), Studio::TRACK_BACKING);
     assert_eq!(track_accent(&take(2)), take_color(&take(2)));
-    assert_eq!(track_accent(&take(2)), Studio::default_track_color(&take(2).id));
+    assert_eq!(
+        track_accent(&take(2)),
+        Studio::default_track_color(&take(2).id)
+    );
     // A bus's cap is its lane's: periwinkle untinted.
     assert_eq!(bus_accent(&fx_bus("a", "Verb")), Studio::TRACK_PERIWINKLE);
 }

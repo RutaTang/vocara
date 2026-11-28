@@ -463,8 +463,7 @@ impl SongPracticeDetailScreen {
             }
             track_row::Message::ContextMenu => {
                 // A clip selected on the take stays so.
-                if self.vm.selected_track_id() != Some(id) || self.vm.selected_bus_id().is_some()
-                {
+                if self.vm.selected_track_id() != Some(id) || self.vm.selected_bus_id().is_some() {
                     let fx = self.vm.select_track(id);
                     self.absorb(fx, step);
                 }

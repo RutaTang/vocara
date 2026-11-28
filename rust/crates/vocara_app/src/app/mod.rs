@@ -543,7 +543,8 @@ impl App {
                 // themselves.
                 let scale_factor = window::scale_factor(id).map(Message::ScaleFactor);
                 // Fitted to the monitor it opened on (`fitted_size`).
-                let monitor = window::monitor_size(id).map(move |size| Message::MonitorSize(id, size));
+                let monitor =
+                    window::monitor_size(id).map(move |size| Message::MonitorSize(id, size));
                 // Dev-only preview hook: a PNG of the rendered app a while
                 // after its first frame, then exit. Avoids needing OS
                 // screen-recording access.
