@@ -8,8 +8,8 @@ use iced::advanced::widget::{tree, Operation, Tree};
 use iced::advanced::{overlay, renderer, Clipboard, Shell, Widget};
 use iced::{mouse, Element, Event, Length, Rectangle, Renderer, Size, Theme, Vector};
 
-/// Handles an event after the content has: `(state, event, bounds, cursor,
-/// shell)`.
+/// Handles an event after the content has (before it, for a wrapper made
+/// [`Wrap::first`]): `(state, event, bounds, cursor, shell)`.
 pub type OnEvent<'a, M, S> =
     Box<dyn FnMut(&mut S, &Event, Rectangle, mouse::Cursor, &mut Shell<'_, M>) + 'a>;
 
@@ -23,6 +23,7 @@ pub struct Wrap<'a, M, S: Default + 'static> {
     content: Element<'a, M, Theme, Renderer>,
     on_event: OnEvent<'a, M, S>,
     interaction: Option<Interaction<'a, S>>,
+    first: bool,
 }
 
 impl<'a, M, S: Default + 'static> Wrap<'a, M, S> {
@@ -34,7 +35,17 @@ impl<'a, M, S: Default + 'static> Wrap<'a, M, S> {
             content: content.into(),
             on_event,
             interaction: None,
+            first: false,
         }
+    }
+
+    /// Handles each event before the content does, and keeps from the
+    /// content an event it captures: a shortcut over a text field, which
+    /// would type the key otherwise (iced hands a widget the event whether
+    /// or not one before it took it).
+    pub fn first(mut self) -> Self {
+        self.first = true;
+        self
     }
 
     /// Overrides the cursor wherever `interaction` returns one.
@@ -124,6 +135,14 @@ impl<M, S: Default + 'static> Widget<M, Theme, Renderer> for Wrap<'_, M, S> {
         shell: &mut Shell<'_, M>,
         viewport: &Rectangle,
     ) {
+        if self.first {
+            let captured = shell.is_event_captured();
+            let state = &mut tree.state.downcast_mut::<Slot<S>>().0;
+            (self.on_event)(state, event, layout.bounds(), cursor, shell);
+            if !captured && shell.is_event_captured() {
+                return;
+            }
+        }
         self.content.as_widget_mut().update(
             &mut tree.children[0],
             event,
@@ -134,8 +153,10 @@ impl<M, S: Default + 'static> Widget<M, Theme, Renderer> for Wrap<'_, M, S> {
             shell,
             viewport,
         );
-        let state = &mut tree.state.downcast_mut::<Slot<S>>().0;
-        (self.on_event)(state, event, layout.bounds(), cursor, shell);
+        if !self.first {
+            let state = &mut tree.state.downcast_mut::<Slot<S>>().0;
+            (self.on_event)(state, event, layout.bounds(), cursor, shell);
+        }
     }
 
     fn mouse_interaction(

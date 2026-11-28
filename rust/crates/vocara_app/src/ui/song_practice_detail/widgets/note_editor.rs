@@ -11,12 +11,14 @@
 //! the messages until [`update`](NoteEditor::update) says it closed, with
 //! Dart's result: `None` (cancelled), the new text, or deleted.
 //!
-//! Like `showDialog`'s route: a tap on the barrier or Escape cancels, and
-//! nothing beneath sees a key while it is open. The text field is
-//! multi-line (3 to 6 lines, then it scrolls), so Return breaks the line
-//! rather than saving. (Dart owned the field's controller in the dialog's
-//! state, disposed only after the exit transition; the state here is plain
-//! data and goes with the editor.)
+//! Like `showDialog`'s route: Escape cancels, and nothing beneath sees a key
+//! while it is open. A tap on the barrier cancels too, but not over text the
+//! user changed: a stray click outside the card threw what they had typed
+//! away without a word. The text field is multi-line (3 to 6 lines, then it
+//! scrolls), so Return breaks the line, and Cmd+Return (Ctrl+Return off
+//! macOS) saves. (Dart owned the field's controller in the dialog's state,
+//! disposed only after the exit transition; the state here is plain data and
+//! goes with the editor.)
 //!
 //! It comes in and goes as a dialog route did: the screen keeps its
 //! `confirm_dialog::DialogMotion` and draws it with
@@ -96,8 +98,12 @@ pub enum Message {
     Edit(text_editor::Action),
     /// Add / Save.
     Save,
-    /// Cancel, a tap on the barrier, or Escape.
+    /// Cancel, or Escape.
     Cancel,
+    /// A tap on the barrier: cancels, unless the text was changed.
+    Dismiss,
+    /// Cmd+Return (Ctrl+Return off macOS): Add / Save, when it is live.
+    Submit,
     /// Delete (editing only).
     Delete,
 }
@@ -140,6 +146,8 @@ fn in_millis(d: Duration) -> i64 {
 pub struct NoteEditor {
     title: String,
     editing: bool,
+    /// The text it opened on.
+    initial: String,
     content: text_editor::Content,
     input: widget::Id,
 }
@@ -172,10 +180,12 @@ impl NoteEditor {
             existing.map_or(in_millis(at), |n| n.position_ms),
             existing.map_or(end.map(in_millis), |n| n.end_ms),
         );
+        let initial = existing.map_or("", |n| n.content.as_str());
         Self {
             title: note_editor_title(position_ms, end_ms),
             editing: existing.is_some(),
-            content: text_editor::Content::with_text(existing.map_or("", |n| n.content.as_str())),
+            initial: initial.to_string(),
+            content: text_editor::Content::with_text(initial),
             input: widget::Id::unique(),
         }
     }
@@ -219,6 +229,11 @@ impl NoteEditor {
         self.trimmed().is_some()
     }
 
+    /// Whether the text differs from what the editor opened on.
+    pub fn changed(&self) -> bool {
+        dart_string::trim(&self.content.text()) != dart_string::trim(&self.initial)
+    }
+
     /// Handles `message`: whether the editor stays open or closes, and with
     /// what.
     pub fn update(&mut self, message: Message) -> Step {
@@ -228,6 +243,10 @@ impl NoteEditor {
                 Step::Stay
             }
             Message::Cancel => Step::Closed(None),
+            Message::Dismiss if self.changed() => Step::Stay,
+            Message::Dismiss => Step::Closed(None),
+            Message::Submit if !self.can_save() => Step::Stay,
+            Message::Submit => self.update(Message::Save),
             Message::Delete => Step::Closed(Some(NoteEditorResult {
                 content: None,
                 deleted: true,
@@ -362,18 +381,36 @@ fn field_style(_: &iced::Theme, status: text_editor::Status) -> text_editor::Sty
 }
 
 /// `content` centred over a dismissible [`BARRIER`] covering everything,
-/// both at `fade` (the card as one layer): a tap on the barrier cancels,
-/// the card takes its own taps, Escape cancels and no key reaches what
-/// lies beneath.
+/// both at `fade` (the card as one layer): a tap on the barrier dismisses
+/// ([`Message::Dismiss`]), the card takes its own taps, Escape cancels,
+/// Cmd+Return submits (before the field, which would break the line) and
+/// no key reaches what lies beneath.
 fn modal(content: Element<'_, Message>, fade: Fade) -> Element<'_, Message> {
-    let barrier = barrier(BARRIER, fade.barrier, Some(Message::Cancel));
+    let barrier = barrier(BARRIER, fade.barrier, Some(Message::Dismiss));
     let layers = stack![
         barrier,
         center(opaque(fade.card(content))).align_x(Horizontal::Center)
     ];
+    let submits = Wrap::<Message, ()>::new(
+        layers,
+        Box::new(|_, event, _, _, shell| {
+            if let Event::Keyboard(keyboard::Event::KeyPressed {
+                key: keyboard::Key::Named(keyboard::key::Named::Enter),
+                modifiers,
+                ..
+            }) = event
+            {
+                if modifiers.command() && !shell.is_event_captured() {
+                    shell.publish(Message::Submit);
+                    shell.capture_event();
+                }
+            }
+        }),
+    )
+    .first();
     Wrap::<Message, ()>::new(
         // A dialog route's scope: Tab goes round its fields.
-        focus_scope(layers),
+        focus_scope(submits),
         Box::new(|_, event, _, _, shell| {
             if let Event::Keyboard(event) = event {
                 if let keyboard::Event::KeyPressed {
