@@ -147,6 +147,19 @@ SkParagraph does), and keep the version iced's renderers use.
   objc2 0.6 AppKit and Foundation bindings (macOS only) the reading and
   the touches use. `src/lib.rs` also allows futures' `try_next`,
   deprecated since the release, whose warning a path dependency shows.
+  winit 0.30.13's view commits an `insertText:replacementRange:` only
+  while it has marked text (typed text goes out as the key press's), so
+  text macOS inserts with no key press and nothing marked (Edit ▸ Emoji &
+  Symbols, dictation) reached no field: `src/insert_text.rs` (new) gives
+  the view's class, by the touches' runtime means, a `keyDown:` that notes
+  a key press is handled while it calls through, and an
+  `insertText:replacementRange:` that calls through first (winit does
+  everything it did, a composition's commit included) and then records
+  the text when no key press is handled, nothing is marked after the call,
+  and nothing is replaced (`insert_text::dropped`); `src/lib.rs` accepts
+  each window (`insert_text::accept`) and, before each event, hands each
+  record to its window's interface as an input method commit
+  (`insert_text::take`). `Cargo.toml` adds the Foundation features it reads.
 The effects' layers are compositing iced has no primitive for, which
 Flutter did:
 
@@ -203,4 +216,6 @@ lines over; drop the logical pixel delta if upstream scales it, and the
 whole patch if winit and iced come to pass the momentum phase and the
 trackpad's touches on. Moving winit to a new release: check that its view
 still lets touches through to the method added to its class (CI's
-`macos_touches` test does).
+`macos_touches` test does), and whether its `insertText:replacementRange:`
+still drops unmarked text outside a key press (drop `insert_text` if it
+commits it).

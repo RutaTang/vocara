@@ -30,6 +30,8 @@ pub mod clipboard;
 pub mod conversion;
 // vocara: wheel events' gestures (see the module).
 pub mod gesture;
+// vocara: text macOS inserts with no key press (see the module).
+pub mod insert_text;
 // vocara: the pointer during a drag in from another app (see the module).
 mod drop_pointer;
 
@@ -359,8 +361,11 @@ where
                                     .expect("Create window");
 
                                 // vocara: its view reports trackpad
-                                // touches, as Flutter's did (`gesture`).
+                                // touches, as Flutter's did (`gesture`),
+                                // and text macOS inserts with no key press
+                                // (`insert_text`).
                                 gesture::accept_touches(&window);
+                                insert_text::accept(&window);
 
                                 #[cfg(target_os = "macos")]
                                 if let Some(position) = position {
@@ -603,6 +608,20 @@ async fn run_instance<P>(
             {
                 wheels.push((id, Some(wheel)));
                 events.push((id, event));
+            }
+        }
+
+        // vocara: text macOS inserted before this event with no key press
+        // and nothing marked, which winit dropped (`insert_text`): each a
+        // commit, as winit sends a composition's.
+        for insertion in insert_text::take() {
+            let window = window_manager.iter_mut().find(|(_, window)| {
+                gesture::view_of(&window.raw) == Some(insertion.view)
+            });
+            if let Some((id, _)) = window {
+                let commit =
+                    core::input_method::Event::Commit(insertion.text);
+                events.push((id, core::Event::InputMethod(commit)));
             }
         }
 

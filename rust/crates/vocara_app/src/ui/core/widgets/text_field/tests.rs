@@ -990,6 +990,29 @@ fn a_keyboard_move_reveals_the_caret_at_once() {
     assert!((back - end).abs() < 0.01, "{back} {end}");
 }
 
+/// Edit ▸ Emoji & Symbols inserts with no key press and nothing marked,
+/// which winit drops; the run loop commits that text alone
+/// (`iced_winit::insert_text`), never typed text nor a composition's, and
+/// the commit lands in the focused field.
+#[test]
+fn text_macos_inserts_with_no_key_press_reaches_the_field() {
+    use iced_winit::insert_text::dropped;
+    assert_eq!(dropped("🎤", false, false, false), Some("🎤"));
+    assert_eq!(dropped("a", true, false, false), None, "typed");
+    assert_eq!(dropped("你好", true, true, false), None, "composed");
+    assert_eq!(dropped("你好", false, true, false), None, "a candidate");
+    assert_eq!(dropped("é", false, false, true), None, "an accent");
+    let mut window = window();
+    let at = Point::new(TEXT_X + width("hi") + 1.0, MIDDLE);
+    let t0 = Instant::now();
+    window.run(field("hi"), at, &click(), t0);
+    let commit = Event::InputMethod(iced::advanced::input_method::Event::Commit(
+        "🎤".to_string(),
+    ));
+    let (messages, _) = window.run(field("hi"), at, &[commit], t0 + 100 * MS);
+    assert_eq!(input_of(messages), Some("hi🎤".to_string()));
+}
+
 /// ↑ and ↓ in a one-line field move its caret to the start and the end, as
 /// a macOS field's do, and go no further: passed on, they reached a video's
 /// controls holding the keyboard, which turned its volume.
