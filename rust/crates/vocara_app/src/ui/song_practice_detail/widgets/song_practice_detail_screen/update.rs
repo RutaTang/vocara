@@ -8,7 +8,6 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use iced::Task;
-use vocara_model::util::format::format_clock_ms;
 
 use super::{
     backing_set_toast, is_audio_path, ms, panel_data, Asked, Awaited, DropRun, DropZone,
@@ -1295,10 +1294,10 @@ impl SongPracticeDetailScreen {
         let title = match e {
             Some(e) => format!(
                 "Add technique across {} → {}",
-                format_clock_ms(s),
-                format_clock_ms(e)
+                lyrics_panel::lyric_time(s),
+                lyrics_panel::lyric_time(e)
             ),
-            None => format!("Add technique at {}", format_clock_ms(s)),
+            None => format!("Add technique at {}", lyrics_panel::lyric_time(s)),
         };
         self.picker_seq += 1;
         let seq = self.picker_seq;

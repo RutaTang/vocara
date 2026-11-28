@@ -1121,8 +1121,9 @@ fn the_sync_hint_scrolls_with_the_lines_on_a_short_panel() {
 
 #[test]
 fn sync_times_read_minutes_seconds_and_hundredths() {
-    assert_eq!(sync_time(0), "00:00.00");
-    assert_eq!(sync_time(61_234), "01:01.23");
+    // The app's m:ss, as the reader and the notes read times.
+    assert_eq!(sync_time(0), "0:00.00");
+    assert_eq!(sync_time(61_234), "1:01.23");
     assert_eq!(sync_time(3_599_999), "59:59.99");
     assert_eq!(sync_time(6_000_000), "100:00.00");
 }
@@ -1442,7 +1443,7 @@ fn the_sync_list_stamps_the_line_tapped_and_shows_its_times() {
     let mut state = LyricsPanelState::new();
     let mut ui = PanelUi::new(Size::new(300.0, 600.0));
     sync(&mut ui, &mut state, &vm);
-    assert!(bounds_of(&mut ui, &state, &vm, "01:01.23").is_some());
+    assert!(bounds_of(&mut ui, &state, &vm, "1:01.23").is_some());
     assert!(bounds_of(&mut ui, &state, &vm, "—").is_some());
     assert_eq!(
         tap_label(&mut ui, &state, &vm, "line 3"),

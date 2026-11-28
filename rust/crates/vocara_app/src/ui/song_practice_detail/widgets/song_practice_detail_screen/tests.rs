@@ -2036,7 +2036,7 @@ fn adding_a_note_via_the_take_header_saves_it_on_the_take() {
     let mut h = Harness::open(Setup::default());
     h.click(track_row::ADD_NOTE);
     let editor = h.screen.note_editor().expect("the note editor opened");
-    assert_eq!(editor.title(), "Note at 00:00");
+    assert_eq!(editor.title(), "Note at 0:00");
     h.send(Message::NoteEditor(note_editor::Message::Edit(
         iced::widget::text_editor::Action::Edit(iced::widget::text_editor::Edit::Paste(Arc::new(
             "breath runs out here".into(),
@@ -2197,7 +2197,7 @@ fn the_technique_picker_lists_the_library_and_adds_the_pick() {
     h.at_ms(2000);
     h.click(track_row::ADD_TECHNIQUE);
     let picker = h.screen.technique_picker().expect("the picker opened");
-    assert_eq!(picker.title(), "Add technique at 00:02");
+    assert_eq!(picker.title(), "Add technique at 0:02");
     assert!(picker.is_loading());
     h.settle();
     assert!(!h.screen.technique_picker().expect("open").is_loading());
@@ -2251,7 +2251,7 @@ fn the_note_editor_keeps_the_keyboard_as_a_snack_bar_comes_and_goes() {
         track_id: "t1".into(),
         message: track_row::Message::AddNote,
     });
-    let title = h.find("Note at 00:00").expect("the editor").bounds();
+    let title = h.find("Note at 0:00").expect("the editor").bounds();
     let mut ui = LiveUi::new(h.size);
     // Into the field, under the title, and typing.
     let mut events = vec![

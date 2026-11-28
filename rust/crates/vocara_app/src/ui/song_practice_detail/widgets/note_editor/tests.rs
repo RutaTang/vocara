@@ -96,9 +96,9 @@ fn a_note_with_no_text_cannot_be_added_or_saved() {
 #[test]
 fn a_drag_too_short_for_a_range_is_titled_as_the_point_it_is_saved_as() {
     let editor = NoteEditor::new(None, ms(12_000), Some(ms(12_050)), normalize);
-    assert_eq!(editor.title(), "Note at 00:12");
+    assert_eq!(editor.title(), "Note at 0:12");
     assert!(iced_test::simulator(editor.view())
-        .find("Note at 00:12")
+        .find("Note at 0:12")
         .is_ok());
 }
 
@@ -107,20 +107,20 @@ fn a_drag_too_short_for_a_range_is_titled_as_the_point_it_is_saved_as() {
 #[test]
 fn a_range_is_titled_by_its_span_earlier_edge_first() {
     let forward = NoteEditor::new(None, ms(12_000), Some(ms(20_000)), normalize);
-    assert_eq!(forward.title(), "Note across 00:12 → 00:20");
+    assert_eq!(forward.title(), "Note across 0:12 → 0:20");
     // A drag drawn right to left.
     let backward = NoteEditor::new(None, ms(20_000), Some(ms(12_000)), normalize);
-    assert_eq!(backward.title(), "Note across 00:12 → 00:20");
+    assert_eq!(backward.title(), "Note across 0:12 → 0:20");
 }
 
 #[test]
 fn an_existing_note_is_titled_by_its_own_range() {
     let existing = note(65_000, Some(70_000), "flat");
     let editor = NoteEditor::new(Some(&existing), ms(3_000), None, normalize);
-    assert_eq!(editor.title(), "Note across 01:05 → 01:10");
+    assert_eq!(editor.title(), "Note across 1:05 → 1:10");
     let point = note(65_000, None, "flat");
     let editor = NoteEditor::new(Some(&point), ms(3_000), Some(ms(9_000)), normalize);
-    assert_eq!(editor.title(), "Note at 01:05");
+    assert_eq!(editor.title(), "Note at 1:05");
 }
 
 #[test]
@@ -273,7 +273,7 @@ fn the_card_is_at_most_460_wide_and_centred() {
     // The default 1024 px window: the title inside the card's 20 px
     // padding (its outline is inset).
     let mut ui = iced_test::simulator(editor.view());
-    let title = ui.find("Note at 00:12").expect("the title").bounds();
+    let title = ui.find("Note at 0:12").expect("the title").bounds();
     let card_left = (1024.0 - CARD_MAX_WIDTH) / 2.0;
     assert!((title.x - (card_left + 20.0)).abs() < 0.5, "{title:?}");
 }

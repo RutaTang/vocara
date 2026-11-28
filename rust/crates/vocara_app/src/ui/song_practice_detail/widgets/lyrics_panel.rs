@@ -1514,11 +1514,13 @@ fn editor_style(_: &Theme, _: text_editor::Status) -> text_editor::Style {
 
 // ------------------------------------------------------------ the sync view
 
-/// `_LyricsSync._fmt`: `mm:ss.cc`.
+/// A sync time: `m:ss.cc`, the app's `m:ss` (the reader's, the notes')
+/// to the hundredth a tap is timed to. (`_LyricsSync._fmt` padded the
+/// minutes, "00:01.00", where the panel beside it read "0:01".)
 pub fn sync_time(ms: i64) -> String {
     let s = ms.div_euclid(1000);
     format!(
-        "{:02}:{:02}.{:02}",
+        "{}:{:02}.{:02}",
         s.div_euclid(60),
         s.rem_euclid(60),
         ms.rem_euclid(1000) / 10

@@ -1,7 +1,7 @@
 //! Port of `ui/song_practice_detail/widgets/note_editor.dart`: the add/edit
 //! note modal — a dark studio card matching the app. Editing an existing
 //! note offers a Delete action. The header says where the note is (or will
-//! be) pinned: "Note at 00:12", or "Note across 00:12 → 00:20" for a range
+//! be) pinned: "Note at 0:12", or "Note across 0:12 → 0:20" for a range
 //! the user drew.
 //!
 //! `showNoteEditor` returned a `Future<NoteEditorResult?>`; here the screen
@@ -33,6 +33,7 @@
 use std::fmt;
 use std::time::Duration;
 
+use super::lyrics_panel::lyric_time;
 use crate::ui::core::text;
 use iced::alignment::{Horizontal, Vertical};
 use iced::widget::{button, center, column, container, opaque, row, stack, Space};
@@ -42,7 +43,6 @@ use iced::{
 };
 use vocara_model::models::practice_note::PracticeNote;
 use vocara_model::util::dart_string;
-use vocara_model::util::format::format_clock_ms;
 
 use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::theme::{self, font, Studio};
@@ -124,15 +124,17 @@ pub enum Step {
 /// screen passes the detail view model's.
 pub type NormalizeRange = fn(i64, Option<i64>) -> (i64, Option<i64>);
 
-/// The header for a note kept at `position_ms` (to `end_ms` for a range).
+/// The header for a note kept at `position_ms` (to `end_ms` for a range),
+/// its times `m:ss` as the notes panel and the lyrics read them (it wrote
+/// "00:12" where the panel beside it read "0:12").
 pub fn note_editor_title(position_ms: i64, end_ms: Option<i64>) -> String {
     match end_ms {
         Some(end) => format!(
             "Note across {} → {}",
-            format_clock_ms(position_ms),
-            format_clock_ms(end)
+            lyric_time(position_ms),
+            lyric_time(end)
         ),
-        None => format!("Note at {}", format_clock_ms(position_ms)),
+        None => format!("Note at {}", lyric_time(position_ms)),
     }
 }
 
@@ -168,8 +170,8 @@ impl NoteEditor {
     /// note's end so the header reflects the span the user drew. An
     /// `existing` note's own range wins over both. The header names the
     /// range as it will be kept (`normalize`): a drag too short for a range
-    /// is saved as a point, and was announced as "Note across 00:12 →
-    /// 00:12".
+    /// is saved as a point, and was announced as "Note across 0:12 →
+    /// 0:12".
     pub fn new(
         existing: Option<&PracticeNote>,
         at: Duration,
