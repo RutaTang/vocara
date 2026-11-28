@@ -164,6 +164,28 @@ fn reachable_buses<'a>(
     result
 }
 
+/// What a channel's output moved onto the bus `bus_name` says of the send
+/// into it the move removed (see [`without_sends_to`]): the send's row and
+/// level went without a word.
+pub fn send_removed_by_output(bus_name: &str) -> String {
+    format!("Removed the send to \"{bus_name}\": the output feeds it now.")
+}
+
+/// The name of the bus `bus_id`, when `sends` hold a send into it that an
+/// output moving onto it removes.
+fn removed_send(
+    practice: &SongPractice,
+    sends: &[TrackSend],
+    bus_id: Option<&str>,
+) -> Option<String> {
+    let bus_id = bus_id?;
+    sends
+        .iter()
+        .any(|s| s.bus_id == bus_id)
+        .then(|| practice.bus_by_id(Some(bus_id)).map(|b| b.name.clone()))
+        .flatten()
+}
+
 /// `sends` less those into `bus_id` (all of them kept for the master, which
 /// no send targets): what a channel keeps when its output moves to that bus.
 fn without_sends_to(sends: &[TrackSend], bus_id: Option<&str>) -> Vec<TrackSend> {
@@ -1405,19 +1427,27 @@ impl MixerController {
     }
 
     /// Routes a vocal take's output to `bus_id` (`None` = master). A send the
-    /// take had into that bus goes: the output feeds the bus now, and the
-    /// send beside it fed it the take a second time. Triggers a rebuild.
+    /// take had into that bus goes, and a toast says so: the output feeds
+    /// the bus now, and the send beside it fed it the take a second time.
+    /// Triggers a rebuild.
     pub fn set_track_bus(
         &mut self,
         host: &mut dyn MixerHost,
         track_id: &str,
         bus_id: Option<&str>,
     ) -> SaveRequest {
+        let removed = host.practice().and_then(|p| {
+            let take = host.track_by_id(track_id)?;
+            removed_send(p, &take.sends, bus_id)
+        });
         host.update_track(track_id, &|t| AudioTrack {
             bus_id: bus_id.map(str::to_string),
             sends: without_sends_to(&t.sends, bus_id),
             ..t.clone()
         });
+        if let Some(name) = removed {
+            host.toast(&send_removed_by_output(&name));
+        }
         self.notify();
         SaveRequest
     }
@@ -1438,8 +1468,8 @@ impl MixerController {
 
     /// Routes a bus's output to another bus, or to the master
     /// (`output_bus_id` `None`). Self-routing and feedback loops are refused;
-    /// a send into the new output's bus goes, as [`Self::set_track_bus`]'s
-    /// does. Rebuilds.
+    /// a send into the new output's bus goes, with a toast, as
+    /// [`Self::set_track_bus`]'s does. Rebuilds.
     #[must_use = "the view model saves the edited model when it is Some"]
     pub fn set_bus_output(
         &mut self,
@@ -1455,6 +1485,9 @@ impl MixerController {
             host.toast("Can't route there — it would create a feedback loop.");
             return None;
         }
+        let removed = practice
+            .bus_by_id(Some(bus_id))
+            .and_then(|b| removed_send(practice, &b.sends, output_bus_id));
         let next = SongPractice {
             fx_buses: with_bus(&practice.fx_buses, bus_id, |b| FxBus {
                 output_bus_id: output_bus_id.map(str::to_string),
@@ -1464,6 +1497,9 @@ impl MixerController {
             ..practice.clone()
         };
         host.set_practice(next);
+        if let Some(name) = removed {
+            host.toast(&send_removed_by_output(&name));
+        }
         self.notify();
         Some(SaveRequest)
     }
