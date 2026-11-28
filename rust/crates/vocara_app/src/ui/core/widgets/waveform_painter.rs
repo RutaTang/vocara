@@ -312,16 +312,39 @@ pub fn live_waveform_outline(
 pub const MAJOR_TICK_MIN_PX: f64 = 96.0;
 
 /// The ruler's major tick interval (ms) for `duration_ms` across `width`
-/// px: [`nice_time_interval_ms_min`] at [`MAJOR_TICK_MIN_PX`].
+/// px: [`nice_time_interval_ms_min`] at [`MAJOR_TICK_MIN_PX`], and closer
+/// than a second where a second spans more than that (zoomed all the way
+/// in, a second across the arrange, the ruler had a single label).
 pub fn ruler_interval_ms(duration_ms: i64, width: f64) -> i64 {
-    nice_time_interval_ms_min(duration_ms, width, MAJOR_TICK_MIN_PX)
+    let interval = nice_time_interval_ms_min(duration_ms, width, MAJOR_TICK_MIN_PX);
+    if interval > 1000 || duration_ms <= 0 || width <= 0.0 {
+        return interval;
+    }
+    let min_ms = MAJOR_TICK_MIN_PX / (width / duration_ms as f64);
+    SUB_SECOND_INTERVALS
+        .into_iter()
+        .find(|&step| step as f64 >= min_ms)
+        .unwrap_or(interval)
+}
+
+/// The ruler's major steps under a second (ms), finest first.
+const SUB_SECOND_INTERVALS: [i64; 3] = [100, 200, 500];
+
+/// A ruler tick's label: [`ruler_label`], and its tenth ("0:12.4") where
+/// the ticks fall closer than a second apart (`interval_ms`).
+pub fn ruler_tick_label(ms: i64, interval_ms: i64) -> String {
+    let label = ruler_label(ms);
+    if interval_ms >= 1000 {
+        return label;
+    }
+    format!("{label}.{}", ms.max(0) % 1000 / 100)
 }
 
 /// How many parts the ruler's minor ticks cut a major `interval` (ms) into:
 /// whole, round steps (10 s into 2 s, 30 s into 5 s, a minute into 10 s).
 pub fn minor_divisions(interval_ms: i64) -> i64 {
     match interval_ms {
-        2000 | 120_000 | 3_600_000 => 4,
+        200 | 2000 | 120_000 | 3_600_000 => 4,
         30_000 | 60_000 | 1_800_000 => 6,
         _ => 5,
     }
@@ -684,7 +707,8 @@ impl<M> canvas::Program<M> for TimelineGridPainter {
 
 /// `TimeRulerPainter`: the time ruler above the tracks (`DESIGN.md`,
 /// Ruler) — a full-height 1 px line per major tick in `tick_color` with its
-/// `m:ss` label ([`ruler_label`]: 10 px tabular figures in `text_color`, 5 px
+/// `m:ss` label (`m:ss.t` zoomed in past a second a tick:
+/// [`ruler_tick_label`]; 10 px tabular figures in `text_color`, 5 px
 /// right of the line, 7 px from the top), and 5 px minor ticks along the
 /// bottom in `minor_color` between them.
 #[derive(Debug, Clone)]
@@ -732,6 +756,7 @@ impl<M> canvas::Program<M> for TimeRulerPainter {
             for x in minor_tick_xs(self.timeline_duration_ms, self.start_ms, w) {
                 line(frame, x as f32, h - MINOR_TICK_HEIGHT, self.minor_color);
             }
+            let interval = ruler_interval_ms(self.timeline_duration_ms, w);
             for (x, t) in ruler_ticks(self.timeline_duration_ms, self.start_ms, w) {
                 let x = x as f32;
                 line(frame, x, 0.0, self.tick_color);
@@ -740,7 +765,7 @@ impl<M> canvas::Program<M> for TimeRulerPainter {
                 fill_tabular_text(
                     frame,
                     canvas::Text {
-                        content: ruler_label(t),
+                        content: ruler_tick_label(t, interval),
                         position: Point::new(crisp(x) + 4.5, 7.0),
                         color: self.text_color,
                         size: Pixels(10.0),
@@ -1137,6 +1162,30 @@ mod tests {
         assert_eq!(ruler_label(768_000), "12:48");
         assert_eq!(ruler_label(3_723_000), "1:02:03");
         assert_eq!(ruler_label(-5), "0:00");
+    }
+
+    // Zoomed all the way in (a second across a 672 px arrange), the ruler
+    // showed a single label.
+    #[test]
+    fn a_ruler_zoomed_to_a_second_ticks_and_labels_tenths() {
+        let interval = ruler_interval_ms(1000, 672.0);
+        assert_eq!(interval, 200);
+        let ticks = ruler_ticks(1000, 12_000, 672.0);
+        assert_eq!(ticks.len(), 5, "{ticks:?}");
+        assert!(ticks[1].0 - ticks[0].0 >= MAJOR_TICK_MIN_PX);
+        let labels: Vec<String> = ticks
+            .iter()
+            .map(|(_, t)| ruler_tick_label(*t, interval))
+            .collect();
+        assert_eq!(labels, ["0:12.0", "0:12.2", "0:12.4", "0:12.6", "0:12.8"]);
+        // 50 ms minor ticks between them.
+        assert_eq!(minor_tick_xs(1000, 12_000, 672.0).len(), 15);
+        // Wider, tenths of a second at most every half second.
+        assert_eq!(ruler_interval_ms(3000, 672.0), 500);
+        // A second or more a tick: whole seconds, as before.
+        assert_eq!(ruler_interval_ms(10_000, 800.0), 2000);
+        assert_eq!(ruler_interval_ms(5000, 800.0), 1000);
+        assert_eq!(ruler_tick_label(12_000, 1000), "0:12");
     }
 
     #[test]
