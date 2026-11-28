@@ -936,6 +936,58 @@ fn a_timbre_curve_breaks_at_gaps_and_a_flat_one_draws_nothing() {
 }
 
 #[test]
+fn a_timbre_curve_breaks_where_there_is_no_voice_and_scales_to_the_voice() {
+    // Between notes the analysis still measures ring and CPP, as finite
+    // extremes: the curves drew them as full-height blocks, and squashed
+    // the voiced part flat.
+    let mut m = VoiceMetrics::clone(&step_metrics());
+    let silent = |f: usize| (15..25).contains(&f);
+    m.active = (0..40).map(|f| u8::from(!silent(f))).collect();
+    m.f0 = (0..40)
+        .map(|f| if silent(f) { f32::NAN } else { 220.0 })
+        .collect();
+    m.ring = (0..40)
+        .map(|f| {
+            if silent(f) {
+                -100.0
+            } else {
+                -10.0 + f as f32 * 0.1
+            }
+        })
+        .collect();
+    let size = Size::new(500.0, 100.0);
+    let runs = timbre_curve(&m, &m.ring, 500, size);
+    assert_eq!(runs.iter().map(Vec::len).collect::<Vec<_>>(), [15, 15]);
+    // The voiced extremes fill the plot, 7% in from its edges.
+    let ys: Vec<f32> = runs.iter().flatten().map(|p| p.y).collect();
+    assert!((ys[0] - 93.0).abs() < 1e-3, "{}", ys[0]);
+    assert!((ys.last().unwrap() - 7.0).abs() < 1e-3);
+    // An audible frame with no pitch (breath) is no voice either.
+    m.active = vec![1; 40];
+    assert_eq!(timbre_curve(&m, &m.ring, 500, size).len(), 2);
+}
+
+#[test]
+fn the_timbre_readouts_read_a_dash_where_there_is_no_voice() {
+    let mut m = VoiceMetrics::clone(&step_metrics());
+    m.active = (0..40).map(|f| u8::from(f >= 20)).collect();
+    m.f0 = (0..40)
+        .map(|f| if f < 20 { f32::NAN } else { 261.6 })
+        .collect();
+    m.ring = vec![-100.8; 40];
+    let src = Source {
+        track: Some(track(500)),
+        metrics: Some(Arc::new(m)),
+        duration_ms: 500,
+        position: Duration::from_millis(100),
+        ..Source::default()
+    };
+    let state = VoiceprintState::new();
+    let shown = texts(&mut simulator(timbre, &src, &state, DOCK));
+    assert!(!shown.iter().any(|t| t.contains("100.8")), "{shown:?}");
+}
+
+#[test]
 fn the_register_marker_stays_on_its_bar() {
     assert_eq!(register_marker_left(f64::NAN, 280.0), None);
     assert_eq!(register_marker_left(0.0, 280.0), Some(0.0));
