@@ -132,6 +132,11 @@ Line height 16 px for 11–12 px text unless noted.
   buttons inside; 1 × 16 px `GRID_STRONG` dividers between subgroups.
 - **Icon button**: transparent, 24 (panels) or 28 (toolbar) square, radius
   5–6, icon `TEXT_SECONDARY`, hover background `HOVER`.
+- **Toggle** (an icon button that stays on: Loop, Follow playhead, Input
+  monitoring, the lyrics' Edit and Sync): on, its icon `TEXT_PRIMARY` on a
+  `SEGMENT_SELECTED` fill (the button's radius; inside a toolbar group 3 px
+  in, radius 4), kept under the pointer as a selected tab or segment keeps
+  its fill, so a click shows at once; off, a plain icon button.
 - **Ghost button** ("New take", "New bus"): 22 px, radius 5, transparent,
   inset outline, 11 px text with a 10 px plus.
 - **Pop-up button** (presets, interpretation, output, send): 22 px, radius
