@@ -657,6 +657,8 @@ impl SongPracticeDetailScreen {
         let target = vm.record_target_id();
         let is_target = target.as_deref() == Some(track.id.as_str());
         let expanded = vm.analysis().is_track_expanded(&track.id);
+        // Another lane soloed silences this one: it dims as a muted take.
+        let silenced = !vm.with_mixer(|m, h| m.resolve_solo(h).track_in_solo(&track.id));
         let mut row = track_row(
             track,
             track.display_name.clone(),
@@ -671,6 +673,7 @@ impl SongPracticeDetailScreen {
         .color(color)
         .selected(selected)
         .armed(!track.is_backing() && is_target)
+        .silenced(silenced)
         .selected_clip_id(if selected {
             vm.selected_clip_id()
         } else {

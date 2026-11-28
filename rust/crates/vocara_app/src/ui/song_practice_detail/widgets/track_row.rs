@@ -455,6 +455,7 @@ pub struct TrackRow<'a, M> {
     position_ms: i64,
     selected: bool,
     armed: bool,
+    silenced: bool,
     reorderable: bool,
     selected_clip_id: Option<String>,
     recording: Option<(&'a [f64], i64)>,
@@ -488,6 +489,7 @@ pub fn track_row<'a, M>(
         position_ms,
         selected: false,
         armed: false,
+        silenced: false,
         reorderable: false,
         selected_clip_id: None,
         recording: None,
@@ -524,6 +526,13 @@ impl<'a, M> TrackRow<'a, M> {
     /// shown as a small red arm dot in the lane header.
     pub fn armed(mut self, armed: bool) -> Self {
         self.armed = armed;
+        self
+    }
+
+    /// Whether a solo elsewhere silences this lane: its clips draw as a
+    /// muted take's (the lane looked as live as the soloed one).
+    pub fn silenced(mut self, silenced: bool) -> Self {
+        self.silenced = silenced;
         self
     }
 
@@ -1089,7 +1098,8 @@ impl LaneState {
 fn body<'a, M>(r: &TrackRow<'a, M>, accent: Color) -> Element<'a, Message> {
     let track = r.track;
     let label = r.label.clone();
-    let muted = track.muted;
+    // Silenced by a solo, it is as unheard as a muted take.
+    let muted = track.muted || r.silenced;
     let dur = r.timeline_duration_ms; // the visible span
     let view_start = r.view_start_ms;
     let position_ms = r.position_ms;

@@ -134,6 +134,54 @@ fn the_rows_below_the_backing_stay_put_as_the_backing_switches() {
     assert_eq!(takes(&h), before);
 }
 
+/// The colour of `clip`'s header band near its right end (past its name),
+/// as drawn.
+fn clip_band(h: &Harness, clip: &str) -> [u8; 4] {
+    let mut ui = LiveUi::new(h.size);
+    let at = ui
+        .find(h.screen.view(), track_row::clip_widget_id(clip))
+        .expect("the clip")
+        .bounds();
+    ui.snapshot(h.screen.view())
+        .pixel((at.x + at.width - 8.0) as usize, (at.y + 4.0) as usize)
+}
+
+// Soloing Take 2 dropped Take 1 from the mix, but Take 1's lane still
+// looked as live as the soloed one.
+#[test]
+fn a_solo_dims_the_lanes_it_silences_as_a_mute_does() {
+    let long = |id: &str, name: &str| {
+        let mut t = take(id, name);
+        t.clips[0].duration_ms = 20_000;
+        t
+    };
+    let mut h = Harness::open(Setup {
+        practice: practice(vec![long("t1", "Take 1"), long("t2", "Take 2")]),
+        ..Setup::default()
+    });
+    let c1 = h.track("t1").clips[0].id.clone();
+    let c2 = h.track("t2").clips[0].id.clone();
+    let (live1, live2) = (clip_band(&h, &c1), clip_band(&h, &c2));
+    let toggle = |h: &mut Harness, id: &str, message: track_row::Message| {
+        h.send(Message::Row {
+            track_id: id.into(),
+            message,
+        });
+        h.settle();
+    };
+    toggle(&mut h, "t1", track_row::Message::ToggleMute);
+    let muted1 = clip_band(&h, &c1);
+    assert_ne!(muted1, live1, "a muted take's clips dim");
+    toggle(&mut h, "t1", track_row::Message::ToggleMute);
+    assert_eq!(clip_band(&h, &c1), live1);
+
+    toggle(&mut h, "t2", track_row::Message::ToggleSolo);
+    assert_eq!(clip_band(&h, &c1), muted1, "Take 1, silenced by the solo");
+    assert_eq!(clip_band(&h, &c2), live2, "Take 2, soloed, heard");
+    toggle(&mut h, "t2", track_row::Message::ToggleSolo);
+    assert_eq!(clip_band(&h, &c1), live1, "heard again");
+}
+
 /// Take 1 with a clip at 0:00 and one at 0:12, overlapping it; Take 2 with
 /// one clip.
 fn two_takes() -> Harness {
