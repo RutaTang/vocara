@@ -56,7 +56,7 @@ use std::time::{Duration, Instant};
 
 use iced::futures::SinkExt;
 use iced::widget::{container, stack, Space};
-use iced::{window, Element, Length, Size, Subscription, Task, Theme};
+use iced::{window, Element, Length, Point, Size, Subscription, Task, Theme};
 use vocara_model::diagnostics::DiagnosticsLog;
 use vocara_services::app_menu::PreferencesRequests;
 use vocara_services::quit_request::QuitRequests;
@@ -210,6 +210,9 @@ pub enum Message {
     WindowOpened(window::Id),
     /// The window's scale factor, asked for when it opened.
     ScaleFactor(f32),
+    /// The size of the monitor the window opened on, asked for when it
+    /// opened (none when it cannot be told).
+    MonitorSize(window::Id, Option<Size>),
     /// The user asked to close the window.
     CloseRequested(window::Id),
     /// macOS asked the app to quit (Cmd+Q, the app-menu Quit, a Dock quit,
@@ -539,22 +542,31 @@ impl App {
                 // (`devicePixelRatio`); they follow a change of it
                 // themselves.
                 let scale_factor = window::scale_factor(id).map(Message::ScaleFactor);
+                // Fitted to the monitor it opened on (`fitted_size`).
+                let monitor = window::monitor_size(id).map(move |size| Message::MonitorSize(id, size));
                 // Dev-only preview hook: a PNG of the rendered app a while
                 // after its first frame, then exit. Avoids needing OS
                 // screen-recording access.
                 if self.boot.screenshot.is_some() {
                     return Task::batch([
                         scale_factor,
+                        monitor,
                         Task::perform(tokio::time::sleep(SCREENSHOT_DELAY), |_| {
                             Message::ScreenshotDue
                         }),
                     ]);
                 }
-                scale_factor
+                Task::batch([scale_factor, monitor])
             }
             Message::ScaleFactor(scale_factor) => {
                 crate::ui::core::scale_factor::set_scale_factor(scale_factor);
                 Task::none()
+            }
+            Message::MonitorSize(id, monitor) => {
+                match monitor.map(|monitor| fitted_size(WINDOW_SIZE, monitor, MIN_WINDOW_SIZE)) {
+                    Some(fitted) if fitted != WINDOW_SIZE => window::resize(id, fitted),
+                    _ => Task::none(),
+                }
             }
             Message::CloseRequested(id) => {
                 self.window.get_or_insert(id);
@@ -1228,16 +1240,46 @@ fn write_png(shot: &window::Screenshot, path: &std::path::Path) -> Result<(), St
     writer.finish().map_err(|e| e.to_string())
 }
 
+/// The window's size when it opens, where the monitor has room for it.
+pub const WINDOW_SIZE: Size = Size::new(1440.0, 900.0);
+
+/// The least the window can be made.
+pub const MIN_WINDOW_SIZE: Size = Size::new(960.0, 600.0);
+
+/// Where a `window` opens on a `monitor` (sizes, the monitor's from its
+/// top-left): centred, as `Position::Centered` put it, but never above or
+/// left of the monitor. Centred on a smaller monitor, a 1440 × 900 window
+/// opened at (−170, −90) on 1100 × 720, its toolbar (and with it the way to
+/// move it) off the top of the screen.
+pub fn opening_position(window: Size, monitor: Size) -> Point {
+    Point::new(
+        ((monitor.width - window.width) / 2.0).max(0.0),
+        ((monitor.height - window.height) / 2.0).max(0.0),
+    )
+}
+
+/// The window's size on a `monitor`: `window`, less what of it the monitor
+/// has no room for, but never under `min`. The window opens at
+/// [`opening_position`], so at this size it is all on the monitor.
+pub fn fitted_size(window: Size, monitor: Size, min: Size) -> Size {
+    Size::new(
+        window.width.min(monitor.width).max(min.width),
+        window.height.min(monitor.height).max(min.height),
+    )
+}
+
 /// The window: 1440 × 900 (at least 960 × 600), centred, closed through the
-/// quit guard; on macOS the title bar is hidden and transparent over a
-/// full-size content view, and once the window is open it takes an empty
-/// unified toolbar (`vocara_services::window_toolbar`), which centres the
-/// traffic lights in the 52 px toolbar every page draws.
+/// quit guard; on a monitor too small for it, on the monitor and shrunk to
+/// fit once open ([`opening_position`], [`fitted_size`]). On macOS the
+/// title bar is hidden and transparent over a full-size content view, and
+/// once the window is open it takes an empty unified toolbar
+/// (`vocara_services::window_toolbar`), which centres the traffic lights in
+/// the 52 px toolbar every page draws.
 pub fn window_settings() -> window::Settings {
     window::Settings {
-        size: Size::new(1440.0, 900.0),
-        min_size: Some(Size::new(960.0, 600.0)),
-        position: window::Position::Centered,
+        size: WINDOW_SIZE,
+        min_size: Some(MIN_WINDOW_SIZE),
+        position: window::Position::SpecificWith(opening_position),
         // Intercept the OS close so an in-flight recording is finalized
         // (saved) before the process is torn down.
         exit_on_close_request: false,

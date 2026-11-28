@@ -615,6 +615,66 @@ fn a_page_popped_as_it_comes_in_goes_back_from_where_it_got() {
     assert!(route.controller.ends_at(Instant::now()) < t0 + ROUTE_TRANSITION / 10);
 }
 
+// ------------------------------------------------------------ the window
+
+/// How many window actions `task` carries (a resize).
+fn window_actions(task: Task<Message>) -> usize {
+    use iced::futures::StreamExt;
+    use iced_test::runtime::Action;
+    let Some(stream) = iced_test::runtime::task::into_stream(task) else {
+        return 0;
+    };
+    iced::futures::executor::block_on(
+        stream
+            .filter(|action| std::future::ready(matches!(action, Action::Window(_))))
+            .count(),
+    )
+}
+
+// Restarted on a 1100 × 720 screen, the 1440 × 900 window opened centred
+// at (−170, −90), its toolbar above the screen's top, with no way to reach
+// it to move the window.
+#[test]
+fn a_window_too_big_for_its_monitor_opens_on_it_and_shrinks_to_fit() {
+    let settings = window_settings();
+    assert_eq!(settings.size, WINDOW_SIZE);
+    let window::Position::SpecificWith(place) = settings.position else {
+        panic!("placed by the monitor's size");
+    };
+    let small = Size::new(1100.0, 720.0);
+    assert_eq!(place(WINDOW_SIZE, small), iced::Point::ORIGIN);
+    // Centred where it fits, as before; held on the monitor on one side.
+    assert_eq!(
+        place(WINDOW_SIZE, Size::new(1920.0, 1080.0)),
+        iced::Point::new(240.0, 90.0)
+    );
+    assert_eq!(
+        place(WINDOW_SIZE, Size::new(1280.0, 1000.0)),
+        iced::Point::new(0.0, 50.0)
+    );
+
+    assert_eq!(fitted_size(WINDOW_SIZE, small, MIN_WINDOW_SIZE), small);
+    let roomy = Size::new(1920.0, 1080.0);
+    assert_eq!(fitted_size(WINDOW_SIZE, roomy, MIN_WINDOW_SIZE), WINDOW_SIZE);
+    assert_eq!(
+        fitted_size(WINDOW_SIZE, Size::new(1280.0, 1000.0), MIN_WINDOW_SIZE),
+        Size::new(1280.0, 900.0)
+    );
+    // Never under its least size.
+    assert_eq!(
+        fitted_size(WINDOW_SIZE, Size::new(800.0, 500.0), MIN_WINDOW_SIZE),
+        MIN_WINDOW_SIZE
+    );
+
+    // Once open, the app asks for the monitor's size and resizes the
+    // window to fit it, only when it does not.
+    let mut app = boot(None);
+    let id = window::Id::unique();
+    assert_eq!(window_actions(app.update(Message::MonitorSize(id, Some(small)))), 1);
+    assert_eq!(window_actions(app.update(Message::MonitorSize(id, Some(roomy)))), 0);
+    assert_eq!(window_actions(app.update(Message::MonitorSize(id, None))), 0);
+}
+
 /// The app over `library`, on the detached services, every task its boot
 /// starts run (Home's list read).
 fn boot_over(library: Arc<Library>) -> App {
