@@ -998,6 +998,10 @@ fn at_the_floor_the_actions_still_take_their_taps() {
         tap_label(&mut ui, &state, &vm, "Done"),
         vec![Message::SetLyricsMode(LyricsMode::Read)]
     );
+    // No line has a time: Clear has nothing to clear.
+    assert!(tap_label(&mut ui, &state, &vm, "Clear").is_empty());
+    let mut vm = vm;
+    vm.lyrics[3].time_ms = Some(4_000);
     assert_eq!(
         tap_label(&mut ui, &state, &vm, "Clear"),
         vec![Message::ClearLyricTimes]
@@ -1007,6 +1011,31 @@ fn at_the_floor_the_actions_still_take_their_taps() {
     assert_eq!(
         tap_label(&mut ui, &state, &vm, "Save"),
         vec![Message::ApplyEditedLyrics]
+    );
+}
+
+#[test]
+fn unsynced_lyrics_are_not_indented_by_an_empty_time_column() {
+    let left = |lines: Vec<LyricLine>| {
+        let vm = Vm::reading(lines);
+        let mut state = LyricsPanelState::new();
+        let mut ui = PanelUi::new(PANEL);
+        sync(&mut ui, &mut state, &vm);
+        bounds_of(&mut ui, &state, &vm, "line 3")
+            .expect("the line")
+            .bounds()
+            .x
+    };
+    // The panel's 1 px border, the list's 8 and the row's 8.
+    let unsynced = left(twelve_lines());
+    assert!((unsynced - 17.0).abs() < 0.5, "{unsynced}");
+    // One timed line: every line keeps the column, so the words line up.
+    let mut lines = twelve_lines();
+    lines[0].time_ms = Some(1_000);
+    let synced = left(lines);
+    assert!(
+        (synced - (17.0 + TIME_COLUMN + 6.0)).abs() < 0.5,
+        "{synced}"
     );
 }
 

@@ -1337,12 +1337,14 @@ pub fn lyric_time(ms: i64) -> String {
 /// [`TIME_COLUMN`] of 10 px tabular time and the line at 13 px on a 20 px
 /// line; the `active` line on a [`CURRENT_LINE`] pill, white and medium,
 /// its time `ACCENT_BRIGHT`; the lines before it `TEXT_FAINT`, the ones to
-/// come [`UPCOMING_LINE`]. A synced line seeks to itself.
+/// come [`UPCOMING_LINE`]. A synced line seeks to itself. With no line
+/// timed there is no time column: the empty one indented every line.
 fn panel_reader<'a>(
     state: &'a LyricsPanelState,
     data: RightPanelData<'a>,
     active: i64,
 ) -> Element<'a, Message> {
+    let timed = data.lyrics.iter().any(LyricLine::is_synced);
     let mut lines = Column::new().spacing(1);
     for (i, l) in data.lyrics.iter().enumerate() {
         let id = state.line_id(List::Reader, i);
@@ -1379,11 +1381,13 @@ fn panel_reader<'a>(
                 UPCOMING_LINE
             })
             .width(Length::Fill);
-        let face = container(
+        let face = container(if timed {
             row![container(time).width(TIME_COLUMN), words]
                 .spacing(6)
-                .align_y(Vertical::Top),
-        )
+                .align_y(Vertical::Top)
+        } else {
+            row![words]
+        })
         .padding([6, 8])
         .width(Length::Fill)
         .style(move |_| {
@@ -1577,7 +1581,15 @@ fn lyrics_sync<'a>(state: &'a LyricsPanelState, data: RightPanelData<'a>) -> Ele
                 list,
                 hrule(),
                 container(row![
-                    secondary_button("Clear", Some(Message::ClearLyricTimes)),
+                    // Dead with no time to clear (it looked live and did
+                    // nothing).
+                    secondary_button(
+                        "Clear",
+                        data.lyrics
+                            .iter()
+                            .any(LyricLine::is_synced)
+                            .then_some(Message::ClearLyricTimes),
+                    ),
                     Space::new().width(Length::Fill),
                     secondary_button("Done", Some(Message::SetLyricsMode(LyricsMode::Read))),
                     Space::new().width(8),
