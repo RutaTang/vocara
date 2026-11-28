@@ -58,7 +58,7 @@
 //! show none and as in Dart: their ink went on the `Scaffold`'s
 //! `Material`, under the opaque card (`tappable`).
 
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 use std::convert::Infallible;
 use std::hash::{Hash, Hasher};
 use std::io;
@@ -862,31 +862,69 @@ fn turn_line(settings: &Arc<AppSettingsService>) -> Arc<TurnLine> {
 /// page left).
 #[derive(Debug, Default)]
 struct Turns {
-    served: Mutex<u64>,
+    served: Mutex<Served>,
     next: Condvar,
+}
+
+/// How far a line of turns has got.
+#[derive(Debug, Default)]
+struct Served {
+    /// How many turns have been served: the next turn is this one.
+    count: u64,
+    /// Later turns that will never be taken ([`Turns::give_up`]).
+    given_up: BTreeSet<u64>,
+}
+
+impl Served {
+    /// The turn served, and every one given up right after it.
+    fn advance(&mut self) {
+        self.count += 1;
+        while self.given_up.remove(&self.count) {
+            self.count += 1;
+        }
+    }
 }
 
 impl Turns {
     /// Waits for `turn`, runs `work`, then hands over to the next turn,
     /// however `work` ends.
     fn take<T>(&self, turn: u64, work: impl FnOnce() -> T) -> T {
-        struct Served<'a>(&'a Turns);
-        impl Drop for Served<'_> {
+        struct Done<'a>(&'a Turns);
+        impl Drop for Done<'_> {
             fn drop(&mut self) {
-                *self.0.served.lock().unwrap_or_else(PoisonError::into_inner) += 1;
+                self.0.lock().advance();
                 self.0.next.notify_all();
             }
         }
-        let mut served = self.served.lock().unwrap_or_else(PoisonError::into_inner);
-        while *served < turn {
+        let mut served = self.lock();
+        while served.count < turn {
             served = self
                 .next
                 .wait(served)
                 .unwrap_or_else(PoisonError::into_inner);
         }
         drop(served);
-        let _served = Served(self);
+        let _done = Done(self);
         work()
+    }
+
+    /// Gives `turn` up: the thread that was to take it never started. The
+    /// turns after it go on without it, where they waited for it for the
+    /// rest of the run — every later choice on every Settings page, the
+    /// line being shared.
+    fn give_up(&self, turn: u64) {
+        let mut served = self.lock();
+        if served.count == turn {
+            served.advance();
+        } else if served.count < turn {
+            served.given_up.insert(turn);
+        }
+        drop(served);
+        self.next.notify_all();
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Served> {
+        self.served.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -1065,6 +1103,9 @@ impl Screen for SettingsScreen {
                 })
             });
         if let Err(e) = spawned {
+            // Its choices are lost, but not the line: the turns after this
+            // one must not wait for a thread that never ran.
+            self.turns.turns.give_up(turn);
             DiagnosticsLog::instance().log("settings", &format!("flush failed: {e}"));
         }
     }

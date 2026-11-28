@@ -739,6 +739,27 @@ fn a_choice_still_waiting_when_the_page_leaves_is_applied_after_the_one_in_fligh
     assert_eq!(page.settings().monitor_reverb_wet(), 0.8);
 }
 
+// A page's flush whose thread could not start gives its turn up: the turns
+// after it (every later choice on every Settings page, the line being
+// shared) go on, where they waited for it for the rest of the run.
+#[test]
+fn a_turn_given_up_holds_no_turn_after_it() {
+    let turns = Arc::new(Turns::default());
+    let comes = |turn: u64| {
+        let (done, came) = std::sync::mpsc::channel();
+        let line = Arc::clone(&turns);
+        std::thread::spawn(move || line.take(turn, || done.send(()).unwrap()));
+        came.recv_timeout(Duration::from_secs(5)).is_ok()
+    };
+    // Given up before its turn came.
+    turns.give_up(1);
+    assert!(comes(0));
+    assert!(comes(2), "turn 2 waited for the one given up");
+    // Given up as its turn came.
+    turns.give_up(3);
+    assert!(comes(4), "turn 4 waited for the one given up");
+}
+
 // Settings left with a choice still waiting behind one in flight, then
 // opened again and a newer choice made: the newer one lands last. (Each page
 // kept its own line once, so the reopened page's choice ran at once and the
