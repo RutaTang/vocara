@@ -773,6 +773,27 @@ fn a_buss_own_output_never_offers_itself() {
     );
 }
 
+// Delay's output on Reverb: Reverb's output menu offered Delay, which the
+// output then refused as a feedback loop.
+#[test]
+fn a_buss_output_never_offers_a_bus_that_would_loop_back_to_it() {
+    let buses = vec![
+        fx_bus("a", "Reverb"),
+        Arc::new(FxBus {
+            output_bus_id: Some("a".into()),
+            ..(*fx_bus("b", "Delay")).clone()
+        }),
+        fx_bus("c", "Room"),
+    ];
+    let mut ui = simulator(Size::new(1200.0, 400.0), desk(&[], &buses, true).view());
+    let delays = count(&mut ui, "Delay");
+    let rooms = count(&mut ui, "Room");
+    // Reverb's output (the first bus output).
+    ui.click(nth("Master", 0)).expect("the bus's output");
+    assert_eq!(count(&mut ui, "Room"), rooms + 1, "the menu is open");
+    assert_eq!(count(&mut ui, "Delay"), delays, "never the loop");
+}
+
 // Regression guard: the bus strip's trash icon (and its right-click "Delete
 // bus") deleted on the spot, while the timeline's bus lane asks first — and
 // a delete takes the bus's whole FX chain and every send into it, with no

@@ -97,6 +97,7 @@ use crate::ui::core::widgets::opacity_layer::opacity_layer;
 use crate::ui::core::widgets::painter::KeyedCache;
 use crate::ui::core::widgets::studio_controls::{fader_db, studio_pan_knob, PAN_KNOB_SIZE};
 use crate::ui::core::widgets::studio_text::studio_text;
+use crate::ui::song_practice_detail::view_model::mixer_controller::bus_route_would_cycle;
 
 /// The desk's data: the Dart widget's `tracks`, and what it read from the
 /// view model.
@@ -827,7 +828,12 @@ fn bus_channel<'a>(b: &'a FxBus, selected: bool, buses: &'a [Arc<FxBus>]) -> Ele
             }],
         )
         .selected(b.output_bus_id.is_none())];
-        for other in buses.iter().filter(|o| o.id != b.id) {
+        // Not itself, nor a bus that reaches it: a feedback loop the
+        // output would refuse.
+        for other in buses
+            .iter()
+            .filter(|o| !bus_route_would_cycle(buses, &b.id, &o.id))
+        {
             options.push(
                 MenuItem::new(
                     other.name.clone(),

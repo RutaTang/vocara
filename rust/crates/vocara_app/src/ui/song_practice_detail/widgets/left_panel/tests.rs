@@ -762,6 +762,30 @@ fn a_buss_own_output_never_offers_itself() {
     );
 }
 
+// Bus 2's Output on Bus 1: Bus 1's Output and Send menus offered Bus 2,
+// and choosing it showed "Can't route there — it would create a feedback
+// loop."
+#[test]
+fn a_buss_routing_menus_leave_out_the_buses_that_would_loop_back_to_it() {
+    let a = bus("a", "Reverb");
+    let b = Arc::new(FxBus {
+        output_bus_id: Some("a".into()),
+        ..(*bus("b", "Delay")).clone()
+    });
+    let c = bus("c", "Room");
+    let buses = vec![a.clone(), b, c];
+    for menu in [
+        InspectorMenu::Output(Channel::Bus("a".into())),
+        InspectorMenu::AddSend(Channel::Bus("a".into())),
+    ] {
+        let mut vm = Vm::new().bus(a.clone()).buses(buses.clone());
+        vm.open_menu = Some(menu.clone());
+        let mut ui = ui();
+        assert_eq!(count(&mut ui, &vm, "Room"), 1, "{menu:?}");
+        assert_eq!(count(&mut ui, &vm, "Delay"), 0, "{menu:?}");
+    }
+}
+
 // Regression guard: the inspector built its FxPanel without a key, so
 // selecting another take (or bus) reused the panel's element tree and the
 // EQ's live state — the analyzer's smoothed spectrum, adaptive ceiling and

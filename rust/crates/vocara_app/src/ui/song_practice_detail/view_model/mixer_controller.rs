@@ -174,6 +174,43 @@ fn without_sends_to(sends: &[TrackSend], bus_id: Option<&str>) -> Vec<TrackSend>
         .collect()
 }
 
+/// Whether routing the bus `from_bus_id` into `to_bus_id` (as its output
+/// or an aux send) would close a feedback loop: it is the bus itself, or it
+/// can already reach it through bus outputs and aux sends. The engine
+/// REJECTS a cyclic graph and silently keeps the old one, so the routing
+/// edits refuse such a route, and the routing menus (the inspector's and the
+/// mixer strip's) leave it out: they offered it, then refused it.
+pub fn bus_route_would_cycle<B: Borrow<FxBus>>(
+    buses: &[B],
+    from_bus_id: &str,
+    to_bus_id: &str,
+) -> bool {
+    if to_bus_id == from_bus_id {
+        return true;
+    }
+    let by_id = buses_by_id(buses);
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut queue: Vec<&str> = vec![to_bus_id];
+    while let Some(id) = queue.pop() {
+        if id == from_bus_id {
+            return true;
+        }
+        if !seen.insert(id) {
+            continue;
+        }
+        let Some(b) = by_id.get(id) else {
+            continue;
+        };
+        if let Some(out) = &b.output_bus_id {
+            queue.push(out);
+        }
+        for s in &b.sends {
+            queue.push(&s.bus_id);
+        }
+    }
+    false
+}
+
 /// `{for (final b in buses) b.id: b}`: a later bus wins a duplicate id.
 fn buses_by_id<B: Borrow<FxBus>>(buses: &[B]) -> HashMap<&str, &FxBus> {
     buses
@@ -1385,11 +1422,8 @@ impl MixerController {
         SaveRequest
     }
 
-    /// Whether routing `from_bus_id` into `to_bus_id` (as its output or an
-    /// aux send) would close a feedback loop — i.e. `to_bus_id` can already
-    /// reach `from_bus_id` through bus outputs and aux sends. The engine
-    /// REJECTS a cyclic graph and silently keeps the old one, so the routing
-    /// UI must refuse the edit instead.
+    /// [`bus_route_would_cycle`] in the practice as it is (`None` = the
+    /// master, which closes no loop).
     fn bus_route_would_cycle(
         &self,
         host: &dyn MixerHost,
@@ -1399,30 +1433,7 @@ impl MixerController {
         let (Some(to_bus_id), Some(practice)) = (to_bus_id, host.practice()) else {
             return false;
         };
-        if to_bus_id == from_bus_id {
-            return true;
-        }
-        let by_id = buses_by_id(&practice.fx_buses);
-        let mut seen: HashSet<&str> = HashSet::new();
-        let mut queue: Vec<&str> = vec![to_bus_id];
-        while let Some(id) = queue.pop() {
-            if id == from_bus_id {
-                return true;
-            }
-            if !seen.insert(id) {
-                continue;
-            }
-            let Some(b) = by_id.get(id) else {
-                continue;
-            };
-            if let Some(out) = &b.output_bus_id {
-                queue.push(out);
-            }
-            for s in &b.sends {
-                queue.push(&s.bus_id);
-            }
-        }
-        false
+        bus_route_would_cycle(&practice.fx_buses, from_bus_id, to_bus_id)
     }
 
     /// Routes a bus's output to another bus, or to the master
