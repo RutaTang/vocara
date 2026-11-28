@@ -712,6 +712,32 @@ impl OutResampler {
     }
 }
 
+/// Whether a stream error leaves the stream running as it was, so nothing needs rebuilding:
+/// a missed deadline ([`cpal::ErrorKind::Xrun`]: on macOS cpal reports every
+/// `kAudioDeviceProcessorOverload` through the error callback), or a refused real-time
+/// promotion (audio still plays). Read as a lost device, one overload rebuilt the stream, an
+/// audible gap, and under sustained load it did so about once a second.
+fn stream_error_is_transient(kind: cpal::ErrorKind) -> bool {
+    matches!(
+        kind,
+        cpal::ErrorKind::Xrun | cpal::ErrorKind::RealtimeDenied
+    )
+}
+
+/// The device events an output stream's error raises: none for one that leaves the stream
+/// playing, [`EVENT_OUTPUT_LOST`] (the host's poll rebuilds the stream) for the rest.
+fn output_error_events(kind: cpal::ErrorKind) -> u32 {
+    // A stream following the system default reports a default change as DeviceChanged:
+    // cpal already rerouted it and documents that it stays active with no rebuild needed.
+    // Flagging it as lost made the host rebuild a working stream (an audible gap) and the
+    // stale binding read as a reroute, hard-muting the monitor behind a false warning.
+    if kind == cpal::ErrorKind::DeviceChanged || stream_error_is_transient(kind) {
+        0
+    } else {
+        EVENT_OUTPUT_LOST
+    }
+}
+
 /// Build + start an f32 output stream whose callback renders the shared `rt` at `ENGINE_SR`,
 /// resampling to the device's native rate (`config.sample_rate`) at the boundary. At 48 kHz the
 /// engine renders directly into the cpal buffer (identity, zero overhead). A stream error
@@ -732,15 +758,11 @@ fn build_stream(
     // render counter — sync before any callback can run.
     rt.transport().begin_output_stream();
     let err_cb = move |err: cpal::Error| {
-        // A stream following the system default reports a default change as DeviceChanged:
-        // cpal already rerouted it and documents that it stays active with no rebuild needed.
-        // Flagging it as lost made the host rebuild a working stream (an audible gap) and the
-        // stale binding read as a reroute, hard-muting the monitor behind a false warning.
-        if err.kind() == cpal::ErrorKind::DeviceChanged {
-            return;
+        // No logging/alloc on the error path: flag a loss for the host's device-event poll.
+        let lost = output_error_events(err.kind());
+        if lost != 0 {
+            event.fetch_or(lost, Ordering::Release);
         }
-        // No logging/alloc on the error path: flag the loss for the host's device-event poll.
-        event.fetch_or(EVENT_OUTPUT_LOST, Ordering::Release);
     };
     // Retire every older output callback before this stream can produce a sample: a teardown
     // that failed to stop its predecessor no longer means two callbacks racing the cell.
@@ -3307,9 +3329,11 @@ fn build_input_stream(
     epoch: u64,
     event: Arc<AtomicU32>,
 ) -> Result<DeviceHandle, String> {
-    let err_cb = move |err| {
-        let _ = err;
-        event.fetch_or(EVENT_INPUT_LOST, Ordering::Release);
+    let err_cb = move |err: cpal::Error| {
+        // A missed deadline leaves the stream running (see `stream_error_is_transient`).
+        if !stream_error_is_transient(err.kind()) {
+            event.fetch_or(EVENT_INPUT_LOST, Ordering::Release);
+        }
     };
     // `epoch` is the generation `reconfigure` minted with this stream's format: every older
     // callback is already retired, and a denied feed drops its samples rather than racing a
@@ -5511,6 +5535,40 @@ mod decode_tests {
         assert_eq!(rate, 48_000);
         assert_eq!(frames.len(), 100);
         let _ = std::fs::remove_file(&path);
+    }
+}
+
+#[cfg(test)]
+mod stream_error_tests {
+    //! Which cpal stream errors mean a lost device: the host rebuilds the stream on one, an
+    //! audible gap, so an error that leaves the stream playing must not raise it.
+
+    use super::{output_error_events, stream_error_is_transient, EVENT_OUTPUT_LOST};
+    use cpal::ErrorKind;
+
+    #[test]
+    fn a_missed_deadline_is_not_a_lost_device() {
+        for kind in [ErrorKind::Xrun, ErrorKind::RealtimeDenied] {
+            assert!(stream_error_is_transient(kind), "{kind:?}");
+            assert_eq!(output_error_events(kind), 0, "{kind:?}");
+        }
+        // cpal rerouted a default-following stream: it plays on.
+        assert_eq!(output_error_events(ErrorKind::DeviceChanged), 0);
+        assert!(!stream_error_is_transient(ErrorKind::DeviceChanged));
+    }
+
+    #[test]
+    fn a_stream_that_stopped_is_a_lost_device() {
+        for kind in [
+            ErrorKind::DeviceNotAvailable,
+            ErrorKind::StreamInvalidated,
+            ErrorKind::BackendError,
+            ErrorKind::DeviceBusy,
+            ErrorKind::Other,
+        ] {
+            assert!(!stream_error_is_transient(kind), "{kind:?}");
+            assert_eq!(output_error_events(kind), EVENT_OUTPUT_LOST, "{kind:?}");
+        }
     }
 }
 
