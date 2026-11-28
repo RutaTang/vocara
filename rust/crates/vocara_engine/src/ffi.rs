@@ -119,7 +119,8 @@ pub struct VeEngine {
     /// turned "follow the default" into an explicit pick of whatever device happened to be default,
     /// so losing that device left the engine permanently "rerouted" (monitor hard-muted).
     output_binding: Arc<std::sync::Mutex<device::OutputBinding>>,
-    /// Live-input peak level (f32 bits), written by the input callback; read by `ve_input_level`.
+    /// Live-input peak (f32 bits): raised by the input callback, taken by `ve_input_level` (see
+    /// [`crate::meter`]).
     input_level: Arc<AtomicU32>,
     /// Total input frames received (diagnostic for whether the mic is actually delivering data).
     input_frames_in: Arc<AtomicU64>,
@@ -1260,12 +1261,12 @@ pub extern "C" fn ve_set_monitor_reverb(
     })
 }
 
-/// The current live-input peak level (0..1, linear) for a meter. 0 when not capturing.
+/// The live-input peak level (linear) for a meter: the loudest sample since the previous call,
+/// so a meter polled every 50 ms misses no buffer's peak (see [`crate::meter`]). 0 when not
+/// capturing. One reader at a time: each call clears what it returns.
 #[no_mangle]
 pub extern "C" fn ve_input_level(e: *mut VeEngine) -> c_float {
-    with_engine(e, 0.0, |eng| {
-        f32::from_bits(eng.input_level.load(Ordering::Relaxed))
-    })
+    with_engine(e, 0.0, |eng| crate::meter::take_peak(&eng.input_level))
 }
 
 /// Diagnostic + pre-roll clock: total ENGINE-RATE (48 kHz, post-resample) frames the mic

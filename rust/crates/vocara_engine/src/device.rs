@@ -1242,7 +1242,8 @@ struct InputState {
     pos: f64,
     prev: [Smp; CHANNELS],
     primed: bool,
-    /// Input peak level (f32 bits) for the meter — read by the FFI thread.
+    /// Input peak (f32 bits) for the meter, held since the FFI thread last took it (see
+    /// [`crate::meter`]).
     level: Arc<AtomicU32>,
     /// Total ENGINE-RATE (48 kHz, post-resample) frames the callback has emitted — both the
     /// "is the mic delivering?" diagnostic and the clock the take pre-roll measurement
@@ -1575,7 +1576,7 @@ impl InputCell {
             st.nominal_frames_in.fetch_add(whole, Ordering::Relaxed);
             st.nominal_acc -= whole as f64;
         }
-        st.level.store(peak.to_bits(), Ordering::Relaxed);
+        crate::meter::raise_peak(&st.level, peak);
     }
 }
 

@@ -157,8 +157,9 @@ pub trait EngineBindings: Send + Sync {
         unexpected("ve_set_monitor_reverb")
     }
 
-    /// The live input's peak level, 0..1, for a meter; 0 when not capturing
-    /// (`ve_input_level`).
+    /// The live input's peak level, 0..1, for a meter: the loudest sample
+    /// since the previous call, which clears it, so a 50 ms poll misses no
+    /// buffer's peak; 0 when not capturing (`ve_input_level`).
     fn input_level(&self) -> f32 {
         unexpected("ve_input_level")
     }

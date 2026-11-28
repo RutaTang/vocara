@@ -1354,7 +1354,8 @@ impl GraphAudioPlaybackService {
         }
     }
 
-    /// The current live-input peak level (0..1) for a meter; 0 when not
+    /// The live-input peak level (0..1) for a meter: the loudest sample since
+    /// the previous read (see [`EngineBindings::input_level`]); 0 when not
     /// capturing.
     pub fn input_level(&self) -> f64 {
         self.live().map_or(0.0, |e| f64::from(e.input_level()))
