@@ -1049,6 +1049,54 @@ impl Persistence {
 
     // --- Boot recovery --------------------------------------------------------
 
+    /// Puts the pooled copy of [hash] back over the staging file [file] when
+    /// it holds more than the file does now and really has those bytes (the
+    /// file came back shorter after a power cut; see
+    /// `recover_orphan_take`). Copied beside it, then renamed over it, so a
+    /// failure leaves the file as it was. Whether it was restored.
+    fn restore_from_pool(&self, file: &Path, hash: &str) -> bool {
+        let ext = file
+            .extension()
+            .map(|e| e.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
+        let Ok(rel) = AssetStore::rel_path_for(hash, &ext) else {
+            return false;
+        };
+        let pooled = self.assets.root().join(rel);
+        let (Ok(pooled_meta), Ok(file_meta)) = (fs::metadata(&pooled), fs::metadata(file)) else {
+            return false;
+        };
+        if !pooled_meta.is_file() || pooled_meta.len() <= file_meta.len() {
+            return false;
+        }
+        if AssetStore::sha256_of_file(&pooled).ok().as_deref() != Some(hash) {
+            return false;
+        }
+        let mut beside = file.as_os_str().to_owned();
+        beside.push(".restoring");
+        let beside = PathBuf::from(beside);
+        let copied = fs::copy(&pooled, &beside)
+            .and_then(|_| fs::File::open(&beside)?.sync_all())
+            .and_then(|()| fs::rename(&beside, file));
+        match copied {
+            Ok(()) => {
+                log(&format!(
+                    "recovered a take from its pooled copy ({} bytes, the staging file had {})",
+                    pooled_meta.len(),
+                    file_meta.len()
+                ));
+                true
+            }
+            Err(e) => {
+                let _ = fs::remove_file(&beside);
+                log(&format!(
+                    "could not restore a take from its pooled copy ({e})"
+                ));
+                false
+            }
+        }
+    }
+
     /// Boot-time recovery of hard-kill orphaned take recordings. Returns the
     /// number of takes recovered.
     ///
@@ -1268,16 +1316,26 @@ impl Persistence {
         // power cut soon after that save can bring the never-flushed staging
         // file back holding older bytes, whose own hash matches nothing (see
         // AssetStore::imported_hash_of).
+        let mut restored = None;
         if let Some(imported) = AssetStore::imported_hash_of(file) {
             if referenced.contains(&imported) {
                 self.note_pooled(file, &imported);
                 return Ok(RecoveryOutcome::Junk);
             }
+            // Pooled, but the save's rows never committed (a power cut
+            // between the pool write and the commit), and the staging file
+            // came back holding older, shorter bytes: the pooled copy is
+            // the whole take. Recovered from it, the take is complete, and
+            // the pooled file is its asset rather than an orphan the sweep
+            // trashes.
+            if self.restore_from_pool(file, &imported) {
+                restored = Some(imported);
+            }
         }
         let (hashes, i) = prefetched;
-        let hash = match hashes.of(i) {
-            Some(hash) => hash,
-            None => AssetStore::sha256_of_file(file)?,
+        let hash = match (restored, hashes.of(i)) {
+            (Some(hash), _) | (None, Some(hash)) => hash,
+            (None, None) => AssetStore::sha256_of_file(file)?,
         };
         if referenced.contains(&hash) {
             self.note_pooled(file, &hash);

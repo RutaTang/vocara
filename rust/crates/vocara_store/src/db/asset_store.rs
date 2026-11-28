@@ -454,6 +454,11 @@ impl AssetStore {
 
             let id = new_id();
             let stamp = self.writer.stamp();
+            // Created now by the real clock, not the HLC's wall: the GC's
+            // grace window reads these, and a clock once set ahead keeps the
+            // HLC ahead on every boot after it (by design, for LWW), which
+            // stamped every asset in the future: never old enough to sweep.
+            let created = now_ms();
             self.db.insert(&AssetRow {
                 id: id.clone(),
                 content_hash: staged.hash.clone(),
@@ -461,8 +466,8 @@ impl AssetStore {
                 ext: ext.to_string(),
                 kind: kind.to_string(),
                 local_rel_path: Some(rel.clone()),
-                created_at: stamp.at(),
-                updated_at: stamp.at(),
+                created_at: created,
+                updated_at: created,
                 hlc_wall: stamp.hlc.wall_ms,
                 hlc_ctr: stamp.hlc.counter,
                 hlc_node: stamp.hlc.node.clone(),
@@ -1224,9 +1229,14 @@ impl AssetStore {
                 continue;
             }
             // The age grace window (see doc): a young unreferenced row is
-            // treated as in flight, not as garbage.
+            // treated as in flight, not as garbage. A row stamped more than
+            // [`FUTURE_STAMP_SLACK_MS`] ahead of now is not young: rows are
+            // stamped by the real clock now, so only a row from a clock once
+            // set ahead (stamped by the HLC's wall, before) can be, and it
+            // would otherwise wait until real time caught up.
             let newest = created_at.max(updated_at);
-            if now_ms.saturating_sub(newest) < min_age_ms {
+            let from_a_clock_set_ahead = newest > now_ms.saturating_add(FUTURE_STAMP_SLACK_MS);
+            if !from_a_clock_set_ahead && now_ms.saturating_sub(newest) < min_age_ms {
                 continue;
             }
 
@@ -1695,6 +1705,11 @@ fn now_micros() -> i64 {
 }
 
 /// Wall time, epoch milliseconds (`DateTime.now().millisecondsSinceEpoch`).
+/// How far ahead of now an asset row may be stamped and still count as in
+/// flight for the GC's grace window (see `sweep_unreferenced_with`): past
+/// it, the stamp is a clock's, set ahead, not a recent write's.
+const FUTURE_STAMP_SLACK_MS: i64 = 24 * 60 * 60 * 1000;
+
 fn now_ms() -> i64 {
     now_micros().div_euclid(1000)
 }

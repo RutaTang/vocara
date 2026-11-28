@@ -49,6 +49,66 @@ fn now_ms() -> i64 {
         .as_millis() as i64
 }
 
+/// A clock once set a year ahead keeps the HLC ahead on every boot after
+/// it (for LWW). An asset imported then is stamped by the real clock, so it
+/// ages as any other and is swept once unreferenced past the grace window;
+/// a row stamped by that clock before (more than a day ahead) is not taken
+/// for one in flight either.
+#[test]
+fn a_clock_once_set_ahead_does_not_keep_unreferenced_assets_forever() {
+    use std::sync::Arc;
+    use vocara_store::sync::hlc::HlcClock;
+    use vocara_store::sync::sync_writer::SyncWriter;
+    let _g = shared();
+    let f = Fixture::new();
+    let year_ahead = now_ms() + 365 * 24 * 60 * 60 * 1000;
+    let clock = HlcClock::new(super::node()).with_initial(Hlc::new(year_ahead, 0, super::node()));
+    let writer = Arc::new(SyncWriter::new(f.db.clone(), Arc::new(clock)));
+    let store = AssetStore::new(f.db.clone(), f.root().to_path_buf(), writer);
+    let id = store
+        .import_file(
+            &f.make_src("ahead.wav", &[4, 5, 6]),
+            AssetStore::DEFAULT_KIND,
+        )
+        .unwrap();
+    let row = f.asset(&id);
+    assert!(row.hlc_wall >= year_ahead, "the HLC stays ahead, for LWW");
+    assert!(
+        (row.created_at - now_ms()).abs() < 60_000,
+        "created by the real clock: {}",
+        row.created_at
+    );
+    // A row the clock set ahead stamped before this fix.
+    f.db.insert(&AssetRow {
+        id: pad_id("LEGACY"),
+        content_hash: "HASH_LEGACY".to_string(),
+        byte_size: 3,
+        ext: "wav".to_string(),
+        kind: "audio".to_string(),
+        local_rel_path: Some("legacy.wav".to_string()),
+        created_at: year_ahead,
+        updated_at: year_ahead,
+        hlc_wall: year_ahead,
+        hlc_ctr: 0,
+        hlc_node: super::node(),
+        hlc_packed: Hlc::new(year_ahead, 0, super::node()).packed(),
+        ..Default::default()
+    })
+    .unwrap();
+    ack_journal(&f);
+    // A grace window of a minute: the fresh import is in flight, the row
+    // stamped a year ahead is not.
+    let swept = store
+        .sweep_unreferenced(std::time::Duration::from_secs(60))
+        .unwrap();
+    assert_eq!(swept, 1);
+    assert!(f.asset(&pad_id("LEGACY")).deleted_at.is_some());
+    assert!(f.asset(&id).deleted_at.is_none());
+    // Past the window, the import goes too.
+    assert_eq!(store.sweep_unreferenced(ZERO).unwrap(), 1);
+    assert!(f.asset(&id).deleted_at.is_some());
+}
+
 #[test]
 fn sweep_tombstones_and_deletes_a_wholly_unreferenced_asset() {
     let _g = shared();

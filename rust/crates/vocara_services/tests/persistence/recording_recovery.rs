@@ -988,6 +988,34 @@ fn a_take_whose_staging_copy_lost_its_last_writes_to_a_power_cut_is_not_recovere
 }
 
 #[test]
+fn a_take_pooled_but_not_saved_when_the_power_went_is_recovered_whole() {
+    // The save pooled the take (its file, its asset row) but the power went
+    // before its clip rows committed; the recorder never flushed the staging
+    // file, so it comes back shorter. The take comes back whole, from the
+    // pooled copy, and that copy is its asset, not an orphan to trash.
+    let m = Memory::new();
+    let practice = create_practice(&m);
+    let full = mono_wav(4800);
+    let staged = stage_orphan(&m.root, &practice.id, &full, None);
+    m.assets()
+        .import_file(&text(&staged), AssetStore::DEFAULT_KIND)
+        .unwrap();
+    fs::write(&staged, mono_wav(2400)).unwrap();
+
+    let before = reload(&m, &practice.id).vocal_tracks.len();
+    assert_eq!(recover(&m, &fake_analyze()), 1);
+    let reloaded = reload(&m, &practice.id);
+    assert_eq!(reloaded.vocal_tracks.len(), before + 1);
+    let clip = &reloaded.vocal_tracks.last().unwrap().clips[0];
+    assert_eq!(
+        fs::read(&clip.audio_file_path).unwrap(),
+        full,
+        "recovered from the pooled copy"
+    );
+    assert_eq!(m.assets().sweep_orphan_pool_files().unwrap(), 0);
+}
+
+#[test]
 fn a_held_back_recording_keeps_its_recorded_hash_through_the_sweep() {
     // The hash a save recorded is what tells a power-cut leftover from an
     // orphan (see above); a boot whose attempt failed must not sweep it away
