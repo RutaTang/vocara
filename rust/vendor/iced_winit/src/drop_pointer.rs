@@ -54,6 +54,7 @@ pub fn position(
 /// A point in a view's coordinates (`flipped`: y runs down, else up from
 /// the bottom), `size` points large, as physical pixels from its top left
 /// at `scale`; `None` outside it.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn from_view(
     point: (f64, f64),
     size: (f64, f64),
