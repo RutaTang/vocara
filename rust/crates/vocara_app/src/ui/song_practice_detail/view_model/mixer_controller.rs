@@ -164,6 +164,16 @@ fn reachable_buses<'a>(
     result
 }
 
+/// `sends` less those into `bus_id` (all of them kept for the master, which
+/// no send targets): what a channel keeps when its output moves to that bus.
+fn without_sends_to(sends: &[TrackSend], bus_id: Option<&str>) -> Vec<TrackSend> {
+    sends
+        .iter()
+        .filter(|s| Some(s.bus_id.as_str()) != bus_id)
+        .cloned()
+        .collect()
+}
+
 /// `{for (final b in buses) b.id: b}`: a later bus wins a duplicate id.
 fn buses_by_id<B: Borrow<FxBus>>(buses: &[B]) -> HashMap<&str, &FxBus> {
     buses
@@ -922,7 +932,8 @@ impl MixerController {
     // --- Aux sends (post-fader, to FX buses) --------------------------------
 
     /// Adds a post-fader send from a take to `bus_id` (max [`MAX_SENDS`], no
-    /// dupes).
+    /// dupes, and never to the bus its output already feeds: the bus would
+    /// hear the take twice).
     #[must_use = "the view model saves the edited model when it is Some"]
     pub fn add_track_send(
         &mut self,
@@ -931,7 +942,10 @@ impl MixerController {
         bus_id: &str,
     ) -> Option<SaveRequest> {
         let track = host.track_by_id(track_id)?;
-        if track.sends.len() >= MAX_SENDS || track.sends.iter().any(|s| s.bus_id == bus_id) {
+        if track.sends.len() >= MAX_SENDS
+            || track.sends.iter().any(|s| s.bus_id == bus_id)
+            || track.bus_id.as_deref() == Some(bus_id)
+        {
             return None;
         }
         host.update_track(track_id, &|t| {
@@ -989,7 +1003,9 @@ impl MixerController {
         if track.sends[slot].bus_id == bus_id {
             return None;
         }
-        if track.sends.iter().any(|s| s.bus_id == bus_id) {
+        // The output's bus likewise: it already hears the take.
+        if track.sends.iter().any(|s| s.bus_id == bus_id) || track.bus_id.as_deref() == Some(bus_id)
+        {
             return None;
         }
         let mut next = track.sends.clone();
@@ -1048,6 +1064,7 @@ impl MixerController {
         if bus_id == target_bus_id
             || bus.sends.len() >= MAX_SENDS
             || bus.sends.iter().any(|s| s.bus_id == target_bus_id)
+            || bus.output_bus_id.as_deref() == Some(target_bus_id)
         {
             return None;
         }
@@ -1110,7 +1127,9 @@ impl MixerController {
         if bus.sends[slot].bus_id == target_bus_id {
             return None;
         }
-        if bus.sends.iter().any(|s| s.bus_id == target_bus_id) {
+        if bus.sends.iter().any(|s| s.bus_id == target_bus_id)
+            || bus.output_bus_id.as_deref() == Some(target_bus_id)
+        {
             return None;
         }
         if self.bus_route_would_cycle(host, bus_id, Some(target_bus_id)) {
@@ -1347,8 +1366,9 @@ impl MixerController {
         Some(SaveRequest)
     }
 
-    /// Routes a vocal take's output to `bus_id` (`None` = master). Triggers a
-    /// rebuild.
+    /// Routes a vocal take's output to `bus_id` (`None` = master). A send the
+    /// take had into that bus goes: the output feeds the bus now, and the
+    /// send beside it fed it the take a second time. Triggers a rebuild.
     pub fn set_track_bus(
         &mut self,
         host: &mut dyn MixerHost,
@@ -1357,6 +1377,7 @@ impl MixerController {
     ) -> SaveRequest {
         host.update_track(track_id, &|t| AudioTrack {
             bus_id: bus_id.map(str::to_string),
+            sends: without_sends_to(&t.sends, bus_id),
             ..t.clone()
         });
         self.notify();
@@ -1404,8 +1425,9 @@ impl MixerController {
     }
 
     /// Routes a bus's output to another bus, or to the master
-    /// (`output_bus_id` `None`). Self-routing and feedback loops are refused.
-    /// Rebuilds.
+    /// (`output_bus_id` `None`). Self-routing and feedback loops are refused;
+    /// a send into the new output's bus goes, as [`Self::set_track_bus`]'s
+    /// does. Rebuilds.
     #[must_use = "the view model saves the edited model when it is Some"]
     pub fn set_bus_output(
         &mut self,
@@ -1424,6 +1446,7 @@ impl MixerController {
         let next = SongPractice {
             fx_buses: with_bus(&practice.fx_buses, bus_id, |b| FxBus {
                 output_bus_id: output_bus_id.map(str::to_string),
+                sends: without_sends_to(&b.sends, output_bus_id),
                 ..b.clone()
             }),
             ..practice.clone()

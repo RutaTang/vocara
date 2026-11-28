@@ -1208,11 +1208,28 @@ fn the_offer_sets_never_feed_a_bus_twice() {
     let targets = vec![&a, &b, &c];
     let sends = vec![TrackSend::new("a", 0.0), TrackSend::new("b", 0.0)];
     let ids = |v: Vec<&FxBus>| v.iter().map(|b| b.id.clone()).collect::<Vec<_>>();
-    assert_eq!(ids(addable_targets(&sends, &targets)), vec!["c"]);
-    assert_eq!(ids(retarget_options(&sends, 0, &targets)), vec!["a", "c"]);
-    assert_eq!(ids(retarget_options(&sends, 1, &targets)), vec!["b", "c"]);
-    assert!(can_add_send(&sends, &targets));
-    assert!(!can_add_send(&sends, &[&a, &b]));
+    assert_eq!(ids(addable_targets(&sends, None, &targets)), vec!["c"]);
+    assert_eq!(
+        ids(retarget_options(&sends, 0, None, &targets)),
+        vec!["a", "c"]
+    );
+    assert_eq!(
+        ids(retarget_options(&sends, 1, None, &targets)),
+        vec!["b", "c"]
+    );
+    assert!(can_add_send(&sends, None, &targets));
+    assert!(!can_add_send(&sends, None, &[&a, &b]));
+    // The output's bus is fed already: no send offers it.
+    assert!(addable_targets(&sends, Some("c"), &targets).is_empty());
+    assert!(!can_add_send(&sends, Some("c"), &targets));
+    assert_eq!(
+        ids(retarget_options(&sends, 0, Some("c"), &targets)),
+        vec!["a"]
+    );
+    assert_eq!(
+        ids(addable_targets(&[], Some("b"), &targets)),
+        vec!["a", "c"]
+    );
     assert_eq!(send_name("b", &targets), "B");
     assert_eq!(send_name("zz", &targets), "—");
     let buses = vec![Arc::new(a.clone()), Arc::new(b.clone())];
