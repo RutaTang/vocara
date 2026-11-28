@@ -294,8 +294,8 @@ pub struct Vpio {
     owner: u64,
     /// Raised by another engine's open: release the mic (see [`make_room`]).
     release: Arc<AtomicBool>,
-    /// The device IO buffer sizes this open changed, put back when it closes. A field, so it
-    /// drops after [`Drop::drop`] has stopped the unit.
+    /// The device IO buffer sizes this open changed, put back when it closes: by
+    /// [`Drop::drop`], once the unit is stopped and before it leaves the registry.
     _io: IoRestore,
     /// What [`Vpio::measure_latency`] reads: the devices the legs run on, the rate the mic
     /// element delivers at, and whether the take passes through the echo canceller.
@@ -469,6 +469,8 @@ fn make_room(owner: u64) {
                     start.elapsed().as_millis()
                 ),
             );
+            // A holder whose stop failed parked its unit as it let go.
+            reap_leaked(owner);
             return;
         }
         if start.elapsed() >= RELEASE_WAIT {
@@ -991,7 +993,6 @@ impl Vpio {
 
 impl Drop for Vpio {
     fn drop(&mut self) {
-        units().live.retain(|l| l.id != self.id);
         // Stop (joins the RT callback) BEFORE the contexts are freed: no callback runs afterward.
         if let Err(st) = self.stop() {
             // The stop failed, so a callback may still be inside. Its refcons are the addresses
@@ -1012,7 +1013,14 @@ impl Drop for Vpio {
                 _out: self._out.take(),
             });
         }
-        // `_io` drops after this: the device buffer sizes go back (for a leaked unit too).
+        // The device buffer sizes go back (for a leaked unit too), and only then does the unit
+        // leave the registry. Another engine's open waits in [`make_room`] until it is gone from
+        // there: it must find this unit stopped and disposed (or parked), and the devices at
+        // the sizes they had before this unit retuned them. Gone from the registry first, that
+        // open initialized its unit under this one's teardown, read this unit's 256 frames as
+        // the devices' own, and then had them put back under it.
+        drop(IoRestore(std::mem::take(&mut self._io.0)));
+        units().live.retain(|l| l.id != self.id);
     }
 }
 
