@@ -407,6 +407,21 @@ pub(super) fn word_at(value: &Value, index: usize, upstream: bool) -> (usize, us
     (first, first + graphemes(word))
 }
 
+/// The word a double click at `index` selects: the word holding the
+/// character there, or the one before it when `upstream`
+/// ([`word_at`]), so a click at a word's start selects that word alone
+/// (iced's took the word before the position as well). Past the end of
+/// the text, the last word, as before.
+fn double_click_word(value: &Value, index: usize, upstream: bool) -> (usize, usize) {
+    if index >= value.len() {
+        return (
+            value.previous_start_of_word(index),
+            value.next_end_of_word(index),
+        );
+    }
+    word_at(value, index, upstream)
+}
+
 /// Focuses the field's `state` (a click, a right-click, a focus
 /// operation), the caret shown afresh.
 fn focus(state: &mut State) {
@@ -701,20 +716,13 @@ impl<'a, Message: Clone + 'a> Widget<Message, Theme, Renderer> for TextInput<'a,
                             state.is_dragging = Some(Drag::Select);
                         }
                         click::Kind::Double => {
-                            let position = find_cursor_position(
-                                text_layout.bounds(),
-                                &self.value,
-                                state,
-                                target,
-                            )
-                            .unwrap_or(0);
+                            let (index, upstream) =
+                                self.position_at(state, text_layout.bounds(), cursor_position.x);
+                            let word = double_click_word(&self.value, index, upstream);
 
-                            state.cursor.select_range(
-                                self.value.previous_start_of_word(position),
-                                self.value.next_end_of_word(position),
-                            );
+                            state.cursor.select_range(word.0, word.1);
 
-                            state.is_dragging = Some(Drag::SelectWords { anchor: position });
+                            state.is_dragging = Some(Drag::SelectWords { anchor: word });
                         }
                         click::Kind::Triple => {
                             state.cursor.select_all(&self.value);
@@ -775,9 +783,10 @@ impl<'a, Message: Clone + 'a> Widget<Message, Theme, Renderer> for TextInput<'a,
             | Event::Touch(touch::Event::FingerMoved { position, .. }) => {
                 let state = state(tree);
 
-                if let Some(is_dragging) = &state.is_dragging {
+                if let Some(is_dragging) = state.is_dragging {
                     let text_layout = layout.children().next().unwrap();
 
+                    let position_x = position.x;
                     let target = position.x - text_layout.bounds().x;
 
                     let value = self.value.clone();
@@ -796,16 +805,13 @@ impl<'a, Message: Clone + 'a> Widget<Message, Theme, Renderer> for TextInput<'a,
                                 .select_range(state.cursor.start(&value), position);
                         }
                         Drag::SelectWords { anchor } => {
-                            if position < *anchor {
-                                state.cursor.select_range(
-                                    self.value.previous_start_of_word(position),
-                                    self.value.next_end_of_word(*anchor),
-                                );
+                            let (index, upstream) =
+                                self.position_at(state, text_layout.bounds(), position_x);
+                            let word = double_click_word(&value, index, upstream);
+                            if word.0 < anchor.0 {
+                                state.cursor.select_range(word.0, anchor.1);
                             } else {
-                                state.cursor.select_range(
-                                    self.value.previous_start_of_word(*anchor),
-                                    self.value.next_end_of_word(position),
-                                );
+                                state.cursor.select_range(anchor.0, word.1.max(anchor.1));
                             }
                         }
                     }
@@ -1706,10 +1712,13 @@ struct Focus {
     is_window_focused: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 enum Drag {
     Select,
-    SelectWords { anchor: usize },
+    /// Words from a double click, `anchor` the word it selected first.
+    SelectWords {
+        anchor: (usize, usize),
+    },
 }
 
 impl State {

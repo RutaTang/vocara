@@ -360,6 +360,57 @@ fn a_selection_shows_no_caret_and_an_unfocused_window_none_either() {
     ));
 }
 
+/// A double click at a word's start selects that word alone, as on
+/// macOS: iced's field took the word before the position too ("four five"
+/// for a click on the "f" of "five"). A double click inside a word, and a
+/// drag after it, select whole words still.
+#[test]
+fn a_double_click_at_a_words_start_selects_that_word_alone() {
+    let value = "one two three four five six";
+    let double = [
+        press(mouse::Button::Left),
+        release(mouse::Button::Left),
+        press(mouse::Button::Left),
+        release(mouse::Button::Left),
+    ];
+    let t0 = Instant::now();
+    // Just inside the "f" of "five": the position at the word's start.
+    let mut window = window();
+    let start = Point::new(TEXT_X + width("one two three four ") + 1.0, MIDDLE);
+    window.run(field(value), start, &double, t0);
+    let (messages, _) = window.run(field(value), start, &[typed("X")], t0);
+    assert_eq!(
+        input_of(messages).as_deref(),
+        Some("one two three four X six")
+    );
+    // In the middle of a word: that word.
+    let mut window = self::window();
+    let middle = Point::new(TEXT_X + width("one two thr"), MIDDLE);
+    window.run(field(value), middle, &double, t0);
+    let (messages, _) = window.run(field(value), middle, &[typed("X")], t0);
+    assert_eq!(
+        input_of(messages).as_deref(),
+        Some("one two X four five six")
+    );
+    // Held after the double click and dragged on to "six": the words from
+    // "five" to it, not "four".
+    let mut window = self::window();
+    window.run(
+        field(value),
+        start,
+        &[
+            press(mouse::Button::Left),
+            release(mouse::Button::Left),
+            press(mouse::Button::Left),
+        ],
+        t0,
+    );
+    let six = Point::new(TEXT_X + width("one two three four five si"), MIDDLE);
+    window.run(field(value), six, &[release(mouse::Button::Left)], t0);
+    let (messages, _) = window.run(field(value), six, &[typed("X")], t0);
+    assert_eq!(input_of(messages).as_deref(), Some("one two three four X"));
+}
+
 // ------------------------------------------------------------------- menu
 
 #[test]
