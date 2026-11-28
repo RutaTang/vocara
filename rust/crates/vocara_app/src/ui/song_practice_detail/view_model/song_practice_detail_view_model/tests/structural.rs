@@ -1143,6 +1143,67 @@ fn a_new_take_numbers_past_a_recovered_take() {
     assert_eq!(names.last().map(String::as_str), Some("Take 4"));
 }
 
+#[test]
+fn every_new_take_is_given_the_colour_after_the_last_ones() {
+    // Coloured by a hash of its id, a copy wore the colour of the take
+    // right above it, one take in five; no take had a colour of its own.
+    use vocara_model::models::audio_track::TAKE_COLORS;
+    let [coral, ochre, sage, periwinkle, lilac] = TAKE_COLORS;
+    let coloured = |t: AudioTrack, c: i64| AudioTrack {
+        color_value: Some(c),
+        ..t
+    };
+    let (f, mut s) = Fixture::open(Setup {
+        practice: seed_practice(Some(vec![
+            coloured(take("single", "Take 1", "/pool/take1.wav"), coral),
+            coloured(take("two", "Take 2", "/pool/take2.wav"), ochre),
+        ])),
+        ..Setup::default()
+    });
+    let colour_of = |s: &Screen, name: &str| {
+        s.practice()
+            .vocal_tracks
+            .iter()
+            .find(|t| t.display_name == name)
+            .and_then(|t| t.color_value)
+    };
+    s.act(|vm| vm.new_take());
+    s.settle();
+    assert_eq!(colour_of(&s, "Take 3"), Some(sage));
+    s.act(|vm| vm.duplicate_track("single"));
+    s.settle();
+    assert_eq!(colour_of(&s, "Take 1 copy"), Some(periwinkle));
+    let call = s.call(|vm| vm.add_vocal_take("/src/guide.wav"));
+    s.await_reply(call);
+    s.settle();
+    assert_eq!(colour_of(&s, "guide"), Some(lilac));
+    set_position(&mut s, 500);
+    s.act(|vm| vm.split_track_at_playhead("single"));
+    s.settle();
+    assert_eq!(colour_of(&s, "Take 1 (2)"), Some(coral));
+    // The take split keeps its own.
+    assert_eq!(colour_of(&s, "Take 1"), Some(coral));
+    // Saved with it.
+    let stored: Vec<Option<i64>> = f
+        .repo
+        .stored()
+        .vocal_tracks
+        .iter()
+        .map(|t| t.color_value)
+        .collect();
+    assert_eq!(
+        stored,
+        [
+            Some(coral),
+            Some(coral),
+            Some(periwinkle),
+            Some(ochre),
+            Some(sage),
+            Some(lilac)
+        ]
+    );
+}
+
 // --- Save serialization --------------------------------------------------------------
 
 #[test]

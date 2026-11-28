@@ -1301,6 +1301,8 @@ impl SongPracticeDetailViewModel {
         // raw value would be filed under no interpretation at all and never
         // appear.
         track.version_id = practice.active_version().map(|v| v.id.clone());
+        // The next colour, as a DAW gives each new track.
+        track.color_value = Some(practice.next_take_color());
         let track_id = track.id.clone();
         let mut next = (*practice).clone();
         next.vocal_tracks.push(Arc::new(track));
@@ -1832,6 +1834,9 @@ impl SongPracticeDetailViewModel {
             id: new_id(),
             display_name: format!("{} copy", live.display_name),
             created_at: DateTime::now(),
+            // A new take: the next colour, not its source's, so the copy
+            // under it tells apart from it.
+            color_value: Some(cur.next_take_color()),
             clips: live
                 .clips
                 .iter()
@@ -2102,6 +2107,8 @@ impl SongPracticeDetailViewModel {
             technique_markers: second_markers,
             display_name: format!("{} (2)", live.display_name),
             created_at: DateTime::now(),
+            // A new take: the next colour, as every new take gets.
+            color_value: Some(cur.next_take_color()),
             ..(*live).clone()
         };
         list[idx] = Arc::new(first);

@@ -5,7 +5,9 @@ use std::sync::Arc;
 
 use serde_json::{json, Value};
 use vocara_model::models::audio_fx::TrackFx;
-use vocara_model::models::audio_track::{AudioTrack, AudioTrackKind};
+use vocara_model::models::audio_track::{
+    default_take_color_index, AudioTrack, AudioTrackKind, TAKE_COLORS,
+};
 use vocara_model::models::fx_bus::FxBus;
 use vocara_model::models::lyric_line::LyricLine;
 use vocara_model::models::practice_note::PracticeNote;
@@ -340,6 +342,61 @@ fn an_absurd_take_number_neither_throws_nor_wraps_negative() {
         practice_with(&["Take 2", "Take 1000000"]).next_take_number(),
         1000001
     );
+}
+
+// --- SongPractice take colours ---
+
+/// A take `id` made `minute` minutes into 2026, coloured `color`.
+fn take_made(id: &str, minute: i64, color: Option<i64>) -> Arc<AudioTrack> {
+    let made =
+        DateTime::from_millis_since_epoch(d2026().millis_since_epoch() + minute * 60_000, false)
+            .expect("a time");
+    Arc::new(AudioTrack {
+        created_at: made,
+        color_value: color,
+        ..vocal(id, None)
+    })
+}
+
+fn practice_of(takes: Vec<Arc<AudioTrack>>) -> SongPractice {
+    SongPractice {
+        vocal_tracks: takes,
+        ..base()
+    }
+}
+
+#[test]
+fn a_new_take_gets_the_colour_after_the_newest_takes() {
+    // Hashed from each take's id, three takes in six wore sage, one of them
+    // right under the take it was duplicated from, and no take wore lilac.
+    let [coral, ochre, sage, periwinkle, lilac] = TAKE_COLORS;
+    assert_eq!(practice_of(Vec::new()).next_take_color(), coral);
+    let p = practice_of(vec![take_made("a", 0, Some(coral))]);
+    assert_eq!(p.next_take_color(), ochre);
+    // The newest by when it was made, wherever it is listed.
+    let p = practice_of(vec![
+        take_made("a", 5, Some(periwinkle)),
+        take_made("b", 0, Some(sage)),
+    ]);
+    assert_eq!(p.next_take_color(), lilac);
+    // After the last colour, the first again.
+    let p = practice_of(vec![take_made("a", 0, Some(lilac))]);
+    assert_eq!(p.next_take_color(), coral);
+    // A take with no colour of its own counts as the one it shows.
+    let shown = TAKE_COLORS[default_take_color_index("old")];
+    let after = TAKE_COLORS[(default_take_color_index("old") + 1) % TAKE_COLORS.len()];
+    assert_ne!(shown, after);
+    let p = practice_of(vec![take_made("old", 0, None)]);
+    assert_eq!(p.next_take_color(), after);
+    // One off the palette (an old saturated tint) starts it over.
+    let p = practice_of(vec![take_made("a", 0, Some(0xFF00_FF00))]);
+    assert_eq!(p.next_take_color(), coral);
+    // Made in the same instant, the one listed last is the newest.
+    let p = practice_of(vec![
+        take_made("a", 0, Some(coral)),
+        take_made("b", 0, Some(sage)),
+    ]);
+    assert_eq!(p.next_take_color(), periwinkle);
 }
 
 #[test]

@@ -53,13 +53,7 @@ use crate::ui::core::widgets::studio_text::studio_text;
 /// colour per track of equal lightness ([`Studio::TRACK_COLORS`]). The menu
 /// offered Dart's sixteen saturated tints, which matched no default colour
 /// and none of the design's.
-pub const TRACK_COLOR_PALETTE: [i64; 5] = [
-    0xFFD98C7E, // coral
-    0xFFC9A46E, // ochre
-    0xFF6FB39A, // sage
-    0xFF8FA3D9, // periwinkle
-    0xFFB48FD0, // lilac
-];
+pub const TRACK_COLOR_PALETTE: [i64; 5] = vocara_model::models::audio_track::TAKE_COLORS;
 
 /// Dart's `Color(value)`: an ARGB int (its low 32 bits) as a color.
 pub fn argb(value: i64) -> Color {

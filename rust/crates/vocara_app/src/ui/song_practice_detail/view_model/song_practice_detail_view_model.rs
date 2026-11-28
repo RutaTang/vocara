@@ -852,6 +852,7 @@ impl Core {
         // Resolved, like create_empty_vocal_take: a recording or import must
         // land in an interpretation that is shown.
         track.version_id = target;
+        track.color_value = Some(practice.next_take_color());
         let id = track.id.clone();
         let mut next = practice.clone();
         next.vocal_tracks.push(Arc::new(track));
