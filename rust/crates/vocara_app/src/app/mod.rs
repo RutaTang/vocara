@@ -844,7 +844,8 @@ impl App {
                 // toolbar and the snack bars, under the dialogs. Its slot
                 // stays when empty, so the dialogs keep theirs. It takes
                 // every press over it; one in the title-bar band that
-                // nothing in it took is the window's.
+                // nothing in it took is the window's (a video's picture
+                // takes its own).
                 let (top, page) = running.router.top();
                 layers = layers.push(page.overlay(top).map_or_else(
                     || Space::new().width(Length::Fill).height(Length::Fill).into(),

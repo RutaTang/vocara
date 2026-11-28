@@ -393,9 +393,10 @@ impl TechniqueVideoPlayer {
 
     /// The fullscreen route's page while the video is fullscreen: the video
     /// filling the window over black, its own controls over it; it takes
-    /// every key (its shortcuts first). Every click on it is taken as well,
-    /// by the app's backdrop around the page's overlay
-    /// (`toolbar::window_backdrop`), which stands in for an `opaque` here.
+    /// every key (its shortcuts first). Every click on it is taken as well:
+    /// by the controls, which cover the whole picture, and by the app's
+    /// backdrop around the page's overlay (`toolbar::window_backdrop`),
+    /// which stands in for an `opaque` here.
     pub fn fullscreen_view(&self) -> Option<Element<'_, Message>> {
         if !self.fullscreen || !self.transport.has_player() {
             return None;

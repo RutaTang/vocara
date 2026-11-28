@@ -577,15 +577,15 @@ fn a_fullscreen_video_covers_the_whole_window_and_takes_its_keys() {
         ],
     );
     assert!(technique(&app).1.overlay().is_some());
-    // Covered, the band is still the window's (it could not be moved while
-    // a video was fullscreen), and the page beneath takes nothing.
+    // Covered, the band is the video's, whose double press leaves
+    // fullscreen: a press there moves and zooms no window (a double click
+    // left fullscreen and zoomed the window too), and the page beneath
+    // takes nothing.
     let covered = drag_the_bar(&app);
-    assert!(drags(&covered), "{covered:?}");
     assert!(
-        covered.iter().all(|m| matches!(
-            m,
-            app::Message::DragWindow | app::Message::Technique(_, Message::Media(_))
-        )),
+        covered
+            .iter()
+            .all(|m| matches!(m, app::Message::Technique(_, Message::Media(_)))),
         "{covered:?}"
     );
     // Escape reaches the video, not the page under it.

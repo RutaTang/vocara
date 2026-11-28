@@ -1320,6 +1320,11 @@ impl<M> Widget<M, Theme, Renderer> for VideoControls<'_, M> {
                     }
                     (Some(_), _) if left => {
                         state.tap = Some(VideoTap { at: p });
+                        // The recognizer's to win: nothing around the video
+                        // takes the press too. The window's title-bar band
+                        // did, under the fullscreen view, and the double
+                        // press that left fullscreen zoomed the window.
+                        shell.capture_event();
                     }
                     _ => {}
                 }
