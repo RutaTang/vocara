@@ -512,6 +512,8 @@ pub struct PopupMenu<'a, M> {
     menu: Element<'a, M>,
     picked: Rc<Cell<bool>>,
     opens: Opens,
+    /// What it reports as the menu opens.
+    on_open: Vec<M>,
 }
 
 impl<'a, M: Clone + 'a> PopupMenu<'a, M> {
@@ -528,7 +530,15 @@ impl<'a, M: Clone + 'a> PopupMenu<'a, M> {
             menu: menu_card(items, width, &picked),
             picked,
             opens,
+            on_open: Vec::new(),
         }
+    }
+
+    /// Reports `messages` as the menu opens, before any pick (a strip
+    /// selects its channel as its right-click menu opens).
+    pub fn on_open(mut self, messages: Vec<M>) -> Self {
+        self.on_open = messages;
+        self
     }
 }
 
@@ -725,6 +735,9 @@ impl<'a, M: Clone + 'a> Widget<M, Theme, Renderer> for PopupMenu<'a, M> {
         // scrolled, so a click where a row had been picked another.
         if !was_open && state.open.is_some() {
             tree.children[1] = Tree::new(&self.menu);
+            for m in &self.on_open {
+                shell.publish(m.clone());
+            }
         }
     }
 

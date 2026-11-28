@@ -162,8 +162,14 @@ impl Default for MicInput {
 pub enum Message {
     /// `vm.selectTrack(id)`: a take's strip was clicked.
     SelectTrack { id: String },
-    /// `vm.selectBus(id)`: a bus's strip was clicked.
+    /// `vm.selectBus(id)`: a bus's strip was clicked, or right-clicked for
+    /// its menu.
     SelectBus { id: String },
+    /// A take's strip was right-clicked for its menu: the take is selected
+    /// as the menu opens, as the arrange's lanes select theirs, a clip
+    /// selected on it staying so. The menu opened over another take's
+    /// selection, offering to delete a take the inspector did not show.
+    SelectTrackForMenu { id: String },
     /// `vm.mixer.toggleMute(id)`.
     ToggleMute { id: String },
     /// `vm.mixer.toggleSolo(id)`.
@@ -802,6 +808,7 @@ fn track_channel<'a>(
         ROUTE_MENU_WIDTH,
         Opens::AtSecondaryPress,
     )
+    .on_open(vec![Message::SelectTrackForMenu { id: id.to_string() }])
     .into()
 }
 
@@ -898,6 +905,7 @@ fn bus_channel<'a>(b: &'a FxBus, selected: bool, buses: &'a [Arc<FxBus>]) -> Ele
         ROUTE_MENU_WIDTH,
         Opens::AtSecondaryPress,
     )
+    .on_open(vec![Message::SelectBus { id: id.to_string() }])
     .into()
 }
 

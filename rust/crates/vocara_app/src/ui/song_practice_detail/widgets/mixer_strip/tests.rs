@@ -652,8 +652,35 @@ fn a_strip_selects_its_take_and_its_buttons_reach_the_take() {
             Message::SelectTrack { id: "t1".into() },
             Message::ToggleMute { id: "t0".into() },
             Message::ToggleSolo { id: "t1".into() },
+            // Selected as its menu opens.
+            Message::SelectTrackForMenu { id: "t1".into() },
             Message::DeleteTrack { id: "t1".into() },
         ]
+    );
+}
+
+// A right click on a strip opened its menu with the selection left on
+// another strip, so the menu's delete was for a take the inspector did not
+// show.
+#[test]
+fn a_right_click_selects_the_strips_channel_as_its_menu_opens() {
+    let tracks = takes(0..2);
+    let buses = vec![fx_bus("bus1", "Verb")];
+    let mut ui = simulator(STRIP, desk(&tracks, &buses, true).view());
+    let title = text_at(&mut ui, "Take 0", 0).expect("t0's title");
+    ui.point_at(title.center());
+    let _ = ui.simulate([right_press(), right_release()]);
+    assert_eq!(
+        ui.into_messages().collect::<Vec<_>>(),
+        vec![Message::SelectTrackForMenu { id: "t0".into() }]
+    );
+    let mut ui = simulator(STRIP, desk(&tracks, &buses, true).view());
+    let title = text_at(&mut ui, "Verb", 0).expect("the bus's title");
+    ui.point_at(title.center());
+    let _ = ui.simulate([right_press(), right_release()]);
+    assert_eq!(
+        ui.into_messages().collect::<Vec<_>>(),
+        vec![Message::SelectBus { id: "bus1".into() }]
     );
 }
 
@@ -785,7 +812,10 @@ mod deleting_a_bus_asks_first {
         ui.point_at(title.center());
         let _ = ui.simulate([right_press(), right_release()]);
         ui.click(nth("Delete bus", 0)).expect("the menu's delete");
-        assert_eq!(ui.into_messages().collect::<Vec<_>>(), vec![delete()]);
+        assert_eq!(
+            ui.into_messages().collect::<Vec<_>>(),
+            vec![Message::SelectBus { id: "b1".into() }, delete()]
+        );
     }
 
     #[test]
@@ -813,10 +843,13 @@ mod deleting_a_bus_asks_first {
         ui.click(nth("Rename", 0)).expect("Rename");
         assert_eq!(
             ui.into_messages().collect::<Vec<_>>(),
-            vec![Message::RenameBus {
-                id: "b1".into(),
-                current: "Lead Vox".into()
-            }]
+            vec![
+                Message::SelectBus { id: "b1".into() },
+                Message::RenameBus {
+                    id: "b1".into(),
+                    current: "Lead Vox".into()
+                }
+            ]
         );
     }
 
@@ -843,7 +876,10 @@ mod deleting_a_bus_asks_first {
         ui.point_at(add.center());
         let _ = ui.simulate([right_press(), right_release()]);
         assert!(text_at(&mut ui, "Rename", 0).is_none(), "closed again");
-        assert!(ui.into_messages().next().is_none());
+        // Only the bus each opening selected.
+        assert!(ui
+            .into_messages()
+            .all(|m| m == Message::SelectBus { id: "b1".into() }));
     }
 }
 

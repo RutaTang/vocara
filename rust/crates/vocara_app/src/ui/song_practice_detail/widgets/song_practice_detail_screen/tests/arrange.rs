@@ -288,6 +288,29 @@ fn a_right_press_selects_the_clip_or_take_before_its_menu_opens() {
     assert_eq!(h.vm().selected_clip_id(), Some("c2"));
 }
 
+// The mixer's strips: a right click opened the menu of one take while the
+// inspector stayed on another.
+#[test]
+fn a_right_press_on_a_mixer_strip_selects_its_take_as_the_arrange_does() {
+    let mut h = two_takes();
+    let menu_of = |id: &str| {
+        Message::Dock(bottom_dock::Message::Mixer(
+            mixer_strip::Message::SelectTrackForMenu { id: id.into() },
+        ))
+    };
+    assert_eq!(h.vm().selected_track_id(), Some("t1"));
+    h.send(menu_of("t2"));
+    assert_eq!(h.vm().selected_track_id(), Some("t2"));
+    // On the take already selected, its selected clip stays so.
+    h.send(Message::Row {
+        track_id: "t1".into(),
+        message: track_row::Message::SelectClip("c2".into()),
+    });
+    h.send(menu_of("t1"));
+    assert_eq!(h.vm().selected_track_id(), Some("t1"));
+    assert_eq!(h.vm().selected_clip_id(), Some("c2"));
+}
+
 // "Delete this clip?" did not say which, over overlapping clips.
 #[test]
 fn the_delete_clip_question_names_the_clip_by_its_take_and_start() {
