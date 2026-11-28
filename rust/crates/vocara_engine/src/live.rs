@@ -1218,18 +1218,26 @@ impl EngineHandle {
         // false only after dropping — i.e. joining — every stream, and sets true before
         // building one), so everything can be freed immediately. Poisoned lock → assume a
         // renderer is running (conservative: fall through to the grace-epoch path).
-        let idle = self.renderer_gate.lock().map(|g| !*g).unwrap_or(false);
+        //
+        // The gate stays locked until the retirees are freed: the live graph's carry points at
+        // one of them (see `Graph::take_carry`), so a stream the host raised the gate for in
+        // between, its first block taking that carry, would read a graph being freed. Held, the
+        // host's raise waits for the frees, and that block finds the carry dropped.
+        let gate = self.renderer_gate.lock();
+        let idle = gate.as_ref().map(|g| !**g).unwrap_or(false);
         if idle {
             // No block will take the live graph's carry before these are freed: drop it.
             // SAFETY: the cell's graph is alive while the cell is; the carry is an atomic.
             let _ = unsafe { &*self.cell.load() }.take_carry();
             for (ptr, _) in self.retired.drain(..) {
-                // SAFETY: the gate read proved no stream callback exists, and any stream the
-                // host starts later loads the CURRENT cell value — this retiree is unreachable.
+                // SAFETY: the gate, held false, proves no stream callback exists until it is
+                // released, and the carry that could reach this retiree is dropped above.
                 unsafe { drop(Box::from_raw(ptr)) };
             }
+            drop(gate);
             return;
         }
+        drop(gate);
 
         let now = self.shared.blocks.load(Ordering::Acquire);
         let mut i = 0;
