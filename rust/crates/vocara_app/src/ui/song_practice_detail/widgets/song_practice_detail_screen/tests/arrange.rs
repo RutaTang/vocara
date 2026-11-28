@@ -1,4 +1,5 @@
-//! The arrange on the page: where the interpretation menu opens.
+//! The arrange on the page: where the interpretation menu opens, and the
+//! rows keeping their places as the backing switches.
 
 use super::*;
 
@@ -27,4 +28,22 @@ fn the_interpretation_menu_opens_under_its_button_wherever_it_is_pressed() {
         row.x < label.x + label.width / 2.0,
         "from the button's left edge, not the press: {row:?}, {label:?}"
     );
+}
+
+// Switching an Accompaniment to an empty Original moved every row below the
+// backing by 4 px: its drop zone was taller than the lane it stood in for.
+#[test]
+fn the_rows_below_the_backing_stay_put_as_the_backing_switches() {
+    let mut p = practice(vec![take("t1", "Take 1")]);
+    p.accompaniment = Some(Arc::new(backing()));
+    let mut h = Harness::open(Setup {
+        practice: p,
+        ..Setup::default()
+    });
+    let takes = |h: &Harness| h.find("Vocal takes").expect("the takes header").bounds();
+    let before = takes(&h);
+    h.send(Message::SetPlayReference(true));
+    h.settle();
+    assert!(h.shows("Drag the original song here, or click to browse"));
+    assert_eq!(takes(&h), before);
 }

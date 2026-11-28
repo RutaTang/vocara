@@ -76,7 +76,7 @@ use crate::ui::song_practice_detail::widgets::track_context_menu::{
 use crate::ui::song_practice_detail::widgets::track_row::{bus_color, channel_color};
 use crate::ui::song_practice_detail::widgets::track_row::{
     header_frame, header_name, take_color, track_menu_button, track_row, TIMELINE_H_MARGIN,
-    TRACK_HEADER_W,
+    TRACK_HEADER_W, TRACK_ROW_HEIGHT,
 };
 use crate::ui::song_practice_detail::widgets::vocal_tract_engine;
 use crate::ui::song_practice_detail::widgets::vocal_tract_view::{self, VocalTract};
@@ -757,12 +757,18 @@ impl SongPracticeDetailScreen {
             .style(bare_button)
             .width(Length::Fill)
             .on_press(Message::Browse(zone.clone()));
-        let padded = container(tap).padding(Padding {
-            top: 4.0,
-            right: 10.0,
-            bottom: 8.0,
-            left: 14.0,
-        });
+        // As tall as the lane it stands in for: 4 px taller, the switch
+        // between an empty Original and a set Accompaniment (or a first
+        // take landing) moved every row below it.
+        let inset = (TRACK_ROW_HEIGHT - DROP_HINT_HEIGHT) / 2.0;
+        let padded = container(tap)
+            .padding(Padding {
+                top: inset,
+                right: 10.0,
+                bottom: inset,
+                left: 14.0,
+            })
+            .height(TRACK_ROW_HEIGHT);
         // The playhead goes on across the box, as across the rows.
         drop_zone(with_playhead(padded.into(), playhead), zone)
     }
