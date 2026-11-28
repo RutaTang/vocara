@@ -69,6 +69,9 @@ pub(crate) struct FakeInstaller {
     pub(crate) fails_with: Mutex<Option<String>>,
     /// How many images it installed.
     pub(crate) installs: AtomicUsize,
+    /// When set, the next install waits here, Installing, until a send (or
+    /// the sender's drop) lets it go on.
+    pub(crate) held: Mutex<Option<mpsc::Receiver<()>>>,
 }
 
 impl Installer for FakeInstaller {
@@ -79,6 +82,11 @@ impl Installer for FakeInstaller {
     fn install(&self, request: &InstallRequest<'_>) -> Result<(), String> {
         if let Some(e) = self.fails_with.lock().unwrap().clone() {
             return Err(e);
+        }
+        // Verifying and staging, which take the Mac's installer seconds.
+        let held = self.held.lock().unwrap().take();
+        if let Some(held) = held {
+            let _ = held.recv();
         }
         // As the Mac's installer does, right before it starts the helper.
         if !(request.clear_to_swap)() {

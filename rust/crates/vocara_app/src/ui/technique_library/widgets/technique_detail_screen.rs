@@ -91,6 +91,7 @@ use vocara_model::util::dart_string;
 use vocara_services::audio_exporter::PickError;
 use vocara_services::media_player::{MediaPlayerFactory, SystemMediaPlayers};
 use vocara_services::mic_recording_controller::MicRecordingController;
+use vocara_services::self_update::SelfUpdate;
 use vocara_store::sync::sync_engine::RemoteApplied;
 
 use super::media::example_players::ExamplePlayers;
@@ -118,6 +119,7 @@ use crate::ui::core::widgets::text_field::editor as text_editor;
 use crate::ui::core::widgets::toolbar;
 use crate::ui::core::widgets::visible_drop_target::unclaimed_drop;
 use crate::ui::snack::{fixed_bar, SnackEvent, SnackQueue, SnackStyle};
+use crate::ui::song_practice_detail::widgets::song_practice_detail_screen::RECORD_AFTER_THE_UPDATE;
 use crate::ui::song_practice_detail::widgets::voiceprint_view::{
     self as voiceprint, VoiceprintState,
 };
@@ -509,6 +511,9 @@ pub struct TechniqueDetailScreen {
     shown: Shown,
     /// The snack bars: the first shows, the rest wait their turn.
     snacks: SnackQueue,
+    /// The app's self-update: Record is refused while it installs (see
+    /// `RECORD_AFTER_THE_UPDATE`).
+    self_update: Arc<SelfUpdate>,
 }
 
 impl std::fmt::Debug for TechniqueDetailScreen {
@@ -563,6 +568,7 @@ impl TechniqueDetailScreen {
             form: None,
             shown: Shown::default(),
             snacks: SnackQueue::new(),
+            self_update: Arc::clone(&services.self_update),
         };
         let mut step = Step::new();
         screen.absorb(next, &mut step);
@@ -713,8 +719,24 @@ impl TechniqueDetailScreen {
             }
             Message::Analysis(m) => {
                 let allow_practice = !self.edit_view();
-                let next = analysis::update(&mut self.vm, &mut self.voiceprint, m, allow_practice);
-                self.absorb(next, &mut step);
+                // Record, not once an update installs: it relaunches Vocara
+                // in seconds, and the quit would stop the take where it is
+                // (a take started earlier is waited for, and holds the
+                // update). Asked under the update's lock, so the install's
+                // last look before its swap sees this start, or this sees
+                // the install.
+                let record = matches!(m, analysis::Message::Record);
+                let (vm, voiceprint) = (&mut self.vm, &mut self.voiceprint);
+                let update = || analysis::update(vm, voiceprint, m, allow_practice);
+                let next = if record {
+                    self.self_update.unless_installing(update)
+                } else {
+                    Some(update())
+                };
+                match next {
+                    Some(next) => self.absorb(next, &mut step),
+                    None => self.snack_into(RECORD_AFTER_THE_UPDATE),
+                }
             }
             Message::Landed(done) => {
                 let next = self.vm.land(done);
@@ -1018,7 +1040,20 @@ impl TechniqueDetailScreen {
             }
             MediaEvent::Export(id) => self.vm.export_media(&id),
             MediaEvent::ToggleExpand(id) => self.vm.toggle_example_expanded(&id),
-            MediaEvent::StartRecord => self.vm.start_example_recording(),
+            // As the practice take's Record (see `handle`).
+            MediaEvent::StartRecord => {
+                let vm = &mut self.vm;
+                match self
+                    .self_update
+                    .unless_installing(|| vm.start_example_recording())
+                {
+                    Some(next) => next,
+                    None => {
+                        self.snack_into(RECORD_AFTER_THE_UPDATE);
+                        return;
+                    }
+                }
+            }
             MediaEvent::StopRecord => self.vm.stop_example_recording(),
             MediaEvent::Position(at) => {
                 self.vm.set_playhead_from_playback(at);
