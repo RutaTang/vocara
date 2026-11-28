@@ -1293,18 +1293,23 @@ impl Harness {
             .count()
     }
 
-    /// Drops `paths` at `at`, as the OS does.
+    /// Drops `paths` at `at`, as the OS does: one event per file, each
+    /// after a move to the pointer (macOS's event loop reads it there, see
+    /// `visible_drop_target`).
     fn drop_at(&mut self, at: Point, paths: &[&str]) {
         let messages: Vec<Message> = {
             let mut ui = self.ui();
             ui.point_at(at);
+            let moved = || IcedEvent::Mouse(iced::mouse::Event::CursorMoved { position: at });
             let mut events = Vec::new();
             for p in paths {
+                events.push(moved());
                 events.push(IcedEvent::Window(window::Event::FileHovered(
                     PathBuf::from(p),
                 )));
             }
             for p in paths {
+                events.push(moved());
                 events.push(IcedEvent::Window(window::Event::FileDropped(
                     PathBuf::from(p),
                 )));

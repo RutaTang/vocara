@@ -1145,33 +1145,24 @@ async fn run_instance<P>(
                             // vocara: a file hovering or dropped is judged
                             // where the pointer is, which winit does not
                             // report during a drag in from another app (see
-                            // `drop_pointer`): the cursor moves there first.
+                            // `drop_pointer`): the cursor moves there first,
+                            // unless it is there already.
                             if matches!(
                                 window_event,
                                 winit::event::WindowEvent::HoveredFile(_)
                                     | winit::event::WindowEvent::DroppedFile(_)
                             ) {
-                                if let Some(position) =
-                                    drop_pointer::position(&window.raw)
-                                {
-                                    // A dummy device id only names the
-                                    // device; nothing reads it back.
-                                    let moved = winit::event::WindowEvent::CursorMoved {
-                                        device_id: winit::event::DeviceId::dummy(),
-                                        position,
-                                    };
-                                    window.state.update(
+                                if let Some(position) = drop_pointer::moved(
+                                    window.state.cursor_position(),
+                                    drop_pointer::position(&window.raw),
+                                ) {
+                                    synthesize(
                                         &program,
-                                        &window.raw,
-                                        &moved,
+                                        id,
+                                        window,
+                                        drop_pointer::cursor_moved(position),
+                                        &mut events,
                                     );
-                                    if let Some(event) = conversion::window_event(
-                                        moved,
-                                        window.state.scale_factor(),
-                                        window.state.modifiers(),
-                                    ) {
-                                        events.push((id, event));
-                                    }
                                 }
                             }
                             window.state.update(
@@ -1386,6 +1377,30 @@ async fn run_instance<P>(
     }
 
     let _ = ManuallyDrop::into_inner(user_interfaces);
+}
+
+/// vocara: hands `window` a pointer event winit did not report (see
+/// `drop_pointer`), as if it had: the window's state follows it, and its
+/// interface gets it with the window's other events.
+fn synthesize<P, C>(
+    program: &program::Instance<P>,
+    id: window::Id,
+    window: &mut window::Window<P, C>,
+    event: winit::event::WindowEvent,
+    events: &mut Vec<(window::Id, core::Event)>,
+) where
+    P: Program,
+    C: Compositor<Renderer = P::Renderer>,
+    P::Theme: theme::Base,
+{
+    window.state.update(program, &window.raw, &event);
+    if let Some(event) = conversion::window_event(
+        event,
+        window.state.scale_factor(),
+        window.state.modifiers(),
+    ) {
+        events.push((id, event));
+    }
 }
 
 /// Builds a window's [`UserInterface`] for the [`Program`].

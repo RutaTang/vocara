@@ -18,8 +18,10 @@
 //! saw, gathers the files of one drop (consecutive `FileDropped` events) and
 //! hands them over together, as desktop_drop's `onDragDone` did. Platform
 //! note: winit reports no pointer movement during an external drag on macOS,
-//! so the position judged there is the last one before the drag entered the
-//! window; with no position known at all the drop is refused, never guessed.
+//! so the event loop reads the pointer from AppKit and moves the cursor
+//! there as a file hovers or drops (the vendored iced_winit's
+//! `drop_pointer`); a move is no other event that ends a drop. With no
+//! position known at all the drop is refused, never guessed.
 
 use std::path::PathBuf;
 
@@ -78,6 +80,20 @@ fn reaches(bounds: Rectangle, cursor: mouse::Cursor) -> bool {
     cursor.position_over(bounds).is_some()
 }
 
+/// Whether `event` ends a drop whose files are arriving: any event but
+/// another file of it, or the pointer moving. On macOS the event loop moves
+/// the cursor to the pointer as a drop comes in (winit reports no pointer
+/// during a drag in from another app), and a move between two files of one
+/// drop split it into one drop per file: the song page took the first and
+/// refused the rest while it was busy with it.
+fn ends_drop(event: &Event) -> bool {
+    !matches!(
+        event,
+        Event::Window(window::Event::FileDropped(_))
+            | Event::Mouse(mouse::Event::CursorMoved { .. })
+    )
+}
+
 impl<'a, M: 'a> From<VisibleDropTarget<'a, M>> for Element<'a, M> {
     fn from(target: VisibleDropTarget<'a, M>) -> Self {
         let VisibleDropTarget {
@@ -103,8 +119,7 @@ impl<'a, M: 'a> From<VisibleDropTarget<'a, M>> for Element<'a, M> {
                     };
                 // The files of one drop arrive back to back; the first other
                 // event ends the drop.
-                if state.dropping && !matches!(event, Event::Window(window::Event::FileDropped(_)))
-                {
+                if state.dropping && ends_drop(event) {
                     state.dropping = false;
                     let files = std::mem::take(&mut state.files);
                     if state.reached && !files.is_empty() {
@@ -186,6 +201,28 @@ mod tests {
                 Msg::Hover(false),
                 Msg::Drop(vec!["/a.wav".into(), "/b.wav".into()])
             ]
+        );
+    }
+
+    #[test]
+    fn a_drop_of_several_files_with_a_move_before_each_is_one_drop() {
+        // The event loop moves the cursor to the pointer before a dropped
+        // file: each move ended the drop, and three files made three drops.
+        let mut ui = iced_test::simulator(container(target()));
+        let at = Point::new(100.0, 100.0);
+        ui.point_at(at);
+        let moved = || Event::Mouse(mouse::Event::CursorMoved { position: at });
+        let dropped = |p: &str| Event::Window(window::Event::FileDropped(PathBuf::from(p)));
+        let _ = ui.simulate([
+            moved(),
+            dropped("/a.wav"),
+            moved(),
+            dropped("/b.wav"),
+            Event::Window(window::Event::RedrawRequested(Instant::now())),
+        ]);
+        assert_eq!(
+            ui.into_messages().collect::<Vec<_>>(),
+            vec![Msg::Drop(vec!["/a.wav".into(), "/b.wav".into()])]
         );
     }
 

@@ -278,18 +278,23 @@ impl Harness {
         ui.into_messages().collect()
     }
 
-    /// Drops `paths` at `at`, as the OS does.
+    /// Drops `paths` at `at`, as the OS does: one event per file, each
+    /// after a move to the pointer (macOS's event loop reads it there, see
+    /// `visible_drop_target`).
     fn drop_at(&mut self, at: Point, paths: &[&str]) {
         let messages: Vec<Message> = {
             let mut ui = self.ui();
             ui.point_at(at);
+            let moved = || IcedEvent::Mouse(iced::mouse::Event::CursorMoved { position: at });
             let mut events = Vec::new();
             for p in paths {
+                events.push(moved());
                 events.push(IcedEvent::Window(window::Event::FileHovered(
                     PathBuf::from(p),
                 )));
             }
             for p in paths {
+                events.push(moved());
                 events.push(IcedEvent::Window(window::Event::FileDropped(
                     PathBuf::from(p),
                 )));
@@ -454,6 +459,26 @@ fn dropping_only_unsupported_files_reports_the_skip() {
         Some("No supported audio or video files in the drop."),
         "a drop that imports nothing must say so"
     );
+}
+
+// A drop of two clips adds both. Split into a drop per file (see
+// `drop_at`), the second came while the first imported, and the view model
+// let it go without a word.
+#[test]
+fn a_drop_of_two_clips_adds_both() {
+    let setup = Setup::new(twang(ID, vec![])).media(FakeMedia::sandbox());
+    let mut h = Harness::loaded(setup);
+    h.edit();
+    let zone = h.find(ADD_FIRST).expect("the add zone").center();
+    h.drop_at(zone, &["/tmp/a.wav", "/tmp/b.m4a"]);
+    h.settle();
+    let added: Vec<String> = h
+        .vm()
+        .effective_media()
+        .iter()
+        .map(|m| m.path.clone())
+        .collect();
+    assert_eq!(added, ["/sandbox/a.wav", "/sandbox/b.m4a"]);
 }
 
 // technique_media_pool_guard_test: 'a lone clip refused for its size says

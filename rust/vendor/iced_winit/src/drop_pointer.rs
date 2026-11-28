@@ -7,7 +7,33 @@
 //! judged there, and the app's drop targets (which take a drop only where a
 //! click would land) refused it. The event loop asks [`position`] when a
 //! file hovers over or is dropped on the window, and moves the cursor there
-//! first, as if the pointer had moved.
+//! first, as if the pointer had moved ([`moved`]): only where it is not
+//! already. winit reports each file of a drop on its own, and a move before
+//! each but the first (to where the cursor was) ended the drop in the app's
+//! targets, which split one drop of several files into one drop per file.
+
+use winit::dpi::PhysicalPosition;
+
+/// Where the cursor moves to for the pointer `read` over the window, from
+/// where the window has it (`cursor`): `None` when the pointer is where
+/// the cursor is already, or was not read (off the content).
+pub fn moved(
+    cursor: Option<PhysicalPosition<f64>>,
+    read: Option<PhysicalPosition<f64>>,
+) -> Option<PhysicalPosition<f64>> {
+    read.filter(|position| cursor != Some(*position))
+}
+
+/// winit's event for the pointer moving to `position`. A dummy device id
+/// only names the device; nothing reads it back.
+pub fn cursor_moved(
+    position: PhysicalPosition<f64>,
+) -> winit::event::WindowEvent {
+    winit::event::WindowEvent::CursorMoved {
+        device_id: winit::event::DeviceId::dummy(),
+        position,
+    }
+}
 
 /// The pointer's position over `window`'s content, in physical pixels from
 /// its top left, read from AppKit; `None` off macOS, off the main thread, or
@@ -71,7 +97,22 @@ pub fn from_view(
 
 #[cfg(test)]
 mod tests {
-    use super::from_view;
+    use super::{PhysicalPosition, from_view, moved};
+
+    #[test]
+    fn the_cursor_moves_only_to_where_it_is_not() {
+        let at = |x, y| PhysicalPosition::new(x, y);
+        // A drop's first file: the cursor was where the drag came in.
+        assert_eq!(
+            moved(Some(at(10.0, 10.0)), Some(at(300.0, 200.0))),
+            Some(at(300.0, 200.0))
+        );
+        assert_eq!(moved(None, Some(at(300.0, 200.0))), Some(at(300.0, 200.0)));
+        // Its next files: the cursor is there already.
+        assert_eq!(moved(Some(at(300.0, 200.0)), Some(at(300.0, 200.0))), None);
+        // The pointer off the content: the cursor stays.
+        assert_eq!(moved(Some(at(300.0, 200.0)), None), None);
+    }
 
     #[test]
     fn a_point_in_an_unflipped_view_is_measured_from_its_top() {
