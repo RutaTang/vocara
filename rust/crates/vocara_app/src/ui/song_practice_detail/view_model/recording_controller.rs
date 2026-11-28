@@ -90,6 +90,7 @@ use vocara_model::util::id::new_id;
 use vocara_services::app_settings_service::AppSettingsService;
 use vocara_services::audio_edit_service::trim_wav_head_in_place;
 use vocara_services::audio_file_service::{probe_wav, AudioFiles};
+use vocara_services::engine::media::MAX_PLAYBACK_DURATION;
 use vocara_services::graph_audio_playback_service::{GraphAudioPlaybackService, SyncError};
 use vocara_services::mic_permission;
 use vocara_services::mic_recording_controller::{
@@ -903,6 +904,17 @@ impl RecordingController {
 
     /// The device watch's period.
     pub const DEVICE_WATCH_PERIOD: Duration = Duration::from_secs(1);
+
+    /// How long a take may run before the device watch stops it: a few
+    /// seconds short of [`MAX_PLAYBACK_DURATION`], the longest audio the
+    /// take's analysis (and every later decode of it) accepts. Nothing else
+    /// stopped a take short of the engine's six-hour WAV limit, so a take past
+    /// an hour was recorded, then failed its analysis at Stop: nothing was
+    /// staged, and boot recovery, which analyzes the same way, failed it on
+    /// every launch. The margin covers a watch tick (one a second) and the
+    /// stop's tail.
+    const TAKE_LENGTH_LIMIT: Duration =
+        MAX_PLAYBACK_DURATION.saturating_sub(Duration::from_secs(3));
 
     /// The monitor meter's period.
     pub const MONITOR_METER_PERIOD: Duration = Duration::from_millis(50);
@@ -2684,11 +2696,17 @@ impl RecordingController {
             // describe, so the engine stopped feeding the writer. Finalize
             // now: the file on disk is valid and complete up to the limit, and
             // the recording clock would otherwise keep running over audio
-            // nothing is storing.
+            // nothing is storing. Unreachable while the length limit below
+            // stops every take within the hour; kept as the engine's backstop.
             host.toast(
                 "Recording reached the six-hour maximum length. \
                  The take was saved up to that point.",
             );
+            self.stop_take();
+        }
+        if self.is_recording() && self.taken_ms() >= Self::TAKE_LENGTH_LIMIT.as_millis() as f64 {
+            // See TAKE_LENGTH_LIMIT: stopped here, the take is kept whole.
+            host.toast(&take_length_limit_notice());
             self.stop_take();
         }
         if events & GraphAudioPlaybackService::EVENT_INPUT_LOST != 0 {
@@ -2799,6 +2817,14 @@ impl Drop for RecordingController {
 /// and the take was stopped for it.
 const RECORD_WRITE_FAILED_NOTICE: &str = "Recording stopped: the take could not be written to \
      disk, which may be full. What was recorded up to then is being saved.";
+
+/// What the song page says when a take reached the longest one it keeps.
+fn take_length_limit_notice() -> String {
+    format!(
+        "Takes can be up to {} minutes. This one stopped at that length and was saved.",
+        MAX_PLAYBACK_DURATION.as_secs() / 60
+    )
+}
 
 /// The finalize's read of the stopped take (the busy gate's action, on a
 /// worker). `Err` is the finalize throwing.

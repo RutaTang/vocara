@@ -2206,6 +2206,32 @@ fn a_failed_write_stops_the_take_at_once_and_keeps_what_landed() {
     assert_eq!(mic.s().stop_calls, 1);
 }
 
+/// A take is stopped a few seconds short of the hour the take's analysis
+/// accepts, and kept: recorded on past it, it failed its analysis at Stop,
+/// was never staged, and boot recovery failed it on every launch.
+#[test]
+fn a_take_reaching_the_length_limit_is_stopped_and_kept() {
+    let f = finalizer();
+    let graph = Graph::new();
+    let mic = FakeMic::new(&f);
+    let mut s = Screen::new(Opts::new(&f).mic(&mic).graph(&graph));
+    s.record();
+    let limit_frames = RecordingController::TAKE_LENGTH_LIMIT.as_millis() as u64 * 48;
+    graph.s().written_frames = limit_frames - 48_000;
+    s.watch_tick();
+    assert!(s.c.is_recording(), "a second short of the limit it goes on");
+    graph.s().written_frames = limit_frames;
+    s.watch_tick();
+    assert!(!s.c.is_recording(), "one tick at the limit stops it");
+    assert!(s.pump_until(|s| !s.c.is_stopping()));
+    assert_eq!(
+        s.host.toasts,
+        ["Takes can be up to 60 minutes. This one stopped at that length and was saved."]
+    );
+    assert_eq!(s.saves, 1, "the take lands");
+    assert!(RecordingController::TAKE_LENGTH_LIMIT < MAX_PLAYBACK_DURATION);
+}
+
 #[test]
 fn a_lost_input_stops_every_consumer_with_one_notice() {
     let f = finalizer();
