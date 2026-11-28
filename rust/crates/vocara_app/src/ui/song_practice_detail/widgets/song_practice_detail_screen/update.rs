@@ -857,6 +857,14 @@ impl SongPracticeDetailScreen {
         }
         let now = Instant::now();
         let clock = self.vocal_tract.clock(live, self.vm.position(), now);
+        // Whose voice it reads: a formant one voice's frame misses is not
+        // filled in from another's.
+        if live {
+            self.vocal_tract.set_voice(vocal_tract_view::Voice::Live);
+        } else if let Some(take) = self.vm.selected_track() {
+            self.vocal_tract
+                .set_voice(vocal_tract_view::Voice::Take(take.id.clone()));
+        }
         if live {
             match self.vm.analysis().live_vocal_tract() {
                 Some(state) => {

@@ -114,6 +114,19 @@ pub const RANGE_WINDOW: f64 = 2.0;
 pub const TRAIL_WINDOW: f64 = 0.35;
 /// How long a preset takes to turn the head (to 90 %).
 pub const TURN_SETTLE: Duration = Duration::from_millis(320);
+/// How far the clock may move on between two estimates before it counts as
+/// a jump (a seek), across which no formant is carried (s). Estimates come
+/// every frame while the playhead runs, every 30 ms on Live.
+pub const CARRY_JUMP: f64 = 0.5;
+
+/// Whose voice the estimates are (see [`VocalTractState::set_voice`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Voice {
+    /// The microphone's, on Live.
+    Live,
+    /// The take's with this id, at the playhead.
+    Take(String),
+}
 
 /// One voiced estimate, remembered for the bands and the trail.
 #[derive(Clone, Copy, Debug)]
@@ -139,6 +152,13 @@ pub struct VocalTractState {
     /// When Live began (the live clock's zero).
     live_since: Option<Instant>,
     last_frame: Option<Instant>,
+    /// Whose voice the estimates are now.
+    voice: Option<Voice>,
+    /// The formants last found in that voice, which a frame missing one
+    /// keeps (see [`VocalTractState::feed`]).
+    known: Option<[f32; 3]>,
+    /// The clock of the last estimate.
+    last_clock: Option<f64>,
 }
 
 impl Default for VocalTractState {
@@ -163,6 +183,9 @@ impl VocalTractState {
             why_none: None,
             live_since: None,
             last_frame: None,
+            voice: None,
+            known: None,
+            last_clock: None,
         }
     }
 
@@ -263,6 +286,16 @@ impl VocalTractState {
         self.why_none = Some(Status::Unavailable);
     }
 
+    /// Takes in whose voice the estimates are from now on: Live's, or the
+    /// selected take's (the screen, as it feeds). Another voice than the
+    /// last carries nothing over from it ([`VocalTractState::feed`]).
+    pub fn set_voice(&mut self, voice: Voice) {
+        if self.voice.as_ref() != Some(&voice) {
+            self.voice = Some(voice);
+            self.known = None;
+        }
+    }
+
     /// Takes in the estimate for `clock` (`None`: nothing to read, Take
     /// with no take), at `now`.
     pub fn feed(&mut self, estimate: Option<TractPose>, clock: f64, now: Instant) {
@@ -274,14 +307,27 @@ impl VocalTractState {
         let mut pose =
             estimate.unwrap_or_else(|| demo::articulate(&demo::AH, false, Fit::Uncertain));
         // A formant the analysis did not find this frame (0: unknown) keeps
-        // the last one known: gliding it to 0 would read "F2 0 Hz" and put
-        // the vowel map's dot on a vowel nobody sang.
-        if let Some(known) = self.pose.formants() {
+        // the last one found in the same voice: gliding it to 0 would read
+        // "F2 0 Hz" and put the vowel map's dot on a vowel nobody sang. Not
+        // one from another voice (Live, another take: `set_voice`), nor from
+        // before a seek (the clock jumped): that vowel nobody sang here
+        // either.
+        let jumped = self
+            .last_clock
+            .is_some_and(|last| clock < last || clock - last > CARRY_JUMP);
+        self.last_clock = Some(clock);
+        if jumped {
+            self.known = None;
+        }
+        if let Some(known) = self.known {
             for (f, k) in pose.formants.iter_mut().zip(known) {
                 if f.is_nan() || *f <= 0.0 {
                     *f = k;
                 }
             }
+        }
+        if pose.voiced {
+            self.known = Some(pose.formants);
         }
         // The bands and the trail look back from this clock (a seek back
         // forgets what came after it).
@@ -370,6 +416,9 @@ impl VocalTractState {
         self.pose.clear();
         self.history.clear();
         self.live_since = None;
+        self.voice = None;
+        self.known = None;
+        self.last_clock = None;
     }
 
     /// What the panel shows now.

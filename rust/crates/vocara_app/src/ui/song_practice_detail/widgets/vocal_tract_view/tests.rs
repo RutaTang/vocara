@@ -254,6 +254,44 @@ fn a_formant_missing_from_a_voiced_frame_keeps_the_last_one_known() {
     assert_eq!(r.vowel, Some((known[0], known[1])));
 }
 
+/// Live (or take A) sung, then take B selected: a formant B's frame misses
+/// is not A's, nor one from before a seek in B.
+#[test]
+fn a_formant_is_carried_only_within_one_voice_and_not_across_a_seek() {
+    let settle = |st: &mut VocalTractState, from: Instant| {
+        for step in 1..=20 {
+            let at = from + MS * (50 * step);
+            st.update(Message::Frame(at), at);
+        }
+    };
+    let mut missing_f2 = ah();
+    missing_f2.formants = [640.0, 0.0, 0.0];
+    for voice in [Voice::Live, Voice::Take("a".into())] {
+        let mut st = VocalTractState::new();
+        let t0 = Instant::now();
+        st.set_voice(voice);
+        st.feed(Some(ee()), 1.0, t0);
+        st.set_voice(Voice::Take("b".into()));
+        st.feed(Some(missing_f2.clone()), 1.05, t0 + MS * 50);
+        settle(&mut st, t0 + MS * 50);
+        assert_eq!(st.readouts().vowel, None, "no dot at A's vowel");
+        assert_eq!(st.shown().formants[1], 0.0, "a dash, not A's F2");
+    }
+    // Within one take, a seek: what was found before it is not carried.
+    let mut st = VocalTractState::new();
+    let t0 = Instant::now();
+    st.set_voice(Voice::Take("b".into()));
+    st.feed(Some(ee()), 1.0, t0);
+    st.feed(Some(missing_f2.clone()), 30.0, t0 + MS * 50);
+    settle(&mut st, t0 + MS * 50);
+    assert_eq!(st.readouts().vowel, None);
+    // And without one it still is.
+    st.feed(Some(ee()), 30.02, t0 + MS * 1200);
+    st.feed(Some(missing_f2), 30.05, t0 + MS * 1250);
+    settle(&mut st, t0 + MS * 1250);
+    assert_eq!(st.shown().formants[1], ee().formants[1]);
+}
+
 #[test]
 fn a_formant_never_found_reads_as_a_dash_and_puts_no_dot_on_the_map() {
     let mut st = VocalTractState::new();
