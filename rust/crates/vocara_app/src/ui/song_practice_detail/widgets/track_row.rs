@@ -307,33 +307,26 @@ pub fn clip_selected(lane_selected: bool, selected_clip_id: Option<&str>, clip_i
     lane_selected && selected_clip_id.is_none_or(|id| id == clip_id)
 }
 
-/// A lane's colour (`DESIGN.md`, Track colours): a custom tint if set; the
-/// backing's neutral; else the `index`th vocal track's colour
-/// ([`Studio::track_color`], in the order the takes are listed), so takes
-/// read as distinct. The colour never changes with selection (Logic style) —
-/// selection is shown by the header background and the selected clip's
-/// outline only.
-pub fn take_color(track: &AudioTrack, index: usize) -> Color {
-    if let Some(value) = track.color_value {
-        argb(value)
-    } else if track.is_backing() {
-        Studio::TRACK_BACKING
-    } else {
-        Studio::track_color(index)
-    }
+/// A lane's colour (`DESIGN.md`, Track colours) wherever it is drawn: its
+/// lane in the arrange, its mixer strip's cap, the inspector's colour square
+/// and Home's card. A custom tint if set; the backing's neutral; else the
+/// take's own colour, by its id ([`Studio::default_track_color`]). It was
+/// the take's place in the list: duplicating, adding, deleting or
+/// reordering a take recoloured the takes after it. The colour never
+/// changes with selection (Logic style) — selection is shown by the header
+/// background and the selected clip's outline only.
+pub fn take_color(track: &AudioTrack) -> Color {
+    lane_color(&track.id, track.color_value, track.is_backing())
 }
 
-/// A channel's colour wherever it is drawn: its lane in the arrange, its
-/// mixer strip's cap and the inspector's colour square. [`take_color`] at
-/// the take's place among the shown interpretation's vocal takes, which is
-/// the order the arrange lists them in (0 for a track not among them, as
-/// the backing is), so a channel reads as one colour across the window.
-pub fn channel_color(track: &AudioTrack, vocal_takes: &[Arc<AudioTrack>]) -> Color {
-    let index = vocal_takes
-        .iter()
-        .position(|t| t.id == track.id)
-        .unwrap_or(0);
-    take_color(track, index)
+/// [`take_color`] of the track `id`, tinted `color_value`, a `backing` or
+/// a take (for a view that has the track's row, not the track: Home's card).
+pub fn lane_color(id: &str, color_value: Option<i64>, backing: bool) -> Color {
+    match color_value {
+        Some(value) => argb(value),
+        None if backing => Studio::TRACK_BACKING,
+        None => Studio::default_track_color(id),
+    }
 }
 
 /// A bus's colour wherever it is drawn (its lane, its strip, the
@@ -489,7 +482,7 @@ pub fn track_row<'a, M>(
     TrackRow {
         track,
         label: label.into(),
-        color: take_color(track, 0),
+        color: take_color(track),
         timeline_duration_ms,
         view_start_ms: 0,
         position_ms,
@@ -509,7 +502,7 @@ pub fn track_row<'a, M>(
 }
 
 impl<'a, M> TrackRow<'a, M> {
-    /// The lane's colour ([`take_color`]; the first take's until set).
+    /// The lane's colour ([`take_color`] until set).
     pub fn color(mut self, color: Color) -> Self {
         self.color = color;
         self

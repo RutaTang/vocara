@@ -73,7 +73,7 @@ use crate::ui::song_practice_detail::widgets::track_context_menu::{
     bus_context_menu, clip_context_menu, menu_host, studio_menu, track_context_menu, BusMenu,
     MenuAnchor, StudioMenuItem, TrackMenu, MENU_ANCHOR_BELOW_DY,
 };
-use crate::ui::song_practice_detail::widgets::track_row::{bus_color, channel_color};
+use crate::ui::song_practice_detail::widgets::track_row::bus_color;
 use crate::ui::song_practice_detail::widgets::track_row::{
     header_frame, header_name, take_color, track_menu_button, track_row, TIMELINE_H_MARGIN,
     TRACK_HEADER_W, TRACK_ROW_HEIGHT,
@@ -331,7 +331,6 @@ impl SongPracticeDetailScreen {
             selected_bus,
             fx_buses: &practice.fx_buses,
             supports_effects: vm.mixer().supports_effects(),
-            vocal_takes: &self.shown.vocal_takes,
             active_interpretation: practice.active_version().map(|v| v.name.as_str()),
             open_menu: match &self.menu {
                 Some(OpenMenu::Inspector(menu)) => Some(menu),
@@ -383,7 +382,6 @@ impl SongPracticeDetailScreen {
             let settings = vm.app_settings();
             let mixer = MixerStrip {
                 tracks: &self.shown.mixer_tracks,
-                vocal_takes: &self.shown.vocal_takes,
                 buses: &practice.fx_buses,
                 supports_effects: vm.mixer().supports_effects(),
                 selected_track_id: vm.selected_track_id(),
@@ -408,7 +406,7 @@ impl SongPracticeDetailScreen {
                     Some(t) if vocal_tract_engine::readable_take(t) => {
                         vocal_tract_view::Source::Take(
                             &t.display_name,
-                            channel_color(t, &self.shown.vocal_takes),
+                            take_color(t),
                         )
                     }
                     _ => vocal_tract_view::Source::NoTake,
@@ -517,7 +515,7 @@ impl SongPracticeDetailScreen {
         let backing_lane = match backing {
             Some(track) => self.lane(
                 track,
-                take_color(track, 0),
+                take_color(track),
                 DropZone::Backing,
                 dur,
                 view_start,
@@ -552,12 +550,12 @@ impl SongPracticeDetailScreen {
             // lane adds it as a new clip on THAT take (only that lane
             // highlights). The live recording draws on the armed lane itself
             // (Logic / Cubase), so there's no separate REC lane.
-            for (i, t) in self.shown.vocal_takes.iter().enumerate() {
+            for t in &self.shown.vocal_takes {
                 list = list.push(
                     LaneKey::Take(id_key(&t.id)),
                     self.lane(
                         t,
-                        take_color(t, i),
+                        take_color(t),
                         DropZone::Take(t.id.clone()),
                         dur,
                         view_start,

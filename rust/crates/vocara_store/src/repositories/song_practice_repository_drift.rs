@@ -1781,14 +1781,19 @@ impl SongPracticeRepository for SongPracticeRepositoryDrift {
             [],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )?;
-        // (track, practice, vocal, interpretation), in the tracks' order.
-        let tracks: Vec<(String, String, bool, Option<String>)> = self.db.query(
-            "SELECT id, practice_id, kind = 'vocal', interpretation_id FROM tracks \
+        // (track, practice, vocal, interpretation), in the tracks' order,
+        // and each track's tint (the card draws the track in its colour).
+        let tracks: Vec<(String, String, bool, Option<String>, Option<i64>)> = self.db.query(
+            "SELECT id, practice_id, kind = 'vocal', interpretation_id, color_value FROM tracks \
              WHERE deleted_at IS NULL AND kind IN ('vocal', 'accompaniment') \
              ORDER BY practice_id, order_index, created_at, id",
             [],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
         )?;
+        let tints: HashMap<&str, Option<i64>> = tracks
+            .iter()
+            .map(|(id, _, _, _, tint)| (id.as_str(), *tint))
+            .collect();
         // (start, duration, content hash) per track, in the clips' order.
         let mut clips: HashMap<String, Vec<(i64, i64, String)>> = HashMap::new();
         for (track, start, duration, hash) in self.db.query(
@@ -1812,7 +1817,7 @@ impl SongPracticeRepository for SongPracticeRepositoryDrift {
         }
         // Each practice's clips' end, over every track it has.
         let mut ends: HashMap<&str, i64> = HashMap::new();
-        for (track, practice, _, _) in &tracks {
+        for (track, practice, _, _, _) in &tracks {
             for (start, duration, _) in clips.get(track).map_or(&[][..], Vec::as_slice) {
                 let end = ends.entry(practice.as_str()).or_default();
                 *end = (*end).max(start + duration);
@@ -1825,7 +1830,7 @@ impl SongPracticeRepository for SongPracticeRepositoryDrift {
             .map(|(id, _, active)| (id.as_str(), active.as_deref()))
             .collect();
         let mut chosen: HashMap<&str, (&str, PreviewSource, bool)> = HashMap::new();
-        for (track, practice, vocal, interpretation) in &tracks {
+        for (track, practice, vocal, interpretation, _) in &tracks {
             if !clips.contains_key(track) {
                 continue;
             }
@@ -1891,6 +1896,7 @@ impl SongPracticeRepository for SongPracticeRepositoryDrift {
                     })
                     .collect();
                 PracticePreview::compose(id.clone(), length, Some(*source), &drawn)
+                    .of_track(*track, tints.get(track).copied().flatten())
             })
             .collect())
     }

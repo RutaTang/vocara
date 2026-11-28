@@ -666,14 +666,33 @@ fn a_selected_lane_highlights_its_selected_clip_or_all_of_them() {
 #[test]
 fn a_lane_takes_its_tint_its_backing_neutral_or_its_take_color() {
     let mut track = take("t1", 1000, Vec::new());
-    // The takes in order: coral, ochre, sage, periwinkle, lilac, coral...
-    assert_eq!(take_color(&track, 0), Studio::TRACK_CORAL);
-    assert_eq!(take_color(&track, 1), Studio::TRACK_OCHRE);
-    assert_eq!(take_color(&track, 5), Studio::TRACK_CORAL);
+    assert_eq!(take_color(&track), Studio::default_track_color("t1"));
+    assert!(Studio::TRACK_COLORS.contains(&take_color(&track)));
     track.color_value = Some(0xFF5B8DEF);
-    assert_eq!(take_color(&track, 1), argb(0xFF5B8DEF));
+    assert_eq!(take_color(&track), argb(0xFF5B8DEF));
     let backing = AudioTrack::new("acc", AudioTrackKind::Accompaniment, "Backing", created());
-    assert_eq!(take_color(&backing, 0), Studio::TRACK_BACKING);
+    assert_eq!(take_color(&backing), Studio::TRACK_BACKING);
+    assert_eq!(lane_color("acc", None, true), Studio::TRACK_BACKING);
+    assert_eq!(lane_color("t1", Some(0xFF5B8DEF), false), argb(0xFF5B8DEF));
+}
+
+// A take's colour was its place among the takes: duplicating Take 1 turned
+// Take 2 from ochre to sage, and a reorder recoloured them the same way.
+#[test]
+fn a_takes_default_colour_is_its_own_wherever_it_is_listed() {
+    let ids: Vec<String> = (0..12).map(|i| format!("take-{i}")).collect();
+    let colours: Vec<Color> = ids
+        .iter()
+        .map(|id| take_color(&take(id, 1000, Vec::new())))
+        .collect();
+    // The same id, the same colour: nothing else goes into it.
+    for (id, colour) in ids.iter().zip(&colours) {
+        assert_eq!(take_color(&take(id, 1000, Vec::new())), *colour);
+    }
+    // And the ids spread over the palette.
+    let distinct: std::collections::HashSet<[u8; 4]> =
+        colours.iter().map(|c| c.into_rgba8()).collect();
+    assert!(distinct.len() >= 3, "{distinct:?}");
 }
 
 #[test]

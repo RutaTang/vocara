@@ -75,7 +75,7 @@ use super::pitch_lane::{note_vibrato_of, pitch_in_tune_percent, pitch_notes_of, 
 use super::track_context_menu::{
     menu_host, studio_menu, MenuAnchor, StudioMenuItem, MENU_ANCHOR_BELOW_DY,
 };
-use super::track_row::{bus_color, channel_color};
+use super::track_row::{bus_color, take_color};
 use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::theme::{alpha, boxed, fill, font, height, type_scale, Studio};
 use crate::ui::core::widgets::cap_label::cap_label;
@@ -396,8 +396,6 @@ pub struct Inspector<'a> {
     pub fx_buses: &'a [Arc<FxBus>],
     /// `vm.mixer.supportsEffects`: whether the engine runs the inserts.
     pub supports_effects: bool,
-    /// `vm.versions.vocalTakes`: numbers the take ("Take 2").
-    pub vocal_takes: &'a [Arc<AudioTrack>],
     /// `vm.versions.active?.name`.
     pub active_interpretation: Option<&'a str>,
     /// The strip's menu the screen holds open, if any.
@@ -427,40 +425,18 @@ impl Inspector<'_> {
 // ------------------------------------------------------------- pure parts
 
 /// The identity block's colour square: the channel's colour in the arrange
-/// (`track_row::channel_color`: its own tint, else its place among the
-/// shown vocal takes), so the inspector, the lane and the mixer strip read
-/// as one channel.
-pub fn take_dot_color(track: &AudioTrack, vocal_takes: &[Arc<AudioTrack>]) -> Color {
-    channel_color(track, vocal_takes)
-}
-
-/// `_takeLabel`: "Take 2 · Interpretation 1" — the take's place among the
-/// active interpretation's takes ("Take" when it is not among them), then
-/// the interpretation's name when there is one.
-pub fn take_label(
-    track_id: &str,
-    vocal_takes: &[Arc<AudioTrack>],
-    interpretation: Option<&str>,
-) -> String {
-    let number = match vocal_takes.iter().position(|t| t.id == track_id) {
-        Some(i) => format!("Take {}", i + 1),
-        None => "Take".to_string(),
-    };
-    match interpretation {
-        Some(name) => format!("{number} · {name}"),
-        None => number,
-    }
+/// (`track_row::take_color`), so the inspector, the lane and the mixer
+/// strip read as one channel.
+pub fn take_dot_color(track: &AudioTrack) -> Color {
+    take_color(track)
 }
 
 /// The line under a take's name ("Interpretation 1 · 0:39 · Nov 21"): what
-/// it is (the take's label, its number left out when the name already
-/// reads it; "Original" / "Accompaniment" for a backing), its length and
-/// its date.
-pub fn take_subtitle(
-    track: &AudioTrack,
-    vocal_takes: &[Arc<AudioTrack>],
-    interpretation: Option<&str>,
-) -> String {
+/// it is (its interpretation; "Original" / "Accompaniment" for a backing),
+/// its length and its date. Not a number: it read "Take N" by the take's
+/// place in the list, which a reorder made "Take 3" under a take named
+/// "Take 2" (the name above it is the take's own).
+pub fn take_subtitle(track: &AudioTrack, interpretation: Option<&str>) -> String {
     let sub = if track.is_backing() {
         if track.is_reference() {
             "Original".to_string()
@@ -468,13 +444,7 @@ pub fn take_subtitle(
             "Accompaniment".to_string()
         }
     } else {
-        let label = take_label(&track.id, vocal_takes, interpretation);
-        let name = track.display_name.as_str();
-        match label.strip_prefix(name) {
-            Some("") => String::new(),
-            Some(rest) if rest.starts_with(" · ") => rest[" · ".len()..].to_string(),
-            _ => label,
-        }
+        interpretation.unwrap_or_default().to_string()
     };
     let rest = format!(
         "{} · {}",
@@ -957,9 +927,9 @@ fn take_body<'a, M: Clone + 'a>(
     let is_vocal = !track.is_backing() && insp.supports_effects;
     responsive(move |size| {
         let identity = identity_block(
-            take_dot_color(track, insp.vocal_takes),
+            take_dot_color(track),
             &track.display_name,
-            take_subtitle(track, insp.vocal_takes, insp.active_interpretation),
+            take_subtitle(track, insp.active_interpretation),
             // The FX panel's preset row closes the block.
             !is_vocal,
         );

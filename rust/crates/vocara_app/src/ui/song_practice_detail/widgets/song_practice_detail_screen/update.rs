@@ -1727,7 +1727,6 @@ impl SongPracticeDetailScreen {
             selected_bus: None,
             fx_buses: &[],
             supports_effects: false,
-            vocal_takes: &[],
             active_interpretation: None,
             open_menu: None,
         }

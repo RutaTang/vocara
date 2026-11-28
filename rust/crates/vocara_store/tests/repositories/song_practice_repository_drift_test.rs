@@ -404,8 +404,10 @@ fn previews_draw_the_first_take_else_the_backing_from_the_cache() {
             start_ms: 1000,
             ..f.clip_with_peaks("take-a.wav", &[4, 5, 6], &[1.0; 10])
         }],
+        color_value: Some(0xFF5B8DEF),
         ..take("Take 1", version(&a).as_deref())
     };
+    let take_a_id = take_a.id.clone();
     let a = f.save(&SongPractice {
         accompaniment: Some(Arc::new(backing("backing-a.wav", &[0.5; 10]))),
         ..with_takes(&a, vec![take_a])
@@ -427,6 +429,9 @@ fn previews_draw_the_first_take_else_the_backing_from_the_cache() {
     assert_eq!(previews.len(), 3, "the live practices");
     let pa = of(&a.id);
     assert_eq!(pa.source, Some(PreviewSource::Take));
+    // The card draws it in the take's colour: the take, and its tint.
+    assert_eq!(pa.track_id, take_a_id);
+    assert_eq!(pa.color_value, Some(0xFF5B8DEF));
     assert_eq!(pa.length_ms, 6000, "the take's end");
     assert_eq!(pa.peaks.len(), PracticePreview::BUCKETS);
     // The take's peaks (1.0) from its second in; silence before.
@@ -434,6 +439,8 @@ fn previews_draw_the_first_take_else_the_backing_from_the_cache() {
     assert!((pa.peaks[PracticePreview::BUCKETS - 1] - 1.0).abs() < 1e-6);
     let pb = of(&b.id);
     assert_eq!(pb.source, Some(PreviewSource::Backing));
+    assert_eq!(pb.track_id, b.accompaniment.as_ref().expect("its backing").id);
+    assert_eq!(pb.color_value, None);
     assert!(pb.peaks.iter().any(|v| (v - 0.25).abs() < 1e-6));
     let pc = of(&c.id);
     assert_eq!((pc.source, pc.length_ms, pc.peaks.len()), (None, 0, 0));

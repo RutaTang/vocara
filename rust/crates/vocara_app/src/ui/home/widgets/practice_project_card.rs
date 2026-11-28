@@ -36,6 +36,7 @@ use crate::ui::core::theme::{alpha, bare_button, boxed, font, type_scale, Studio
 use crate::ui::core::widgets::animated::{animated_container, Decoration};
 use crate::ui::core::widgets::controls::icon_button;
 use crate::ui::core::widgets::studio_text::studio_text;
+use crate::ui::song_practice_detail::widgets::track_row::lane_color;
 
 /// How long the card takes to lift (`AnimatedContainer`).
 pub const ANIMATION: Duration = Duration::from_millis(120);
@@ -136,20 +137,16 @@ pub fn length_label(ms: i64) -> String {
     }
 }
 
-/// The colour a practice's waveform takes: its take's, one of the track
-/// colours, the same for the practice every time (by its id); the backing's
-/// neutral when it is the backing's.
-pub fn waveform_color(id: &str, source: PreviewSource) -> Color {
-    match source {
-        PreviewSource::Backing => Studio::TRACK_BACKING,
-        PreviewSource::Take => {
-            // FNV-1a: stable across runs and builds.
-            let hash = id.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| {
-                (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
-            });
-            Studio::track_color((hash % Studio::TRACK_COLORS.len() as u64) as usize)
-        }
-    }
+/// The colour a practice's waveform takes: its track's on the practice page
+/// (`track_row::lane_color`: its tint, the backing's neutral, else the
+/// take's own by its id). It was a colour by the practice's id, which
+/// matched no take's.
+pub fn waveform_color(preview: &PracticePreview, source: PreviewSource) -> Color {
+    lane_color(
+        &preview.track_id,
+        preview.color_value,
+        source == PreviewSource::Backing,
+    )
 }
 
 /// `PracticeProjectCard(practice: ..., onOpen: ..., onDelete: ...)`, with
@@ -257,7 +254,7 @@ fn band<'a, M: 'a>(
             .center(Length::Fill),
         );
     } else if let Some((p, source)) = preview.and_then(|p| p.source.map(|s| (p, s))) {
-        let color = alpha(waveform_color(&p.id, source), 0.85);
+        let color = alpha(waveform_color(p, source), 0.85);
         layers = layers.push(
             container(
                 canvas_widget(Waveform {
@@ -400,6 +397,8 @@ mod tests {
             id: id.into(),
             length_ms: 48_000,
             source: Some(PreviewSource::Take),
+            track_id: format!("{id}-take"),
+            color_value: None,
             peaks: (0..PracticePreview::BUCKETS)
                 .map(|i| ((i as f32) / 20.0).sin().abs())
                 .collect(),
@@ -460,20 +459,25 @@ mod tests {
         assert_eq!(length_label(-5), "0:00");
     }
 
+    // The card's waveform took a colour by the practice's id, which matched
+    // no take's: the take it draws reads in its own colour on the page.
     #[test]
-    fn a_practice_keeps_its_waveform_colour_and_a_backing_is_neutral() {
-        let a = waveform_color("practice-a", PreviewSource::Take);
-        assert_eq!(a, waveform_color("practice-a", PreviewSource::Take));
-        assert!(Studio::TRACK_COLORS.contains(&a));
+    fn the_waveform_is_drawn_in_its_takes_colour_and_a_backing_is_neutral() {
+        use crate::ui::song_practice_detail::widgets::track_context_menu::argb;
+        use crate::ui::song_practice_detail::widgets::track_row::take_color;
+        use vocara_model::models::audio_track::{AudioTrack, AudioTrackKind};
+        let wave = preview("P1");
+        let take = AudioTrack::new("P1-take", AudioTrackKind::Vocal, "Take 1", now());
+        assert_eq!(waveform_color(&wave, PreviewSource::Take), take_color(&take));
+        let tinted = wave.clone().of_track("P1-take", Some(0xFF5B8DEF));
         assert_eq!(
-            waveform_color("practice-a", PreviewSource::Backing),
+            waveform_color(&tinted, PreviewSource::Take),
+            argb(0xFF5B8DEF)
+        );
+        assert_eq!(
+            waveform_color(&wave, PreviewSource::Backing),
             Studio::TRACK_BACKING
         );
-        // Practices take different colours of the five.
-        let colours: std::collections::HashSet<[u8; 4]> = (0..40)
-            .map(|i| waveform_color(&format!("p{i}"), PreviewSource::Take).into_rgba8())
-            .collect();
-        assert!(colours.len() >= 4, "{colours:?}");
     }
 
     #[test]
@@ -592,7 +596,7 @@ mod tests {
         // colour wherever the level reaches it; at the band's corner, the
         // well.
         let colour = over(
-            alpha(waveform_color("P1", PreviewSource::Take), 0.85),
+            alpha(waveform_color(&wave, PreviewSource::Take), 0.85),
             Studio::WELL,
         );
         let lit = (14..248)
