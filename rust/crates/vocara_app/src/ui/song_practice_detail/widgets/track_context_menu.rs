@@ -353,7 +353,7 @@ pub fn bus_context_menu<'a>(menu: &BusMenu) -> Element<'a, BusAction> {
 /// the bus's FX chain and every send into it with it, and there is no undo.
 pub fn confirm_delete_bus(bus_name: &str) -> ConfirmDialog {
     ConfirmDialog::new(format!("Delete \"{bus_name}\"?"))
-        .body("Removing this FX bus re-routes anything feeding it to the master.")
+        .body("Removing this FX bus re-routes anything feeding it to Master.")
 }
 
 /// What the clip menu's rows report.

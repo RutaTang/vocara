@@ -390,7 +390,7 @@ fn the_rename_and_delete_bus_prompts_say_what_dart_said() {
     assert_eq!(d.title, "Delete \"Verb\"?");
     assert_eq!(
         d.body.as_deref(),
-        Some("Removing this FX bus re-routes anything feeding it to the master.")
+        Some("Removing this FX bus re-routes anything feeding it to Master.")
     );
     assert_eq!(d.confirm_label, "Delete");
     assert!(d.destructive);
