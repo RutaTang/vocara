@@ -288,6 +288,62 @@ fn a_right_press_selects_the_clip_or_take_before_its_menu_opens() {
     assert_eq!(h.vm().selected_clip_id(), Some("c2"));
 }
 
+// A bus's lane ignored clicks: only its header answered, where a take's
+// empty lane selects the take and opens its menu.
+#[test]
+fn a_click_on_a_buss_lane_selects_it_and_a_right_click_opens_its_menu() {
+    let mut h = with_buses(&["a"]);
+    assert_eq!(h.vm().selected_bus_id(), None);
+    let mut ui = LiveUi::new(h.size);
+    let label = header_label(&h, "Bus a");
+    let lane = Point::new(
+        label.x + track_row::TRACK_HEADER_W + 200.0,
+        label.center_y(),
+    );
+    ui.point_at(lane);
+    let messages = ui.run(h.screen.view(), [live_ui::press(), live_ui::release()]);
+    h.feed(messages);
+    assert_eq!(h.vm().selected_bus_id(), Some("a"));
+    assert_eq!(h.vm().selected_track_id(), None);
+    h.send(Message::Row {
+        track_id: "t1".into(),
+        message: track_row::Message::Select,
+    });
+    let messages = ui.run(h.screen.view(), live_ui::right_click());
+    h.feed(messages);
+    assert_eq!(h.screen.open_menu(), Some(&OpenMenu::Bus("a".into())));
+    assert_eq!(h.vm().selected_bus_id(), Some("a"));
+    // At the click, not at the header.
+    let menu = ui
+        .find(h.screen.view(), "Rename")
+        .expect("the bus menu")
+        .bounds();
+    assert!(menu.x > label.x + track_row::TRACK_HEADER_W, "{menu:?}");
+}
+
+// The mixer's strips: a right click opened the menu of one take while the
+// inspector stayed on another.
+#[test]
+fn a_right_press_on_a_mixer_strip_selects_its_take_as_the_arrange_does() {
+    let mut h = two_takes();
+    let menu_of = |id: &str| {
+        Message::Dock(bottom_dock::Message::Mixer(
+            mixer_strip::Message::SelectTrackForMenu { id: id.into() },
+        ))
+    };
+    assert_eq!(h.vm().selected_track_id(), Some("t1"));
+    h.send(menu_of("t2"));
+    assert_eq!(h.vm().selected_track_id(), Some("t2"));
+    // On the take already selected, its selected clip stays so.
+    h.send(Message::Row {
+        track_id: "t1".into(),
+        message: track_row::Message::SelectClip("c2".into()),
+    });
+    h.send(menu_of("t1"));
+    assert_eq!(h.vm().selected_track_id(), Some("t1"));
+    assert_eq!(h.vm().selected_clip_id(), Some("c2"));
+}
+
 // "Delete this clip?" did not say which, over overlapping clips.
 #[test]
 fn the_delete_clip_question_names_the_clip_by_its_take_and_start() {

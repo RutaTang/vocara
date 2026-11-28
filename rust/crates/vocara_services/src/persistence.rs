@@ -1437,6 +1437,8 @@ impl Persistence {
                 tracks.push(Arc::new(AudioTrack {
                     clips: vec![clip],
                     version_id,
+                    // In the next colour, as the editor gives a new take.
+                    color_value: Some(practice.next_take_color()),
                     ..AudioTrack::new(
                         new_id(),
                         AudioTrackKind::Vocal,

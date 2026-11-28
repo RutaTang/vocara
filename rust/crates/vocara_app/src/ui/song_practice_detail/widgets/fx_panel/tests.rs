@@ -167,17 +167,29 @@ fn check() -> String {
 }
 
 #[test]
-fn the_preset_menu_checks_the_current_preset_and_reopens_at_its_top() {
+fn the_preset_menu_checks_the_current_preset_and_reopens_showing_it() {
     let warm = FxPresets::vocal()[1].fx.clone();
     let mut ui = simulator(Size::new(W, 900.0), view(track(Some(&warm))));
     let popup = text_at(&mut ui, "Warm Lead", 0).expect("the preset pop-up");
     ui.click(nth("Warm Lead", 0)).expect("the preset pop-up");
     assert_eq!(count(&mut ui, &check()), 1, "the current preset's check");
-    // The check sits on Warm Lead's row (the pop-up's own text is first).
+    // The check sits on Warm Lead's row (the pop-up's own text is first),
+    // level with its name, in a column of its own clear of the description:
+    // at the description's end it read as part of it ("…bypassed,✓").
     let row = text_at(&mut ui, "Warm Lead", 1).expect("Warm Lead's row");
     let next = text_at(&mut ui, FxPresets::vocal()[2].name, 0).expect("the next row");
     let mark = text_at(&mut ui, &check(), 0).expect("the check");
     assert!(row.y < mark.center_y() && mark.center_y() < next.y);
+    assert!(
+        (mark.center_y() - row.center_y()).abs() < 2.0,
+        "{mark:?} level with {row:?}"
+    );
+    let description =
+        text_at(&mut ui, FxPresets::vocal()[1].description, 0).expect("its description");
+    assert!(
+        description.x + description.width <= mark.x - 8.0,
+        "{description:?} clear of {mark:?}"
+    );
     // Where a row shows, its list's scroll taken in.
     let shown = |ui: &mut iced_test::Simulator<'_, Message>, label: &str| {
         ui.find(nth(label, 0))
@@ -202,8 +214,26 @@ fn the_preset_menu_checks_the_current_preset_and_reopens_at_its_top() {
     assert_eq!(
         shown(&mut ui, probe),
         Some(at_top),
-        "the menu opens at its top, not where it was scrolled"
+        "the menu opens where it shows Warm Lead, not where it was scrolled"
     );
+
+    // A current preset far down the list: the menu opens scrolled to it.
+    // (Opened at its top, Telephone was checked out of sight.)
+    let telephone = FxPresets::vocal()
+        .into_iter()
+        .find(|p| p.name == "Telephone")
+        .expect("Telephone");
+    let mut ui = simulator(Size::new(W, 900.0), view(track(Some(&telephone.fx))));
+    ui.click(nth("Telephone", 0)).expect("the preset pop-up");
+    let shown_row = ui
+        .find(nth("Telephone", 1))
+        .ok()
+        .and_then(|t| t.visible_bounds())
+        .expect("Telephone's row in view");
+    let whole = text_at(&mut ui, "Telephone", 1).expect("its row");
+    assert_eq!(shown_row.height, whole.height, "whole, not cut at an edge");
+    let mark = text_at(&mut ui, &check(), 0).expect("the check");
+    assert!((mark.center_y() - whole.center_y()).abs() < 2.0);
 }
 
 #[test]

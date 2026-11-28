@@ -30,6 +30,7 @@
 //! pop-up button only looks like one; the menu it opens is its caller's.
 
 use std::borrow::Cow;
+use std::time::Instant;
 
 use iced::alignment::{Horizontal, Vertical};
 use iced::border::Radius;
@@ -40,6 +41,7 @@ use iced::{
     Size, Theme, Vector,
 };
 
+use super::gesture::{DOUBLE_TAP_SLOP, DOUBLE_TAP_TIMEOUT, PRECISE_PAN_SLOP};
 use super::line_icon::{glyphs, line_icon_inherit, line_icon_stroked, Glyph};
 use super::material_tooltip::material_tooltip;
 use super::studio_text::studio_text;
@@ -1070,9 +1072,13 @@ pub const KNOB_SMALL: f32 = 8.0;
 /// with a 1 px drop shadow. `value` is 0 to 1; the knob's centre runs
 /// between its radius in from each end.
 ///
-/// A press anywhere on it sets the value from the pointer's x and takes
-/// the pointer; every move while held sets it again; the release sends
-/// `on_release` once (where a caller commits). Build with [`thin_slider`].
+/// A press takes the pointer. On the knob it holds the knob where it was
+/// grabbed ([`SliderGrip`]), and the press alone moves nothing; elsewhere it
+/// sets the value from the pointer's x. Every move while held sets it from
+/// there; the release sends `on_release` once if the press changed the
+/// value (where a caller commits). With [`ThinSlider::reset_to`], a double
+/// click sets the value given, as the mixer's faders go back to 0 dB.
+/// Build with [`thin_slider`].
 pub struct ThinSlider<'a, M> {
     value: f32,
     on_change: Box<dyn Fn(f32) -> M + 'a>,
@@ -1082,6 +1088,8 @@ pub struct ThinSlider<'a, M> {
     height: f32,
     /// A bipolar slider's zero, which its fill runs from.
     origin: Option<f32>,
+    /// The value a double click sets, if it sets one.
+    reset: Option<f32>,
 }
 
 /// A thin slider at `value` (0 to 1).
@@ -1098,6 +1106,7 @@ pub fn thin_slider<'a, M>(
         off: false,
         height: SLIDER_HEIGHT,
         origin: None,
+        reset: None,
     }
 }
 
@@ -1126,6 +1135,12 @@ impl<M> ThinSlider<'_, M> {
         self.origin = Some(origin.clamp(0.0, 1.0));
         self
     }
+
+    /// A double click sets `value` (a level's 0 dB), as a press would.
+    pub fn reset_to(mut self, value: f32) -> Self {
+        self.reset = Some(value.clamp(0.0, 1.0));
+        self
+    }
 }
 
 /// The value a thin slider `width` wide with a `knob` px knob reads at
@@ -1148,37 +1163,136 @@ impl<'a, M: Clone + 'a> From<ThinSlider<'a, M>> for Element<'a, M> {
     }
 }
 
-/// A slider's hold: set while a press or drag owes its release.
+/// How far past a knob's edge a press still takes the knob.
+pub const KNOB_GRAB_SLACK: f32 = 2.0;
+
+/// A horizontal slider's press, shared by [`ThinSlider`] and the track
+/// header's fader (`studio_controls::studio_fader`), taken as the mixer's
+/// vertical faders take theirs: a press on the knob holds it where it was
+/// grabbed, so the press alone moves nothing and a drag moves the level by
+/// the pointer's travel; a press elsewhere sets the level where it lands;
+/// a double click sets the slider's reset value. Positions are x from the
+/// slider's left edge. (A press on the knob jumped the level by the press's
+/// distance from the knob's centre: −8.7 dB read −7.8, then −9.8.)
 #[derive(Debug, Default)]
-pub struct SliderHold {
-    held: bool,
+pub struct SliderGrip {
+    held: Option<Grip>,
+    /// The last click's release: where and when (for a double click).
+    last_click: Option<(Point, Instant)>,
+}
+
+/// A press in flight.
+#[derive(Debug, Clone, Copy)]
+struct Grip {
+    /// Where it went down.
+    at: Point,
+    /// How far right of the level's place it holds the knob (0 off it).
+    grab: f32,
+    /// Whether it has moved the level, and so owes the release.
+    changed: bool,
+    /// Whether it has travelled, so it is no click.
+    dragged: bool,
+}
+
+impl SliderGrip {
+    /// A primary press at `p`, `x` from the left edge, on a slider whose
+    /// knob is drawn at `knob_x` (`reach` either side of it takes it) for a
+    /// level placed at `level_x`. A double click goes to `reset_x` when the
+    /// slider has one. The x to set the level from, if the press sets it.
+    pub fn press(
+        &mut self,
+        p: Point,
+        x: f32,
+        knob_x: f32,
+        level_x: f32,
+        reach: f32,
+        reset_x: Option<f32>,
+    ) -> Option<f32> {
+        let now = Instant::now();
+        let double = self.last_click.take().is_some_and(|(at, up)| {
+            now.duration_since(up) <= DOUBLE_TAP_TIMEOUT && at.distance(p) <= DOUBLE_TAP_SLOP
+        });
+        let (set, grab, reset) = match reset_x {
+            // Reset, held there: a drag on goes on from it.
+            Some(reset_x) if double => (Some(reset_x), x - reset_x, true),
+            _ if (x - knob_x).abs() <= reach => (None, x - level_x, false),
+            _ => (Some(x), 0.0, false),
+        };
+        self.held = Some(Grip {
+            at: p,
+            grab,
+            changed: set.is_some(),
+            dragged: reset,
+        });
+        set
+    }
+
+    /// Whether a press is held.
+    pub fn is_held(&self) -> bool {
+        self.held.is_some()
+    }
+
+    /// The pointer moved to `p`, `x` from the left edge, while held: the x
+    /// to set the level from, if it moves the level.
+    pub fn moved(&mut self, p: Point, x: f32) -> Option<f32> {
+        let held = self.held.as_mut()?;
+        held.dragged |= held.at.distance(p) > PRECISE_PAN_SLOP;
+        if !held.changed && p.x == held.at.x {
+            // Across the knob only: the level stays.
+            return None;
+        }
+        held.changed = true;
+        Some(x - held.grab)
+    }
+
+    /// The press let go: whether it changed the level (and so owes its
+    /// release); `None` when none was held.
+    pub fn release(&mut self) -> Option<bool> {
+        let held = self.held.take()?;
+        self.last_click = (!held.dragged).then(|| (held.at, Instant::now()));
+        Some(held.changed)
+    }
 }
 
 impl<M: Clone> canvas::Program<M> for ThinSlider<'_, M> {
-    type State = SliderHold;
+    type State = SliderGrip;
 
     fn update(
         &self,
-        state: &mut SliderHold,
+        state: &mut SliderGrip,
         event: &canvas::Event,
         bounds: Rectangle,
         cursor: mouse::Cursor,
     ) -> Option<canvas::Action<M>> {
-        let value_at = |x: f32| thin_slider_value(x - bounds.x, bounds.width, self.knob);
+        let (width, knob) = (bounds.width, self.knob);
+        let set = |x: f32| (self.on_change)(thin_slider_value(x, width, knob));
         match event {
             canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
                 let p = cursor.position_over(bounds)?;
-                state.held = true;
-                Some(canvas::Action::publish((self.on_change)(value_at(p.x))).and_capture())
+                let knob_x = thin_slider_knob_x(self.value, width, knob);
+                let reset_x = self.reset.map(|r| thin_slider_knob_x(r, width, knob));
+                let pressed = state.press(
+                    p,
+                    p.x - bounds.x,
+                    knob_x,
+                    knob_x,
+                    knob / 2.0 + KNOB_GRAB_SLACK,
+                    reset_x,
+                );
+                Some(match pressed {
+                    Some(x) => canvas::Action::publish(set(x)).and_capture(),
+                    None => canvas::Action::capture(),
+                })
             }
-            canvas::Event::Mouse(mouse::Event::CursorMoved { position }) if state.held => {
-                Some(canvas::Action::publish((self.on_change)(value_at(position.x))).and_capture())
+            canvas::Event::Mouse(mouse::Event::CursorMoved { position }) if state.is_held() => {
+                Some(match state.moved(*position, position.x - bounds.x) {
+                    Some(x) => canvas::Action::publish(set(x)).and_capture(),
+                    None => canvas::Action::capture(),
+                })
             }
-            canvas::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left))
-                if state.held =>
-            {
-                state.held = false;
-                Some(match self.on_release.clone() {
+            canvas::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
+                let changed = state.release()?;
+                Some(match self.on_release.clone().filter(|_| changed) {
                     Some(release) => canvas::Action::publish(release).and_capture(),
                     None => canvas::Action::capture(),
                 })
@@ -1189,7 +1303,7 @@ impl<M: Clone> canvas::Program<M> for ThinSlider<'_, M> {
 
     fn draw(
         &self,
-        _state: &SliderHold,
+        _state: &SliderGrip,
         renderer: &Renderer,
         _theme: &Theme,
         bounds: Rectangle,
@@ -1213,11 +1327,11 @@ impl<M: Clone> canvas::Program<M> for ThinSlider<'_, M> {
 
     fn mouse_interaction(
         &self,
-        state: &SliderHold,
+        state: &SliderGrip,
         bounds: Rectangle,
         cursor: mouse::Cursor,
     ) -> mouse::Interaction {
-        if state.held || cursor.is_over(bounds) {
+        if state.is_held() || cursor.is_over(bounds) {
             mouse::Interaction::Pointer
         } else {
             mouse::Interaction::default()
@@ -1987,6 +2101,44 @@ mod tests {
             ui.into_messages().collect::<Vec<_>>(),
             vec![Msg::Level(0.5), Msg::Level(1.0), Msg::Done]
         );
+    }
+
+    // The inspector's volume: a press a little off the knob's centre jumped
+    // the level (−8.7 dB read −7.8, then −9.8), and a double click did not
+    // reset it.
+    #[test]
+    fn a_thin_slider_holds_its_knob_where_grabbed_and_resets_on_a_double_click() {
+        // 110 px, a 10 px knob: at 0.25 the knob's centre is at x 30.
+        let view = |reset: bool| -> Element<'static, Msg> {
+            let slider = thin_slider(0.25, Msg::Level, Msg::Done);
+            container(if reset { slider.reset_to(1.0) } else { slider })
+                .width(110)
+                .into()
+        };
+        let mut ui = iced_test::simulator(view(true));
+        ui.point_at(Point::new(33.0, 6.0));
+        let _ = ui.simulate([press(), move_to(43.0, 6.0), release()]);
+        assert_eq!(
+            ui.into_messages().collect::<Vec<_>>(),
+            vec![Msg::Level(0.35), Msg::Done],
+            "moved by its travel alone"
+        );
+        let mut ui = iced_test::simulator(view(true));
+        ui.point_at(Point::new(27.0, 6.0));
+        let _ = ui.simulate([press(), release()]);
+        assert!(ui.into_messages().next().is_none(), "a click on it holds");
+        let mut ui = iced_test::simulator(view(true));
+        ui.point_at(Point::new(30.0, 6.0));
+        let _ = ui.simulate([press(), release(), press(), release()]);
+        assert_eq!(
+            ui.into_messages().collect::<Vec<_>>(),
+            vec![Msg::Level(1.0), Msg::Done]
+        );
+        // With no reset value, a double click is two clicks on the knob.
+        let mut ui = iced_test::simulator(view(false));
+        ui.point_at(Point::new(30.0, 6.0));
+        let _ = ui.simulate([press(), release(), press(), release()]);
+        assert!(ui.into_messages().next().is_none());
     }
 
     #[test]

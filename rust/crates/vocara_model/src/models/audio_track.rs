@@ -54,6 +54,22 @@ impl AudioTrackKind {
     }
 }
 
+/// The takes' colours, ARGB as [`AudioTrack::color_value`] stores them, in
+/// the order new takes take them: `DESIGN.md`'s five track colours, coral,
+/// ochre, sage, periwinkle and lilac (the app's `Studio::TRACK_COLORS`).
+pub const TAKE_COLORS: [i64; 5] = [0xFFD98C7E, 0xFFC9A46E, 0xFF6FB39A, 0xFF8FA3D9, 0xFFB48FD0];
+
+/// Which of [`TAKE_COLORS`] the take `id` shows while it has no colour of
+/// its own (a take from before new takes were given one): the palette's at
+/// a hash of its id (FNV-1a, the same across runs and builds), so it stays
+/// the take's however the takes around it are added, removed or reordered.
+pub fn default_take_color_index(id: &str) -> usize {
+    let hash = id.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| {
+        (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
+    });
+    (hash % TAKE_COLORS.len() as u64) as usize
+}
+
 /// A single audio clip on a lane: an audio file placed at [start_ms] on the
 /// shared timeline, with its own pre-computed waveform. A lane ([`AudioTrack`])
 /// holds zero or more clips (Logic / Cubase style), so recording onto a lane

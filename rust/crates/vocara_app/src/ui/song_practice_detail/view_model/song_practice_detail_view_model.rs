@@ -151,7 +151,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use indexmap::IndexMap;
-use vocara_model::models::audio_track::{AudioClip, AudioTrack, AudioTrackKind};
+use vocara_model::models::audio_track::{
+    lane_visible_spans, AudioClip, AudioTrack, AudioTrackKind,
+};
 use vocara_model::models::fx_bus::FxBus;
 use vocara_model::models::lyric_line::LyricLine;
 use vocara_model::models::practice_note::PracticeNote;
@@ -286,6 +288,107 @@ pub fn uncovered_spans(deleted: &AudioClip, remaining: &[AudioClip]) -> Vec<(i64
     }
     spans.sort_by_key(|span| span.0);
     spans
+}
+
+/// The clip of `clips` (a lane's, in its order) heard at `ms`: the topmost
+/// one covering it ([`lane_visible_spans`]), `None` where the lane is
+/// silent. A note or technique marker lies on the audio of the clip heard
+/// at its start, so a range that runs on over the next clip goes with the
+/// one it starts on.
+pub fn clip_heard_at(clips: &[AudioClip], ms: i64) -> Option<usize> {
+    let spans: Vec<(i64, i64)> = clips.iter().map(|c| (c.start_ms, c.end_ms())).collect();
+    lane_visible_spans(&spans)
+        .into_iter()
+        .find(|v| ms >= v.start_ms && ms < v.end_ms)
+        .map(|v| v.clip)
+}
+
+/// What rides a clip being dragged: the notes and technique markers that
+/// lay on its audio when the drag began ([`clip_heard_at`]), as they were
+/// then, and the clip's start then. Each live move puts them where they
+/// were, moved by the clip's travel since: a note the clip passes over is
+/// not swept along, and a drag back returns everything where it was. The
+/// notes stayed at their times while the clip moved away, so its delete,
+/// which takes "the notes inside it", took other audio's notes and left its
+/// own.
+struct ClipRiders {
+    track_id: String,
+    clip_id: String,
+    start_ms: i64,
+    notes: Vec<PracticeNote>,
+    markers: Vec<TechniqueMarker>,
+}
+
+impl ClipRiders {
+    /// What lies on `clip_id`'s audio on `track` as it is now.
+    fn of(track: &AudioTrack, clip_id: &str) -> Option<ClipRiders> {
+        let index = track.clips.iter().position(|c| c.id == clip_id)?;
+        let on_clip = |ms: i64| clip_heard_at(&track.clips, ms) == Some(index);
+        Some(ClipRiders {
+            track_id: track.id.clone(),
+            clip_id: clip_id.to_string(),
+            start_ms: track.clips[index].start_ms,
+            notes: track
+                .notes
+                .iter()
+                .filter(|n| on_clip(n.position_ms))
+                .cloned()
+                .collect(),
+            markers: track
+                .technique_markers
+                .iter()
+                .filter(|m| on_clip(m.position_ms))
+                .cloned()
+                .collect(),
+        })
+    }
+
+    /// `notes` with the riders moved `delta` from where they were, a range
+    /// held inside `timeline_ms`.
+    fn moved_notes(
+        &self,
+        notes: &[PracticeNote],
+        delta: i64,
+        timeline_ms: i64,
+    ) -> Vec<PracticeNote> {
+        notes
+            .iter()
+            .map(|n| match self.notes.iter().find(|r| r.id == n.id) {
+                Some(r) => clamp_note_end(
+                    &PracticeNote {
+                        position_ms: r.position_ms + delta,
+                        end_ms: r.end_ms.map(|e| e + delta),
+                        ..n.clone()
+                    },
+                    timeline_ms,
+                ),
+                None => n.clone(),
+            })
+            .collect()
+    }
+
+    /// Like [`ClipRiders::moved_notes`], for technique markers.
+    fn moved_markers(
+        &self,
+        markers: &[TechniqueMarker],
+        delta: i64,
+        timeline_ms: i64,
+    ) -> Vec<TechniqueMarker> {
+        markers
+            .iter()
+            .map(|m| match self.markers.iter().find(|r| r.id == m.id) {
+                Some(r) => clamp_marker_end(
+                    &TechniqueMarker {
+                        position_ms: r.position_ms + delta,
+                        end_ms: r.end_ms.map(|e| e + delta),
+                        ..m.clone()
+                    },
+                    timeline_ms,
+                ),
+                None => m.clone(),
+            })
+            .collect()
+    }
 }
 
 /// Like [`clamp_note_end`], for a technique marker.
@@ -579,6 +682,9 @@ pub(super) struct Core {
 
     /// Takes with a clip moved live and not yet committed.
     moving_live: HashSet<String>,
+    /// What rides the clip dragged now, from its first live move to the
+    /// commit.
+    clip_riders: Option<ClipRiders>,
     /// Where a split or merge moved a note or technique marker, by its old
     /// (take, id): both give what they move to another take a fresh id. A
     /// note editor or marker menu opened before such an edit landed still
@@ -746,6 +852,7 @@ impl Core {
         // Resolved, like create_empty_vocal_take: a recording or import must
         // land in an interpretation that is shown.
         track.version_id = target;
+        track.color_value = Some(practice.next_take_color());
         let id = track.id.clone();
         let mut next = practice.clone();
         next.vocal_tracks.push(Arc::new(track));
@@ -1131,6 +1238,7 @@ impl SongPracticeDetailViewModel {
             unsaved_from: None,
             reverts: 0,
             moving_live: HashSet::new(),
+            clip_riders: None,
             moved_marks: HashMap::new(),
             save_queue: VecDeque::new(),
             running_save: None,

@@ -97,6 +97,7 @@ use crate::ui::core::widgets::opacity_layer::opacity_layer;
 use crate::ui::core::widgets::painter::KeyedCache;
 use crate::ui::core::widgets::studio_controls::{fader_db, studio_pan_knob, PAN_KNOB_SIZE};
 use crate::ui::core::widgets::studio_text::studio_text;
+use crate::ui::song_practice_detail::view_model::mixer_controller::bus_route_would_cycle;
 
 /// The desk's data: the Dart widget's `tracks`, and what it read from the
 /// view model.
@@ -162,8 +163,14 @@ impl Default for MicInput {
 pub enum Message {
     /// `vm.selectTrack(id)`: a take's strip was clicked.
     SelectTrack { id: String },
-    /// `vm.selectBus(id)`: a bus's strip was clicked.
+    /// `vm.selectBus(id)`: a bus's strip was clicked, or right-clicked for
+    /// its menu.
     SelectBus { id: String },
+    /// A take's strip was right-clicked for its menu: the take is selected
+    /// as the menu opens, as the arrange's lanes select theirs, a clip
+    /// selected on it staying so. The menu opened over another take's
+    /// selection, offering to delete a take the inspector did not show.
+    SelectTrackForMenu { id: String },
     /// `vm.mixer.toggleMute(id)`.
     ToggleMute { id: String },
     /// `vm.mixer.toggleSolo(id)`.
@@ -802,6 +809,7 @@ fn track_channel<'a>(
         ROUTE_MENU_WIDTH,
         Opens::AtSecondaryPress,
     )
+    .on_open(vec![Message::SelectTrackForMenu { id: id.to_string() }])
     .into()
 }
 
@@ -820,7 +828,12 @@ fn bus_channel<'a>(b: &'a FxBus, selected: bool, buses: &'a [Arc<FxBus>]) -> Ele
             }],
         )
         .selected(b.output_bus_id.is_none())];
-        for other in buses.iter().filter(|o| o.id != b.id) {
+        // Not itself, nor a bus that reaches it: a feedback loop the
+        // output would refuse.
+        for other in buses
+            .iter()
+            .filter(|o| !bus_route_would_cycle(buses, &b.id, &o.id))
+        {
             options.push(
                 MenuItem::new(
                     other.name.clone(),
@@ -898,6 +911,7 @@ fn bus_channel<'a>(b: &'a FxBus, selected: bool, buses: &'a [Arc<FxBus>]) -> Ele
         ROUTE_MENU_WIDTH,
         Opens::AtSecondaryPress,
     )
+    .on_open(vec![Message::SelectBus { id: id.to_string() }])
     .into()
 }
 
