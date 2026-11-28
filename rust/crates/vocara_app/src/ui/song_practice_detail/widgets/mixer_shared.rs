@@ -19,14 +19,16 @@
 #[cfg(test)]
 pub mod testing;
 
+use std::any::Any;
 use std::cell::Cell;
 use std::rc::Rc;
 
 use crate::ui::core::text;
 use iced::advanced::layout::{self, flex, Layout};
-use iced::advanced::widget::{tree, Operation, Tree};
+use iced::advanced::widget::{operation, tree, Id, Operation, Tree};
 use iced::advanced::{overlay, renderer, Clipboard, Shell, Widget};
 use iced::alignment::Vertical;
+use iced::widget::scrollable::AbsoluteOffset;
 use iced::widget::text::Wrapping;
 use iced::widget::{column, container, row, Column, Space};
 use iced::{
@@ -550,12 +552,16 @@ fn menu_card<'a, M: Clone + 'a>(
     width: f32,
     picked: &Rc<Cell<bool>>,
 ) -> Element<'a, M> {
+    // The current item's check has a column of its own, on every row: at
+    // the end of a row's text it read as part of its description
+    // ("…bypassed,✓").
+    let checks = items.iter().any(|i| i.selected);
     let mut rows = Column::new().width(Length::Fill);
     for item in items {
         if item.divider {
             rows = rows.push(menu_divider());
         }
-        rows = rows.push(MenuRow::new(item, Rc::clone(picked)));
+        rows = rows.push(MenuRow::new(item, Rc::clone(picked), checks));
     }
     container(no_scrollbar(scrollable(rows)))
         .width(width)
@@ -584,6 +590,9 @@ fn menu_divider<'a, M: 'a>() -> Element<'a, M> {
 struct PopupState {
     /// Where the open menu is anchored, from the trigger's top-left.
     open: Option<Vector>,
+    /// The menu just opened: its next layout scrolls its current item into
+    /// view ([`reveal_current`]).
+    reveal: bool,
     /// A primary press on the trigger that may become the opening tap.
     down: Option<Point>,
     /// A tap on the open menu's barrier in flight.
@@ -730,11 +739,14 @@ impl<'a, M: Clone + 'a> Widget<M, Theme, Renderer> for PopupMenu<'a, M> {
             }
             _ => {}
         }
-        // The menu opens fresh, scrolled to its top: its tree outlived the
-        // last opening, and a long list (the presets) reopened where it was
-        // scrolled, so a click where a row had been picked another.
+        // The menu opens fresh, scrolled to show its current item (or at its
+        // top): its tree outlived the last opening, and a long list (the
+        // presets) reopened where it was scrolled, so a click where a row had
+        // been picked another; opened at its top, a current preset far down
+        // the list was checked out of sight.
         if !was_open && state.open.is_some() {
             tree.children[1] = Tree::new(&self.menu);
+            state.reveal = true;
             for m in &self.on_open {
                 shell.publish(m.clone());
             }
@@ -841,7 +853,11 @@ impl<M> overlay::Overlay<M, Theme, Renderer> for MenuOverlay<'_, '_, M> {
             .as_widget_mut()
             .layout(self.tree, renderer, &limits);
         let at = menu_position(self.at, node.size(), bounds);
-        layout::Node::with_children(bounds, vec![node.move_to(at)])
+        let node = node.move_to(at);
+        if std::mem::take(&mut self.state.reveal) {
+            reveal_current(self.menu, self.tree, &node, renderer);
+        }
+        layout::Node::with_children(bounds, vec![node])
     }
 
     fn draw(
@@ -957,13 +973,98 @@ impl<M> overlay::Overlay<M, Theme, Renderer> for MenuOverlay<'_, '_, M> {
     }
 }
 
+/// Marks a menu's current row for [`reveal_current`].
+struct CurrentRow;
+
+/// Scrolls the menu laid out as `node` so its current row shows, centred
+/// where the list allows; a menu with no current row, or one that fits,
+/// stays at its top.
+fn reveal_current<M>(
+    menu: &mut Element<'_, M>,
+    tree: &mut Tree,
+    node: &layout::Node,
+    renderer: &Renderer,
+) {
+    /// The list's bounds and its content's, and the current row's.
+    #[derive(Default)]
+    struct Find {
+        list: Option<(Rectangle, Rectangle)>,
+        row: Option<Rectangle>,
+    }
+    impl Operation for Find {
+        fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+            operate(self);
+        }
+        fn scrollable(
+            &mut self,
+            _id: Option<&Id>,
+            bounds: Rectangle,
+            content_bounds: Rectangle,
+            _translation: Vector,
+            _state: &mut dyn operation::Scrollable,
+        ) {
+            self.list.get_or_insert((bounds, content_bounds));
+        }
+        fn custom(&mut self, _id: Option<&Id>, bounds: Rectangle, state: &mut dyn Any) {
+            if state.is::<CurrentRow>() {
+                self.row.get_or_insert(bounds);
+            }
+        }
+    }
+    /// Scrolls the list to `0` down.
+    struct ScrollTo(f32);
+    impl Operation for ScrollTo {
+        fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+            operate(self);
+        }
+        fn scrollable(
+            &mut self,
+            _id: Option<&Id>,
+            _bounds: Rectangle,
+            _content_bounds: Rectangle,
+            _translation: Vector,
+            state: &mut dyn operation::Scrollable,
+        ) {
+            state.scroll_to(AbsoluteOffset {
+                x: None,
+                y: Some(self.0),
+            });
+        }
+    }
+    let layout = Layout::new(node);
+    let mut find = Find::default();
+    menu.as_widget_mut()
+        .operate(tree, layout, renderer, &mut find);
+    let (Some((list, content)), Some(row)) = (find.list, find.row) else {
+        return;
+    };
+    let room = content.height - list.height;
+    if room <= 0.0 {
+        return;
+    }
+    let y = (row.y - content.y + row.height / 2.0 - list.height / 2.0).clamp(0.0, room);
+    menu.as_widget_mut()
+        .operate(tree, layout, renderer, &mut ScrollTo(y));
+}
+
+/// The check column's width (the check glyph's) and its gap from the text.
+const CHECK_COLUMN: f32 = 14.0;
+const CHECK_GAP: f32 = 10.0;
+
+/// A row label's line (13 px text, line height 1.3), which the check is
+/// centred on.
+const LABEL_LINE: f32 = 13.0 * 1.3;
+
 /// `_MenuRow`: an `InkWell` row — `Studio.hover` under the pointer — with
-/// the label, its optional subtitle, and a check when selected. A pick
-/// reports the item's messages and closes the menu.
+/// the label, its optional subtitle, and, in a menu with a current item, a
+/// column for that item's check, level with its label. A pick reports the
+/// item's messages and closes the menu.
 struct MenuRow<'a, M> {
     content: Element<'a, M>,
     on_tap: Vec<M>,
     picked: Rc<Cell<bool>>,
+    /// The menu's current item.
+    current: bool,
 }
 
 /// A row's label colour and weight: the inspector menus' (`DESIGN.md`,
@@ -978,7 +1079,9 @@ fn label_style<M>(item: &MenuItem<M>) -> (iced::Color, iced::Font) {
 }
 
 impl<'a, M: Clone + 'a> MenuRow<'a, M> {
-    fn new(item: MenuItem<M>, picked: Rc<Cell<bool>>) -> Self {
+    /// `item`'s row; `checks` when its menu has a current item, which
+    /// gives every row the check's column.
+    fn new(item: MenuItem<M>, picked: Rc<Cell<bool>>, checks: bool) -> Self {
         let (color, font) = label_style(&item);
         let mut labels = column![container(
             text(item.label)
@@ -997,14 +1100,29 @@ impl<'a, M: Clone + 'a> MenuRow<'a, M> {
                     .color(Studio::TEXT_FAINT),
             );
         }
-        let mut content = row![labels.width(Length::Fill)].align_y(Vertical::Center);
-        if item.selected {
-            content = content.push(icons::icon(Icon::Check, 14.0, SELECTED_CHECK));
-        }
+        let content: Element<'a, M> = if checks {
+            let check: Element<'a, M> = if item.selected {
+                icons::icon(Icon::Check, CHECK_COLUMN, SELECTED_CHECK).into()
+            } else {
+                Space::new().into()
+            };
+            row![
+                labels.width(Length::Fill),
+                container(check).width(CHECK_COLUMN).center_y(LABEL_LINE),
+            ]
+            .spacing(CHECK_GAP)
+            .align_y(Vertical::Top)
+            .into()
+        } else {
+            row![labels.width(Length::Fill)]
+                .align_y(Vertical::Center)
+                .into()
+        };
         Self {
             content: container(content).padding([9, 14]).into(),
             on_tap: item.on_tap,
             picked,
+            current: item.selected,
         }
     }
 }
@@ -1087,6 +1205,9 @@ impl<M: Clone> Widget<M, Theme, Renderer> for MenuRow<'_, M> {
         renderer: &Renderer,
         operation: &mut dyn Operation,
     ) {
+        if self.current {
+            operation.custom(None, layout.bounds(), &mut CurrentRow);
+        }
         if let Some(content) = layout.children().next() {
             self.content.as_widget_mut().operate(
                 &mut tree.children[0],
