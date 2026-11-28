@@ -17,7 +17,8 @@
 #                  release (its library must leave the App Sandbox container)
 #   3  Publish   - the DMG + SHA256SUMS + latest.json (the in-app update
 #                  check's manifest, naming the DMG, its size and SHA-256
-#                  for the self-update) as this public repo's GitHub release
+#                  for the self-update) as this public repo's GitHub release:
+#                  a draft until all three are attached, then published
 #
 # There is no backend deploy phase yet: sync is local-only P0 today. When the
 # self-hosted sync server lands (P1, see docs/sync-protocol.md), its deploy
@@ -523,18 +524,43 @@ jobs:
       # GitHub serves releases/latest/download/latest.json (and the
       # releases/latest API v0.1.0 reads) from the newest release that is
       # not a prerelease, so a `-` tag never reaches the update check.
-      - name: Create GitHub Release
+      #
+      # Created as a draft, its assets uploaded into it, and published by
+      # the next step only once all three are there. Published at once, the
+      # release was the latest while its assets were still uploading: an
+      # update check in that window read it and found no latest.json, or a
+      # manifest naming a DMG not yet attached.
+      - name: Create the GitHub release as a draft
+        id: release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           tag_name: ${{ github.ref_name }}
           name: Vocara ${{ github.ref_name }}
-          draft: false
+          draft: true
           prerelease: ${{ contains(github.ref_name, '-') }}
           body_path: artifacts/notes.md
           files: |
             artifacts/*.dmg
             artifacts/SHA256SUMS
             artifacts/latest.json
+
+      # A prerelease stays one: publishing changes nothing but the draft.
+      - name: Publish the release once every asset is attached
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ steps.release.outputs.id }}
+          DMG_NAME: ${{ needs.build-macos.outputs.dmg_name }}
+        run: |
+          set -euo pipefail
+          TAG="$GITHUB_REF_NAME"
+          [ -n "$RELEASE_ID" ] || { echo "::error::the release step reported no release id"; exit 1; }
+          ATTACHED="$(gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
+            --jq '.assets[] | select(.state == "uploaded") | .name')"
+          for asset in "$DMG_NAME" SHA256SUMS latest.json; do
+            grep -qxF "$asset" <<<"$ATTACHED" \
+              || { echo "::error::$asset is not attached to the draft release $TAG: not publishing it"; exit 1; }
+          done
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false
 
       - name: Summary
         run: |

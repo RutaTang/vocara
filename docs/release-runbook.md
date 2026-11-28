@@ -77,7 +77,11 @@ either works; this repo standardizes on the former).
      (`.github/scripts/launch-check.sh`, `--update` for the second). That
      release must be published (`LAST_SANDBOXED_RELEASE` in the script).
    - **Publish**: the DMG, a `SHA256SUMS` file and `latest.json` as this
-     repository's GitHub release. A tag containing a `-` (e.g.
+     repository's GitHub release, created as a draft and published only
+     once all three are attached (published at once, it was the release the
+     update check reads while its files were still uploading). A run that
+     fails between the two leaves the draft: delete it before re-running.
+     A tag containing a `-` (e.g.
      `v1.0.0-rc.1`) publishes as a prerelease, which the update check never
      offers.
 3. **Verify on a second machine** (or at minimum a different user account):
