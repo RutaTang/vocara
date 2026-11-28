@@ -204,7 +204,8 @@ mod tests {
         let results = drive(&mut dialog, |ui, _| {
             ui.click("Cancel").expect("the cancel button");
             let _ = ui.tap_key(keyboard::Key::Named(Named::Escape));
-            ui.point_at(iced::Point::new(5.0, 5.0));
+            // Below the title-bar band, whose clicks are the window's.
+            ui.point_at(iced::Point::new(5.0, 100.0));
             let _ = ui.simulate(iced_test::simulator::click());
         });
         assert_eq!(results, vec![Some(DialogResult::Text(None)); 3]);

@@ -32,6 +32,8 @@ pub mod conversion;
 pub mod gesture;
 // vocara: the pointer during a drag in from another app (see the module).
 mod drop_pointer;
+// vocara: a control-click is a secondary click on macOS (see the module).
+mod secondary_click;
 
 mod error;
 mod proxy;
@@ -533,6 +535,12 @@ async fn run_instance<P>(
     let mut wheels: Vec<(window::Id, Option<gesture::Wheel>)> = Vec::new();
     let mut embedders: FxHashMap<window::Id, gesture::Embedder> =
         FxHashMap::default();
+    // vocara: each window's drag in from another app (`drop_pointer`).
+    let mut drags: FxHashMap<window::Id, drop_pointer::Drag> =
+        FxHashMap::default();
+    // vocara: each window's control-clicks (`secondary_click`).
+    let mut clicks: FxHashMap<window::Id, secondary_click::ControlClick> =
+        FxHashMap::default();
     let mut messages = Vec::new();
     let mut actions = 0;
 
@@ -771,10 +779,36 @@ async fn run_instance<P>(
                             }
                         }
 
-                        if let Some(redraw_at) = window_manager.redraw_at() {
+                        // vocara: the pointer, read again over a window a
+                        // file hovers over (see `drop_pointer`); the cursor
+                        // moves where it changed.
+                        for (id, window) in window_manager.iter_mut() {
+                            if drags
+                                .get_mut(&id)
+                                .is_some_and(|drag| drag.due(now))
+                                && let Some(position) = drop_pointer::moved(
+                                    window.state.cursor_position(),
+                                    drop_pointer::position(&window.raw),
+                                )
+                            {
+                                synthesize(
+                                    &program,
+                                    id,
+                                    window,
+                                    drop_pointer::cursor_moved(position),
+                                    &mut events,
+                                );
+                            }
+                        }
+
+                        // vocara: and wakes for the next read.
+                        if let Some(wake_at) = drop_pointer::wake_at(
+                            window_manager.redraw_at(),
+                            next_read(&drags),
+                        ) {
                             let _ =
                                 control_sender.start_send(Control::ChangeFlow(
-                                    ControlFlow::WaitUntil(redraw_at),
+                                    ControlFlow::WaitUntil(wake_at),
                                 ));
                         } else {
                             let _ = control_sender.start_send(
@@ -1142,37 +1176,52 @@ async fn run_instance<P>(
                                 &mut system_theme,
                             );
                         } else {
+                            // vocara: a control-click is the right button's
+                            // on macOS, its release too (`secondary_click`).
+                            let window_event = match window_event {
+                                winit::event::WindowEvent::MouseInput {
+                                    device_id,
+                                    state,
+                                    button,
+                                } if secondary_click::ON => {
+                                    let control =
+                                        window.state.modifiers().control_key();
+                                    winit::event::WindowEvent::MouseInput {
+                                        device_id,
+                                        state,
+                                        button: clicks
+                                            .entry(id)
+                                            .or_default()
+                                            .button(button, state, control),
+                                    }
+                                }
+                                window_event => window_event,
+                            };
+
                             // vocara: a file hovering or dropped is judged
                             // where the pointer is, which winit does not
                             // report during a drag in from another app (see
-                            // `drop_pointer`): the cursor moves there first.
-                            if matches!(
-                                window_event,
-                                winit::event::WindowEvent::HoveredFile(_)
-                                    | winit::event::WindowEvent::DroppedFile(_)
-                            ) {
-                                if let Some(position) =
-                                    drop_pointer::position(&window.raw)
-                                {
-                                    // A dummy device id only names the
-                                    // device; nothing reads it back.
-                                    let moved = winit::event::WindowEvent::CursorMoved {
-                                        device_id: winit::event::DeviceId::dummy(),
-                                        position,
-                                    };
-                                    window.state.update(
-                                        &program,
-                                        &window.raw,
-                                        &moved,
-                                    );
-                                    if let Some(event) = conversion::window_event(
-                                        moved,
-                                        window.state.scale_factor(),
-                                        window.state.modifiers(),
-                                    ) {
-                                        events.push((id, event));
-                                    }
-                                }
+                            // `drop_pointer`): the cursor moves there first,
+                            // unless it is there already. While a file
+                            // hovers, the pointer is read again (above); once
+                            // the drag leaves, the cursor leaves too (below).
+                            let around = drags
+                                .entry(id)
+                                .or_default()
+                                .event(&window_event, Instant::now());
+                            if around == drop_pointer::Around::MoveFirst
+                                && let Some(position) = drop_pointer::moved(
+                                    window.state.cursor_position(),
+                                    drop_pointer::position(&window.raw),
+                                )
+                            {
+                                synthesize(
+                                    &program,
+                                    id,
+                                    window,
+                                    drop_pointer::cursor_moved(position),
+                                    &mut events,
+                                );
                             }
                             window.state.update(
                                 &program,
@@ -1202,6 +1251,16 @@ async fn run_instance<P>(
                                     wheels.push((id, wheel));
                                 }
                                 events.push((id, event));
+                            }
+
+                            if around == drop_pointer::Around::LeaveAfter {
+                                synthesize(
+                                    &program,
+                                    id,
+                                    window,
+                                    drop_pointer::cursor_left(),
+                                    &mut events,
+                                );
                             }
                         }
                     }
@@ -1367,10 +1426,14 @@ async fn run_instance<P>(
                             }
                         }
 
-                        if let Some(redraw_at) = window_manager.redraw_at() {
+                        // vocara: or for a drag's next read.
+                        if let Some(wake_at) = drop_pointer::wake_at(
+                            window_manager.redraw_at(),
+                            next_read(&drags),
+                        ) {
                             let _ =
                                 control_sender.start_send(Control::ChangeFlow(
-                                    ControlFlow::WaitUntil(redraw_at),
+                                    ControlFlow::WaitUntil(wake_at),
                                 ));
                         } else {
                             let _ = control_sender.start_send(
@@ -1386,6 +1449,41 @@ async fn run_instance<P>(
     }
 
     let _ = ManuallyDrop::into_inner(user_interfaces);
+}
+
+/// vocara: when the pointer is read next over a window a file hovers over
+/// (see `drop_pointer`).
+fn next_read(
+    drags: &FxHashMap<window::Id, drop_pointer::Drag>,
+) -> Option<Instant> {
+    drags
+        .values()
+        .filter_map(drop_pointer::Drag::next_read)
+        .min()
+}
+
+/// vocara: hands `window` a pointer event winit did not report (see
+/// `drop_pointer`), as if it had: the window's state follows it, and its
+/// interface gets it with the window's other events.
+fn synthesize<P, C>(
+    program: &program::Instance<P>,
+    id: window::Id,
+    window: &mut window::Window<P, C>,
+    event: winit::event::WindowEvent,
+    events: &mut Vec<(window::Id, core::Event)>,
+) where
+    P: Program,
+    C: Compositor<Renderer = P::Renderer>,
+    P::Theme: theme::Base,
+{
+    window.state.update(program, &window.raw, &event);
+    if let Some(event) = conversion::window_event(
+        event,
+        window.state.scale_factor(),
+        window.state.modifiers(),
+    ) {
+        events.push((id, event));
+    }
 }
 
 /// Builds a window's [`UserInterface`] for the [`Program`].

@@ -12,10 +12,17 @@
 //! - **Dragging.** The toolbar's empty area moves the window and a double
 //!   click on it zooms (maximizes or restores) it, as the drag bar did and
 //!   as `DragToMoveArea` did: the drag starts once a press pans (not on the
-//!   press itself), and a double tap toggles. The app wraps every page in
+//!   press itself), and a double tap toggles. The app wraps the window's
+//!   content (its pages, their dialogs, the waiting and fatal screens) in
 //!   [`drag_region`], which watches the top [`HEIGHT`] px and starts the
 //!   gesture only on a press nothing under it took (a button, a field, a
-//!   slider capture theirs).
+//!   slider capture theirs; so does a disabled button). A surface over the
+//!   whole window that takes every press (a dialog's barrier, the lyrics
+//!   Focus view, a video's fullscreen) lets the band's presses that none of
+//!   its controls took through to the window ([`window_backdrop`]): the
+//!   content view answers `mouseDownCanMoveWindow` NO
+//!   (`vocara_services::window_toolbar`), so AppKit never moves the window
+//!   by itself, and under such a surface it could not be moved at all.
 //! - **The environment badge.** Outside production the toolbar ends with
 //!   the coral "DEV" / "TEST" pill. The app sets it once
 //!   ([`set_environment_badge`]); every page's toolbar shows it at its
@@ -25,12 +32,17 @@
 //! (its back button, [`title`] and [`subtitle`], its actions); the shared
 //! controls ([`super::controls`]) give the buttons.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::time::Instant;
 
+use iced::advanced::layout::{self, Layout};
+use iced::advanced::widget::{tree, Operation, Tree};
+use iced::advanced::{overlay, renderer, Clipboard, Shell, Widget};
 use iced::alignment::Vertical;
 use iced::widget::{column, container, row, Space};
-use iced::{mouse, Element, Event, Length, Padding};
+use iced::{
+    mouse, Element, Event, Length, Padding, Point, Rectangle, Renderer, Size, Theme, Vector,
+};
 
 use super::controls::{icon_button, IconButton};
 use super::gesture::{Gesture, PanDoubleTap};
@@ -58,6 +70,12 @@ thread_local! {
     /// every page's toolbar. The app's view runs on one thread (the main
     /// thread; a test's own), which sets it as it boots.
     static BADGE: RefCell<String> = const { RefCell::new(String::new()) };
+
+    /// Where a press in the title-bar band went down that a
+    /// [`window_backdrop`] let through to the window, for the
+    /// [`drag_region`] around it, which reads it back as the press reaches
+    /// it (on the same thread, in the same update).
+    static LET_THROUGH: Cell<Option<Point>> = const { Cell::new(None) };
 }
 
 /// Sets the environment badge every page toolbar ends with (empty: none).
@@ -153,8 +171,18 @@ fn env_badge<'a, M: 'a>(label: &str) -> Element<'a, M> {
     .into()
 }
 
-/// `content` (the pages) with the toolbar's window gestures over its top
-/// [`HEIGHT`] px: a press there that nothing took, then a pan, publishes
+/// Whether `event` is a primary press in the window's title-bar band: its
+/// top [`HEIGHT`] px, in window coordinates (where the pointer is).
+pub fn is_band_press(event: &Event, cursor: mouse::Cursor) -> bool {
+    matches!(
+        event,
+        Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left))
+    ) && cursor.position().is_some_and(|p| p.y < HEIGHT)
+}
+
+/// `content` (the window's content, its dialogs too) with the toolbar's
+/// window gestures over its top [`HEIGHT`] px: a press there that nothing
+/// took, or that a [`window_backdrop`] let through, then a pan, publishes
 /// `on_drag` (start a window drag); a double tap publishes
 /// `on_toggle_maximize`. Everything else passes through untouched.
 pub fn drag_region<'a, M: Clone + 'a>(
@@ -171,9 +199,12 @@ pub fn drag_region<'a, M: Clone + 'a>(
                     let in_toolbar = cursor
                         .position_over(bounds)
                         .filter(|p| p.y - bounds.y < HEIGHT);
+                    let let_through = LET_THROUGH
+                        .take()
+                        .is_some_and(|at| Some(at) == cursor.position());
                     match in_toolbar {
                         // A control in the toolbar took it: not a drag.
-                        Some(p) if !shell.is_event_captured() => {
+                        Some(p) if !shell.is_event_captured() || let_through => {
                             gesture.press(p, now);
                             None
                         }
@@ -200,10 +231,158 @@ pub fn drag_region<'a, M: Clone + 'a>(
     .into()
 }
 
+/// `content`, a surface over the whole window that takes every press over
+/// it, as `opaque` does (a dialog's barrier, a full-window view), whose
+/// part of the title-bar band is still the window's: a primary press there
+/// that none of its controls took goes on to the [`drag_region`] around it,
+/// which moves or zooms the window from it. A control there keeps its
+/// press: one that took it and shows itself under the pointer (a button's
+/// pointer, a field's caret); an `opaque` inside, which shows nothing
+/// there, is no control.
+pub fn window_backdrop<'a, M: 'a>(content: impl Into<Element<'a, M>>) -> Element<'a, M> {
+    Element::new(Backdrop {
+        content: content.into(),
+    })
+}
+
+struct Backdrop<'a, M> {
+    content: Element<'a, M>,
+}
+
+impl<M> Widget<M, Theme, Renderer> for Backdrop<'_, M> {
+    // The content's own tree, as `opaque`'s: put in place of one, the
+    // surface keeps its state.
+    fn tag(&self) -> tree::Tag {
+        self.content.as_widget().tag()
+    }
+
+    fn state(&self) -> tree::State {
+        self.content.as_widget().state()
+    }
+
+    fn children(&self) -> Vec<Tree> {
+        self.content.as_widget().children()
+    }
+
+    fn diff(&self, tree: &mut Tree) {
+        self.content.as_widget().diff(tree);
+    }
+
+    fn size(&self) -> Size<Length> {
+        self.content.as_widget().size()
+    }
+
+    fn size_hint(&self) -> Size<Length> {
+        self.content.as_widget().size_hint()
+    }
+
+    fn layout(
+        &mut self,
+        tree: &mut Tree,
+        renderer: &Renderer,
+        limits: &layout::Limits,
+    ) -> layout::Node {
+        self.content.as_widget_mut().layout(tree, renderer, limits)
+    }
+
+    fn draw(
+        &self,
+        tree: &Tree,
+        renderer: &mut Renderer,
+        theme: &Theme,
+        style: &renderer::Style,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        viewport: &Rectangle,
+    ) {
+        self.content
+            .as_widget()
+            .draw(tree, renderer, theme, style, layout, cursor, viewport);
+    }
+
+    fn operate(
+        &mut self,
+        tree: &mut Tree,
+        layout: Layout<'_>,
+        renderer: &Renderer,
+        operation: &mut dyn Operation,
+    ) {
+        self.content
+            .as_widget_mut()
+            .operate(tree, layout, renderer, operation);
+    }
+
+    fn update(
+        &mut self,
+        tree: &mut Tree,
+        event: &Event,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        renderer: &Renderer,
+        clipboard: &mut dyn Clipboard,
+        shell: &mut Shell<'_, M>,
+        viewport: &Rectangle,
+    ) {
+        let over = cursor.position_over(layout.bounds());
+        // What the surface shows under a press in the band, before it is
+        // handled: a control shows itself there.
+        let shown = (over.is_some() && is_band_press(event, cursor)).then(|| {
+            self.content
+                .as_widget()
+                .mouse_interaction(tree, layout, cursor, viewport, renderer)
+        });
+        self.content.as_widget_mut().update(
+            tree, event, layout, cursor, renderer, clipboard, shell, viewport,
+        );
+        if let (Some(at), Some(shown)) = (over, shown) {
+            let control = shell.is_event_captured()
+                && !matches!(shown, mouse::Interaction::None | mouse::Interaction::Idle);
+            if !control {
+                LET_THROUGH.set(Some(at));
+            }
+        }
+        if over.is_some() && matches!(event, Event::Mouse(mouse::Event::ButtonPressed(_))) {
+            shell.capture_event();
+        }
+    }
+
+    fn mouse_interaction(
+        &self,
+        tree: &Tree,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        viewport: &Rectangle,
+        renderer: &Renderer,
+    ) -> mouse::Interaction {
+        let interaction = self
+            .content
+            .as_widget()
+            .mouse_interaction(tree, layout, cursor, viewport, renderer);
+        if interaction == mouse::Interaction::None && cursor.is_over(layout.bounds()) {
+            mouse::Interaction::Idle
+        } else {
+            interaction
+        }
+    }
+
+    fn overlay<'b>(
+        &'b mut self,
+        tree: &'b mut Tree,
+        layout: Layout<'b>,
+        renderer: &Renderer,
+        viewport: &Rectangle,
+        translation: Vector,
+    ) -> Option<overlay::Element<'b, M, Theme, Renderer>> {
+        self.content
+            .as_widget_mut()
+            .overlay(tree, layout, renderer, viewport, translation)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use iced::widget::{button, column, text};
+    use iced::widget::{button, column, opaque, stack, text};
     use iced::Point;
 
     #[derive(Debug, Clone, PartialEq)]
@@ -211,6 +390,7 @@ mod tests {
         Drag,
         Maximize,
         Pressed,
+        Dismissed,
     }
 
     fn press() -> Event {
@@ -304,5 +484,120 @@ mod tests {
         set_environment_badge("");
         let mut ui = iced_test::simulator(page());
         assert!(ui.find("DEV").is_err());
+    }
+
+    /// A press at `at` that pans, then a double tap there: what the window
+    /// gestures and the rest report.
+    fn pan_then_double_tap(ui: &mut iced_test::Simulator<'_, Msg>, at: Point) {
+        ui.point_at(at);
+        let _ = ui.simulate([press(), move_to(at.x + 10.0, at.y), release()]);
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        ui.point_at(at);
+        let _ = ui.simulate([press(), release()]);
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        let _ = ui.simulate([press(), release()]);
+    }
+
+    #[test]
+    fn a_disabled_button_in_the_toolbar_moves_and_zooms_nothing() {
+        // iced's disabled button let the press through: a double click on
+        // the greyed Play zoomed the window, a drag on it moved it.
+        use crate::ui::core::widgets::controls::{group_button, icon_button};
+        use crate::ui::core::widgets::line_icon::glyphs;
+        let page = || {
+            drag_region(
+                column![
+                    page_toolbar(row![
+                        title("Practices"),
+                        Space::new().width(Length::Fill),
+                        icon_button(glyphs::PLAY, Msg::Pressed)
+                            .enabled(false)
+                            .tooltip("Play"),
+                        group_button(glyphs::PLAY, "Go to start", None::<Msg>, false),
+                    ]),
+                    Space::new().height(Length::Fill),
+                ],
+                Msg::Drag,
+                Msg::Maximize,
+            )
+        };
+        for label in ["Play", "Go to start"] {
+            let mut ui = iced_test::simulator(page());
+            let at = ui.find(label).expect("the button").bounds().center();
+            pan_then_double_tap(&mut ui, at);
+            assert!(ui.into_messages().next().is_none(), "{label}");
+        }
+        // Beside them, the toolbar still moves and zooms the window.
+        let mut ui = iced_test::simulator(page());
+        pan_then_double_tap(&mut ui, Point::new(300.0, 20.0));
+        assert_eq!(
+            ui.into_messages().collect::<Vec<_>>(),
+            vec![Msg::Drag, Msg::Maximize]
+        );
+    }
+
+    #[test]
+    fn a_dialogs_barrier_lets_the_title_bar_band_move_and_zoom_the_window() {
+        // The content view no longer moves the window by itself, and the
+        // barrier took every press: under a dialog the window could not be
+        // moved at all.
+        use crate::ui::core::widgets::confirm_dialog::barrier;
+        let window = || {
+            let barrier = barrier(iced::Color::BLACK, 0.7, Some(Msg::Dismissed));
+            drag_region(stack![page(), barrier], Msg::Drag, Msg::Maximize)
+        };
+        let mut ui = iced_test::simulator(window());
+        pan_then_double_tap(&mut ui, Point::new(300.0, 20.0));
+        // The band's taps dismiss nothing, and the toolbar's button under
+        // the barrier takes nothing.
+        let go = ui.find("Go").expect("the button").bounds().center();
+        ui.point_at(go);
+        let _ = ui.simulate([press(), release()]);
+        assert_eq!(
+            ui.into_messages().collect::<Vec<_>>(),
+            vec![Msg::Drag, Msg::Maximize]
+        );
+        // Below the band, a tap on the barrier dismisses it.
+        let mut ui = iced_test::simulator(window());
+        ui.point_at(Point::new(300.0, 200.0));
+        let _ = ui.simulate([press(), release()]);
+        assert_eq!(ui.into_messages().collect::<Vec<_>>(), vec![Msg::Dismissed]);
+    }
+
+    #[test]
+    fn a_full_window_view_lets_its_empty_band_through_and_keeps_its_controls() {
+        // The lyrics Focus view or a video's fullscreen: an opaque view over
+        // the whole window with a control in the band.
+        let view = || {
+            window_backdrop(opaque(
+                column![
+                    row![
+                        Space::new().width(Length::Fill),
+                        button(text("Exit")).on_press(Msg::Pressed),
+                    ]
+                    .height(HEIGHT),
+                    Space::new().height(Length::Fill),
+                ]
+                .width(Length::Fill)
+                .height(Length::Fill),
+            ))
+        };
+        let window = || drag_region(stack![page(), view()], Msg::Drag, Msg::Maximize);
+        let mut ui = iced_test::simulator(window());
+        pan_then_double_tap(&mut ui, Point::new(300.0, 20.0));
+        assert_eq!(
+            ui.into_messages().collect::<Vec<_>>(),
+            vec![Msg::Drag, Msg::Maximize]
+        );
+        // Its control keeps its press: a drag from it moves nothing.
+        let mut ui = iced_test::simulator(window());
+        let exit = ui.find("Exit").expect("the button").bounds().center();
+        ui.point_at(exit);
+        let _ = ui.simulate([press(), move_to(exit.x - 40.0, exit.y), release()]);
+        assert_eq!(ui.into_messages().collect::<Vec<_>>(), vec![Msg::Pressed]);
+        // Below the band, nothing is the window's.
+        let mut ui = iced_test::simulator(window());
+        pan_then_double_tap(&mut ui, Point::new(300.0, 200.0));
+        assert!(ui.into_messages().next().is_none());
     }
 }

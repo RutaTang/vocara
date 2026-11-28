@@ -1293,18 +1293,23 @@ impl Harness {
             .count()
     }
 
-    /// Drops `paths` at `at`, as the OS does.
+    /// Drops `paths` at `at`, as the OS does: one event per file, each
+    /// after a move to the pointer (macOS's event loop reads it there, see
+    /// `visible_drop_target`).
     fn drop_at(&mut self, at: Point, paths: &[&str]) {
         let messages: Vec<Message> = {
             let mut ui = self.ui();
             ui.point_at(at);
+            let moved = || IcedEvent::Mouse(iced::mouse::Event::CursorMoved { position: at });
             let mut events = Vec::new();
             for p in paths {
+                events.push(moved());
                 events.push(IcedEvent::Window(window::Event::FileHovered(
                     PathBuf::from(p),
                 )));
             }
             for p in paths {
+                events.push(moved());
                 events.push(IcedEvent::Window(window::Event::FileDropped(
                     PathBuf::from(p),
                 )));
@@ -1933,6 +1938,86 @@ fn a_drop_with_no_supported_audio_says_so() {
     h.drop_at(lane, &["/src/lyrics.txt", "/src/voice.opus"]);
     assert_eq!(h.screen.snack(), Some(NO_AUDIO_IN_DROP));
     assert_eq!(h.files.imports.load(Ordering::SeqCst), 0);
+}
+
+// The lyrics Focus view covers the page's toolbar as one opaque layer: with
+// the content view no longer moving the window by itself, the window could
+// not be moved while it showed.
+#[test]
+fn the_window_moves_from_the_band_over_the_lyrics_focus_view() {
+    use crate::ui::core::widgets::toolbar;
+    use crate::ui::song_practice_detail::widgets::lyrics_panel;
+    use iced::mouse::{Button, Event as Mouse};
+
+    #[derive(Debug, Clone)]
+    enum Window {
+        Page(Box<Message>),
+        Drag,
+    }
+    let mut h = Harness::open(Setup::default());
+    h.send(Message::Lyrics(lyrics_panel::Message::SetLyricsFocus(true)));
+    let window = || {
+        let page = h.screen.view().map(|m| Window::Page(Box::new(m)));
+        let window = toolbar::drag_region(page, Window::Drag, Window::Drag);
+        Simulator::with_size(settings(), h.size, window)
+    };
+    let pan = |ui: &mut Simulator<'_, Window>, at: Point| {
+        ui.point_at(at);
+        let to = Point::new(at.x - 40.0, at.y);
+        let _ = ui.simulate([
+            IcedEvent::Mouse(Mouse::ButtonPressed(Button::Left)),
+            IcedEvent::Mouse(Mouse::CursorMoved { position: to }),
+            IcedEvent::Mouse(Mouse::ButtonReleased(Button::Left)),
+        ]);
+    };
+    let mut ui = window();
+    pan(&mut ui, Point::new(420.0, 20.0));
+    let messages: Vec<Window> = ui.into_messages().collect();
+    assert!(
+        matches!(messages.as_slice(), [Window::Drag]),
+        "{messages:?}"
+    );
+    // Its Exit button keeps its press (released on it: it exits).
+    let mut ui = window();
+    let exit = ui.find("Exit focus").expect("the button").bounds().center();
+    ui.point_at(exit);
+    let _ = ui.simulate([
+        IcedEvent::Mouse(Mouse::ButtonPressed(Button::Left)),
+        IcedEvent::Mouse(Mouse::CursorMoved {
+            position: Point::new(exit.x - 2.0, exit.y),
+        }),
+        IcedEvent::Mouse(Mouse::ButtonReleased(Button::Left)),
+    ]);
+    let messages: Vec<Window> = ui.into_messages().collect();
+    assert!(
+        matches!(
+            messages.as_slice(),
+            [Window::Page(m)] if matches!(
+                **m,
+                Message::Lyrics(lyrics_panel::Message::SetLyricsFocus(false))
+            )
+        ),
+        "{messages:?}"
+    );
+}
+
+// A drop beside every zone (here on the transport bar, which Finder showed
+// a copy badge over all the same) went nowhere, without a word.
+#[test]
+fn a_drop_beside_every_zone_says_where_audio_goes() {
+    let mut h = Harness::open(Setup::default());
+    let record = h
+        .find("Record")
+        .expect("the Record button")
+        .bounds()
+        .center();
+    h.drop_at(record, &["/src/a.wav"]);
+    assert_eq!(h.screen.snack(), Some(DROP_ON_A_LANE));
+    assert_eq!(h.files.imports.load(Ordering::SeqCst), 0);
+    // On a lane: no word, the drop is the lane's.
+    let mut h = Harness::open(Setup::default());
+    h.drop_at(lane_at(&h, "Take 1"), &["/src/a.wav"]);
+    assert_ne!(h.screen.snack(), Some(DROP_ON_A_LANE));
 }
 
 #[test]

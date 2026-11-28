@@ -147,6 +147,17 @@ SkParagraph does), and keep the version iced's renderers use.
   objc2 0.6 AppKit and Foundation bindings (macOS only) the reading and
   the touches use. `src/lib.rs` also allows futures' `try_next`,
   deprecated since the release, whose warning a path dependency shows.
+  winit reports no pointer during a drag in from another app (Finder) and
+  has no `draggingUpdated:`: `src/drop_pointer.rs` (new) reads the pointer
+  from AppKit (`mouseLocationOutsideOfEventStream`), and `src/lib.rs` moves
+  the cursor there (a `CursorMoved` of its own, `synthesize`) before a
+  `HoveredFile` or `DroppedFile` where it is not already, again about 30
+  times a second while a file hovers (`drop_pointer::Drag`, the loop woken
+  for each read), and lets it leave (`CursorLeft`) after
+  `HoveredFileCancelled`. `src/window/state.rs` adds `cursor_position`.
+  On macOS a control-click is a secondary click, as AppKit takes it:
+  `src/secondary_click.rs` (new) and `src/lib.rs` report a left press with
+  Control held, and its release, as the right button's.
 The effects' layers are compositing iced has no primitive for, which
 Flutter did:
 
@@ -201,6 +212,7 @@ loops as upstream's with the effects' branches added.
 Moving iced_winit to a new release: carry `src/gesture.rs` and the marked
 lines over; drop the logical pixel delta if upstream scales it, and the
 whole patch if winit and iced come to pass the momentum phase and the
-trackpad's touches on. Moving winit to a new release: check that its view
-still lets touches through to the method added to its class (CI's
-`macos_touches` test does).
+trackpad's touches on, and `drop_pointer` if winit comes to report the
+pointer during a drag in (`draggingUpdated:`). Moving winit to a new
+release: check that its view still lets touches through to the method
+added to its class (CI's `macos_touches` test does).

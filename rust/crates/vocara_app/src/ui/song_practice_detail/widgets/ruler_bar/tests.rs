@@ -130,6 +130,47 @@ fn a_click_on_a_loop_handle_still_seeks() {
     assert!(starts(&messages).is_empty());
 }
 
+/// The ruler with Loop off (its region still set, as the default one is).
+fn not_looping(loop_start_ms: i64, loop_end_ms: i64) -> RulerBar {
+    RulerBar {
+        loop_enabled: false,
+        ..ruler(0, TIMELINE_MS, loop_start_ms, loop_end_ms)
+    }
+}
+
+#[test]
+fn with_the_loop_off_a_drag_on_the_playhead_at_the_start_scrubs() {
+    // The default loop runs from 0 to the end, and its start handle lay
+    // under the playhead's marker at 0:00: a drag on the marker moved the
+    // hidden loop edge, and the playhead stayed put.
+    let from = at(0.0) + iced::Vector::new(3.0, 0.0);
+    let messages = run(not_looping(0, 8000), from, drag(from, &[10.0, 20.0, 30.0]));
+    assert!(starts(&messages).is_empty(), "{messages:?}");
+    assert!(ends(&messages).is_empty(), "{messages:?}");
+    let expected = |dx: f64| (3.0 + dx) / f64::from(LANE_W) * TIMELINE_MS as f64;
+    let s = seeks(&messages);
+    assert_eq!(s.len(), 2, "{messages:?}");
+    assert!((s[1] as f64 - expected(60.0)).abs() <= 1.0, "{s:?}");
+}
+
+#[test]
+fn with_the_loop_off_a_drag_at_the_loops_end_scrubs() {
+    let from = at(8000.0);
+    let messages = run(not_looping(0, 8000), from, drag(from, &[-10.0, -30.0]));
+    assert!(ends(&messages).is_empty(), "{messages:?}");
+    assert!(starts(&messages).is_empty(), "{messages:?}");
+    let s = seeks(&messages);
+    assert_eq!(s.len(), 1, "{messages:?}");
+    assert!(s[0] < 8000, "{s:?}");
+}
+
+#[test]
+fn with_the_loop_off_a_click_on_its_edge_still_seeks() {
+    let click = at(0.0) + iced::Vector::new(3.0, 0.0);
+    let messages = run(not_looping(0, 8000), click, vec![press(), release()]);
+    assert_eq!(seeks(&messages).len(), 1, "{messages:?}");
+}
+
 #[test]
 fn a_loop_narrower_than_a_handle_still_moves_left() {
     // The end's handle lies over the start's: a leftward drag took the end,

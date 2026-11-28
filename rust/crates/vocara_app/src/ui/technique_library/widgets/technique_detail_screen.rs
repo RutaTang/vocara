@@ -116,6 +116,7 @@ use crate::ui::core::widgets::studio_hint::spinner;
 use crate::ui::core::widgets::studio_text::studio_text;
 use crate::ui::core::widgets::text_field::editor as text_editor;
 use crate::ui::core::widgets::toolbar;
+use crate::ui::core::widgets::visible_drop_target::unclaimed_drop;
 use crate::ui::snack::{fixed_bar, SnackEvent, SnackQueue, SnackStyle};
 use crate::ui::song_practice_detail::widgets::voiceprint_view::{
     self as voiceprint, VoiceprintState,
@@ -137,6 +138,9 @@ pub const NAME_REQUIRED: &str = "Give the technique a name.";
 pub const SAVE_FAILED: &str = "Couldn't save. Please try again.";
 /// The snack bar after a delete that did not happen.
 pub const DELETE_FAILED: &str = "Couldn't delete the technique.";
+/// The snack bar for a drop in the editor beside the examples' zone: where
+/// clips go.
+pub const DROP_ON_EXAMPLES: &str = "Drop audio or video clips on Examples.";
 /// The unsaved-changes dialog's title.
 pub const DISCARD_TITLE: &str = "Discard unsaved changes?";
 /// The read view's placeholder for a field with nothing in it.
@@ -259,6 +263,8 @@ pub enum Message {
     SnackFrame(Instant),
     /// Snack bar `n` was swiped away.
     SnackSwiped(u64),
+    /// A drop in the editor that the examples' zone did not take.
+    DropMissed,
 }
 
 /// The edit form: the text as typed, and the technique it was seeded from
@@ -725,6 +731,12 @@ impl TechniqueDetailScreen {
             Message::SnackExpired(seq) => self.snacks.expired(seq, Instant::now()),
             Message::SnackFrame(at) => self.snacks.frame(at),
             Message::SnackSwiped(seq) => self.snacks.swiped(seq, Instant::now()),
+            // The read view takes no drop.
+            Message::DropMissed => {
+                if self.editing {
+                    self.snack_into(DROP_ON_EXAMPLES);
+                }
+            }
         }
         self.refresh(&mut step);
         step
@@ -1245,6 +1257,10 @@ impl Screen for TechniqueDetailScreen {
         let page = self.players.shortcuts(page, self.vm.mic_live(), |m| {
             Message::Media(media_section::Message::Player(m))
         });
+        // In the editor, a drop beside the examples' zone says where clips
+        // go, not let go without a word. (Wrapped in the read view too, so
+        // the page keeps its widgets' state as the editor opens.)
+        let page = unclaimed_drop(page, |_| Message::DropMissed);
         let mut layers = stack![container(page)
             .width(Length::Fill)
             .height(Length::Fill)

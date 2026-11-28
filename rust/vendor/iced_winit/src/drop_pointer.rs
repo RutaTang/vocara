@@ -7,7 +7,134 @@
 //! judged there, and the app's drop targets (which take a drop only where a
 //! click would land) refused it. The event loop asks [`position`] when a
 //! file hovers over or is dropped on the window, and moves the cursor there
-//! first, as if the pointer had moved.
+//! first, as if the pointer had moved ([`moved`]): only where it is not
+//! already. winit reports each file of a drop on its own, and a move before
+//! each but the first (to where the cursor was) ended the drop in the app's
+//! targets, which split one drop of several files into one drop per file.
+//!
+//! In between, AppKit tells the window where the drag is
+//! (`draggingUpdated:`), which winit's delegate does not implement: the
+//! hover was judged where the drag came in, and a drop zone lit up only if
+//! the drag entered over it. So while a file hovers, the event loop reads
+//! the pointer again about 30 times a second and moves the cursor where it
+//! changed ([`Drag`]). When the drag leaves the window (or is cancelled), the
+//! cursor leaves too: the end of a drag is no pointer event, and a hover or
+//! a tooltip the moves brought out stayed where the pointer last was.
+
+use std::time::Duration;
+
+use winit::dpi::PhysicalPosition;
+use winit::event::WindowEvent;
+
+use crate::core::time::Instant;
+
+/// How often the pointer is read while a file hovers over a window: about
+/// 30 times a second.
+pub const READ_EVERY: Duration = Duration::from_millis(33);
+
+/// What the event loop does around one of a window's events from winit,
+/// for a drag in from another app.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Around {
+    /// Nothing more.
+    Nothing,
+    /// Reads the pointer and moves the cursor there first: a file hovers or
+    /// is dropped.
+    MoveFirst,
+    /// The cursor leaves the window after it: the drag left it.
+    LeaveAfter,
+}
+
+/// A window's drag in from another app: while a file hovers over it, when
+/// the pointer is read next.
+#[derive(Debug, Default)]
+pub struct Drag {
+    next_read: Option<Instant>,
+}
+
+impl Drag {
+    /// Follows `event`, one of the window's from winit, at `now`: a file
+    /// hovering starts the reads; a drop, the drag leaving, or the pointer
+    /// moving or clicking by itself (which winit reports only once no drag
+    /// is under way) ends them.
+    pub fn event(&mut self, event: &WindowEvent, now: Instant) -> Around {
+        match event {
+            WindowEvent::HoveredFile(_) => {
+                self.next_read = Some(now + READ_EVERY);
+                Around::MoveFirst
+            }
+            WindowEvent::DroppedFile(_) => {
+                self.next_read = None;
+                Around::MoveFirst
+            }
+            WindowEvent::HoveredFileCancelled => {
+                self.next_read = None;
+                Around::LeaveAfter
+            }
+            WindowEvent::CursorMoved { .. }
+            | WindowEvent::MouseInput { .. } => {
+                self.next_read = None;
+                Around::Nothing
+            }
+            _ => Around::Nothing,
+        }
+    }
+
+    /// Whether the pointer is read at `now`: a file hovers and its read is
+    /// due. The next one is due [`READ_EVERY`] later.
+    pub fn due(&mut self, now: Instant) -> bool {
+        match self.next_read {
+            Some(at) if at <= now => {
+                self.next_read = Some(now + READ_EVERY);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// When the pointer is read next, while a file hovers.
+    pub fn next_read(&self) -> Option<Instant> {
+        self.next_read
+    }
+}
+
+/// When the event loop wakes next: at `redraw` (a window's next frame) or
+/// at the next read of a drag (`read`), whichever comes first.
+pub fn wake_at(
+    redraw: Option<Instant>,
+    read: Option<Instant>,
+) -> Option<Instant> {
+    match (redraw, read) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }
+}
+
+/// Where the cursor moves to for the pointer `read` over the window, from
+/// where the window has it (`cursor`): `None` when the pointer is where
+/// the cursor is already, or was not read (off the content).
+pub fn moved(
+    cursor: Option<PhysicalPosition<f64>>,
+    read: Option<PhysicalPosition<f64>>,
+) -> Option<PhysicalPosition<f64>> {
+    read.filter(|position| cursor != Some(*position))
+}
+
+/// winit's event for the pointer moving to `position`. A dummy device id
+/// only names the device; nothing reads it back.
+pub fn cursor_moved(position: PhysicalPosition<f64>) -> WindowEvent {
+    WindowEvent::CursorMoved {
+        device_id: winit::event::DeviceId::dummy(),
+        position,
+    }
+}
+
+/// winit's event for the pointer leaving the window.
+pub fn cursor_left() -> WindowEvent {
+    WindowEvent::CursorLeft {
+        device_id: winit::event::DeviceId::dummy(),
+    }
+}
 
 /// The pointer's position over `window`'s content, in physical pixels from
 /// its top left, read from AppKit; `None` off macOS, off the main thread, or
@@ -71,7 +198,101 @@ pub fn from_view(
 
 #[cfg(test)]
 mod tests {
-    use super::from_view;
+    use super::{
+        Around, Drag, Instant, PhysicalPosition, READ_EVERY, WindowEvent,
+        cursor_left, cursor_moved, from_view, moved, wake_at,
+    };
+    use std::path::PathBuf;
+    use std::time::Duration;
+
+    fn hovered() -> WindowEvent {
+        WindowEvent::HoveredFile(PathBuf::from("/a.wav"))
+    }
+
+    fn dropped() -> WindowEvent {
+        WindowEvent::DroppedFile(PathBuf::from("/a.wav"))
+    }
+
+    #[test]
+    fn the_pointer_is_read_while_a_file_hovers() {
+        let t0 = Instant::now();
+        let ms = |n| t0 + Duration::from_millis(n);
+        let mut drag = Drag::default();
+        assert!(!drag.due(t0), "no drag, no read");
+        assert_eq!(drag.next_read(), None);
+        assert_eq!(drag.event(&hovered(), t0), Around::MoveFirst);
+        // The next read is due a 30th of a second on, then each one after.
+        assert_eq!(drag.next_read(), Some(t0 + READ_EVERY));
+        assert!(!drag.due(ms(10)));
+        assert!(drag.due(ms(33)));
+        assert_eq!(drag.next_read(), Some(ms(66)));
+        assert!(!drag.due(ms(40)), "once per period");
+        // A late wake reads once and counts on from then.
+        assert!(drag.due(ms(100)));
+        assert_eq!(drag.next_read(), Some(ms(133)));
+        // A second file of the same drag changes nothing but the next read.
+        assert_eq!(drag.event(&hovered(), ms(110)), Around::MoveFirst);
+        assert!(drag.due(ms(143)));
+    }
+
+    #[test]
+    fn a_drop_or_the_drag_leaving_ends_the_reads() {
+        let t0 = Instant::now();
+        let later = t0 + Duration::from_secs(1);
+        let mut drag = Drag::default();
+        let _ = drag.event(&hovered(), t0);
+        assert_eq!(drag.event(&dropped(), t0), Around::MoveFirst);
+        assert!(!drag.due(later));
+        assert_eq!(drag.next_read(), None);
+
+        let _ = drag.event(&hovered(), t0);
+        assert_eq!(
+            drag.event(&WindowEvent::HoveredFileCancelled, t0),
+            Around::LeaveAfter
+        );
+        assert!(!drag.due(later));
+
+        // winit reports the pointer itself once no drag is under way: a
+        // drag whose end was never reported stops being read.
+        let _ = drag.event(&hovered(), t0);
+        let moved = cursor_moved(PhysicalPosition::new(1.0, 1.0));
+        assert_eq!(drag.event(&moved, t0), Around::Nothing);
+        assert!(!drag.due(later));
+        // And the window's other events leave the reads alone.
+        let _ = drag.event(&hovered(), t0);
+        assert_eq!(drag.event(&cursor_left(), t0), Around::Nothing);
+        assert_eq!(
+            drag.event(&WindowEvent::Focused(true), t0),
+            Around::Nothing
+        );
+        assert!(drag.due(later));
+    }
+
+    #[test]
+    fn the_loop_wakes_for_the_first_of_a_frame_and_a_read() {
+        let t0 = Instant::now();
+        let t1 = t0 + Duration::from_millis(5);
+        assert_eq!(wake_at(None, None), None);
+        assert_eq!(wake_at(Some(t1), None), Some(t1));
+        assert_eq!(wake_at(None, Some(t1)), Some(t1));
+        assert_eq!(wake_at(Some(t1), Some(t0)), Some(t0));
+        assert_eq!(wake_at(Some(t0), Some(t1)), Some(t0));
+    }
+
+    #[test]
+    fn the_cursor_moves_only_to_where_it_is_not() {
+        let at = |x, y| PhysicalPosition::new(x, y);
+        // A drop's first file: the cursor was where the drag came in.
+        assert_eq!(
+            moved(Some(at(10.0, 10.0)), Some(at(300.0, 200.0))),
+            Some(at(300.0, 200.0))
+        );
+        assert_eq!(moved(None, Some(at(300.0, 200.0))), Some(at(300.0, 200.0)));
+        // Its next files: the cursor is there already.
+        assert_eq!(moved(Some(at(300.0, 200.0)), Some(at(300.0, 200.0))), None);
+        // The pointer off the content: the cursor stays.
+        assert_eq!(moved(Some(at(300.0, 200.0)), None), None);
+    }
 
     #[test]
     fn a_point_in_an_unflipped_view_is_measured_from_its_top() {

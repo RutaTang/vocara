@@ -222,6 +222,7 @@ impl<'a, M: Clone + 'a> From<IconButton<'a, M>> for Element<'a, M> {
         let side = b.size.side();
         let corner = b.size.radius();
         let (active, accent) = (b.active, b.accent);
+        let disabled = b.on_press.is_none();
         let face = container(inherit_icon(b.icon, b.icon_size.unwrap_or(b.size.icon())))
             .center_x(side)
             .center_y(side);
@@ -240,6 +241,7 @@ impl<'a, M: Clone + 'a> From<IconButton<'a, M>> for Element<'a, M> {
                     None,
                 )
             });
+        let target = holding_presses(target, disabled);
         match b.tooltip {
             // Below the button, its top 6 px clear of it; the tip is also
             // its label for the widget tree.
@@ -247,7 +249,7 @@ impl<'a, M: Clone + 'a> From<IconButton<'a, M>> for Element<'a, M> {
                 let tip = tip.into_owned();
                 labelled(material_tooltip(target, tip.clone(), 6.0), tip)
             }
-            None => target.into(),
+            None => target,
         }
     }
 }
@@ -464,6 +466,7 @@ pub fn group_button<'a, M: Clone + 'a>(
     active: bool,
 ) -> Element<'a, M> {
     let icon = icon.into();
+    let disabled = on_press.is_none();
     let face = container(inherit_icon(icon, super::line_icon::DENSE_SIZE))
         .center_x(GROUP_BUTTON_WIDTH)
         .center_y(height::TOOLBAR_GROUP);
@@ -472,7 +475,31 @@ pub fn group_button<'a, M: Clone + 'a>(
         .on_press_maybe(on_press)
         .style(move |_, status| styled(None, icon_button_color(status, active, false), 0.0, None));
     let tip: String = tip.into();
-    labelled(material_tooltip(target, tip.clone(), 6.0), tip)
+    labelled(
+        material_tooltip(holding_presses(target, disabled), tip.clone(), 6.0),
+        tip,
+    )
+}
+
+/// `target`, a button, taking every press over it while `disabled`, as a
+/// disabled AppKit control keeps its clicks: iced's lets the press through,
+/// and in a toolbar the window's gestures took it for the toolbar's empty
+/// area (a double click on a greyed Play zoomed the window, a drag on it
+/// moved the window). Enabled, the button takes its press itself. Always
+/// wrapped, so the button keeps its state as it is enabled and disabled.
+fn holding_presses<'a, M: 'a>(target: impl Into<Element<'a, M>>, disabled: bool) -> Element<'a, M> {
+    super::wrap::Wrap::<M, ()>::new(
+        target,
+        Box::new(move |_, event, bounds, cursor, shell| {
+            if disabled
+                && matches!(event, iced::Event::Mouse(mouse::Event::ButtonPressed(_)))
+                && cursor.is_over(bounds)
+            {
+                shell.capture_event();
+            }
+        }),
+    )
+    .into()
 }
 
 // ------------------------------------------------------- text buttons

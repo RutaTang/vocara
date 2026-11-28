@@ -255,16 +255,21 @@ fn move_to(ui: &mut Simulator<'_, Host>, at: Point) {
     let _ = ui.simulate([IcedEvent::Mouse(mouse::Event::CursorMoved { position: at })]);
 }
 
-/// A drop of `paths` at `at`, the way the platform reports one.
+/// A drop of `paths` at `at`, the way the platform reports one: one event
+/// per file, each after a move to the pointer (macOS's event loop reads it
+/// there, see `visible_drop_target`).
 fn drop_at(ui: &mut Simulator<'_, Host>, at: Point, paths: &[&str]) {
     ui.point_at(at);
+    let moved = || IcedEvent::Mouse(mouse::Event::CursorMoved { position: at });
     let mut events = Vec::new();
     for p in paths {
+        events.push(moved());
         events.push(IcedEvent::Window(window::Event::FileHovered(
             PathBuf::from(p),
         )));
     }
     for p in paths {
+        events.push(moved());
         events.push(IcedEvent::Window(window::Event::FileDropped(
             PathBuf::from(p),
         )));
@@ -660,7 +665,8 @@ fn the_rename_dialog_shows_the_caption_and_saves_or_cancels() {
         let _ = ui.tap_key(iced::keyboard::Key::Named(
             iced::keyboard::key::Named::Escape,
         ));
-        ui.point_at(Point::new(5.0, 5.0));
+        // Below the title-bar band, whose clicks are the window's.
+        ui.point_at(Point::new(5.0, 100.0));
         let _ = ui.simulate(iced_test::simulator::click());
     });
     assert_eq!(
