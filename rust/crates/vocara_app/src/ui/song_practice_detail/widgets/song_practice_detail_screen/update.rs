@@ -970,7 +970,7 @@ impl SongPracticeDetailScreen {
             }
             P::StampNextLyric => self.vm.stamp_next_lyric(),
             P::StampLyricAt(index) => self.vm.stamp_lyric_at(index),
-            P::ClearLyricTimes => self.vm.clear_lyric_times(),
+            P::ClearLyricTimes => return self.clear_lyric_times(step),
             P::SeekToLyric(line) => {
                 self.vm.seek_to_lyric(&line);
                 return;
@@ -1469,6 +1469,20 @@ impl SongPracticeDetailScreen {
         self.ask(dialog, Asked::Separate(track_id.to_string()), step);
     }
 
+    /// Sync's Clear: asked first, as Delete take is. One click took every
+    /// line's tap time at once, saved, with nothing to go back to (Clear sits
+    /// beside Done). With no line timed there is nothing to lose.
+    fn clear_lyric_times(&mut self, step: &mut Step) {
+        if !self.vm.lyrics().iter().any(|l| l.time_ms.is_some()) {
+            let fx = self.vm.clear_lyric_times();
+            return self.absorb(fx, step);
+        }
+        let dialog = ConfirmDialog::new("Clear all line times?")
+            .body("Every line loses its time, and you tap the lines again from the first.")
+            .confirm_label("Clear times");
+        self.ask(dialog, Asked::ClearLyricTimes, step);
+    }
+
     fn rename_bus(&mut self, bus_id: String, current: &str, step: &mut Step) {
         let mut prompt = rename_dialog(current);
         prompt.title = "Rename bus".to_string();
@@ -1509,6 +1523,7 @@ impl SongPracticeDetailScreen {
             Asked::DeleteInterpretation(id) if confirmed => {
                 self.vm.versions_do(|v, h| v.delete(&id, h))
             }
+            Asked::ClearLyricTimes if confirmed => self.vm.clear_lyric_times(),
             _ => return,
         };
         self.absorb(fx, step);

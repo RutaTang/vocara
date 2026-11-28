@@ -255,6 +255,7 @@ pub enum Asked {
     NewInterpretation,
     RenameInterpretation(String),
     DeleteInterpretation(String),
+    ClearLyricTimes,
 }
 
 /// A result that is cloneable (the screen's messages are) but landed once:

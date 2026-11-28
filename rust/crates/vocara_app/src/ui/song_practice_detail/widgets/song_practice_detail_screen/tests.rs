@@ -2229,6 +2229,41 @@ fn deleting_a_clip_asks_first_as_deleting_a_take_does() {
     assert_eq!(clips, ["c1"]);
 }
 
+// Sync's Clear asks first, as Delete clip does: one click took a whole
+// song's tap timing at once, saved, with nothing to go back to.
+#[test]
+fn clearing_the_lyric_times_asks_first() {
+    use vocara_model::models::lyric_line::LyricLine;
+    let mut p = practice(vec![take("t1", "Take 1")]);
+    p.lyrics = vec![
+        LyricLine::new("First line", Some(1200)),
+        LyricLine::new("Second line", Some(4800)),
+    ];
+    let mut h = Harness::open(Setup {
+        practice: p,
+        ..Setup::default()
+    });
+    let times = |h: &Harness| -> Vec<Option<i64>> {
+        h.repo.stored().lyrics.iter().map(|l| l.time_ms).collect()
+    };
+    h.send(Message::Lyrics(lyrics_panel::Message::ClearLyricTimes));
+    let Dialog::Confirm(confirm) = h.dialog() else {
+        panic!("a confirmation");
+    };
+    assert_eq!(confirm.title, "Clear all line times?");
+    h.answer(DialogResult::Confirmed(false));
+    h.settle();
+    assert_eq!(times(&h), [Some(1200), Some(4800)], "cancelled");
+
+    h.send(Message::Lyrics(lyrics_panel::Message::ClearLyricTimes));
+    h.answer(DialogResult::Confirmed(true));
+    h.settle();
+    assert_eq!(times(&h), [None, None]);
+    // With nothing timed there is nothing to ask about.
+    h.send(Message::Lyrics(lyrics_panel::Message::ClearLyricTimes));
+    assert!(h.dialog.is_none());
+}
+
 // playhead_repaint_test: 'deleting the backing's clip asks to delete the
 // backing' — a backing lane is its one clip.
 #[test]
