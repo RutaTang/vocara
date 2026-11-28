@@ -2,7 +2,8 @@
 //! (dark card, coral accent) that replaced the forui adaptive dialog —
 //! [`ConfirmDialog`] (`showConfirmDialog`: confirm/cancel, returns whether
 //! the user confirmed) and [`StudioPrompt`] (`showStudioPrompt`: a single
-//! line of text, returns the trimmed text, or nothing on cancel / empty).
+//! line of text, returns the trimmed text, or nothing on cancel; its
+//! confirm button waits for some text).
 //!
 //! A dialog is a modal over the whole window, the page toolbars included, as a
 //! Flutter dialog route sat above every page: the screen asks the app to show
@@ -14,9 +15,16 @@
 //! cancels (the barrier is dismissible; its tap is `ModalBarrier`'s — any
 //! button, landing on the release within `kTouchSlop` of the press, see
 //! [`barrier`]); Enter in the prompt's field
-//! submits, as its `onSubmitted` did; Enter in the confirm dialog does
-//! nothing (no button there takes focus). While a dialog is up it holds the
-//! keyboard: nothing beneath sees a key.
+//! submits, as its `onSubmitted` did, once it holds some text. Return in a
+//! confirm dialog presses its confirm button, as a macOS alert's default
+//! button takes Return, unless that button is destructive (Delete,
+//! Discard, Clear, Remove): there Return does nothing, so a stray Return
+//! never deletes. The buttons take no keyboard focus (see
+//! `focus_traversal`), so Tab moves no focus ring between them. While a
+//! dialog is up it holds the keyboard: nothing beneath sees a key.
+//!
+//! A prompt opened with text in its field selects that text, as a macOS
+//! rename sheet does: typing replaces it.
 //!
 //! The app's custom modals go through the same stack, so they too cover the
 //! page toolbar as a Flutter dialog route did: the update download dialog
@@ -73,6 +81,8 @@ pub struct ConfirmDialog {
     pub cancel_label: String,
     pub icon: Option<Icon>,
     pub destructive: bool,
+    /// Only its buttons answer it ([`ConfirmDialog::answered_by_buttons`]).
+    pub buttons_only: bool,
 }
 
 impl ConfirmDialog {
@@ -84,6 +94,7 @@ impl ConfirmDialog {
             cancel_label: "Cancel".to_string(),
             icon: None,
             destructive: true,
+            buttons_only: false,
         }
     }
 
@@ -109,6 +120,15 @@ impl ConfirmDialog {
 
     pub fn destructive(mut self, destructive: bool) -> Self {
         self.destructive = destructive;
+        self
+    }
+
+    /// Only its buttons answer it: a tap on the barrier or Escape closes it
+    /// with [`DialogResult::Closed`], no answer, where otherwise they answer
+    /// "no" as its cancel button does. For a question a stray click must
+    /// not answer (the first launch's update check).
+    pub fn answered_by_buttons(mut self) -> Self {
+        self.buttons_only = true;
         self
     }
 }
@@ -219,7 +239,8 @@ pub enum DialogResult {
     /// cancelled.)
     Text(Option<String>),
     /// A dialog that answers nothing closed ([`UpdateDownloadDialog`]'s
-    /// "Later", a barrier tap or Escape).
+    /// "Later", a barrier tap or Escape; a barrier tap or Escape on a
+    /// [`ConfirmDialog::answered_by_buttons`]).
     Closed,
 }
 
@@ -243,6 +264,10 @@ impl DialogResult {
 pub enum Message {
     /// The cancel button, a barrier tap or Escape.
     Cancel,
+    /// The cancel button of a [`ConfirmDialog::answered_by_buttons`]: its
+    /// "no", where a barrier tap or Escape ([`Message::Cancel`]) closes it
+    /// unanswered. The other dialogs never send it.
+    Decline,
     /// The confirm button (or Enter in the prompt's field).
     Confirm,
     /// The prompt's text changed.
@@ -295,11 +320,12 @@ impl DialogState {
     }
 
     /// The task that puts the keyboard in the dialog's field when it opens
-    /// (`autofocus: true`: the prompt's, the new technique's name); nothing
-    /// for a dialog without one.
+    /// (`autofocus: true`: the prompt's, the new technique's name), the
+    /// prompt's text selected (see the module docs); nothing for a dialog
+    /// without one.
     pub fn focus<T: Send + 'static>(&self) -> iced::Task<T> {
         match &self.dialog {
-            Dialog::Prompt(_) => iced::widget::operation::focus(self.input.clone()),
+            Dialog::Prompt(_) => focus_selecting_all(self.input.clone()),
             Dialog::NewTechnique(d) => d.focus(),
             Dialog::RenameExample(d) => d.focus(),
             Dialog::Confirm(_) | Dialog::UpdateDownload(_) => iced::Task::none(),
@@ -333,21 +359,24 @@ impl DialogState {
                 self.text = text;
                 DialogStep::Stay
             }
-            (Message::Cancel, Dialog::Confirm(_)) => {
+            (Message::Cancel, Dialog::Confirm(d)) if d.buttons_only => {
+                DialogStep::Closed(DialogResult::Closed)
+            }
+            (Message::Cancel | Message::Decline, Dialog::Confirm(_)) => {
                 DialogStep::Closed(DialogResult::Confirmed(false))
             }
             (Message::Confirm, Dialog::Confirm(_)) => {
                 DialogStep::Closed(DialogResult::Confirmed(true))
             }
-            (Message::Cancel, Dialog::Prompt(_)) => DialogStep::Closed(DialogResult::Text(None)),
-            (Message::Confirm, Dialog::Prompt(_)) => {
-                let t = self.text.trim();
-                DialogStep::Closed(DialogResult::Text(if t.is_empty() {
-                    None
-                } else {
-                    Some(t.to_string())
-                }))
+            (Message::Cancel | Message::Decline, Dialog::Prompt(_)) => {
+                DialogStep::Closed(DialogResult::Text(None))
             }
+            // An empty field confirms nothing: the button is disabled and
+            // Return does nothing, the dialog staying open.
+            (Message::Confirm, Dialog::Prompt(_)) => match prompt_text(&self.text) {
+                Some(t) => DialogStep::Closed(DialogResult::Text(Some(t.to_string()))),
+                None => DialogStep::Stay,
+            },
         }
     }
 
@@ -359,16 +388,33 @@ impl DialogState {
 
     /// The dialog at `fade` (see the module docs).
     pub fn view_at(&self, fade: Fade) -> Element<'_, Message> {
-        let card = match &self.dialog {
-            Dialog::Confirm(d) => confirm_card(d),
-            Dialog::Prompt(p) => prompt_card(p, &self.text, self.input.clone()),
+        let (card, on_return) = match &self.dialog {
+            // Return presses a confirm dialog's button unless it is
+            // destructive.
+            Dialog::Confirm(d) => (
+                confirm_card(d),
+                (!d.destructive).then_some(Message::Confirm),
+            ),
+            Dialog::Prompt(p) => (prompt_card(p, &self.text, self.input.clone()), None),
             // The custom modals draw their own barrier and card.
             Dialog::UpdateDownload(d) => return d.view_at(fade),
             Dialog::NewTechnique(d) => return d.view_at(fade),
             Dialog::RenameExample(d) => return d.view_at(fade),
         };
-        modal(card, fade)
+        modal_with_return(card, fade, on_return)
     }
+}
+
+/// The prompt's trimmed text, when there is some to confirm.
+fn prompt_text(text: &str) -> Option<&str> {
+    let t = text.trim();
+    (!t.is_empty()).then_some(t)
+}
+
+/// The task that focuses the field `id` and selects all its text, so typing
+/// replaces what it was opened with (a rename's current name).
+pub fn focus_selecting_all<T: Send + 'static>(id: widget::Id) -> iced::Task<T> {
+    iced::widget::operation::focus(id.clone()).chain(iced::widget::operation::select_all(id))
 }
 
 /// A dialog card's width.
@@ -463,9 +509,14 @@ fn confirm_card(d: &ConfirmDialog) -> Element<'_, Message> {
     } else {
         DialogButton::Primary
     };
+    let on_cancel = if d.buttons_only {
+        Message::Decline
+    } else {
+        Message::Cancel
+    };
     content = content.push(Space::new().height(20)).push(buttons(
         &d.cancel_label,
-        Message::Cancel,
+        on_cancel,
         &d.confirm_label,
         Some(Message::Confirm),
         kind,
@@ -496,7 +547,7 @@ fn prompt_card<'a>(p: &'a StudioPrompt, value: &str, input: widget::Id) -> Eleme
             &p.cancel_label,
             Message::Cancel,
             &p.confirm_label,
-            Some(Message::Confirm),
+            prompt_text(value).map(|_| Message::Confirm),
             DialogButton::Primary,
         ));
     card(content.into())
@@ -624,6 +675,16 @@ pub fn barrier<'a, M: Clone + 'a>(
 /// the barrier cancels, the card takes its own taps, Escape cancels and no
 /// key reaches what lies beneath.
 pub fn modal<'a>(content: Element<'a, Message>, fade: Fade) -> Element<'a, Message> {
+    modal_with_return(content, fade, None)
+}
+
+/// [`modal`] whose Return, when no field in it took the key, sends
+/// `on_return` (a confirm dialog's default button), when given.
+fn modal_with_return<'a>(
+    content: Element<'a, Message>,
+    fade: Fade,
+    on_return: Option<Message>,
+) -> Element<'a, Message> {
     let barrier = barrier(theme::DIALOG_BARRIER, fade.barrier, Some(Message::Cancel));
     let layers = stack![
         barrier,
@@ -632,14 +693,22 @@ pub fn modal<'a>(content: Element<'a, Message>, fade: Fade) -> Element<'a, Messa
     Wrap::<Message, ()>::new(
         // A dialog route's scope: Tab goes round its fields.
         focus_scope(layers),
-        Box::new(|_, event, _, _, shell| {
+        Box::new(move |_, event, _, _, shell| {
             if let Event::Keyboard(event) = event {
                 if let keyboard::Event::KeyPressed {
-                    key: keyboard::Key::Named(keyboard::key::Named::Escape),
+                    key: keyboard::Key::Named(named),
                     ..
                 } = event
                 {
-                    shell.publish(Message::Cancel);
+                    match named {
+                        keyboard::key::Named::Escape => shell.publish(Message::Cancel),
+                        keyboard::key::Named::Enter if !shell.is_event_captured() => {
+                            if let Some(on_return) = &on_return {
+                                shell.publish(on_return.clone());
+                            }
+                        }
+                        _ => {}
+                    }
                 }
                 // The dialog holds the keyboard (a text field inside it has
                 // already had its turn).
@@ -657,8 +726,62 @@ pub fn modal<'a>(content: Element<'a, Message>, fade: Fade) -> Element<'a, Messa
 pub(crate) mod testing {
     use iced::time::Instant;
 
-    use super::{DialogMotion, Fade, TRANSITION};
+    use iced::{Element, Event};
+
+    use super::{DialogMotion, Fade, Message, TRANSITION};
     use crate::ui::core::motion::Curve;
+
+    /// Runs the widget operations of `task` (a dialog's focus on opening)
+    /// on `view` as the runtime does, then feeds it `events`: what it
+    /// published.
+    pub fn opened(
+        view: Element<'_, Message>,
+        task: iced::Task<Message>,
+        events: &[Event],
+    ) -> Vec<Message> {
+        use iced::advanced::renderer::Headless;
+        use iced::futures::StreamExt;
+        use iced_test::runtime::user_interface::{Cache, UserInterface};
+        use iced_test::runtime::Action;
+
+        let operations: Vec<_> = match iced_test::runtime::task::into_stream(task) {
+            Some(stream) => iced::futures::executor::block_on(
+                stream
+                    .filter_map(|action| async move {
+                        match action {
+                            Action::Widget(operation) => Some(operation),
+                            _ => None,
+                        }
+                    })
+                    .collect(),
+            ),
+            None => Vec::new(),
+        };
+        let mut renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
+            crate::ui::core::theme::font::REGULAR,
+            crate::ui::core::theme::DEFAULT_TEXT_SIZE.into(),
+            None,
+        ))
+        .expect("a headless renderer");
+        let mut ui = UserInterface::build(
+            view,
+            iced::Size::new(1024.0, 768.0),
+            Cache::default(),
+            &mut renderer,
+        );
+        for mut operation in operations {
+            ui.operate(&renderer, operation.as_mut());
+        }
+        let mut messages = Vec::new();
+        let _ = ui.update(
+            events,
+            iced::mouse::Cursor::Unavailable,
+            &mut renderer,
+            &mut iced::advanced::clipboard::Null,
+            &mut messages,
+        );
+        messages
+    }
 
     const GONE: Fade = Fade {
         barrier: 0.0,
@@ -889,7 +1012,7 @@ mod tests {
     }
 
     #[test]
-    fn escape_and_a_barrier_tap_cancel_and_enter_does_nothing_in_a_confirm() {
+    fn escape_and_a_barrier_tap_cancel_and_enter_does_nothing_in_a_destructive_confirm() {
         let mut state = DialogState::new(ConfirmDialog::new("Delete?"));
         let messages = run(&mut state, |ui| {
             let _ = ui.tap_key(keyboard::Key::Named(Named::Enter));
@@ -898,6 +1021,63 @@ mod tests {
             let _ = ui.simulate(iced_test::simulator::click());
         });
         assert_eq!(messages, vec![Message::Cancel, Message::Cancel]);
+    }
+
+    /// Return presses a confirm dialog's button, as a macOS alert's default
+    /// button takes it, when that button is not destructive; a destructive
+    /// one (above) takes no Return, so a stray one never deletes.
+    #[test]
+    fn return_confirms_a_dialog_whose_button_is_not_destructive() {
+        let mut state = DialogState::new(
+            ConfirmDialog::new("Repair library?")
+                .confirm_label("Repair")
+                .destructive(false),
+        );
+        let messages = run(&mut state, |ui| {
+            let _ = ui.tap_key(keyboard::Key::Named(Named::Enter));
+        });
+        assert_eq!(messages, vec![Message::Confirm]);
+        assert_eq!(
+            state.update(Message::Confirm),
+            Some(DialogResult::Confirmed(true))
+        );
+    }
+
+    /// A question only its buttons answer: its cancel button is a "no", a
+    /// barrier tap or Escape closes it with no answer.
+    #[test]
+    fn a_dialog_answered_by_its_buttons_alone_takes_no_dismissal_as_a_no() {
+        let question = || {
+            ConfirmDialog::new("Check for updates automatically?")
+                .confirm_label("Check automatically")
+                .cancel_label("Don't check")
+                .destructive(false)
+                .answered_by_buttons()
+        };
+        let mut state = DialogState::new(question());
+        let messages = run(&mut state, |ui| {
+            ui.click("Don't check").expect("the cancel button");
+            let _ = ui.tap_key(keyboard::Key::Named(Named::Escape));
+            ui.point_at(Point::new(5.0, BELOW_BAND));
+            let _ = ui.simulate(iced_test::simulator::click());
+        });
+        assert_eq!(
+            messages,
+            vec![Message::Decline, Message::Cancel, Message::Cancel]
+        );
+        assert_eq!(
+            DialogState::new(question()).update(Message::Decline),
+            Some(DialogResult::Confirmed(false))
+        );
+        assert_eq!(
+            DialogState::new(question()).update(Message::Cancel),
+            Some(DialogResult::Closed)
+        );
+        // Any other confirm dialog takes them all as its cancel button.
+        assert_eq!(
+            DialogState::new(ConfirmDialog::new("Delete?")).update(Message::Cancel),
+            Some(DialogResult::Confirmed(false))
+        );
     }
 
     fn mouse(event: iced::mouse::Event) -> Event {
@@ -1005,12 +1185,10 @@ mod tests {
             state.update(Message::Confirm),
             Some(DialogResult::Text(Some("My song".into())))
         );
+        // A blank field confirms nothing: the dialog stays open.
         let mut state = DialogState::new(StudioPrompt::new("New practice"));
         state.update(Message::Input("   ".into()));
-        assert_eq!(
-            state.update(Message::Confirm),
-            Some(DialogResult::Text(None))
-        );
+        assert_eq!(state.step(Message::Confirm), DialogStep::Stay);
         let mut state = DialogState::new(StudioPrompt::new("New practice").initial("x"));
         assert_eq!(
             state.update(Message::Cancel),
@@ -1058,6 +1236,7 @@ mod tests {
                 .label("Name")
                 .hint("Song title"),
         );
+        state.update(Message::Input("Song".into()));
         let messages = run(&mut state, |ui| {
             assert!(ui.find("Name").is_ok());
             assert!(ui.find("NAME").is_err());
@@ -1103,6 +1282,41 @@ mod tests {
                 Message::Cancel
             ]
         );
+    }
+
+    /// An empty prompt keeps its confirm button disabled and takes no
+    /// Return: closed, it would have named nothing and said nothing.
+    #[test]
+    fn an_empty_prompt_cannot_be_confirmed() {
+        let mut state = DialogState::new(StudioPrompt::new("Rename").initial("Old"));
+        state.update(Message::Input("  ".into()));
+        let messages = run(&mut state, |ui| {
+            ui.click("Create").expect("the confirm button");
+            ui.click("  ").expect("the field");
+            let _ = ui.tap_key(keyboard::Key::Named(Named::Enter));
+        });
+        // The button sent nothing; Return in the field did, and it stays.
+        assert_eq!(messages, vec![Message::Confirm]);
+        assert_eq!(state.step(Message::Confirm), DialogStep::Stay);
+        // With a name, the button takes the click.
+        state.update(Message::Input("New".into()));
+        let messages = run(&mut state, |ui| {
+            ui.click("Create").expect("the confirm button");
+        });
+        assert_eq!(messages, vec![Message::Confirm]);
+    }
+
+    /// A prompt opened with a name in its field selects it, as a macOS
+    /// rename sheet does: typing replaces it ("Interpretation 2X" before).
+    #[test]
+    fn a_prompt_opens_with_its_text_selected_so_typing_replaces_it() {
+        let state = DialogState::new(
+            StudioPrompt::new("Rename interpretation").initial("Interpretation 2"),
+        );
+        let typed =
+            iced_test::simulator::press_key(keyboard::Key::Character("X".into()), Some("X".into()));
+        let messages = testing::opened(state.view(), state.focus(), &[typed]);
+        assert_eq!(messages, vec![Message::Input("X".into())]);
     }
 
     #[test]

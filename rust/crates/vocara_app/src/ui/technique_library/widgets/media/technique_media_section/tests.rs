@@ -614,6 +614,23 @@ fn rename_asks_for_a_caption_and_an_empty_one_clears_it() {
     assert_eq!(answer(&mut page, None), None, "cancelled");
 }
 
+/// The rename opens with the caption selected, as a macOS rename sheet
+/// does: typing replaces it.
+#[test]
+fn the_rename_dialog_opens_with_its_caption_selected() {
+    let dialog = RenameExampleDialog::new("Example 0");
+    let typed = iced_test::simulator::press_key(
+        iced::keyboard::Key::Character("T".into()),
+        Some("T".into()),
+    );
+    let messages = crate::ui::core::widgets::confirm_dialog::testing::opened(
+        dialog.view(),
+        dialog.focus(),
+        &[typed],
+    );
+    assert_eq!(messages, vec![confirm_dialog::Message::Input("T".into())]);
+}
+
 #[test]
 fn the_rename_dialog_shows_the_caption_and_saves_or_cancels() {
     let drive = |dialog: &RenameExampleDialog,

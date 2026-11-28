@@ -445,7 +445,16 @@ fn an_empty_library_pitches_building_one_with_no_filter() {
     // Search + tag filter only appear once there's something to filter.
     assert!(!h.shows("All tags"));
     assert!(!h.shows(&glyph(Icon::Search)));
-    assert!(h.shows("New technique"));
+    // Its own New technique button, under the pitch.
+    let pitch = h.find("Build your technique library").expect("the pitch");
+    // (The first "New technique" is the toolbar's + tooltip.)
+    let button = h
+        .ui()
+        .find(nth(NEW_TECHNIQUE, 1))
+        .expect("the empty state's button")
+        .bounds();
+    assert!(button.y > pitch.y, "{button:?} under {pitch:?}");
+    assert_eq!(h.click_nth(NEW_TECHNIQUE, 1), vec![Message::NewTechnique]);
 }
 
 // A failed list read used to fall through to the empty state,
@@ -616,8 +625,38 @@ fn typing_in_the_search_box_filters_the_cards() {
     assert_eq!(messages, vec![Message::Query("Twang".into())]);
     assert_eq!(h.names(), ["Twang"]);
 
+    // Nothing found: said of the search, the filter, or both.
     h.send(Message::Query("nothing like it".into()));
+    assert!(h.shows("No techniques match your search."));
+    h.send(Message::PickTag(Some("EVT".into())));
+    assert!(h.shows("No techniques match your search and filter."));
+    h.send(Message::Query(String::new()));
+    h.send(Message::PickTag(Some(UNTAGGED_FILTER.into())));
     assert!(h.shows("No techniques match this filter."));
+}
+
+/// Escape in the search field clears it, and so does the clear button
+/// that shows inside the field while it holds a search, as in a macOS
+/// search field.
+#[test]
+fn escape_and_the_clear_button_clear_the_search() {
+    let mut h = Harness::library(vec![stored("Twang", &["EVT"]), stored("Curbing", &["CVT"])]);
+    h.settle();
+    assert!(!h.shows(&glyph(Icon::X)), "nothing to clear");
+    h.send(Message::Query("Twang".into()));
+    let messages = h.drive(|ui| {
+        ui.click(SEARCH).expect("the search field");
+        let _ = ui.tap_key(keyboard::Key::Named(Named::Escape));
+    });
+    assert_eq!(messages, vec![Message::Query(String::new())]);
+    assert_eq!(h.names(), ["Curbing", "Twang"]);
+    h.send(Message::Query("Curb".into()));
+    assert_eq!(
+        h.click(&glyph(Icon::X)),
+        vec![Message::Query(String::new())]
+    );
+    assert_eq!(h.names(), ["Curbing", "Twang"]);
+    assert!(!h.shows(&glyph(Icon::X)));
 }
 
 // technique_dialogs_test, through the page: the dialog's name (trimmed by

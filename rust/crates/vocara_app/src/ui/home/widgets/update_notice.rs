@@ -475,7 +475,7 @@ impl UpdateDownloadDialog {
     pub fn update(&mut self, message: DialogMessage) -> Option<DialogOutcome> {
         let mode = self.mode();
         match message {
-            DialogMessage::Cancel => Some(DialogOutcome::Close),
+            DialogMessage::Cancel | DialogMessage::Decline => Some(DialogOutcome::Close),
             DialogMessage::Confirm => match mode {
                 // The dialog stays open on purpose: if the browser launch
                 // fails the selectable URL is the fallback.

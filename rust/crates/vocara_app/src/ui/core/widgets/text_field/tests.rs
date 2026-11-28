@@ -360,6 +360,57 @@ fn a_selection_shows_no_caret_and_an_unfocused_window_none_either() {
     ));
 }
 
+/// A double click at a word's start selects that word alone, as on
+/// macOS: iced's field took the word before the position too ("four five"
+/// for a click on the "f" of "five"). A double click inside a word, and a
+/// drag after it, select whole words still.
+#[test]
+fn a_double_click_at_a_words_start_selects_that_word_alone() {
+    let value = "one two three four five six";
+    let double = [
+        press(mouse::Button::Left),
+        release(mouse::Button::Left),
+        press(mouse::Button::Left),
+        release(mouse::Button::Left),
+    ];
+    let t0 = Instant::now();
+    // Just inside the "f" of "five": the position at the word's start.
+    let mut window = window();
+    let start = Point::new(TEXT_X + width("one two three four ") + 1.0, MIDDLE);
+    window.run(field(value), start, &double, t0);
+    let (messages, _) = window.run(field(value), start, &[typed("X")], t0);
+    assert_eq!(
+        input_of(messages).as_deref(),
+        Some("one two three four X six")
+    );
+    // In the middle of a word: that word.
+    let mut window = self::window();
+    let middle = Point::new(TEXT_X + width("one two thr"), MIDDLE);
+    window.run(field(value), middle, &double, t0);
+    let (messages, _) = window.run(field(value), middle, &[typed("X")], t0);
+    assert_eq!(
+        input_of(messages).as_deref(),
+        Some("one two X four five six")
+    );
+    // Held after the double click and dragged on to "six": the words from
+    // "five" to it, not "four".
+    let mut window = self::window();
+    window.run(
+        field(value),
+        start,
+        &[
+            press(mouse::Button::Left),
+            release(mouse::Button::Left),
+            press(mouse::Button::Left),
+        ],
+        t0,
+    );
+    let six = Point::new(TEXT_X + width("one two three four five si"), MIDDLE);
+    window.run(field(value), six, &[release(mouse::Button::Left)], t0);
+    let (messages, _) = window.run(field(value), six, &[typed("X")], t0);
+    assert_eq!(input_of(messages).as_deref(), Some("one two three four X"));
+}
+
 // ------------------------------------------------------------------- menu
 
 #[test]
@@ -1102,6 +1153,72 @@ fn command_z_undoes_and_shift_command_z_redoes_in_a_multi_line_field() {
     content = Content::with_text("another note");
     run(&mut window, &mut content, &undo);
     assert_eq!(content.text(), "another note");
+}
+
+/// ↓ on a multi-line field's last line takes the caret to the end of the
+/// text and ↑ on its first line to the start, as a macOS text view's do
+/// (cosmic-text left the caret where it was on that line, so a summary
+/// that looks like one line could not be reached the end of with ↓); with
+/// ⇧ they select to there. Between lines they move a line.
+#[test]
+fn up_and_down_past_a_multi_line_fields_first_and_last_lines_go_to_its_ends() {
+    let shifted = |named: Named| {
+        let shift = keyboard::Modifiers::SHIFT;
+        [
+            Event::Keyboard(keyboard::Event::ModifiersChanged(shift)),
+            Event::Keyboard(keyboard::Event::KeyPressed {
+                key: keyboard::Key::Named(named),
+                modified_key: keyboard::Key::Named(named),
+                physical_key: keyboard::key::Physical::Unidentified(
+                    keyboard::key::NativeCode::Unidentified,
+                ),
+                location: keyboard::Location::Standard,
+                modifiers: shift,
+                text: None,
+                repeat: false,
+            }),
+            Event::Keyboard(keyboard::Event::ModifiersChanged(
+                keyboard::Modifiers::empty(),
+            )),
+        ]
+    };
+    let mut window = window();
+    let mut content = Content::with_text("line one\nline two");
+    // At the start of the second line.
+    let at = Point::new(TEXT_X + 1.0, LINE_TOP + LINE + 7.0);
+    let run = |window: &mut Window, content: &mut Content, events: &[Event]| {
+        let (messages, _) = window.run(prose(content, false), at, events, Instant::now());
+        for message in messages {
+            if let Msg::Edit(action) = message {
+                content.perform(action);
+            }
+        }
+    };
+    run(&mut window, &mut content, &click());
+    run(
+        &mut window,
+        &mut content,
+        &[key(Named::ArrowDown), typed("Z")],
+    );
+    assert_eq!(content.text(), "line one\nline twoZ");
+    // Up from the last line moves a line; again, on the first, the start.
+    run(&mut window, &mut content, &[key(Named::ArrowUp)]);
+    run(
+        &mut window,
+        &mut content,
+        &[key(Named::ArrowUp), typed("A")],
+    );
+    assert_eq!(content.text(), "Aline one\nline twoZ");
+    // ⇧↓ selects down a line, then to the end.
+    run(&mut window, &mut content, &shifted(Named::ArrowDown));
+    run(&mut window, &mut content, &shifted(Named::ArrowDown));
+    assert_eq!(content.selection().as_deref(), Some("line one\nline twoZ"));
+    // From the end, ⇧↑ selects up a line, then to the start.
+    run(&mut window, &mut content, &[key(Named::ArrowDown)]);
+    assert_eq!(content.selection(), None);
+    run(&mut window, &mut content, &shifted(Named::ArrowUp));
+    run(&mut window, &mut content, &shifted(Named::ArrowUp));
+    assert_eq!(content.selection().as_deref(), Some("Aline one\nline twoZ"));
 }
 
 /// Edit ▸ Emoji & Symbols inserts with no key press and nothing marked,

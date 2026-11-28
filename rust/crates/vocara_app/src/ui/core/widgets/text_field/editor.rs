@@ -670,6 +670,44 @@ impl Content {
         self.0.borrow().editor.copy()
     }
 
+    /// `motion` from the caret as a macOS text view takes it: Up on the
+    /// first visual line goes to the start of the text and Down on the last
+    /// to its end (cosmic-text's leave the caret on that line). Shift
+    /// extends the selection the same way. Any other motion is itself.
+    fn past_the_edge(&self, motion: Motion) -> Motion {
+        let (up, to) = match motion {
+            Motion::Up => (true, Motion::DocumentStart),
+            Motion::Down => (false, Motion::DocumentEnd),
+            other => return other,
+        };
+        let internal = self.0.borrow();
+        let position = internal.editor.cursor().position;
+        let buffer = internal.editor.buffer();
+        let Some(layout) = buffer
+            .lines
+            .get(position.line)
+            .and_then(cosmic_text::BufferLine::layout_opt)
+        else {
+            return motion;
+        };
+        // The visual line the caret is on: the last that starts at or
+        // before it (at a wrap, the line the caret starts).
+        let visual = layout
+            .iter()
+            .rposition(|line| line.glyphs.first().map_or(0, |g| g.start) <= position.column)
+            .unwrap_or(0);
+        let at_edge = if up {
+            position.line == 0 && visual == 0
+        } else {
+            position.line + 1 >= buffer.lines.len() && visual + 1 >= layout.len()
+        };
+        if at_edge {
+            to
+        } else {
+            motion
+        }
+    }
+
     /// Its first line's ending.
     pub fn line_ending(&self) -> Option<LineEnding> {
         Some(self.line(0)?.ending)
@@ -1288,10 +1326,10 @@ impl<Message> Widget<Message, Theme, Renderer> for TextEditor<'_, Message> {
                                 }
                             }
                             Binding::Move(motion) => {
-                                sink.act(Action::Move(motion), shell);
+                                sink.act(Action::Move(content.past_the_edge(motion)), shell);
                             }
                             Binding::Select(motion) => {
-                                sink.act(Action::Select(motion), shell);
+                                sink.act(Action::Select(content.past_the_edge(motion)), shell);
                             }
                             Binding::SelectWord => {
                                 sink.act(Action::SelectWord, shell);

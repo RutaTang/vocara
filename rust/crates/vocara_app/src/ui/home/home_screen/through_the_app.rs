@@ -230,10 +230,10 @@ fn the_question_whether_to_check_comes_once_and_a_yes_checks() {
     assert!(home(&app).1.timers().is_empty(), "asked once");
 }
 
-// Escape on the question is "Don't check", as the macOS updaters take it:
-// kept, and nothing is fetched.
+// Escape on the question closes it with no answer: nothing is kept (the
+// next launch asks again) and nothing is fetched. Only its buttons answer.
 #[test]
-fn escape_on_the_question_is_a_no() {
+fn escape_on_the_question_answers_nothing() {
     let mut app = boot(Arc::new(Library::in_memory()), unanswered_release);
     fire(&mut app, |t| *t == Timer::UpdateCheck);
     fire(&mut app, |t| *t == Timer::Consent);
@@ -249,10 +249,7 @@ fn escape_on_the_question_is_a_no() {
         settle(&mut app, task);
     }
     assert_eq!(app.dialogs(), 0);
-    assert_eq!(
-        app.services().update_check.auto_check_preference(),
-        Some(false)
-    );
+    assert_eq!(app.services().update_check.auto_check_preference(), None);
     assert!(!shows(&app, "Vocara 9.9.9 is available."));
 }
 

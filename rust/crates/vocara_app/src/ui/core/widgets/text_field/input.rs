@@ -72,6 +72,7 @@ pub struct TextInput<'a, Message> {
     line_height: text::LineHeight,
     on_input: Option<Box<dyn Fn(String) -> Message + 'a>>,
     on_submit: Option<Message>,
+    on_escape: Option<Message>,
     caret_color: Color,
     style: StyleFn<'a, Theme>,
     last_status: Option<Status>,
@@ -94,6 +95,7 @@ impl<'a, Message: Clone> TextInput<'a, Message> {
             line_height: text::LineHeight::default(),
             on_input: None,
             on_submit: None,
+            on_escape: None,
             caret_color: DEFAULT_CARET,
             style: Box::new(default),
             last_status: None,
@@ -115,6 +117,14 @@ impl<'a, Message: Clone> TextInput<'a, Message> {
     /// The message Return sends.
     pub fn on_submit(mut self, message: Message) -> Self {
         self.on_submit = Some(message);
+        self
+    }
+
+    /// The message Escape sends while the field holds some text (a search
+    /// field's clear, as an `NSSearchField`'s Escape): the field keeps the
+    /// focus. Empty, or without one, Escape takes the focus away.
+    pub fn on_escape(mut self, message: Message) -> Self {
+        self.on_escape = Some(message);
         self
     }
 
@@ -405,6 +415,21 @@ pub(super) fn word_at(value: &Value, index: usize, upstream: bool) -> (usize, us
     let graphemes = |s: &str| s.graphemes(true).count();
     let first = graphemes(&content[..start]);
     (first, first + graphemes(word))
+}
+
+/// The word a double click at `index` selects: the word holding the
+/// character there, or the one before it when `upstream`
+/// ([`word_at`]), so a click at a word's start selects that word alone
+/// (iced's took the word before the position as well). Past the end of
+/// the text, the last word, as before.
+fn double_click_word(value: &Value, index: usize, upstream: bool) -> (usize, usize) {
+    if index >= value.len() {
+        return (
+            value.previous_start_of_word(index),
+            value.next_end_of_word(index),
+        );
+    }
+    word_at(value, index, upstream)
 }
 
 /// Focuses the field's `state` (a click, a right-click, a focus
@@ -701,20 +726,13 @@ impl<'a, Message: Clone + 'a> Widget<Message, Theme, Renderer> for TextInput<'a,
                             state.is_dragging = Some(Drag::Select);
                         }
                         click::Kind::Double => {
-                            let position = find_cursor_position(
-                                text_layout.bounds(),
-                                &self.value,
-                                state,
-                                target,
-                            )
-                            .unwrap_or(0);
+                            let (index, upstream) =
+                                self.position_at(state, text_layout.bounds(), cursor_position.x);
+                            let word = double_click_word(&self.value, index, upstream);
 
-                            state.cursor.select_range(
-                                self.value.previous_start_of_word(position),
-                                self.value.next_end_of_word(position),
-                            );
+                            state.cursor.select_range(word.0, word.1);
 
-                            state.is_dragging = Some(Drag::SelectWords { anchor: position });
+                            state.is_dragging = Some(Drag::SelectWords { anchor: word });
                         }
                         click::Kind::Triple => {
                             state.cursor.select_all(&self.value);
@@ -775,9 +793,10 @@ impl<'a, Message: Clone + 'a> Widget<Message, Theme, Renderer> for TextInput<'a,
             | Event::Touch(touch::Event::FingerMoved { position, .. }) => {
                 let state = state(tree);
 
-                if let Some(is_dragging) = &state.is_dragging {
+                if let Some(is_dragging) = state.is_dragging {
                     let text_layout = layout.children().next().unwrap();
 
+                    let position_x = position.x;
                     let target = position.x - text_layout.bounds().x;
 
                     let value = self.value.clone();
@@ -796,16 +815,13 @@ impl<'a, Message: Clone + 'a> Widget<Message, Theme, Renderer> for TextInput<'a,
                                 .select_range(state.cursor.start(&value), position);
                         }
                         Drag::SelectWords { anchor } => {
-                            if position < *anchor {
-                                state.cursor.select_range(
-                                    self.value.previous_start_of_word(position),
-                                    self.value.next_end_of_word(*anchor),
-                                );
+                            let (index, upstream) =
+                                self.position_at(state, text_layout.bounds(), position_x);
+                            let word = double_click_word(&value, index, upstream);
+                            if word.0 < anchor.0 {
+                                state.cursor.select_range(word.0, anchor.1);
                             } else {
-                                state.cursor.select_range(
-                                    self.value.previous_start_of_word(*anchor),
-                                    self.value.next_end_of_word(position),
-                                );
+                                state.cursor.select_range(anchor.0, word.1.max(anchor.1));
                             }
                         }
                     }
@@ -1282,6 +1298,15 @@ impl<'a, Message: Clone + 'a> Widget<Message, Theme, Renderer> for TextInput<'a,
 
                             shell.capture_event();
                         }
+                        keyboard::Key::Named(key::Named::Escape)
+                            if self.on_escape.is_some() && !self.value.is_empty() =>
+                        {
+                            if let Some(on_escape) = self.on_escape.clone() {
+                                shell.publish(on_escape);
+                            }
+                            state.toolbar = None;
+                            shell.capture_event();
+                        }
                         keyboard::Key::Named(key::Named::Escape) => {
                             state.is_focused = None;
                             state.is_dragging = None;
@@ -1706,10 +1731,13 @@ struct Focus {
     is_window_focused: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 enum Drag {
     Select,
-    SelectWords { anchor: usize },
+    /// Words from a double click, `anchor` the word it selected first.
+    SelectWords {
+        anchor: (usize, usize),
+    },
 }
 
 impl State {

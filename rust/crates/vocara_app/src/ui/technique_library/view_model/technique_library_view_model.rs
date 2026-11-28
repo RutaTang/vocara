@@ -349,13 +349,15 @@ impl TechniqueLibraryViewModel {
 
     /// All tags in the library with their counts, alphabetically. Used for
     /// the tag filter. Tags are folded case-insensitively (so "EVT" and
-    /// "evt" are one entry), keeping the first-seen casing as the display
-    /// label — consistent with how `parseCommaList` dedupes tags within a
-    /// single technique.
+    /// "evt" are one entry), each technique counted once per tag (as
+    /// `parseCommaList` dedupes tags within a single technique). An entry
+    /// reads as its most common spelling, the first of those alphabetically
+    /// on a tie, so it matches most cards whatever order they came in (the
+    /// first-seen spelling made it depend on which technique came first).
     pub fn tag_facets(&self) -> Vec<TagFacet> {
-        // Lowercased tag -> its facet (shown casing, count).
+        // Lowercased tag -> its facet's place, and each spelling's count.
         let mut index: HashMap<String, usize> = HashMap::new();
-        let mut facets: Vec<TagFacet> = Vec::new();
+        let mut facets: Vec<(Vec<(&str, usize)>, usize)> = Vec::new();
         for t in &self.all {
             let mut seen: Vec<String> = Vec::new();
             for tag in &t.tags {
@@ -364,18 +366,30 @@ impl TechniqueLibraryViewModel {
                     continue; // count each technique once per tag
                 }
                 seen.push(key.clone());
-                match index.get(&key) {
-                    Some(&i) => facets[i].count += 1,
-                    None => {
-                        index.insert(key, facets.len());
-                        facets.push(TagFacet {
-                            tag: tag.clone(),
-                            count: 1,
-                        });
-                    }
+                let i = *index.entry(key).or_insert_with(|| {
+                    facets.push((Vec::new(), 0));
+                    facets.len() - 1
+                });
+                let (spellings, count) = &mut facets[i];
+                *count += 1;
+                match spellings.iter_mut().find(|(s, _)| *s == tag.as_str()) {
+                    Some((_, n)) => *n += 1,
+                    None => spellings.push((tag.as_str(), 1)),
                 }
             }
         }
+        let mut facets: Vec<TagFacet> = facets
+            .into_iter()
+            .filter_map(|(spellings, count)| {
+                let (tag, _) = spellings
+                    .into_iter()
+                    .max_by(|(a, m), (b, n)| m.cmp(n).then_with(|| compare_utf16(b, a)))?;
+                Some(TagFacet {
+                    tag: tag.to_string(),
+                    count,
+                })
+            })
+            .collect();
         facets.sort_by(|a, b| compare_utf16(&fold(&a.tag), &fold(&b.tag)));
         facets
     }

@@ -9,8 +9,9 @@
 //! is something to search — the search field, and the New technique icon
 //! button at its right end); below it the spinner, the read error with
 //! Retry, the empty state, or the "Techniques" heading with its count and
-//! the tag filter (a pop-up button) over the grid of cards, or "No
-//! techniques match this filter." A card opens its technique; hovered, it
+//! the tag filter (a pop-up button) over the grid of cards, or a line
+//! saying nothing matches the search or the filter ([`no_match`]). A card
+//! opens its technique; hovered, it
 //! lifts and shows its trash (delete, after a confirmation); its tags
 //! filter the library.
 //!
@@ -129,6 +130,12 @@ pub const SEARCH_WIDTH: f32 = 220.0;
 pub const TAG_FILTER_MAX_WIDTH: f32 = 200.0;
 /// The tag menu's width.
 pub const MENU_WIDTH: f32 = 220.0;
+
+/// The search field's clear button's tooltip.
+pub const CLEAR_SEARCH: &str = "Clear search";
+
+/// The empty library's button.
+pub const NEW_TECHNIQUE: &str = "New technique";
 
 /// The search field's id.
 pub const SEARCH: iced::widget::Id = iced::widget::Id::new("technique-library-search");
@@ -611,10 +618,13 @@ impl TechniqueLibraryScreen {
                     ..LIBRARY_PADDING
                 }),
                 center(
-                    studio_text("No techniques match this filter.")
-                        .size(type_scale::BODY)
-                        .line_height(iced::Pixels(18.0))
-                        .color(Studio::TEXT_FAINT),
+                    studio_text(no_match(
+                        !dart_string::trim(vm.query()).is_empty(),
+                        vm.active_tag().is_some(),
+                    ))
+                    .size(type_scale::BODY)
+                    .line_height(iced::Pixels(18.0))
+                    .color(Studio::TEXT_FAINT),
                 ),
             ]
             .into();
@@ -694,17 +704,31 @@ fn rule<'a>() -> Element<'a, Message> {
         .into()
 }
 
+/// What the page says when nothing passes the search and the tag filter:
+/// worded for whichever of them narrows the list.
+pub fn no_match(searching: bool, filtering: bool) -> &'static str {
+    match (searching, filtering) {
+        (true, false) => "No techniques match your search.",
+        (true, true) => "No techniques match your search and filter.",
+        (false, _) => "No techniques match this filter.",
+    }
+}
+
 /// The search field (`DESIGN.md`, Text fields): 28 px, the field's own
 /// well (its outline the accent at 60 % while focused), a 13 px search
-/// glyph in `TEXT_FAINT` inside it at the left, 12 px text.
+/// glyph in `TEXT_FAINT` inside it at the left, 12 px text. While it holds
+/// a search, a clear button sits inside its right end, and Escape in it
+/// clears it too, as in a macOS search field.
 fn search_field(query: &str) -> Element<'_, Message> {
     let input = text_input("Search techniques", query)
         .id(SEARCH)
         .on_input(Message::Query)
+        .on_escape(Message::Query(String::new()))
         .size(theme::FIELD_TEXT_SIZE)
         .line_height(iced::Pixels(type_scale::LINE))
         .padding(Padding {
             left: 28.0,
+            right: 28.0,
             ..theme::FIELD_PADDING
         })
         .caret_color(Studio::ACCENT)
@@ -717,7 +741,25 @@ fn search_field(query: &str) -> Element<'_, Message> {
             ..Padding::ZERO
         })
         .center_y(theme::FIELD_HEIGHT);
-    stack![input, glyph].width(SEARCH_WIDTH).into()
+    let mut field = stack![input, glyph];
+    if !query.is_empty() {
+        field = field.push(
+            container(
+                icon_button(Icon::X, Message::Query(String::new()))
+                    .panel()
+                    .icon_size(12.0)
+                    .tooltip(CLEAR_SEARCH),
+            )
+            .width(Length::Fill)
+            .align_x(Horizontal::Right)
+            .padding(Padding {
+                right: 2.0,
+                ..Padding::ZERO
+            })
+            .center_y(theme::FIELD_HEIGHT),
+        );
+    }
+    field.width(SEARCH_WIDTH).into()
 }
 
 /// One row of the tag menu (`DESIGN.md`, Menus): 24 px, radius 4, a
@@ -1047,14 +1089,18 @@ fn error_state<'a>() -> Element<'a, Message> {
     )
 }
 
-/// No techniques yet. No inline button: the toolbar's New technique is the
-/// single, always-present way to add one.
+/// No techniques yet, with a New technique button under the line (the
+/// toolbar's + is easy to miss on an empty page).
 fn empty_state<'a>() -> Element<'a, Message> {
     state_message(
         Icon::Library,
         "Build your technique library",
         "Collect the techniques you train, in your own words. Add a technique, tag it \
          however your method does, and attach audio or video examples.",
-        None,
+        Some(
+            studio_button(NEW_TECHNIQUE, Message::NewTechnique)
+                .icon(Icon::Plus)
+                .into(),
+        ),
     )
 }

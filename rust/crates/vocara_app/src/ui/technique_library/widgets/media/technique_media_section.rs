@@ -114,7 +114,7 @@ pub const ADD_FIRST: &str = "Drag an audio or video clip here, or click to brows
 /// What the compact zone says once it has some.
 pub const ADD_ANOTHER: &str = "Add another example";
 /// The read view's placeholder when there is no example.
-pub const EMPTY: &str = "Empty content";
+pub const EMPTY: &str = "No examples yet";
 /// The record row's idle button.
 pub const RECORD: &str = "Record an example";
 /// The record row's button while a take records.
@@ -1087,9 +1087,9 @@ impl RenameExampleDialog {
     }
 
     /// The task that puts the keyboard in the field when the dialog opens
-    /// (`autofocus: true`).
+    /// (`autofocus: true`), the caption selected so typing replaces it.
     pub fn focus<T: Send + 'static>(&self) -> Task<T> {
-        iced::widget::operation::focus(self.input.clone())
+        confirm_dialog::focus_selecting_all(self.input.clone())
     }
 
     /// Handles `message`; `Some` when the dialog closes.
@@ -1099,7 +1099,9 @@ impl RenameExampleDialog {
                 self.text = text;
                 None
             }
-            confirm_dialog::Message::Cancel => Some(DialogResult::Text(None)),
+            confirm_dialog::Message::Cancel | confirm_dialog::Message::Decline => {
+                Some(DialogResult::Text(None))
+            }
             // Save, or Return in the field: the trimmed text, empty or not.
             confirm_dialog::Message::Confirm => Some(DialogResult::Text(Some(
                 dart_string::trim(&self.text).to_string(),
