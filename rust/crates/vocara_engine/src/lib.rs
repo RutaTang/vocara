@@ -17,6 +17,7 @@ pub mod engine;
 pub mod feed;
 pub mod graph;
 pub mod graph_cell;
+pub mod latency;
 // Whether an open mic stream still delivers (the host's reopen decision).
 pub mod input_health;
 // The device IO buffer sizes a mic open changes, and their restore.

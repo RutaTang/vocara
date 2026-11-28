@@ -60,7 +60,7 @@ mod sync_chain;
 mod tests;
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -148,6 +148,9 @@ struct Shared {
     input_pull: Mutex<Vec<f32>>,
     /// See [`GraphAudioPlaybackService::input_failed`].
     input_failed: AtomicBool,
+    /// The user's recording offset in ms (f64 bits; see
+    /// [`GraphAudioPlaybackService::set_record_offset_ms`]).
+    record_offset_ms: AtomicU64,
 }
 
 /// What the Dart object owned (see the module doc).
@@ -1226,6 +1229,7 @@ impl GraphAudioPlaybackService {
                 playing: Broadcast::new(),
                 input_pull: Mutex::new(Vec::new()),
                 input_failed: AtomicBool::new(false),
+                record_offset_ms: AtomicU64::new(0.0f64.to_bits()),
             }),
         }
     }
@@ -1519,6 +1523,27 @@ impl GraphAudioPlaybackService {
         self.live().map_or(0.0, |e| {
             f64::from(e.record_latency_frames()) / 48_000.0 * 1000.0
         })
+    }
+
+    /// Sets the user's recording offset (ms; Settings): added to the measured
+    /// round trip wherever a take is aligned, for what no device reports (a
+    /// Bluetooth headset's codec, a speaker across the room), as a DAW's
+    /// recording delay is. Positive moves new takes earlier. A non-finite
+    /// value is dropped.
+    pub fn set_record_offset_ms(&self, ms: f64) {
+        if ms.is_finite() {
+            self.shared
+                .record_offset_ms
+                .store(ms.to_bits(), Ordering::Relaxed);
+        }
+    }
+
+    /// How far a new take is shifted earlier on the timeline, in ms: the
+    /// measured round trip ([`GraphAudioPlaybackService::record_latency_ms`])
+    /// plus the user's offset.
+    pub fn take_alignment_ms(&self) -> f64 {
+        let offset = f64::from_bits(self.shared.record_offset_ms.load(Ordering::Relaxed));
+        self.record_latency_ms() + offset
     }
 
     // --- Capture, recording ---------------------------------------------------

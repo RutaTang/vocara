@@ -211,6 +211,8 @@ struct GraphState {
     written_frames: u64,
     /// The input round-trip the take is compensated for, in frames.
     latency_frames: u32,
+    /// The recording offset Settings gives the service, in ms.
+    record_offset_ms: f64,
     /// The engine's input counter, fed by hand.
     frames: u64,
     /// The device watch's polls (each tick polls once).
@@ -243,10 +245,12 @@ impl Graph {
     }
 
     fn service(self: &Arc<Self>) -> Arc<GraphAudioPlaybackService> {
-        Arc::new(GraphAudioPlaybackService::with_bindings(
+        let svc = Arc::new(GraphAudioPlaybackService::with_bindings(
             Arc::clone(self) as Arc<dyn EngineBindings>,
             None,
-        ))
+        ));
+        svc.set_record_offset_ms(self.s().record_offset_ms);
+        svc
     }
 
     fn polls(&self) -> usize {
@@ -1272,6 +1276,26 @@ fn a_take_records_under_a_name_holding_its_lane_and_start_and_notes_where_its_st
     assert!(s.pump_until(|s| !s.files.aligned().is_empty()));
     assert_eq!(s.files.aligned(), [2500 - 200 - 30]);
     s.stop_and_wait();
+}
+
+#[test]
+fn the_recording_offset_moves_a_take_past_the_measured_round_trip() {
+    // What no device reports, the singer sets in Settings: the take lands
+    // that much earlier than the round trip alone puts it, at its arm's
+    // estimate and at its stop.
+    let f = finalizer();
+    let graph = Graph::new();
+    graph.s().written_frames = 9600; // 200 ms of pre-roll at 48 kHz
+    graph.s().latency_frames = 1440; // 30 ms
+    graph.s().record_offset_ms = 20.0;
+    let mic = FakeMic::new(&f);
+    let mut s = Screen::new(Opts::new(&f).mic(&mic).graph(&graph));
+    s.host.position = ms(2500);
+    s.record();
+    assert!(s.pump_until(|s| !s.files.aligned().is_empty()));
+    assert_eq!(s.files.aligned(), [2500 - 200 - 30 - 20]);
+    s.stop_and_wait();
+    assert_eq!(s.files.aligned(), [2500 - 200 - 30 - 20]);
 }
 
 #[test]

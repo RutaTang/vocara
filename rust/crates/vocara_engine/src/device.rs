@@ -3635,6 +3635,20 @@ fn mic_release_requested(h: Option<&MicHandle>) -> bool {
     h.is_some_and(|v| v.release_requested())
 }
 /// The cpal input stream shares nothing with another engine's.
+/// Measure the record round trip on a mic stream that has just delivered its first frames, and
+/// publish it for the takes' alignment (see `Vpio::measure_latency`): what the open read before
+/// the unit ran is only an estimate. `None` where nothing is measured (the cpal input path
+/// publishes no round trip).
+#[cfg(target_vendor = "apple")]
+fn measure_mic_latency(h: Option<&MicHandle>) -> Option<u32> {
+    h.map(|m| m.measure_latency())
+}
+
+#[cfg(not(target_vendor = "apple"))]
+fn measure_mic_latency(_h: Option<&MicHandle>) -> Option<u32> {
+    None
+}
+
 #[cfg(not(target_vendor = "apple"))]
 fn mic_release_requested(_h: Option<&MicHandle>) -> bool {
     false
@@ -3771,6 +3785,19 @@ fn audio_host_run(
         });
         built
     };
+    // The record round trip measured on a stream that has just delivered (see
+    // `measure_mic_latency`), logged.
+    let note_latency = |gen: u64, frames: Option<u32>| {
+        if let Some(f) = frames {
+            diag::note(
+                tag,
+                &format!(
+                    "input stream gen {gen}: record round trip {f} frames ({:.1} ms), measured on the running unit",
+                    f as f64 * 1000.0 / ENGINE_SR
+                ),
+            );
+        }
+    };
     // A change in the open stream's delivery, logged once (see `input_health`).
     let log_health = |gen: u64, change: Option<Change>, open_for: Option<std::time::Duration>| {
         let line = match change {
@@ -3854,6 +3881,9 @@ fn audio_host_run(
                     let now = Instant::now();
                     let change = health.observe(input_cell.frames_in(), input_cell.is_dead(), now);
                     log_health(gen, change, health.open_for(now));
+                    if change == Some(Change::FirstFrames) {
+                        note_latency(gen, measure_mic_latency(in_stream.as_ref()));
+                    }
                     // Another engine opened the mic and asked for it: VoiceProcessingIO is one
                     // per process, so keeping it would keep that one from delivering. Release it
                     // as a lost input (this engine's owners tear their consumers down); the next
@@ -3979,6 +4009,9 @@ fn audio_host_run(
                     let dead = input_cell.take_dead();
                     let change = health.observe(input_cell.frames_in(), dead, now);
                     log_health(gen, change, health.open_for(now));
+                    if change == Some(Change::FirstFrames) {
+                        note_latency(gen, measure_mic_latency(in_stream.as_ref()));
+                    }
                     // Compared as the state word's consumers read it: 24 bits, like the
                     // generation the applied pair carries.
                     let asked = reopen_gen.is_some_and(|g| g & 0xFF_FFFF == gen & 0xFF_FFFF);

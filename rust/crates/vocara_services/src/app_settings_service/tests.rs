@@ -207,6 +207,11 @@ impl EngineBindings for FakeEngine {
         self.s().input_channel_calls.push(mode);
         Ok(())
     }
+
+    /// A measured round trip of 10 ms.
+    fn record_latency_frames(&self) -> u32 {
+        480
+    }
 }
 
 /// A fake engine and the service over it (what the settings attach).
@@ -2099,7 +2104,8 @@ fn the_document_is_written_in_darts_key_order_and_number_format() {
         text,
         "{\"outputDeviceUid\":\"hp\",\"inputDeviceUid\":null,\"outputDeviceName\":null,\
          \"inputDeviceName\":null,\"monitorReverbWet\":0.2,\"recordGainDb\":12.0,\
-         \"monitorGain\":0.0,\"inputChannelByUid\":{},\"headphoneOutputUids\":[]}"
+         \"monitorGain\":0.0,\"inputChannelByUid\":{},\"headphoneOutputUids\":[],\
+         \"recordingOffsetMs\":0.0}"
     );
 }
 
@@ -2156,4 +2162,38 @@ fn live_gains_clamp_as_darts_clamp_did_and_reach_the_engine() {
     f.service.set_monitor_gain_live(2.0);
     assert_eq!(f.service.monitor_gain(), 1.0);
     assert_eq!(f.service.engine_sample_rate(), 48_000.0);
+}
+
+// --- the recording offset ------------------------------------------------------------
+
+#[test]
+fn the_recording_offset_moves_new_takes_and_survives_a_restart() {
+    // What no device reports (a headset's codec, a speaker across the room)
+    // the singer corrects by ear, as a DAW's recording delay: added to the
+    // measured round trip wherever a take is aligned.
+    let f = Fixture::new();
+    let engine = Engine::new();
+    f.service.attach_engine(engine.handle());
+    assert_eq!(
+        engine.svc.take_alignment_ms(),
+        10.0,
+        "the measured round trip alone"
+    );
+
+    f.service.set_recording_offset_ms(-30.0);
+    assert_eq!(engine.svc.take_alignment_ms(), -20.0);
+    assert_eq!(f.storage.last("recordingOffsetMs"), Some(json!(-30.0)));
+
+    // Read back on the next launch, held to its range, and pushed to the
+    // engine a song opens with.
+    let next = Fixture::new();
+    next.doc(json!({ "recordingOffsetMs": 900.0 }));
+    next.service.load();
+    assert_eq!(
+        next.service.recording_offset_ms(),
+        AppSettingsService::RECORDING_OFFSET_MAX_MS
+    );
+    let engine = Engine::new();
+    next.service.attach_engine(engine.handle());
+    assert_eq!(engine.svc.take_alignment_ms(), 260.0);
 }
