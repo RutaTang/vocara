@@ -37,6 +37,7 @@ use crate::ui::song_practice_detail::widgets::track_row;
 use crate::ui::song_practice_detail::widgets::vocal_tract_engine;
 use crate::ui::song_practice_detail::widgets::vocal_tract_view;
 use crate::ui::song_practice_detail::widgets::voiceprint_view as voiceprint;
+use crate::ui::technique_library::widgets::technique_detail_screen::DISCARD_TITLE;
 use crate::ui::Update;
 
 impl SongPracticeDetailScreen {
@@ -952,14 +953,7 @@ impl SongPracticeDetailScreen {
                 self.vm.toggle_lyrics_panel();
                 return;
             }
-            P::SetLyricsMode(mode) => {
-                self.vm.set_lyrics_mode(match mode {
-                    lyrics_panel::LyricsMode::Read => LyricsMode::Read,
-                    lyrics_panel::LyricsMode::Edit => LyricsMode::Edit,
-                    lyrics_panel::LyricsMode::Sync => LyricsMode::Sync,
-                });
-                return;
-            }
+            P::SetLyricsMode(mode) => return self.set_lyrics_mode(mode, step),
             P::SetLyricsFocus(on) => {
                 self.vm.set_lyrics_focus(on);
                 return;
@@ -1577,6 +1571,32 @@ impl SongPracticeDetailScreen {
         self.import_lyrics_now(path, step);
     }
 
+    /// The Lyrics tab's mode. Leaving the editor (Cancel, the toolbar's
+    /// toggles) drops its draft: over text that differs from the lyrics, it
+    /// asks first, as the technique editor's Cancel does. It threw the edits
+    /// away without a word.
+    fn set_lyrics_mode(&mut self, mode: lyrics_panel::LyricsMode, step: &mut Step) {
+        let leaves_unsaved = self.vm.lyrics_mode() == LyricsMode::Edit
+            && mode != lyrics_panel::LyricsMode::Edit
+            && self
+                .vm
+                .lyrics_draft()
+                .is_some_and(|draft| draft != self.vm.lyrics_as_text());
+        if leaves_unsaved {
+            let dialog = ConfirmDialog::new(DISCARD_TITLE)
+                .body("Your edits to the lyrics have not been saved yet. This cannot be undone.")
+                .confirm_label("Discard")
+                .cancel_label("Keep editing")
+                .destructive(true);
+            return self.ask(dialog, Asked::DiscardLyricsDraft(mode), step);
+        }
+        self.vm.set_lyrics_mode(match mode {
+            lyrics_panel::LyricsMode::Read => LyricsMode::Read,
+            lyrics_panel::LyricsMode::Edit => LyricsMode::Edit,
+            lyrics_panel::LyricsMode::Sync => LyricsMode::Sync,
+        });
+    }
+
     /// The editor's Save: its text applied, the editor told when it lands.
     fn save_lyrics(&mut self, ticket: lyrics_panel::SaveTicket, step: &mut Step) {
         let started = self.vm.apply_edited_lyrics(ticket.text());
@@ -1606,7 +1626,12 @@ impl SongPracticeDetailScreen {
         let confirmed = result.confirmed();
         // Asked from the lyrics editor's own controls (Save, an import into
         // it) and cancelled: the editor, still open, takes the keyboard back.
-        if !confirmed && matches!(asked, Asked::SaveEmptyLyrics(_) | Asked::ImportLyrics(_)) {
+        if !confirmed
+            && matches!(
+                asked,
+                Asked::SaveEmptyLyrics(_) | Asked::ImportLyrics(_) | Asked::DiscardLyricsDraft(_)
+            )
+        {
             self.lyrics.give_focus_back();
         }
         let fx = match asked {
@@ -1642,6 +1667,15 @@ impl SongPracticeDetailScreen {
             Asked::ClearLyricTimes if confirmed => self.vm.clear_lyric_times(),
             Asked::ImportLyrics(path) if confirmed => return self.import_lyrics_now(path, step),
             Asked::SaveEmptyLyrics(ticket) if confirmed => return self.save_lyrics(ticket, step),
+            Asked::DiscardLyricsDraft(mode) if confirmed => {
+                // Asked over the editor: left as it was asked, if it is
+                // still open (a save landing meanwhile closed it).
+                if self.vm.lyrics_mode() == LyricsMode::Edit {
+                    self.vm.set_lyrics_draft(None);
+                    self.set_lyrics_mode(mode, step);
+                }
+                return;
+            }
             Asked::DeleteNote { track_id, note_id } if confirmed => {
                 self.vm.delete_note(&track_id, &note_id)
             }

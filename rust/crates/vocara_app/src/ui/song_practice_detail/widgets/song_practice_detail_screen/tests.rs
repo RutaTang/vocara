@@ -2692,6 +2692,77 @@ fn a_cancelled_dialog_from_the_lyrics_editor_gives_it_the_keyboard_back() {
     assert_eq!(h.answer_focusing(DialogResult::Confirmed(false)), None);
 }
 
+// The lyrics editor's Cancel threw typed edits away without a word: over
+// text that differs from the lyrics it asks first, as the technique
+// editor's Cancel does, and "Keep editing" keeps the draft and gives the
+// editor the keyboard back. The toolbar's toggles leave the editor too.
+#[test]
+fn leaving_the_lyrics_editor_over_unsaved_text_asks_first() {
+    use crate::ui::song_practice_detail::view_model::song_practice_detail_view_model::LyricsMode;
+    use crate::ui::technique_library::widgets::technique_detail_screen::DISCARD_TITLE;
+    use iced::widget::text_editor::{Action, Edit};
+    use vocara_model::models::lyric_line::LyricLine;
+    let mut p = practice(vec![take("t1", "Take 1")]);
+    p.lyrics = vec![LyricLine::new("First line", Some(1200))];
+    let mut h = Harness::open(Setup {
+        practice: p,
+        ..Setup::default()
+    });
+    let panel = Message::Lyrics;
+    let mode = |m| panel(lyrics_panel::Message::SetLyricsMode(m));
+    // Nothing typed: Cancel closes at once.
+    h.send(mode(lyrics_panel::LyricsMode::Edit));
+    h.send(mode(lyrics_panel::LyricsMode::Read));
+    assert!(h.dialog.is_none(), "nothing to lose: no prompt");
+    assert_eq!(h.vm().lyrics_mode(), LyricsMode::Read);
+
+    h.send(mode(lyrics_panel::LyricsMode::Edit));
+    let editor = h.screen.lyrics.editor_id();
+    h.send(panel(lyrics_panel::Message::EditorAction(Action::Move(
+        iced::widget::text_editor::Motion::DocumentEnd,
+    ))));
+    h.send(panel(lyrics_panel::Message::EditorAction(Action::Edit(
+        Edit::Insert('!'),
+    ))));
+    h.send(mode(lyrics_panel::LyricsMode::Read));
+    let Dialog::Confirm(confirm) = h.dialog() else {
+        panic!("a confirmation");
+    };
+    assert_eq!(confirm.title, DISCARD_TITLE);
+    assert_eq!(confirm.confirm_label, "Discard");
+    assert_eq!(confirm.cancel_label, "Keep editing");
+    // Destructive: Return does not confirm it, so a stray one loses nothing.
+    assert!(confirm.destructive);
+    assert_eq!(
+        h.answer_focusing(DialogResult::Confirmed(false)),
+        Some(editor)
+    );
+    assert_eq!(h.vm().lyrics_mode(), LyricsMode::Edit, "kept editing");
+    assert_eq!(h.vm().lyrics_draft(), Some("First line!"));
+
+    // The toolbar's Sync: asked the same; Discard goes there.
+    h.send(mode(lyrics_panel::LyricsMode::Sync));
+    h.answer(DialogResult::Confirmed(true));
+    assert_eq!(h.vm().lyrics_mode(), LyricsMode::Sync);
+    assert_eq!(h.vm().lyrics_draft(), None);
+    assert_eq!(h.vm().lyrics()[0].text, "First line", "nothing saved");
+
+    // Typed back to the lyrics as they are: nothing to lose.
+    h.send(mode(lyrics_panel::LyricsMode::Edit));
+    h.send(panel(lyrics_panel::Message::EditorAction(Action::Move(
+        iced::widget::text_editor::Motion::DocumentEnd,
+    ))));
+    h.send(panel(lyrics_panel::Message::EditorAction(Action::Edit(
+        Edit::Insert('!'),
+    ))));
+    h.send(panel(lyrics_panel::Message::EditorAction(Action::Edit(
+        Edit::Backspace,
+    ))));
+    h.send(mode(lyrics_panel::LyricsMode::Read));
+    assert!(h.dialog.is_none());
+    assert_eq!(h.vm().lyrics_mode(), LyricsMode::Read);
+}
+
 // "Paste lyrics" opened an empty editor: the words still had to be pasted
 // by hand. It opens on the clipboard's text.
 #[test]
