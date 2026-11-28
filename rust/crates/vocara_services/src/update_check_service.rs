@@ -147,6 +147,13 @@ pub struct UpdateCheckService {
     /// That answer as last read or chosen: the outer `None` until it has
     /// been read, the inner one while the user has not answered.
     preference: Mutex<Option<Option<bool>>>,
+    /// Held by [`save_auto_check`] from reading the answer until it is
+    /// written, so saves run one at a time and each writes the answer as it
+    /// stands when its turn comes: two quick toggles spawn two saves, and
+    /// without it the first could write its older answer last.
+    ///
+    /// [`save_auto_check`]: UpdateCheckService::save_auto_check
+    save_order: Mutex<()>,
     /// Whether this run has put the question already (once per run, however
     /// often Home mounts).
     consent_asked: AtomicBool,
@@ -247,6 +254,7 @@ impl UpdateCheckService {
             listeners: Mutex::new(Vec::new()),
             preference_storage: None,
             preference: Mutex::new(Some(None)),
+            save_order: Mutex::new(()),
             consent_asked: AtomicBool::new(false),
         }
     }
@@ -408,10 +416,15 @@ impl UpdateCheckService {
 
     /// Writes the answer [`set_auto_check`] recorded, so the next launch
     /// knows it. Blocking: run it off the UI thread. Nothing to write while
-    /// there is no answer, or for a test's service (kept in memory).
+    /// there is no answer, or for a test's service (kept in memory). Saves
+    /// run one at a time, each writing the newest answer, so the last one
+    /// written is the last one chosen.
     ///
     /// [`set_auto_check`]: UpdateCheckService::set_auto_check
     pub fn save_auto_check(&self) -> io::Result<()> {
+        // Not the preference's own lock: the UI thread takes that to choose,
+        // and must not wait on a write.
+        let _turn = self.save_order.lock().unwrap_or_else(|e| e.into_inner());
         let Some(Some(enabled)) = *self.preference_lock() else {
             return Ok(());
         };
@@ -1133,6 +1146,77 @@ mod tests {
         assert_eq!(locked.auto_check_preference(), None);
         documents.unreadable.store(false, Ordering::SeqCst);
         assert_eq!(locked.auto_check_preference(), Some(false), "read again");
+    }
+
+    /// The settings document a test holds each write of until released,
+    /// saying which answer each one is writing as it starts.
+    struct HeldWrites {
+        documents: Documents,
+        started: Mutex<std::sync::mpsc::Sender<bool>>,
+        release: Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+
+    impl SettingsStorage for HeldWrites {
+        fn read(&self, collection: &str, id: &str) -> io::Result<Option<Map<String, Value>>> {
+            self.documents.read(collection, id)
+        }
+
+        fn write(&self, collection: &str, id: &str, json: &Map<String, Value>) -> io::Result<()> {
+            let enabled = json.get(K_AUTO_CHECK) == Some(&Value::Bool(true));
+            self.started.lock().unwrap().send(enabled).unwrap();
+            self.release.lock().unwrap().recv().unwrap();
+            self.documents.write(collection, id, json)
+        }
+    }
+
+    /// Two quick toggles spawn two saves; however their threads interleave,
+    /// what is kept is the answer chosen last — the first save, still
+    /// writing its older answer, must not land after the second.
+    #[test]
+    fn two_quick_choices_are_kept_in_the_order_they_were_made() {
+        let (started_tx, started) = std::sync::mpsc::channel();
+        let (release, release_rx) = std::sync::mpsc::channel();
+        let storage = Arc::new(HeldWrites {
+            documents: Documents::default(),
+            started: Mutex::new(started_tx),
+            release: Mutex::new(release_rx),
+        });
+        let service = Arc::new(
+            UpdateCheckService::with_fetcher(
+                Box::new(|_| Err(FetchError("offline".into()))),
+                "1.0.0",
+            )
+            .with_preferences(storage.clone()),
+        );
+        let save = |service: &Arc<UpdateCheckService>| {
+            let service = service.clone();
+            std::thread::spawn(move || service.save_auto_check().unwrap())
+        };
+        service.set_auto_check(true);
+        let first = save(&service);
+        assert!(started.recv().unwrap(), "the first save is writing true");
+        service.set_auto_check(false);
+        let second = save(&service);
+        assert!(
+            started
+                .recv_timeout(std::time::Duration::from_millis(300))
+                .is_err(),
+            "the second save must wait for the first to finish"
+        );
+        release.send(()).unwrap();
+        first.join().unwrap();
+        assert!(!started.recv().unwrap(), "then the second writes false");
+        release.send(()).unwrap();
+        second.join().unwrap();
+        let kept = storage
+            .documents
+            .docs
+            .lock()
+            .unwrap()
+            .get("settings/updates")
+            .cloned()
+            .unwrap();
+        assert_eq!(kept.get(K_AUTO_CHECK), Some(&Value::Bool(false)));
     }
 
     /// Choosing notifies, so the Settings switch and the Home question read
