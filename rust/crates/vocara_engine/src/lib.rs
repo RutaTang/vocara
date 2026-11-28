@@ -18,6 +18,8 @@ pub mod graph;
 pub mod graph_cell;
 // Whether an open mic stream still delivers (the host's reopen decision).
 pub mod input_health;
+// The device IO buffer sizes a mic open changes, and their restore.
+pub mod io_buffer;
 pub mod live;
 // The pre-decode file screen: no external crates, so it builds and tests without `device`.
 pub mod media_screen;
