@@ -31,6 +31,7 @@ use super::{
 use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::motion::Curve;
 use crate::ui::core::theme::{self, alpha, bare_button, boxed, fill, font, Studio};
+use crate::ui::core::widgets::click_through::click_through;
 use crate::ui::core::widgets::animated::{animated, animated_container, Decoration};
 use crate::ui::core::widgets::controls::{
     ghost_button, msr_button, popup_button, segmented, MsrKind,
@@ -279,10 +280,14 @@ impl SongPracticeDetailScreen {
                 .style(fill(Studio::BACKGROUND)),
             slot(focus),
             slot(separation),
+            // A toast spans the page's bottom, over the inspector's last
+            // row, the lyrics' Save or Tap and the dock's tabs, for seconds:
+            // presses on it go to those controls rather than to it (it is
+            // not swiped away here).
             slot(
                 self.snacks
                     .view()
-                    .map(|snacks| snacks.map(super::snack_message))
+                    .map(|snacks| click_through(snacks.map(super::snack_message)))
             ),
             slot(editor),
             slot(picker),

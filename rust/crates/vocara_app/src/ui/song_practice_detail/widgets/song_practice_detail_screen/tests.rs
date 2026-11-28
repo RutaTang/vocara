@@ -2229,6 +2229,33 @@ fn deleting_a_clip_asks_first_as_deleting_a_take_does() {
     assert_eq!(clips, ["c1"]);
 }
 
+// A toast spans the page's bottom for seconds, over the dock's tabs (and
+// the lyrics' Save or Tap, the inspector's last row): a press on it goes to
+// what it covers, which it swallowed.
+#[test]
+fn a_toast_takes_no_press_meant_for_what_it_covers() {
+    let mut h = Harness::open(Setup::default());
+    let covered = h.find("Vocal tract").expect("the dock's tab").bounds();
+    h.screen.toast("Wait for the current edit to finish.".into());
+    // In, all the way.
+    h.send(Message::SnackFrame(Instant::now() + Duration::from_secs(1)));
+    let toast = h
+        .find("Wait for the current edit to finish.")
+        .expect("the toast")
+        .bounds();
+    assert!(toast.y < covered.y, "over the tab");
+    // Where both are: the tab's top, under the card's foot.
+    let at = Point::new(covered.center_x(), covered.y + 3.0);
+    let messages: Vec<Message> = {
+        let mut ui = h.ui();
+        ui.point_at(at);
+        ui.simulate(iced_test::simulator::click());
+        ui.into_messages().collect()
+    };
+    h.feed(messages);
+    assert_eq!(h.vm().analysis().dock_tab(), DockTab::VocalTract);
+}
+
 // Sync's Clear asks first, as Delete clip does: one click took a whole
 // song's tap timing at once, saved, with nothing to go back to.
 #[test]

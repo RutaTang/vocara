@@ -5,6 +5,7 @@
 
 pub mod animated;
 pub mod cap_label;
+pub mod click_through;
 pub mod confirm_dialog;
 pub mod controls;
 pub mod dismissible;
