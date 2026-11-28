@@ -376,6 +376,17 @@ fn an_empty_technique_shows_every_field_with_a_placeholder() {
     assert_eq!(h.count("No examples yet"), 1);
 }
 
+// The acoustic signature's placeholder read "RING", where the app writes
+// "Ring" (the Timbre tab, the Summary, the technique's own analysis).
+#[test]
+fn the_acoustic_signature_placeholder_names_ring_as_the_app_does() {
+    assert_eq!(ACOUSTIC_HINT, "How it reads in Ring, tilt, CPP, formants");
+    let mut h = Harness::loaded(Setup::new(twang(ID, vec![])));
+    h.edit();
+    let form = h.screen.form.as_deref().expect("the form");
+    assert!(form.acoustic.text().is_empty(), "the placeholder shows");
+}
+
 // technique_detail_layout_test: 'a failed load shows the error state, not
 // an endless spinner'. Regression: the screen watches only the view model,
 // and the load's failure path notified nothing but the (unwatched) command —

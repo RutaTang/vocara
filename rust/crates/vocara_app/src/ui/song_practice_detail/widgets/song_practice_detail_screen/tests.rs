@@ -2916,6 +2916,24 @@ fn the_interpretation_switcher_opens_its_menu_and_creates_one() {
     assert!(h.shows("Tender"), "the chip shows the new interpretation");
 }
 
+// The interpretation's delete was the one delete dialog that did not say
+// it cannot be undone.
+#[test]
+fn deleting_an_interpretation_says_it_cannot_be_undone() {
+    let mut h = Harness::open(Setup::default());
+    h.click("Interpretation 1");
+    h.send(Message::InterpretationMenu(InterpretationAction::Delete));
+    let Dialog::Confirm(confirm) = h.dialog() else {
+        panic!("a confirmation");
+    };
+    assert_eq!(confirm.title, "Delete \"Interpretation 1\"?");
+    assert_eq!(
+        confirm.body.as_deref(),
+        Some("This removes the interpretation and all of its takes. This cannot be undone.")
+    );
+    assert!(confirm.destructive);
+}
+
 // detail_arrange_journey: 'the "New take" button adds an empty vocal lane'.
 #[test]
 fn the_new_take_button_adds_an_empty_vocal_lane() {

@@ -1837,8 +1837,9 @@ impl SongPracticeDetailScreen {
                 if self.refused(step) {
                     return;
                 }
-                let dialog = ConfirmDialog::new(format!("Delete \"{}\"?", a.name))
-                    .body("This removes the interpretation and all of its takes.");
+                let dialog = ConfirmDialog::new(format!("Delete \"{}\"?", a.name)).body(
+                    "This removes the interpretation and all of its takes. This cannot be undone.",
+                );
                 self.ask(dialog, Asked::DeleteInterpretation(a.id.clone()), step);
             }
         }

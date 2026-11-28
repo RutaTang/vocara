@@ -709,8 +709,11 @@ fn the_take_offset_row_shows_and_sets_the_recording_offset() {
     page.send(Message::OffsetReleased);
     assert_eq!(page.settings().recording_offset_ms(), 25.0);
     assert!(page.shows("+25 ms"));
+    // A true minus, as every other reading ("\u{2212}63 dB"), not a hyphen.
     page.send(Message::Choose(Choice::RecordingOffset(-15.0)));
-    assert!(page.shows("-15 ms"));
+    assert!(page.shows("\u{2212}15 ms"));
+    assert!(!page.shows("-15 ms"));
+    assert_eq!(offset_label(-0.4), "0 ms");
 }
 
 /// A double click on the take offset slider puts it back at no offset.

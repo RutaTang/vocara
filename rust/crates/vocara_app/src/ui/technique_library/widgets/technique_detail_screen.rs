@@ -146,6 +146,10 @@ pub const DELETE_FAILED: &str = "Couldn't delete the technique.";
 pub const DROP_ON_EXAMPLES: &str = "Drop audio or video clips on Examples.";
 /// The unsaved-changes dialog's title.
 pub const DISCARD_TITLE: &str = "Discard unsaved changes?";
+
+/// The acoustic signature's placeholder in the editor: the readings by the
+/// names the app gives them everywhere else ("Ring", not "RING").
+pub const ACOUSTIC_HINT: &str = "How it reads in Ring, tilt, CPP, formants";
 /// The read view's placeholder for a prose field with nothing in it.
 pub const EMPTY_CONTENT: &str = "Not written yet";
 /// The read view's placeholder beside aliases or tags when there are none.
@@ -1291,7 +1295,7 @@ impl TechniqueDetailScreen {
             prose(
                 "Acoustic signature in Vocara",
                 &form.acoustic,
-                "How it reads in RING, tilt, CPP, formants",
+                ACOUSTIC_HINT,
                 (2, 6),
                 ProseField::Acoustic,
             ),

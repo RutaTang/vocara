@@ -1837,13 +1837,14 @@ pub fn engine_footnote(sample_rate: f64) -> String {
 }
 
 /// The recording offset as the row shows it: whole ms, signed ("+20 ms",
-/// "0 ms", "-15 ms").
+/// "0 ms", "−15 ms"), a negative one with a true minus as every other
+/// reading in the app ("−63 dB"), not a hyphen.
 pub fn offset_label(ms: f64) -> String {
     let ms = ms.round() as i64;
-    if ms > 0 {
-        format!("+{ms} ms")
-    } else {
-        format!("{ms} ms")
+    match ms.signum() {
+        1 => format!("+{ms} ms"),
+        -1 => format!("\u{2212}{} ms", ms.unsigned_abs()),
+        _ => "0 ms".to_string(),
     }
 }
 
