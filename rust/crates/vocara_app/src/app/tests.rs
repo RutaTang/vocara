@@ -615,6 +615,75 @@ fn a_page_popped_as_it_comes_in_goes_back_from_where_it_got() {
     assert!(route.controller.ends_at(Instant::now()) < t0 + ROUTE_TRANSITION / 10);
 }
 
+/// The app over `library`, on the detached services, every task its boot
+/// starts run (Home's list read).
+fn boot_over(library: Arc<Library>) -> App {
+    let mut b = Boot::new(AppEnvironment::Dev);
+    b.services = Services::detached;
+    let (mut app, _open) = App::new(b);
+    let mut queue: std::collections::VecDeque<Message> =
+        crate::ui::home::testing::run_task(app.update(Message::Library(
+            LibraryEvent::Finished(LibraryOpen::Opened(library)),
+        )))
+        .into();
+    while let Some(message) = queue.pop_front() {
+        let task = app.update(message);
+        queue.extend(crate::ui::home::testing::run_task(task));
+    }
+    app
+}
+
+// Home's list jumped back to its top while a practice it opened slid in
+// over it: the page a push covered moved down a slot of the window's stack,
+// and was built anew there.
+#[test]
+fn the_page_a_push_covers_keeps_its_scroll_as_the_new_page_slides_in() {
+    use crate::ui::core::widgets::animated::testing::Frames;
+    use iced::{mouse, Color, Event, Point};
+
+    let library = Arc::new(Library::in_memory());
+    for n in 0..40 {
+        library
+            .song_repo
+            .create_practice(&format!("Practice {n}"))
+            .expect("created");
+    }
+    let mut app = boot_over(library);
+    assert!(shows(&app, "Practice 39"), "Home lists them");
+    let mut window = Frames::new(Size::new(1440.0, 900.0));
+    // What the window shows across Home's list.
+    let shown = |window: &Frames| -> Vec<Color> {
+        (2..26)
+            .flat_map(|x| (3..18).map(move |y| Point::new(x as f32 * 50.0, y as f32 * 50.0)))
+            .map(|at| window.pixel(at))
+            .collect()
+    };
+    let t0 = Instant::now();
+    window.frame(app.view(), &[], t0);
+    let at_the_top = shown(&window);
+    // Scrolled down the list, the pointer then let go of it.
+    window.point_at(Point::new(700.0, 500.0));
+    let wheel = Event::Mouse(mouse::Event::WheelScrolled {
+        delta: mouse::ScrollDelta::Pixels { x: 0.0, y: -300.0 },
+    });
+    let (_, messages) = window.frame_messages(app.view(), &[wheel], t0);
+    for m in messages {
+        let _ = app.update(m);
+    }
+    window.point_at(Point::new(-100.0, -100.0));
+    window.frame(app.view(), &[], t0 + Duration::from_secs(1));
+    window.frame(app.view(), &[], t0 + Duration::from_secs(2));
+    let scrolled = shown(&window);
+    assert_ne!(scrolled, at_the_top, "scrolled");
+
+    // A page pushed over Home, at its first frame: Home where it was.
+    let _ = app.update(Message::Navigate(Navigation::Push(Route::Settings)));
+    let (primary, secondary, _) = route_at(&app, Instant::now()).expect("a transition");
+    assert!(primary > 0.99 && secondary.abs() < 0.01, "not moved yet");
+    window.frame(app.view(), &[], t0 + Duration::from_secs(3));
+    assert_eq!(shown(&window), scrolled, "Home's list kept its scroll");
+}
+
 #[test]
 fn a_go_slides_the_new_page_over_the_ones_it_replaced() {
     let mut app = boot(Some("/settings"));

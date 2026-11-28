@@ -288,19 +288,25 @@ impl Running {
                 .is_some_and(|r| r.controller.is_animating(now))
     }
 
-    /// The pages as drawn at the last frame: under the page on top, the
-    /// page on top, and over it (see [`RouteTransition`]). The page on top
-    /// always takes the middle slot, so its widgets keep their state, and
-    /// is a focus scope (`focus_traversal`: Tab moves among its fields).
-    fn pages_view<'a>(&'a self) -> [Element<'a, Message>; 3] {
+    /// The pages as drawn at the last frame (see [`RouteTransition`]), each
+    /// in a slot of its own for as long as it is on the stack: slot `i + 1`
+    /// for the page at place `i`, the one on top last; slot 0 holds the
+    /// pages a go replaced, under the page coming in. iced matches a stack's
+    /// layers by position, so a page moved to another slot is built anew:
+    /// the page a push covered moved down a slot as the new one slid in,
+    /// and Home's list jumped back to its top under the practice it opened.
+    /// Only the page on top and the one a transition moves are drawn, the
+    /// slots of the others left empty, and each is a focus scope
+    /// (`focus_traversal`: Tab moves among its fields).
+    fn pages_view<'a>(&'a self) -> Vec<Element<'a, Message>> {
         let (top, page) = self.router.top();
         let empty = || Element::from(Space::new().width(Length::Fill).height(Length::Fill));
+        // The top page's slot is the last of the stack's.
+        let depth = self.router.len();
+        let mut slots: Vec<Element<'a, Message>> = (0..=depth).map(|_| empty()).collect();
         let Some(route) = &self.route else {
-            return [
-                empty(),
-                slide(focus_scope(page.view(top)), 0.0).into(),
-                empty(),
-            ];
+            slots[depth] = slide(focus_scope(page.view(top)), 0.0).into();
+            return slots;
         };
         let (primary, secondary, shadow) = route.progress(self.now);
         let gone_view = |id: PageId, held: &'a Option<Box<Page>>| -> Option<Element<'a, Message>> {
@@ -314,34 +320,47 @@ impl Running {
         };
         match &route.kind {
             RouteKind::Push { below } => {
-                let under = self
+                // Where it was while it was on top, as it was built there.
+                if let Some((place, (id, covered))) = self
                     .router
                     .pages()
-                    .find(|(id, _)| id == below)
-                    .map_or_else(empty, |(id, page)| {
-                        slide(page.view(id), secondary).inert().into()
-                    });
-                let over = slide(focus_scope(page.view(top)), primary).shadow(shadow);
-                [under, over.into(), empty()]
+                    .enumerate()
+                    .find(|(_, (id, _))| id == below)
+                {
+                    slots[place + 1] = slide(focus_scope(covered.view(id)), secondary)
+                        .inert()
+                        .into();
+                }
+                slots[depth] = slide(focus_scope(page.view(top)), primary)
+                    .shadow(shadow)
+                    .into();
             }
             RouteKind::Pop { gone, held } => {
-                let revealed = slide(focus_scope(page.view(top)), secondary);
-                let over = gone_view(*gone, held).map_or_else(empty, |view| {
-                    slide(view, primary).shadow(shadow).inert().into()
-                });
-                [empty(), revealed.into(), over]
+                slots[depth] = slide(focus_scope(page.view(top)), secondary).into();
+                // Where it was: over the page it reveals.
+                if let Some(view) = gone_view(*gone, held) {
+                    slots.push(
+                        slide(focus_scope(view), primary)
+                            .shadow(shadow)
+                            .inert()
+                            .into(),
+                    );
+                }
             }
             RouteKind::Go { gone } => {
-                let under = gone
+                slots[0] = gone
                     .iter()
                     .filter_map(|(id, held)| gone_view(*id, held))
                     .fold(stack![], |layers, view| {
                         layers.push(slide(view, 0.0).inert())
-                    });
-                let over = slide(focus_scope(page.view(top)), primary).shadow(shadow);
-                [under.into(), over.into(), empty()]
+                    })
+                    .into();
+                slots[depth] = slide(focus_scope(page.view(top)), primary)
+                    .shadow(shadow)
+                    .into();
             }
         }
+        slots
     }
 }
 
@@ -823,10 +842,12 @@ impl App {
                 // The snack bar the app shows sits over the page, where the
                 // page draws its own. The page keeps its place in the stack
                 // whether one shows or not, or whether it slides, so its
-                // widgets keep their state.
-                let mut content = stack(running.pages_view())
+                // widgets keep their state; and the snack bar keeps its own
+                // however many slots the pages take.
+                let pages = stack(running.pages_view())
                     .width(Length::Fill)
                     .height(Length::Fill);
+                let mut content = stack![pages].width(Length::Fill).height(Length::Fill);
                 if let Some(snack_bar) = running.messenger.view() {
                     content = content.push(snack_bar);
                 }
