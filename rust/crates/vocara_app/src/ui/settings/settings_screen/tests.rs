@@ -1635,6 +1635,136 @@ fn back_from_the_licenses_keeps_the_settings_scroll() {
     assert_eq!(offset.0, Some(240.0));
 }
 
+/// ...and keeps it there once the license page has slid all out, the page
+/// run as the app runs it: each frame's view rebuilt into the last one's
+/// tree, what it reports handled. Settings bare after the slide was a new
+/// scroll view, at the top, which reported 0 back.
+#[test]
+fn settings_stays_where_it_was_scrolled_once_the_license_page_has_gone() {
+    use iced::advanced::widget::operation::{self, Operation};
+    use iced::advanced::widget::Id as WidgetId;
+    use iced::{Rectangle, Vector};
+    use iced_test::runtime::user_interface::{Cache, UserInterface};
+    use std::time::Instant;
+
+    use crate::ui::core::widgets::slide::PAGE_TRANSITION;
+
+    /// Reads how far the settings' scroll view is scrolled.
+    struct Offset(Option<f32>);
+    impl Operation for Offset {
+        fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+            operate(self);
+        }
+        fn scrollable(
+            &mut self,
+            id: Option<&WidgetId>,
+            _bounds: Rectangle,
+            _content_bounds: Rectangle,
+            translation: Vector,
+            _state: &mut dyn operation::Scrollable,
+        ) {
+            if id == Some(&SCROLL) {
+                self.0 = Some(translation.y);
+            }
+        }
+    }
+
+    /// The widget operations `task` asks for.
+    fn operations(task: Task<Message>) -> Vec<Box<dyn Operation>> {
+        let Some(stream) = iced_test::runtime::task::into_stream(task) else {
+            return Vec::new();
+        };
+        use iced::futures::StreamExt;
+        iced::futures::executor::block_on(
+            stream
+                .filter_map(|action| async move {
+                    match action {
+                        iced_test::runtime::Action::Widget(op) => Some(op),
+                        _ => None,
+                    }
+                })
+                .collect(),
+        )
+    }
+
+    /// A window of 1100 by 600 drawing the page frame by frame.
+    struct Window {
+        renderer: iced::Renderer,
+        cache: Cache,
+    }
+    impl Window {
+        /// Builds the page's view into the last frame's tree, performs
+        /// `operations` on it, draws a frame and hands the page what it
+        /// reports: how far Settings is scrolled, where it is shown.
+        fn frame(&mut self, page: &mut Page, operations: Vec<Box<dyn Operation>>) -> Option<f32> {
+            let mut ui = UserInterface::build(
+                page.screen.view(),
+                Size::new(1100.0, 600.0),
+                std::mem::take(&mut self.cache),
+                &mut self.renderer,
+            );
+            for mut op in operations {
+                ui.operate(&self.renderer, op.as_mut());
+            }
+            let mut messages = Vec::new();
+            let _ = ui.update(
+                &[iced::Event::Window(iced::window::Event::RedrawRequested(
+                    Instant::now(),
+                ))],
+                iced::mouse::Cursor::Unavailable,
+                &mut self.renderer,
+                &mut iced::advanced::clipboard::Null,
+                &mut messages,
+            );
+            let mut offset = Offset(None);
+            ui.operate(&self.renderer, &mut offset);
+            self.cache = ui.into_cache();
+            for message in messages {
+                page.send(message);
+            }
+            offset.0
+        }
+    }
+
+    let mut window = Window {
+        renderer: iced::futures::executor::block_on(
+            <iced::Renderer as iced::advanced::renderer::Headless>::new(
+                font::REGULAR,
+                theme::DEFAULT_TEXT_SIZE.into(),
+                None,
+            ),
+        )
+        .expect("a headless renderer"),
+        cache: Cache::default(),
+    };
+    let mut page = Setup::new().mount();
+    assert_eq!(window.frame(&mut page, Vec::new()), Some(0.0));
+    // Scrolled down: the view reports where it is.
+    let down = iced::widget::operation::scroll_to(
+        SCROLL,
+        iced::widget::scrollable::AbsoluteOffset {
+            x: None,
+            y: Some(240.0),
+        },
+    );
+    assert_eq!(window.frame(&mut page, operations(down)), Some(240.0));
+    assert_eq!(page.screen.scroll, 240.0);
+    // The license page slides in and covers Settings.
+    page.send(Message::OpenLicenses);
+    window.frame(&mut page, Vec::new());
+    page.send(Message::Frame(Instant::now() + PAGE_TRANSITION));
+    assert_eq!(window.frame(&mut page, Vec::new()), None);
+    // Back: Settings slides back in where it was...
+    let back = page.send_held(Message::Licenses(licenses::Message::Back));
+    assert_eq!(window.frame(&mut page, operations(back)), Some(240.0));
+    // ...and stays there once the license page has gone.
+    page.send(Message::Frame(Instant::now() + PAGE_TRANSITION));
+    assert!(page.screen.closed_licenses.is_none(), "the slide is over");
+    assert_eq!(window.frame(&mut page, Vec::new()), Some(240.0));
+    assert_eq!(window.frame(&mut page, Vec::new()), Some(240.0));
+    assert_eq!(page.screen.scroll, 240.0);
+}
+
 /// The diagnostics bundle names the version About shows when there is no
 /// app bundle to read it from (it wrote "app version: unknown").
 #[test]
