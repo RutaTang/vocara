@@ -3172,6 +3172,11 @@ impl TechniqueDetailViewModel {
     }
 
     /// Updates the caption on one example clip (staged; applied on save).
+    /// An empty caption puts back the one the clip has: the name it was
+    /// added with (the user's file name, or its "Recording N"), unless a
+    /// caption was saved over it since. Staged as empty, it read "Audio
+    /// example": the pooled file is named by its content hash, so there is
+    /// no file name left to fall back to.
     pub fn rename_media(&mut self, media_id: &str, label: &str) {
         // In-flight-save invariant (backstop behind the disabled UI): the
         // commit already snapshotted the labels, so a caption staged now
@@ -3179,8 +3184,13 @@ impl TechniqueDetailViewModel {
         if self.saving {
             return;
         }
-        self.draft_labels
-            .insert(media_id.to_string(), dart_string::trim(label).to_string());
+        let label = dart_string::trim(label);
+        if label.is_empty() {
+            self.draft_labels.remove(media_id);
+        } else {
+            self.draft_labels
+                .insert(media_id.to_string(), label.to_string());
+        }
         self.notify();
     }
 
