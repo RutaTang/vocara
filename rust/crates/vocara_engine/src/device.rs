@@ -1168,6 +1168,11 @@ pub struct InputCell {
     /// The generation whose callback declared its capture dead (see [`Self::mark_dead`]);
     /// 0 = none.
     dead_epoch: AtomicU64,
+    /// The take's flag and written-frame counter (the state's `rec_active`, `rec_written`),
+    /// outside the state so the host can tell a take that is recording (see
+    /// [`Self::take_has_frames`]).
+    rec_active: Arc<AtomicBool>,
+    rec_written: Arc<AtomicU64>,
 }
 
 // SAFETY: see the type doc — the owner epoch plus the `busy` compare-exchange admit at most one
@@ -1296,6 +1301,8 @@ impl InputCell {
         nominal_frames_in: Arc<AtomicU64>,
         event: Arc<AtomicU32>,
     ) -> Arc<InputCell> {
+        let take_active = Arc::clone(&rec_active);
+        let take_written = Arc::clone(&rec_written);
         Arc::new(InputCell {
             state: UnsafeCell::new(InputState {
                 mic,
@@ -1323,7 +1330,16 @@ impl InputCell {
             quantum: AtomicU64::new(0),
             frames_in,
             dead_epoch: AtomicU64::new(0),
+            rec_active: take_active,
+            rec_written: take_written,
         })
+    }
+
+    /// Whether a take is recording and has written frames from the stream open now. Its
+    /// counter starts at 0 with each take (`begin_take`), so a take whose mic stayed silent
+    /// since its arm has none. Any thread.
+    pub fn take_has_frames(&self) -> bool {
+        self.rec_active.load(Ordering::Acquire) && self.rec_written.load(Ordering::Relaxed) > 0
     }
 
     /// Total engine-rate frames the input callbacks have emitted (`ve_input_frames_received`):
@@ -4019,6 +4035,23 @@ fn audio_host_run(
                         Some("the take's ready check saw no frames".to_string())
                     } else {
                         health.stall(dead, now).map(|s| s.describe())
+                    };
+                    // Never under a take that has frames from this stream: a reopen would
+                    // splice it across two streams (maybe onto another mic, with the backing
+                    // stopped for the open). A stall then is the take's owners' to end (their
+                    // watchdogs stop it); a ready check's request that a stream delivering by
+                    // now overtook is stale.
+                    let why = match why {
+                        Some(why) if input_cell.take_has_frames() => {
+                            diag::note(
+                                tag,
+                                &format!(
+                                    "input sync: kept gen {gen} under a recording take ({why})"
+                                ),
+                            );
+                            None
+                        }
+                        why => why,
                     };
                     match why {
                         Some(why) => {
@@ -7151,6 +7184,25 @@ mod input_cell_tests {
             0,
             "the UI must learn to finalize; the clock would otherwise keep running"
         );
+    }
+
+    #[test]
+    fn the_host_sees_a_take_recording_only_once_it_has_frames() {
+        // What keeps a stalled stream (or a stale reopen request) from being torn down under a
+        // take: a take armed on a silent mic has no frames, so a reopen still saves it.
+        let c = cell_with_rec_capacity(1 << 10);
+        assert!(!c.cell.take_has_frames(), "armed, nothing written yet");
+        c.cell.feed_test(&[0.25f32; 4]);
+        assert!(
+            c.cell.take_has_frames(),
+            "the take has frames from this stream"
+        );
+        c.rec_active.store(false, Ordering::Release);
+        assert!(!c.cell.take_has_frames(), "stopped");
+        // The next take starts its counter at 0 (`begin_take`).
+        c.rec_written.store(0, Ordering::Relaxed);
+        c.rec_active.store(true, Ordering::Release);
+        assert!(!c.cell.take_has_frames(), "the next take, its mic silent");
     }
 
     #[test]
