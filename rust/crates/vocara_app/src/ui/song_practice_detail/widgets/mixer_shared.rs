@@ -674,6 +674,7 @@ impl<'a, M: Clone + 'a> Widget<M, Theme, Renderer> for PopupMenu<'a, M> {
         );
         let bounds = layout.bounds();
         let state = tree.state.downcast_mut::<PopupState>();
+        let was_open = state.open.is_some();
         let open = |state: &mut PopupState, at: Vector, shell: &mut Shell<'_, M>| {
             state.open = Some(at);
             state.barrier = AnyTap::default();
@@ -718,6 +719,12 @@ impl<'a, M: Clone + 'a> Widget<M, Theme, Renderer> for PopupMenu<'a, M> {
                 }
             }
             _ => {}
+        }
+        // The menu opens fresh, scrolled to its top: its tree outlived the
+        // last opening, and a long list (the presets) reopened where it was
+        // scrolled, so a click where a row had been picked another.
+        if !was_open && state.open.is_some() {
+            tree.children[1] = Tree::new(&self.menu);
         }
     }
 
